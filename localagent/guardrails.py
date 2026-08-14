@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 
 
@@ -30,10 +32,6 @@ def resolve_in_worktree(path_str: str, worktree: Path, writing: bool = False) ->
                 f"Writing inside .git/ is not allowed (got '{path_str}')."
             )
     return resolved
-
-
-import os
-import re
 
 # (reason, pattern) — case-insensitive. Blocks accidents, not adversaries.
 _DENYLIST: list[tuple[str, str]] = [

@@ -195,8 +195,8 @@ class Runner:
                             result = f"ERROR: malformed tool arguments: {e}"
                     except KeyError:
                         failures += 1
-                        result = (f"ERROR: unknown tool '{name}'. Available: read_file, "
-                                  f"write_file, edit_file, list_dir, grep, bash.")
+                        available_tools = ', '.join(s['function']['name'] for s in TOOL_SCHEMAS)
+                        result = f"ERROR: unknown tool '{name}'. Available: {available_tools}."
                     except TypeError as e:
                         failures += 1
                         result = f"ERROR: bad arguments for {name}: {e}"
