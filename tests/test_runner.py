@@ -134,3 +134,91 @@ def test_trim_messages():
 def test_trim_cannot_fit():
     msgs = [{"role": "system", "content": "s" * 5000}]
     assert trim_messages(msgs, char_budget=100) is False
+
+
+def test_arguments_null_treated_as_empty(parts):
+    wt, executor, transcript, tmp = parts
+    call = {"id": "c1", "type": "function", "function": {"name": "list_dir", "arguments": None}}
+    client = FakeClient([_resp(tool_calls=[call]), _resp(content="done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    tool_msgs = [m for m in client.requests[1] if m["role"] == "tool"]
+    assert "f.txt" in tool_msgs[0]["content"]
+
+
+def test_malformed_tool_call_entry_recovers(parts):
+    wt, executor, transcript, tmp = parts
+    bad = {"id": "c1", "type": "function"}
+    client = FakeClient([_resp(tool_calls=[bad]), _resp(content="ok done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    tool_msgs = [m for m in client.requests[1] if m["role"] == "tool"]
+    assert "unknown tool" in tool_msgs[0]["content"].lower()
+
+
+def test_malformed_response_is_model_error(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([{"choices": []}])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+
+
+def test_null_usage_tolerated(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([{"choices": [{"message": {"role": "assistant", "content": "hi"}}], "usage": None}])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.usage == {"prompt_tokens": 0, "completion_tokens": 0}
+
+
+def test_strike_counter_resets_on_success(parts):
+    wt, executor, transcript, tmp = parts
+    bad = _resp(tool_calls=[{"id": "x", "type": "function",
+                             "function": {"name": "read_file", "arguments": "{not json"}}])
+    good = _resp(tool_calls=[_call("g", "list_dir", {"path": "."})])
+    client = FakeClient([bad, bad, good, bad, bad, _resp(content="done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+
+
+def test_timeout_status(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content="never reached")])
+    r = Runner(client, executor, transcript, model="m", timeout=-1)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "timeout"
+    assert result.turns == 0
+
+
+def test_context_exhausted_status(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([])
+    r = Runner(client, executor, transcript, model="m")
+    r.char_budget = 10
+    result = r.run("s" * 100, "t")
+    transcript.close()
+    assert result.status == "context_exhausted"
+
+
+def test_interrupted_status(parts):
+    wt, executor, transcript, tmp = parts
+    class InterruptingClient:
+        def chat(self, *a, **k):
+            raise KeyboardInterrupt
+    r = Runner(InterruptingClient(), executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "interrupted"
+    events = _events(tmp)
+    assert events[-1]["event"] == "run_end"

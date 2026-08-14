@@ -83,14 +83,19 @@ class Runner:
                 resp = self.client.chat(self.model, messages, tools=TOOL_SCHEMAS,
                                         temperature=self.temperature)
                 turns += 1
+                try:
+                    msg = resp["choices"][0]["message"]
+                except (KeyError, IndexError, TypeError):
+                    return finish("model_error",
+                                  "malformed response from server (no choices[0].message)")
+                resp_usage = resp.get("usage") or {}
                 for k in usage:
-                    usage[k] += resp.get("usage", {}).get(k, 0)
-                msg = resp["choices"][0]["message"]
+                    usage[k] += resp_usage.get(k, 0) or 0
                 tool_calls = msg.get("tool_calls") or []
                 self.transcript.write(
                     "assistant", text=msg.get("content"),
-                    tool_calls=[{"name": tc["function"]["name"],
-                                 "arguments": tc["function"]["arguments"]}
+                    tool_calls=[{"name": (tc.get("function") or {}).get("name"),
+                                 "arguments": ((tc.get("function") or {}).get("arguments") or "")[:2000]}
                                 for tc in tool_calls])
                 messages.append(msg)
 
@@ -98,10 +103,12 @@ class Runner:
                     return finish("completed", msg.get("content") or "")
 
                 for tc in tool_calls:
-                    name = tc["function"]["name"]
+                    fn_info = tc.get("function") or {}
+                    name = fn_info.get("name") or ""
+                    raw_args = fn_info.get("arguments") or "{}"
                     call_id = tc.get("id", "")
                     try:
-                        args = json.loads(tc["function"]["arguments"] or "{}")
+                        args = json.loads(raw_args)
                         if not isinstance(args, dict):
                             raise ValueError("arguments must be a JSON object")
                         result = self.executor.execute(name, args)
@@ -117,7 +124,7 @@ class Runner:
                         failures += 1
                         result = f"ERROR: bad arguments for {name}: {e}"
                     self.transcript.write("tool_result", tool=name,
-                                          args=tc["function"]["arguments"][:500],
+                                          args=raw_args[:500],
                                           result=result[:2000])
                     messages.append({"role": "tool", "tool_call_id": call_id,
                                      "content": result})
