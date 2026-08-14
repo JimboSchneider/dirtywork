@@ -38,9 +38,9 @@ welcome.
 
 **pipx (PyPI):**
 
-    pipx install local-agent
+    pipx install dirtsimple-agent
 
-(PyPI publish pending — the distribution name is `local-agent`, but the
+(The distribution name is `dirtsimple-agent`; the
 installed command is still `localagent`.)
 
 **pipx (straight from GitHub):**

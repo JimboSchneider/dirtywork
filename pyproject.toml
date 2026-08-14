@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "local-agent"
+name = "dirtsimple-agent"
 version = "0.1.0"
 description = "Agentic tool-use loop harness for local LM Studio models — an expensive-model orchestrator's free local workforce"
 readme = "README.md"
