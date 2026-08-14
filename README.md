@@ -214,4 +214,4 @@ Issues and PRs welcome. Ground rules:
 
 ## License
 
-[MIT](LICENSE) © 2026 Dirt Simple Solutions, LLC
+[MIT](https://github.com/JimboSchneider/localagent/blob/main/LICENSE) © 2026 Dirt Simple Solutions, LLC
