@@ -163,6 +163,33 @@ def test_arguments_null_treated_as_empty(parts):
     tool_msgs = [m for m in client.requests[1] if m["role"] == "tool"]
     assert "f.txt" in tool_msgs[0]["content"]
 
+    # The resent history must carry the canonical wire shape: type "function" and
+    # arguments coerced to a string, even though the original entry had arguments:
+    # None.
+    second = client.requests[1]
+    assistant_msg = next(m for m in second
+                          if m["role"] == "assistant" and m.get("tool_calls"))
+    assert assistant_msg["tool_calls"][0]["type"] == "function"
+    assert assistant_msg["tool_calls"][0]["function"]["arguments"] == "{}"
+
+
+def test_valid_call_missing_type_field_canonicalized_on_resend(parts):
+    # No malformed siblings -- this is the previously-verbatim path. The call is
+    # otherwise valid (non-empty id, function.name) but omits "type" entirely,
+    # which a strict server still requires on resend.
+    wt, executor, transcript, tmp = parts
+    call = {"id": "c1", "function": {"name": "list_dir", "arguments": json.dumps({"path": "."})}}
+    client = FakeClient([_resp(tool_calls=[call]), _resp(content="done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+
+    second = client.requests[1]
+    assistant_msg = next(m for m in second
+                          if m["role"] == "assistant" and m.get("tool_calls"))
+    assert assistant_msg["tool_calls"][0]["type"] == "function"
+
 
 def test_malformed_tool_call_entry_recovers(parts):
     # Missing "function" entirely is structurally invalid (not just an unknown

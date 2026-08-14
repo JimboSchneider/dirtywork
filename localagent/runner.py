@@ -33,6 +33,13 @@ def _valid_tool_call(tc) -> bool:
     return args is None or isinstance(args, str)
 
 
+def _canonical_tool_call(tc: dict) -> dict:
+    """Rebuild an accepted call in canonical OpenAI wire shape."""
+    fn = tc["function"]
+    return {"id": tc["id"], "type": "function",
+            "function": {"name": fn["name"], "arguments": fn.get("arguments") or "{}"}}
+
+
 def _total_chars(messages: list) -> int:
     total = 0
     for m in messages:
@@ -136,24 +143,24 @@ class Runner:
                 raw = msg.get("tool_calls") or []
                 if not isinstance(raw, list):
                     raw = []
-                tool_calls = [tc for tc in raw if _valid_tool_call(tc)]
+                tool_calls = [_canonical_tool_call(tc) for tc in raw if _valid_tool_call(tc)]
                 malformed_count = len(raw) - len(tool_calls)
                 self.transcript.write(
                     "assistant", text=msg.get("content"),
                     tool_calls=[{"name": (tc.get("function") or {}).get("name"),
                                  "arguments": ((tc.get("function") or {}).get("arguments") or "")[:2000]}
                                 for tc in tool_calls])
-                if malformed_count > 0:
-                    # Sanitize: drop malformed entries (e.g. None) so the history we
-                    # send back stays protocol-valid for strict OpenAI-compatible servers.
+                if raw:
+                    # Rebuild in canonical wire shape (id, type: "function", function
+                    # with a string arguments) so the history we send back stays
+                    # protocol-valid for strict OpenAI-compatible servers, on every
+                    # path that resends tool calls -- not just when malformed.
                     clean_msg = {"role": "assistant", "content": msg.get("content") or ""}
                     if tool_calls:
                         clean_msg["tool_calls"] = tool_calls
                     messages.append(clean_msg)
                 else:
                     messages.append(msg)
-
-                if not raw:
                     return finish("completed", msg.get("content") or "")
 
                 for _ in range(malformed_count):
