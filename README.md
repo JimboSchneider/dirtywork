@@ -95,9 +95,6 @@ Design docs: `docs/superpowers/specs/2026-08-13-localagent-design.md`
   and `curl -s localhost:1234/v1/models`.
 - **exit 2, "model not loaded"** — `lms load <model>` (the error names the
   loaded models).
-- **exit 2, "branch already exists"** — two runs with the same first five
-  task words in the same clock minute collide on the slug; re-run a moment
-  later or reword the task.
 - **status `max_turns` / `timeout`** — the worktree is kept; read the
   transcript to see where it stalled, salvage what's useful, or re-run with
   higher limits.
@@ -138,10 +135,11 @@ printed to stdout (nothing else goes to stdout):
 
 `status` is one of: `completed`, `max_turns`, `timeout`,
 `context_exhausted`, `model_error`, `interrupted`. When the run fails before
-a `RunResult` exists — the LLM client raises, or any other exception escapes
-`runner.run` (status `model_error` either way) — `turns` is `null` and `usage`
-is `{}`, but `status`, `worktree`, `branch`, and `transcript` are still
-populated so the worktree can be located for salvage.
+a `RunResult` exists — the LLM client raises, post-worktree setup fails (e.g.
+the transcript can't be created), or any other exception escapes the run
+(status `model_error` in every case) — `turns` is `null` and `usage` is `{}`,
+but `status`, `worktree`, `branch`, and `transcript` are still populated so
+the worktree can be located for salvage.
 
 **Exit codes:**
 
