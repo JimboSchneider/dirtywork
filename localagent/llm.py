@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -22,12 +23,18 @@ class LMStudioClient:
         )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read().decode())
+                body = resp.read()
         except urllib.error.HTTPError as e:
-            raise LLMError(f"LM Studio HTTP {e.code} on {path}: {e.read()[:500]!r}")
-        except (urllib.error.URLError, OSError) as e:
+            try:
+                detail = e.read()[:500]
+            except Exception:
+                detail = b"<unreadable error body>"
+            raise LLMError(f"LM Studio HTTP {e.code} on {path}: {detail!r}")
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
             raise LLMError(f"cannot reach LM Studio at {self.base_url}: {e}")
-        except json.JSONDecodeError as e:
+        try:
+            return json.loads(body.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
             raise LLMError(f"invalid JSON from LM Studio on {path}: {e}")
 
     def list_models(self) -> list[str]:

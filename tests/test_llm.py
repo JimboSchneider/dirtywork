@@ -69,3 +69,16 @@ def test_connection_error_raises_llmerror():
     client = LMStudioClient(base_url="http://127.0.0.1:1/v1", timeout=2)
     with pytest.raises(LLMError):
         client.list_models()
+
+
+def test_chat_tools_omitted_when_empty(server: str):
+    client = LMStudioClient(base_url=server)
+    client.chat("m1", [], tools=[])
+    assert "tools" not in _FakeLMStudio.last_payload
+
+
+def test_chat_tools_included_when_nonempty(server: str):
+    client = LMStudioClient(base_url=server)
+    tools = [{"type": "function", "function": {"name": "t", "parameters": {"type": "object", "properties": {}}}}]
+    client.chat("m1", [], tools=tools)
+    assert _FakeLMStudio.last_payload["tools"] == tools
