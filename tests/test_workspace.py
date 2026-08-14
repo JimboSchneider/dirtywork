@@ -78,6 +78,23 @@ def test_create_worktree_bad_ref(repo: Path):
         create_worktree(repo, "x-08141109", "no-such-branch")
 
 
+def test_create_worktree_preexisting_branch_not_deleted(repo: Path):
+    # Pre-create the branch create_worktree would try to create-with `-b`, with a
+    # distinct commit on it (simulating saved work from a prior run). git refuses
+    # "worktree add -b" on an already-existing branch, so this must fail -- but
+    # the best-effort cleanup must NOT delete a branch that pre-dates this call.
+    _git(repo, "branch", "localagent/pre-08141109-ab12")
+    _git(repo, "checkout", "localagent/pre-08141109-ab12")
+    _git(repo, "commit", "--allow-empty", "-m", "saved work on pre-existing branch")
+    _git(repo, "checkout", "main")
+
+    with pytest.raises(WorkspaceError):
+        create_worktree(repo, "pre-08141109-ab12", None)
+
+    branches = _git(repo, "branch", "--list", "localagent/pre-08141109-ab12")
+    assert "localagent/pre-08141109-ab12" in branches
+
+
 def test_ensure_worktrees_excluded_idempotent(repo: Path):
     ensure_worktrees_excluded(repo)
     ensure_worktrees_excluded(repo)

@@ -120,6 +120,20 @@ def test_connection_error_raises_llmerror():
         client.list_models()
 
 
+def test_empty_base_url_raises_llmerror():
+    # urllib.request.Request('') raises ValueError ("unknown url type") outside
+    # any try in the pre-fix code, escaping the LLMError-only contract.
+    client = LMStudioClient(base_url="")
+    with pytest.raises(LLMError):
+        client.list_models()
+
+
+def test_unparseable_base_url_raises_llmerror():
+    client = LMStudioClient(base_url="not-a-url")
+    with pytest.raises(LLMError):
+        client.list_models()
+
+
 def test_chat_tools_omitted_when_empty(server: str):
     client = LMStudioClient(base_url=server)
     client.chat("m1", [], tools=[])

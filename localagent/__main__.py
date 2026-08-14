@@ -84,41 +84,55 @@ def main(argv: list | None = None) -> int:
         _err(str(e))
         return 2
 
-    transcript = Transcript(RUNS_DIR / slug / "transcript.jsonl")
-    print(f"transcript: {transcript.path}", file=sys.stderr)
+    transcript_path = RUNS_DIR / slug / "transcript.jsonl"
+    print(f"transcript: {transcript_path}", file=sys.stderr)
     print(f"worktree:   {worktree}", file=sys.stderr)
 
     # ---- run ----
-    executor = ToolExecutor(worktree, transcript=transcript)
-    runner = Runner(client, executor, transcript, model=args.model,
-                    max_turns=args.max_turns, timeout=args.timeout,
-                    temperature=args.temperature,
-                    run_info={"repo": str(repo), "worktree": str(worktree)})
-    system_prompt = build_system_prompt(worktree, load_repo_context(worktree))
+    # Everything from here on -- Transcript/ToolExecutor/Runner construction,
+    # system-prompt assembly, and the run itself -- is wrapped in one boundary so
+    # the machine contract (exactly one JSON object on stdout, post-preflight)
+    # holds even if a component other than runner.run() blows up.
+    transcript = None
     try:
+        transcript = Transcript(transcript_path)
+        executor = ToolExecutor(worktree, transcript=transcript)
+        runner = Runner(client, executor, transcript, model=args.model,
+                        max_turns=args.max_turns, timeout=args.timeout,
+                        temperature=args.temperature,
+                        run_info={"repo": str(repo), "worktree": str(worktree)})
+        system_prompt = build_system_prompt(worktree, load_repo_context(worktree))
         result = runner.run(system_prompt, args.task)
-    except Exception as e:  # LLMError included — machine contract: always emit JSON
+    except Exception as e:
         message = str(e) if isinstance(e, LLMError) else f"unexpected error: {e!r}"
-        transcript.write("run_end", status="model_error", error=message)
+        if transcript is not None:
+            try:
+                transcript.write("run_end", status="model_error", error=message)
+            except Exception:
+                pass
         _err(message)
         print(json.dumps({
             "status": "model_error",
             "worktree": str(worktree),
             "branch": f"localagent/{slug}",
-            "transcript": str(transcript.path),
+            "transcript": str(transcript_path),
             "turns": None,
             "usage": {},
             "final_message": message,
         }, indent=2))
         return 1
     finally:
-        transcript.close()
+        if transcript is not None:
+            try:
+                transcript.close()
+            except Exception:
+                pass
 
     print(json.dumps({
         "status": result.status,
         "worktree": str(worktree),
         "branch": f"localagent/{slug}",
-        "transcript": str(transcript.path),
+        "transcript": str(transcript_path),
         "turns": result.turns,
         "usage": result.usage,
         "final_message": result.final_message,

@@ -78,6 +78,35 @@ def test_transcript_closed_even_on_unexpected_error(tmp_path, monkeypatch, capsy
     assert events[-1]["event"] == "run_end"
 
 
+def test_transcript_construction_failure_still_prints_json(tmp_path, monkeypatch, capsys):
+    # The JSON exception boundary must cover more than runner.run() -- a failure
+    # constructing Transcript itself (e.g. disk unavailable) must still produce
+    # the documented stdout JSON instead of a traceback.
+    import subprocess
+    import localagent.__main__ as m
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
+                    "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
+                   capture_output=True)
+
+    class BrokenTranscript:
+        def __init__(self, path):
+            raise OSError("disk unavailable")
+
+    monkeypatch.setattr(m, "Transcript", BrokenTranscript)
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])
+
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "model_error"
+    assert "disk unavailable" in payload["final_message"]
+
+
 def test_load_repo_context_uses_worktree_not_caller_checkout(tmp_path, monkeypatch):
     import subprocess
     import localagent.__main__ as m

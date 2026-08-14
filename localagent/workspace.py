@@ -37,9 +37,13 @@ def make_slug(task: str, now: datetime, salt: str | None = None) -> str:
 def create_worktree(repo: Path, slug: str, branch_from: str | None) -> Path:
     rel = Path(".worktrees") / f"la-{slug}"
     ref = branch_from or "HEAD"
-    res = _git(repo, "worktree", "add", "-b", f"localagent/{slug}", str(rel), ref)
+    branch = f"localagent/{slug}"
+    existed = _git(repo, "rev-parse", "--verify", "--quiet",
+                    f"refs/heads/{branch}").returncode == 0
+    res = _git(repo, "worktree", "add", "-b", branch, str(rel), ref)
     if res.returncode != 0:
-        _git(repo, "branch", "-D", f"localagent/{slug}")  # best-effort cleanup; ignore result
+        if not existed:
+            _git(repo, "branch", "-D", branch)  # best-effort cleanup; ignore result
         raise WorkspaceError(f"git worktree add failed: {res.stderr.strip()}")
     return repo / rel
 
