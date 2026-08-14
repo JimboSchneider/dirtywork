@@ -118,3 +118,106 @@ def grep(worktree: Path, pattern: str, path: str = ".", glob: str | None = None)
     # strip the worktree prefix so results read as relative paths
     out = res.stdout.replace(str(worktree.resolve()) + "/", "")
     return _cap(out, note=" — narrow the pattern or path for full results")
+
+
+from .guardrails import build_env, check_bash_command
+
+MAX_BASH_CHARS = 10000
+
+
+def bash(worktree: Path, command: str, timeout: int = 120) -> str:
+    reason = check_bash_command(command)
+    if reason:
+        return reason  # starts with "BLOCKED:"
+    timeout = max(1, min(int(timeout), 600))
+    try:
+        res = subprocess.run(
+            ["bash", "-c", command],
+            cwd=str(worktree),
+            env=build_env(),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return f"ERROR: command timed out after {timeout}s."
+    combined = (res.stdout + res.stderr).strip()
+    return _cap(f"exit code: {res.returncode}\n{combined}", cap=MAX_BASH_CHARS)
+
+
+def _param(props: dict, required: list) -> dict:
+    return {"type": "object", "properties": props, "required": required}
+
+
+TOOL_SCHEMAS = [
+    {"type": "function", "function": {
+        "name": "read_file",
+        "description": "Read a file, returning numbered lines. Large files are "
+                       "windowed; use offset/limit to page through.",
+        "parameters": _param({
+            "path": {"type": "string", "description": "Path relative to worktree root"},
+            "offset": {"type": "integer", "description": "0-based first line, default 0"},
+            "limit": {"type": "integer", "description": "Max lines, default 400"},
+        }, ["path"])}},
+    {"type": "function", "function": {
+        "name": "write_file",
+        "description": "Create or overwrite a file. Parent directories are created.",
+        "parameters": _param({
+            "path": {"type": "string"},
+            "content": {"type": "string"},
+        }, ["path", "content"])}},
+    {"type": "function", "function": {
+        "name": "edit_file",
+        "description": "Replace old_string with new_string in a file. old_string "
+                       "must occur exactly once — include surrounding context.",
+        "parameters": _param({
+            "path": {"type": "string"},
+            "old_string": {"type": "string"},
+            "new_string": {"type": "string"},
+        }, ["path", "old_string", "new_string"])}},
+    {"type": "function", "function": {
+        "name": "list_dir",
+        "description": "List a directory's entries (dirs end with /).",
+        "parameters": _param({"path": {"type": "string", "description": "Default '.'"}}, [])}},
+    {"type": "function", "function": {
+        "name": "grep",
+        "description": "Search file contents with a regex. Optional glob filter "
+                       "like '*.cs' or '*.tsx'.",
+        "parameters": _param({
+            "pattern": {"type": "string"},
+            "path": {"type": "string", "description": "Default '.'"},
+            "glob": {"type": "string"},
+        }, ["pattern"])}},
+    {"type": "function", "function": {
+        "name": "bash",
+        "description": "Run a shell command in the worktree (cwd is the worktree "
+                       "root). Use for builds/tests/git-status, NEVER for editing "
+                       "files. 120s default timeout, 600s max.",
+        "parameters": _param({
+            "command": {"type": "string"},
+            "timeout": {"type": "integer", "description": "Seconds, default 120, max 600"},
+        }, ["command"])}},
+]
+
+
+class ToolExecutor:
+    """Dispatches validated tool calls. Unknown names raise KeyError."""
+
+    def __init__(self, worktree: Path, transcript=None):
+        self.worktree = worktree
+        self.transcript = transcript
+        self._table = {
+            "read_file": read_file,
+            "write_file": write_file,
+            "edit_file": edit_file,
+            "list_dir": list_dir,
+            "grep": grep,
+            "bash": bash,
+        }
+
+    def execute(self, name: str, args: dict) -> str:
+        fn = self._table[name]  # KeyError → runner counts a model failure
+        result = fn(self.worktree, **args)
+        if result.startswith("BLOCKED:") and self.transcript is not None:
+            self.transcript.write("guardrail_block", tool=name, args=args, reason=result)
+        return result
