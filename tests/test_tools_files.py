@@ -66,6 +66,13 @@ def test_edit_file_multiple_matches(wt: Path):
     assert out.startswith("ERROR:") and "2 times" in out
 
 
+def test_edit_file_binary_not_utf8(wt: Path):
+    (wt / "bin.dat").write_bytes(b"\xff\xfe\x00\x01")
+    out = tools.edit_file(wt, "bin.dat", "aa", "bb")
+    assert out.startswith("ERROR:")
+    assert "UTF-8" in out
+
+
 def test_list_dir(wt: Path):
     out = tools.list_dir(wt, ".")
     assert "src/" in out

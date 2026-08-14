@@ -52,6 +52,8 @@ def edit_file(worktree: Path, path: str, old_string: str, new_string: str) -> st
         text = p.read_text(encoding="utf-8")
     except GuardrailError as e:
         return f"ERROR: {e}"
+    except UnicodeDecodeError:
+        return f"ERROR: {path} is not valid UTF-8 text; edit_file only works on text files"
     except OSError as e:
         return f"ERROR: cannot read '{path}': {e}"
     count = text.count(old_string)

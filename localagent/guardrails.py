@@ -48,6 +48,8 @@ _DENYLIST: list[tuple[str, str]] = [
      r"\b(osascript|launchctl|shutdown|reboot|killall)\b"),
     ("redirecting output to an absolute or home path outside the worktree",
      r">>?\s*['\"]?(?!/dev/null)(/|~)"),
+    ("changing directory out of the worktree is not allowed",
+     r"\b(cd|pushd)\s+['\"]?(/|~|\.\.)"),
 ]
 
 _COMPILED = [(reason, re.compile(pat, re.IGNORECASE)) for reason, pat in _DENYLIST]

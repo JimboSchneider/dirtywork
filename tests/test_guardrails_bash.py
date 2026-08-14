@@ -23,6 +23,9 @@ BLOCKED = [
     "killall Finder",
     "echo hi > /etc/motd",
     "cat x >> ~/notes.txt",
+    "cd .. && rm -rf src",
+    "cd /Users/jimschneider && ls",
+    "pushd ~/Documents",
 ]
 
 ALLOWED = [
@@ -34,7 +37,9 @@ ALLOWED = [
     "echo done > out/result.txt",    # relative redirect
     "grep -rn TODO src",
     "npm test 2>/dev/null",          # /dev/null redirect is fine
-    "curl -s https://api.github.com" # download without pipe-to-shell
+    "curl -s https://api.github.com", # download without pipe-to-shell
+    "cd web && npm test",
+    "cd src/app && ls",
 ]
 
 

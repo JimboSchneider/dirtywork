@@ -136,6 +136,17 @@ def test_trim_cannot_fit():
     assert trim_messages(msgs, char_budget=100) is False
 
 
+def test_trim_counts_tool_call_arguments():
+    msgs = [
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "1", "type": "function",
+                         "function": {"name": "write_file", "arguments": "a" * 1000}}]},
+    ]
+    # No role=="tool" messages exist to trim, so this only passes if the
+    # tool_call arguments are counted toward the budget in the first place.
+    assert trim_messages(msgs, char_budget=500) is False
+
+
 def test_arguments_null_treated_as_empty(parts):
     wt, executor, transcript, tmp = parts
     call = {"id": "c1", "type": "function", "function": {"name": "list_dir", "arguments": None}}
@@ -209,6 +220,42 @@ def test_context_exhausted_status(parts):
     result = r.run("s" * 100, "t")
     transcript.close()
     assert result.status == "context_exhausted"
+
+
+def test_length_finish_reason_gives_helpful_hint(parts):
+    wt, executor, transcript, tmp = parts
+    truncated = {
+        "choices": [{
+            "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{
+                    "id": "c", "type": "function",
+                    "function": {"name": "write_file",
+                                 "arguments": "{\"path\": \"x\", \"content\": \"abc"},
+                }],
+            },
+            "finish_reason": "length",
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+    client = FakeClient([truncated, _resp(content="done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    tool_msgs = [m for m in client.requests[1] if m["role"] == "tool"]
+    assert "cut off at the token limit" in tool_msgs[0]["content"]
+
+
+def test_run_start_includes_run_info(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content="done")])
+    r = Runner(client, executor, transcript, model="m", run_info={"repo": "/r"})
+    result = r.run("s", "t")
+    transcript.close()
+    events = _events(tmp)
+    run_start = next(e for e in events if e["event"] == "run_start")
+    assert run_start["repo"] == "/r"
 
 
 def test_interrupted_status(parts):

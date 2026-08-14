@@ -64,3 +64,28 @@ def test_transcript_closed_even_on_unexpected_error(tmp_path, monkeypatch):
     with _pytest.raises(RuntimeError):
         m.main(["run", "--repo", str(repo), "some task"])
     assert closed.get("yes")
+
+
+def test_llm_error_during_run_prints_model_error_json(tmp_path, monkeypatch, capsys):
+    import subprocess
+    import localagent.__main__ as m
+    from localagent.llm import LLMError
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
+                    "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
+                   capture_output=True)
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+
+    def boom(self, system_prompt, task):
+        raise LLMError("boom")
+    monkeypatch.setattr(m.Runner, "run", boom)
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert payload["status"] == "model_error"
+    assert "worktree" in payload

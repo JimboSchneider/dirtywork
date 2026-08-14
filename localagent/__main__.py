@@ -92,13 +92,23 @@ def main(argv: list | None = None) -> int:
     executor = ToolExecutor(worktree, transcript=transcript)
     runner = Runner(client, executor, transcript, model=args.model,
                     max_turns=args.max_turns, timeout=args.timeout,
-                    temperature=args.temperature)
+                    temperature=args.temperature,
+                    run_info={"repo": str(repo), "worktree": str(worktree)})
     system_prompt = build_system_prompt(worktree, load_repo_context(repo))
     try:
         result = runner.run(system_prompt, args.task)
     except LLMError as e:
         transcript.write("run_end", status="model_error", error=str(e))
         _err(str(e))
+        print(json.dumps({
+            "status": "model_error",
+            "worktree": str(worktree),
+            "branch": f"localagent/{slug}",
+            "transcript": str(transcript.path),
+            "turns": None,
+            "usage": {},
+            "final_message": f"LLM error: {e}",
+        }, indent=2))
         return 1
     finally:
         transcript.close()

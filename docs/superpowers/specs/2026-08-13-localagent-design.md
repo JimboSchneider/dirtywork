@@ -67,6 +67,7 @@ localagent run --repo <path> "<task>"
     [--max-turns 40]
     [--timeout 1800]                  # whole-run wall clock, seconds
     [--temperature <f>]               # omitted by default → server preset
+    [--base-url <url>]                # default http://localhost:1234/v1 — testability/deviation: lets tests point at a fake server instead of real LM Studio
 ```
 
 **Lifecycle:**

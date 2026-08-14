@@ -16,7 +16,12 @@ MAX_CONSECUTIVE_FAILURES = 3
 
 
 def _total_chars(messages: list) -> int:
-    return sum(len(m.get("content") or "") for m in messages)
+    total = 0
+    for m in messages:
+        total += len(m.get("content") or "")
+        for tc in m.get("tool_calls") or []:
+            total += len((tc.get("function") or {}).get("arguments") or "")
+    return total
 
 
 def trim_messages(messages: list, char_budget: int) -> bool:
@@ -40,7 +45,8 @@ class RunResult:
 class Runner:
     def __init__(self, client, executor, transcript, model,
                  max_turns: int = 40, timeout: int = 1800,
-                 temperature: float | None = None):
+                 temperature: float | None = None,
+                 run_info: dict | None = None):
         self.client = client
         self.executor = executor
         self.transcript = transcript
@@ -48,6 +54,7 @@ class Runner:
         self.max_turns = max_turns
         self.timeout = timeout
         self.temperature = temperature
+        self.run_info = run_info
         window = CONTEXT_WINDOWS.get(model, DEFAULT_WINDOW)
         self.char_budget = int(window * BUDGET_FRACTION * CHARS_PER_TOKEN)
 
@@ -59,7 +66,8 @@ class Runner:
             {"role": "user", "content": task},
         ]
         self.transcript.write("run_start", task=task, model=self.model,
-                              max_turns=self.max_turns, timeout=self.timeout)
+                              max_turns=self.max_turns, timeout=self.timeout,
+                              **(self.run_info or {}))
         usage = {"prompt_tokens": 0, "completion_tokens": 0}
         turns = 0
         failures = 0
@@ -88,6 +96,7 @@ class Runner:
                 except (KeyError, IndexError, TypeError):
                     return finish("model_error",
                                   "malformed response from server (no choices[0].message)")
+                finish_reason = resp["choices"][0].get("finish_reason")
                 resp_usage = resp.get("usage") or {}
                 for k in usage:
                     usage[k] += resp_usage.get(k, 0) or 0
@@ -115,7 +124,15 @@ class Runner:
                         failures = 0
                     except (json.JSONDecodeError, ValueError) as e:
                         failures += 1
-                        result = f"ERROR: malformed tool arguments: {e}"
+                        if finish_reason == "length":
+                            result = (
+                                "ERROR: your reply was cut off at the token limit before "
+                                "the tool call completed. Emit smaller tool calls — e.g. "
+                                "write the file in pieces using multiple write_file/"
+                                "edit_file calls."
+                            )
+                        else:
+                            result = f"ERROR: malformed tool arguments: {e}"
                     except KeyError:
                         failures += 1
                         result = (f"ERROR: unknown tool '{name}'. Available: read_file, "
