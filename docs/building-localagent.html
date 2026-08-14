@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Building localagent</title>
+<style>
+  :root {
+    --bg: #F7F8F6;
+    --bg-raise: #FFFFFF;
+    --bg-inset: #EEF1ED;
+    --ink: #1B221D;
+    --ink-soft: #4A544D;
+    --ink-faint: #75817A;
+    --line: #D9DFDA;
+    --local: #0E7A4E;
+    --local-soft: #E2F0E8;
+    --frontier: #A66A1E;
+    --frontier-soft: #F4EBDD;
+    --code-bg: #10150F;
+    --code-ink: #D6E2D6;
+    --code-accent: #7FC79E;
+    --code-dim: #7C8A7D;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111611;
+      --bg-raise: #171D17;
+      --bg-inset: #1C231C;
+      --ink: #E4EAE4;
+      --ink-soft: #A7B2A8;
+      --ink-faint: #79857B;
+      --line: #2A322A;
+      --local: #4EC58C;
+      --local-soft: #17251D;
+      --frontier: #D9A468;
+      --frontier-soft: #272015;
+      --code-bg: #0B0F0B;
+      --code-ink: #CFDCCF;
+      --code-accent: #7FC79E;
+      --code-dim: #6E7B6F;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111611;
+    --bg-raise: #171D17;
+    --bg-inset: #1C231C;
+    --ink: #E4EAE4;
+    --ink-soft: #A7B2A8;
+    --ink-faint: #79857B;
+    --line: #2A322A;
+    --local: #4EC58C;
+    --local-soft: #17251D;
+    --frontier: #D9A468;
+    --frontier-soft: #272015;
+    --code-bg: #0B0F0B;
+    --code-ink: #CFDCCF;
+    --code-accent: #7FC79E;
+    --code-dim: #6E7B6F;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Charter", "Iowan Old Style", Georgia, "Times New Roman", serif;
+    font-size: 1.0625rem;
+    line-height: 1.65;
+  }
+  .wrap { max-width: 44rem; margin: 0 auto; padding: 0 1.25rem 6rem; }
+
+  .display, h1, h2, h3 {
+    font-family: "Avenir Next", "Avenir", "Segoe UI", "Helvetica Neue", sans-serif;
+  }
+  h1, h2, h3 { text-wrap: balance; }
+  .mono, code, pre, .stat-num, .bar-label {
+    font-family: ui-monospace, "SF Mono", "Menlo", "Cascadia Mono", monospace;
+  }
+
+  /* ---------- hero ---------- */
+  header { padding: 4.5rem 0 2.5rem; }
+  .eyebrow {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--local);
+    margin: 0 0 1.1rem;
+  }
+  h1 {
+    font-size: clamp(2.2rem, 6vw, 3.1rem);
+    font-weight: 700;
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    margin: 0 0 1.2rem;
+  }
+  .standfirst {
+    font-size: 1.2rem;
+    line-height: 1.55;
+    color: var(--ink-soft);
+    margin: 0 0 2.2rem;
+    max-width: 38rem;
+  }
+  .standfirst strong { color: var(--ink); font-weight: 600; }
+
+  .terminal {
+    background: var(--code-bg);
+    border-radius: 8px;
+    padding: 1.1rem 1.25rem 1.2rem;
+    overflow-x: auto;
+    box-shadow: 0 1px 0 var(--line);
+  }
+  .terminal pre {
+    margin: 0;
+    color: var(--code-ink);
+    font-size: 0.82rem;
+    line-height: 1.6;
+  }
+  .terminal .c { color: var(--code-dim); }
+  .terminal .k { color: var(--code-accent); }
+  .term-cap {
+    font-size: 0.8rem;
+    color: var(--ink-faint);
+    margin: 0.6rem 0 0;
+    font-style: italic;
+  }
+
+  /* ---------- sections ---------- */
+  section { margin-top: 3.6rem; }
+  .sec-mark {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    border-top: 1px solid var(--line);
+    padding-top: 1.6rem;
+  }
+  .sec-mark .n {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.78rem;
+    color: var(--local);
+    letter-spacing: 0.08em;
+  }
+  h2 { font-size: 1.5rem; font-weight: 600; margin: 0; }
+  h3 { font-size: 1.05rem; font-weight: 600; margin: 2rem 0 0.6rem; }
+  p { margin: 1rem 0; }
+  a { color: var(--local); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--local); outline-offset: 2px; border-radius: 2px; }
+  ul, ol { padding-left: 1.4rem; margin: 1rem 0; }
+  li { margin: 0.45rem 0; }
+  li::marker { color: var(--ink-faint); }
+  strong { font-weight: 600; }
+  em { font-style: italic; }
+
+  code {
+    background: var(--bg-inset);
+    border-radius: 4px;
+    padding: 0.1em 0.35em;
+    font-size: 0.86em;
+  }
+  pre.block {
+    background: var(--code-bg);
+    color: var(--code-ink);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    overflow-x: auto;
+    font-size: 0.82rem;
+    line-height: 1.6;
+    margin: 1.2rem 0;
+  }
+  pre.block code { background: none; padding: 0; font-size: inherit; color: inherit; }
+  pre .c { color: var(--code-dim); }
+
+  blockquote {
+    margin: 1.4rem 0;
+    padding: 0.1rem 0 0.1rem 1.1rem;
+    border-left: 3px solid var(--local);
+    color: var(--ink-soft);
+    font-style: italic;
+  }
+
+  /* ---------- two-tier table ---------- */
+  .tiers { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.5rem 0; }
+  @media (max-width: 560px) { .tiers { grid-template-columns: 1fr; } }
+  .tier {
+    border-radius: 8px;
+    padding: 1.1rem 1.2rem 1.2rem;
+    border: 1px solid var(--line);
+    background: var(--bg-raise);
+  }
+  .tier .who {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin: 0 0 0.5rem;
+  }
+  .tier.frontier .who { color: var(--frontier); }
+  .tier.local .who { color: var(--local); }
+  .tier .role { font-size: 0.95rem; color: var(--ink-soft); margin: 0; }
+  .tier .cost {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.78rem;
+    margin: 0.8rem 0 0;
+  }
+  .tier.frontier .cost { color: var(--frontier); }
+  .tier.local .cost { color: var(--local); }
+
+  /* ---------- stats ---------- */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 1.6rem 0;
+  }
+  .stat { background: var(--bg-raise); padding: 0.95rem 1rem 1rem; }
+  .stat-num {
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: var(--local);
+    font-variant-numeric: tabular-nums;
+    display: block;
+  }
+  .stat.amber .stat-num { color: var(--frontier); }
+  .stat-cap { font-size: 0.78rem; color: var(--ink-faint); line-height: 1.35; display: block; margin-top: 0.15rem;
+    font-family: "Avenir Next", "Avenir", "Segoe UI", sans-serif; }
+
+  /* ---------- convergence chart ---------- */
+  .chart {
+    border: 1px solid var(--line);
+    background: var(--bg-raise);
+    border-radius: 8px;
+    padding: 1.2rem 1.2rem 0.9rem;
+    margin: 1.5rem 0;
+  }
+  .chart-title { font-size: 0.78rem; color: var(--ink-faint); margin: 0 0 1rem;
+    font-family: "Avenir Next", "Avenir", "Segoe UI", sans-serif; letter-spacing: 0.04em; text-transform: uppercase; }
+  .bars { display: flex; align-items: flex-end; gap: 0.6rem; height: 90px; }
+  .bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 0.35rem; height: 100%; justify-content: flex-end; }
+  .bar { width: 100%; max-width: 2.6rem; background: var(--local); border-radius: 3px 3px 0 0; opacity: 0.85; }
+  .bar.zero { background: var(--line); height: 3px !important; }
+  .bar-label { font-size: 0.68rem; color: var(--ink-faint); }
+  .bar-n { font-family: ui-monospace, "SF Mono", "Menlo", monospace; font-size: 0.7rem; color: var(--ink-soft); }
+
+  .footnote {
+    margin-top: 4rem;
+    border-top: 1px solid var(--line);
+    padding-top: 1.3rem;
+    font-size: 0.88rem;
+    color: var(--ink-faint);
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">Session postmortem · 2026-08-14</p>
+  <h1>Building localagent</h1>
+  <p class="standfirst">How a frontier model designed, built, reviewed, and shipped a harness
+  that delegates coding work to <strong>free local LLMs</strong> — and how the first
+  production run found a real money bug. One day, end to end.</p>
+
+  <div class="terminal">
+<pre><span class="c">$ localagent run --repo ~/repos/invoicr "Add Vitest unit tests for format.ts…"</span>
+{
+  <span class="k">"status"</span>: <span class="k">"completed"</span>,
+  "turns": 12,
+  "usage": { "prompt_tokens": 89294, "completion_tokens": 1824 },
+  "final_message": "All tests pass (npm run test). Type checking passes."
+}</pre>
+  </div>
+  <p class="term-cap">91k tokens of real agentic work. API cost: $0.</p>
+</header>
+
+<section>
+  <div class="sec-mark"><span class="n">01</span><h2>The pitch</h2></div>
+  <p>I run Claude Code on frontier models. They're excellent — and expensive. Meanwhile
+  my Mac Studio sits there with 128&nbsp;GB of RAM running LM&nbsp;Studio, serving
+  qwen3-coder-next (65k context) and Devstral Small (32k context) for free, four
+  concurrent requests each.</p>
+  <p>The question that started this: <strong>can the expensive model delegate to the free ones?</strong></p>
+  <p>Claude Code's own subagent machinery only spawns Claude models — there's no
+  "point this subagent at localhost." But nothing stops Claude from driving a local model
+  <em>as a tool</em>: build the prompt, POST it, check the work. The catch is that a bare
+  chat completion can't explore a repo, edit files, or run tests. What was missing was a
+  harness — an <strong>agent loop</strong> around the local model.</p>
+  <p>So we built one: <strong>localagent</strong>, a stdlib-only Python CLI that runs one coding
+  task per process against a local model, inside a git worktree it can't escape, producing
+  a reviewable diff and a full JSONL transcript.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">02</span><h2>The division of labor</h2></div>
+  <div class="tiers">
+    <div class="tier frontier">
+      <p class="who">Orchestrator — frontier model</p>
+      <p class="role">Picks the task, writes a precise prompt, audits the transcript,
+      reviews the diff, re-runs the gates, commits and PRs what survives review.</p>
+      <p class="cost">spends judgment · costs money</p>
+    </div>
+    <div class="tier local">
+      <p class="who">Worker — local model</p>
+      <p class="role">Explores the repo, writes code, runs builds and tests — inside a
+      sandbox worktree, with guardrails on every tool call.</p>
+      <p class="cost">spends electricity · costs nothing</p>
+    </div>
+  </div>
+  <p>Two rules make this safe and economical:</p>
+  <ol>
+    <li><strong>Nothing the worker does touches your real checkout.</strong> Every run gets a
+    fresh git worktree on its own branch. No auto-commit, ever. The deliverable is an
+    uncommitted diff plus a transcript.</li>
+    <li><strong>The review gate is the real safety boundary.</strong> Runtime guardrails —
+    path confinement, a bash denylist, a scrubbed environment — block <em>accidents</em>,
+    not adversaries. What actually protects you is a competent reviewer reading the diff
+    and re-running the tests before anything merges.</li>
+  </ol>
+  <p>The economics only work when the review surface is small. If the worker emits 400 lines
+  you must read line-by-line, you've paid most of the cost anyway. Bounded tasks —
+  <em>"write tests for this file, here's the style reference, verify with this command"</em> —
+  are the sweet spot.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">03</span><h2>What localagent is</h2></div>
+  <p>About 600 lines of Python 3.9, standard library only — the system Python on macOS runs
+  it with zero setup. One module per concern:</p>
+<pre class="block"><code>localagent/
+  __main__.py     <span class="c"># CLI: preflight → worktree → run → one JSON object on stdout</span>
+  runner.py       <span class="c"># agent loop: tool dispatch, context trimming, strike limits</span>
+  llm.py          <span class="c"># urllib client for LM Studio's OpenAI-compatible API</span>
+  tools.py        <span class="c"># read / write / edit / list / grep / bash</span>
+  guardrails.py   <span class="c"># path confinement + bash denylist + minimal env</span>
+  workspace.py    <span class="c"># worktree lifecycle, CLAUDE.md injection</span>
+  transcript.py   <span class="c"># JSONL event log, flushed per line (tail -f friendly)</span></code></pre>
+  <h3>Key mechanics</h3>
+  <ul>
+    <li><strong>Native tool calling.</strong> LM Studio speaks the OpenAI <code>tools</code> API —
+    send a schema array, get structured <code>tool_calls</code> back. No fragile
+    "parse XML out of prose" protocol. Verify this with one curl before building anything;
+    it's the load-bearing assumption.</li>
+    <li><strong>The loop</strong> is ~100 lines: POST messages → execute tool calls → append
+    results → repeat until the model replies in plain text. Bounded three ways: max turns, a
+    wall-clock deadline propagated into every model request <em>and</em> subprocess, and a
+    three-consecutive-malformed-calls abort.</li>
+    <li><strong>Context budgeting.</strong> Estimate ~4 chars/token, count tool-call
+    <em>arguments</em> as well as message content (file writes are the biggest payloads!),
+    trim oldest tool results first.</li>
+    <li><strong>Machine-first output.</strong> Exactly one JSON object on stdout with exit codes
+    0/1/2. The consumer is another AI parsing stdout, so this contract is load-bearing;
+    humans watch via <code>tail -f</code> on the transcript.</li>
+    <li><strong>Convention injection.</strong> The target repo's <code>CLAUDE.md</code> goes into
+    the worker's system prompt — read from the worktree's checked-out ref, not the caller's
+    possibly-dirty working tree.</li>
+  </ul>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">04</span><h2>How it was built</h2></div>
+  <p>The build was the same delegation philosophy, one tier up: a brainstorm settled the
+  safety model before any code; a plan specified ten tasks <em>including the actual code and
+  tests</em> as bite-sized TDD cycles; cheap subagents transcribed while mid-tier subagents
+  independently reviewed every diff against the spec.</p>
+  <p>The reviews earned their keep immediately — six fix rounds before the PR even opened:
+  two "never raises" contract violations reproduced with a read-only file and a dangling
+  symlink, exception-type holes in the HTTP client (<code>IncompleteRead</code> is not an
+  <code>OSError</code>!), a stale-branch leak on failed worktree creation, crash paths on
+  malformed server responses. A final whole-branch review then caught what task-scoped
+  reviews structurally can't: cross-module seams, like the timeout nothing actually enforced.</p>
+  <p>Then the pull request went through <strong>seven rounds of human review</strong> —
+  sixteen findings, every one verified against the code before being fixed, several
+  reproduced empirically first, every fix re-gated and answered in-thread.</p>
+
+  <div class="chart">
+    <p class="chart-title">Findings per review round — converging to clean</p>
+    <div class="bars">
+      <div class="bar-col"><span class="bar-n">5</span><div class="bar" style="height:100%"></div><span class="bar-label">R1</span></div>
+      <div class="bar-col"><span class="bar-n">3</span><div class="bar" style="height:60%"></div><span class="bar-label">R2</span></div>
+      <div class="bar-col"><span class="bar-n">1</span><div class="bar" style="height:20%"></div><span class="bar-label">R3</span></div>
+      <div class="bar-col"><span class="bar-n">1</span><div class="bar" style="height:20%"></div><span class="bar-label">R4</span></div>
+      <div class="bar-col"><span class="bar-n">1</span><div class="bar" style="height:20%"></div><span class="bar-label">R5</span></div>
+      <div class="bar-col"><span class="bar-n">2</span><div class="bar" style="height:40%"></div><span class="bar-label">R6</span></div>
+      <div class="bar-col"><span class="bar-n">3</span><div class="bar" style="height:60%"></div><span class="bar-label">R7</span></div>
+      <div class="bar-col"><span class="bar-n">0</span><div class="bar zero"></div><span class="bar-label">✓</span></div>
+    </div>
+  </div>
+
+  <h3>Review heuristics worth stealing</h3>
+  <ul>
+    <li><em>Does the advertised timeout actually bound every blocking call?</em> It didn't:
+    the HTTP client had its own 600s timeout; grep had a fixed 30s.</li>
+    <li><em>What happens on</em> <code>{"choices":[{"message":null}]}</code>? Malformed-but-valid
+    JSON is a whole bug class distinct from invalid JSON.</li>
+    <li><em>Is the recovery path protocol-valid?</em> A synthesized tool result with an empty
+    <code>tool_call_id</code> passes your fake-client tests and gets rejected by a strict real
+    server. The terminal fix was canonicalization: rebuild every accepted tool call into the
+    exact wire shape before resending.</li>
+    <li><em>Can cleanup destroy pre-existing state?</em> A best-effort
+    <code>git branch -D</code> after a failed worktree add would delete a branch that existed
+    <em>before</em> the call. Record provenance; only delete what you created.</li>
+  </ul>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">05</span><h2>The first production run</h2></div>
+  <p>Task: <em>"Add Vitest unit tests for the six functions in
+  <code>web/src/lib/format.ts</code>, colocated, following the style of
+  <code>version.test.ts</code>, verify with <code>npm run test</code>."</em></p>
+
+  <div class="stats">
+    <div class="stat"><span class="stat-num">12</span><span class="stat-cap">turns, 38 seconds of loop time</span></div>
+    <div class="stat"><span class="stat-num">$0</span><span class="stat-cap">91k tokens, all local</span></div>
+    <div class="stat"><span class="stat-num">25</span><span class="stat-cap">tests written, all passing</span></div>
+    <div class="stat"><span class="stat-num">0</span><span class="stat-cap">guardrail events</span></div>
+  </div>
+
+  <p>The transcript showed genuinely good behavior: the model read the source and the style
+  reference before writing, and when its negative-rounding expectation failed, it probed real
+  <code>Math.round</code> semantics with <code>node -e</code> and corrected itself rather than
+  guessing. Review cost on my side: one 125-line file to read, two gate commands to re-run,
+  one stray <code>package-lock.json</code> touch to revert.</p>
+
+  <h3>And then the kicker</h3>
+  <p>The tests faithfully pinned <em>existing</em> behavior — which put a wrong behavior in
+  plain sight. Two review rounds later, <code>round2</code> — the function that computes
+  invoice line amounts, subtotals, tax, and totals — had two real defects fixed:</p>
+  <ol>
+    <li><strong>Asymmetric negative rounding.</strong> <code>Math.round</code> resolves ties
+    toward +∞, so a credit didn't mirror its charge: <code>round2(0.125) → 0.13</code> but
+    <code>round2(-0.125) → -0.12</code>.</li>
+    <li><strong>The epsilon trick silently fails past ~$10.</strong>
+    <code>Number.EPSILON</code> (2.2e-16) is <em>smaller than the ULP at magnitude 10</em>
+    (~1.8e-15), so the nudge vanishes in float addition: <code>round2(10.075) → 10.07</code>.
+    The fix rounds on the decimal the user sees, via a decimal shift —
+    <code>Number(Math.abs(n) + "e2")</code> reparses the shortest decimal representation, so
+    <code>"10.075e2"</code> is exactly <code>1007.5</code>.</li>
+  </ol>
+  <blockquote>A test-writing delegation turned into a shipped fix for invoice-money
+  correctness. The delegation didn't create the bug — it dragged it into the light.</blockquote>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">06</span><h2>Build one yourself</h2></div>
+  <p><strong>Prerequisites:</strong> LM Studio (or any OpenAI-compatible server) with a
+  tool-calling-capable coding model; git; any language with an HTTP client. Prove the
+  load-bearing assumption first — one curl with a <code>tools</code> array, per model.</p>
+  <p><strong>The recipe, in the build order that worked:</strong></p>
+  <ol>
+    <li><strong>Transcript first</strong> (JSONL, flushed per line). Observability before
+    behavior — you will debug the loop by reading this file.</li>
+    <li><strong>Guardrails second, as pure functions.</strong> Path resolution that follows
+    symlinks and compares path components — not string prefixes; <code>/repo-evil</code>
+    starts with <code>/repo</code>. A bash denylist for accidents: <code>sudo</code>,
+    <code>git push</code>, absolute-path <code>rm</code>, <code>cd ..</code> escapes,
+    pipe-to-shell. Scrub the environment — your shell's tokens should never reach the
+    worker's subprocesses.</li>
+    <li><strong>Six tools are enough:</strong> read (numbered, windowed), write, exact-match
+    edit, list, grep, bash. Tools <em>never raise</em> — every failure returns an
+    <code>ERROR:</code> string the model can read and self-correct from. Enforce it with
+    hostile tests: binary files, broken symlinks, read-only files.</li>
+    <li><strong>Worktree lifecycle:</strong> salted-slug branches, provenance-aware cleanup,
+    and <code>git rev-parse --git-path info/exclude</code> (correct even in linked worktrees)
+    to hide your worktree dir.</li>
+    <li><strong>The loop,</strong> with all three bounds from day one, and defensive parsing
+    of <em>every</em> response field — assume <code>message</code> can be null,
+    <code>tool_calls</code> can contain garbage, <code>usage</code> can be missing.
+    Canonicalize accepted tool calls before resending them.</li>
+    <li><strong>A machine contract:</strong> one JSON object on stdout, statuses as an enum,
+    exit codes, everything else on stderr — wrapped in one exception boundary so the contract
+    survives even your own bugs.</li>
+    <li><strong>Two test suites:</strong> a fast one with a scripted fake client, and a
+    live-marked one against the real server, including one true end-to-end run.</li>
+  </ol>
+  <p><strong>Prompting the worker:</strong> name the file, name the style reference, name the
+  verification command. Inject the repo's conventions. The plain-text reply is the loop's
+  termination signal — tell the model that's how it finishes.</p>
+  <p><strong>Reviewing the work:</strong> read the transcript summary, read the diff, re-run
+  the gates yourself, revert incidental artifacts, and only then commit — to a PR you review
+  like anyone else's.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">07</span><h2>Honest limitations, and what's next</h2></div>
+  <ul>
+    <li>A 30B local model is a <em>worker</em>, not an architect. Bounded, well-specified,
+    verifiable tasks succeed; open-ended design does not.</li>
+    <li>The guardrails are heuristic by design; the review gate carries the real weight.
+    Never skip it.</li>
+    <li>Review cost is the true price. Delegate output you can verify cheaply — tests,
+    conversions, boilerplate — not code you'd have to re-derive line by line.</li>
+    <li>Sample size is one. The first run was a clear win; the pattern needs reps.</li>
+  </ul>
+  <p>Next up: opening it for others — un-hardcoding the launcher, a license, CI, and
+  packaging so anyone with LM Studio can <code>pipx install</code> their way to a free
+  local workforce.</p>
+
+  <div class="stats">
+    <div class="stat"><span class="stat-num">1 day</span><span class="stat-cap">design → build → review → production</span></div>
+    <div class="stat"><span class="stat-num">133</span><span class="stat-cap">tests green at merge (130 unit + 3 live)</span></div>
+    <div class="stat"><span class="stat-num">16</span><span class="stat-cap">review findings — all verified, fixed, re-gated</span></div>
+    <div class="stat amber"><span class="stat-num">1¢</span><span class="stat-cap">the rounding bug that made it all worth it</span></div>
+  </div>
+
+  <p>The expensive model spent its tokens where judgment lives — design, review,
+  verification — and the free model did the typing. That's the whole idea, and for one day
+  at least, it worked exactly as drawn.</p>
+</section>
+
+<p class="footnote">Written from the session record, 2026-08-14. Source and design docs:
+the localagent repository (<span class="mono">docs/superpowers/specs</span> and
+<span class="mono">docs/superpowers/plans</span> hold the original spec and the ten-task
+implementation plan).</p>
+</div>
+
+</body>
+</html>
