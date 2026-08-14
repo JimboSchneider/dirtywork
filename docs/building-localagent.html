@@ -449,6 +449,11 @@
   <p><strong>Prerequisites:</strong> LM Studio (or any OpenAI-compatible server) with a
   tool-calling-capable coding model; git; any language with an HTTP client. Prove the
   load-bearing assumption first — one curl with a <code>tools</code> array, per model.</p>
+  <p><strong>Or don't build — clone.</strong> The finished harness is MIT-licensed at
+  <a href="https://github.com/JimboSchneider/localagent">github.com/JimboSchneider/localagent</a>
+  — stdlib-only, pipx-installable, with the full spec and ten-task plan in
+  <span class="mono">docs/</span>. The recipe below is for building your own anyway,
+  which is where the fun is.</p>
   <p><strong>The recipe, in the build order that worked:</strong></p>
   <ol>
     <li><strong>Transcript first</strong> (JSONL, flushed per line). Observability before
@@ -512,7 +517,8 @@
 </section>
 
 <p class="footnote">Written from the session record, 2026-08-14. Source and design docs:
-the localagent repository (<span class="mono">docs/superpowers/specs</span> and
+<a href="https://github.com/JimboSchneider/localagent">github.com/JimboSchneider/localagent</a>
+(<span class="mono">docs/superpowers/specs</span> and
 <span class="mono">docs/superpowers/plans</span> hold the original spec and the ten-task
 implementation plan).</p>
 </div>
