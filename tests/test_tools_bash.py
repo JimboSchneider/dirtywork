@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -57,6 +58,31 @@ def test_executor_dispatch_and_unknown(wt: Path):
     assert "hi" in ex.execute("read_file", {"path": "hello.txt"})
     with pytest.raises(KeyError):
         ex.execute("format_disk", {})
+
+
+def test_executor_deadline_exceeded_blocks_execution(wt: Path):
+    ex = ToolExecutor(wt)
+    ex.deadline = time.monotonic() - 1
+    out = ex.execute("bash", {"command": "touch created.txt"})
+    assert "deadline exceeded" in out.lower()
+    assert not (wt / "created.txt").exists()
+
+
+def test_executor_clamps_bash_timeout_to_remaining_deadline(wt: Path):
+    captured = {}
+
+    def fake_bash(worktree, command, timeout=120):
+        captured["timeout"] = timeout
+        return "exit code: 0\n"
+
+    ex = ToolExecutor(wt)
+    ex._table["bash"] = fake_bash
+    ex.deadline = time.monotonic() + 3
+
+    ex.execute("bash", {"command": "true", "timeout": 600})
+
+    assert captured["timeout"] <= 3
+    assert captured["timeout"] >= 1
 
 
 def test_executor_logs_guardrail_block(wt: Path, tmp_path: Path):

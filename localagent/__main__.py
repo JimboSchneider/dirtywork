@@ -94,7 +94,7 @@ def main(argv: list | None = None) -> int:
                     max_turns=args.max_turns, timeout=args.timeout,
                     temperature=args.temperature,
                     run_info={"repo": str(repo), "worktree": str(worktree)})
-    system_prompt = build_system_prompt(worktree, load_repo_context(repo))
+    system_prompt = build_system_prompt(worktree, load_repo_context(worktree))
     try:
         result = runner.run(system_prompt, args.task)
     except LLMError as e:

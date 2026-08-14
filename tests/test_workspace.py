@@ -54,8 +54,15 @@ def test_preflight_no_commits(tmp_path: Path):
 
 def test_make_slug():
     now = datetime(2026, 8, 14, 11, 9)
-    slug = make_slug("Add unit tests for the invoice footer!", now)
-    assert slug == "add-unit-tests-for-the-08141109"
+    slug = make_slug("Add unit tests for the invoice footer!", now, salt="ab12")
+    assert slug == "add-unit-tests-for-the-0814110900-ab12"
+
+
+def test_make_slug_default_salt_is_random():
+    now = datetime(2026, 8, 14, 11, 9)
+    s1 = make_slug("same task", now)
+    s2 = make_slug("same task", now)
+    assert s1 != s2
 
 
 def test_create_worktree(repo: Path):
@@ -76,6 +83,30 @@ def test_ensure_worktrees_excluded_idempotent(repo: Path):
     ensure_worktrees_excluded(repo)
     exclude = repo / ".git" / "info" / "exclude"
     assert exclude.read_text().count(".worktrees/") == 1
+
+
+def test_ensure_worktrees_excluded_from_linked_worktree(repo: Path, tmp_path: Path):
+    # A linked worktree's `git rev-parse --git-dir` points at the private
+    # .git/worktrees/<name> dir, but git only ever consults the shared
+    # repository's info/exclude. Calling ensure_worktrees_excluded with the
+    # linked worktree's path must still land the entry in the PRIMARY repo's
+    # info/exclude, not the worktree's private gitdir.
+    wt2 = tmp_path / "wt2"
+    _git(repo, "worktree", "add", str(wt2), "-b", "side")
+
+    ensure_worktrees_excluded(wt2)
+
+    primary_exclude = repo / ".git" / "info" / "exclude"
+    assert ".worktrees/" in primary_exclude.read_text()
+
+    # Prove git actually consults that shared file when run from the worktree:
+    # a .worktrees/ dir inside the linked worktree should be ignored by status.
+    (wt2 / ".worktrees" / "dummy").mkdir(parents=True)
+    status = subprocess.run(
+        ["git", "-C", str(wt2), "status", "--porcelain"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert ".worktrees" not in status
 
 
 def test_load_repo_context(repo: Path):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from .guardrails import GuardrailError, resolve_in_worktree
@@ -210,6 +211,7 @@ class ToolExecutor:
     def __init__(self, worktree: Path, transcript=None):
         self.worktree = worktree
         self.transcript = transcript
+        self.deadline = None
         self._table = {
             "read_file": read_file,
             "write_file": write_file,
@@ -221,6 +223,14 @@ class ToolExecutor:
 
     def execute(self, name: str, args: dict) -> str:
         fn = self._table[name]  # KeyError → runner counts a model failure
+        if self.deadline is not None:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                return ("ERROR: run deadline exceeded; stop calling tools and "
+                        "summarize what you have done.")
+            if name == "bash":
+                args = dict(args)
+                args["timeout"] = min(int(args.get("timeout", 120)), max(1, int(remaining)))
         result = fn(self.worktree, **args)
         if result.startswith("BLOCKED:") and self.transcript is not None:
             self.transcript.write("guardrail_block", tool=name, args=args, reason=result)

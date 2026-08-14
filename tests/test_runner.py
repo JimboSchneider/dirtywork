@@ -33,9 +33,11 @@ class FakeClient:
     def __init__(self, responses):
         self.responses = list(responses)
         self.requests = []
+        self.timeouts = []
 
-    def chat(self, model, messages, tools, temperature=None, max_tokens=4096):
+    def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
         self.requests.append([json.loads(json.dumps(m)) for m in messages])
+        self.timeouts.append(timeout)
         return self.responses.pop(0)
 
 
@@ -180,6 +182,15 @@ def test_malformed_response_is_model_error(parts):
     assert result.status == "model_error"
 
 
+def test_null_message_is_model_error(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([{"choices": [{"message": None}]}])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+
+
 def test_null_usage_tolerated(parts):
     wt, executor, transcript, tmp = parts
     client = FakeClient([{"choices": [{"message": {"role": "assistant", "content": "hi"}}], "usage": None}])
@@ -256,6 +267,17 @@ def test_run_start_includes_run_info(parts):
     events = _events(tmp)
     run_start = next(e for e in events if e["event"] == "run_start")
     assert run_start["repo"] == "/r"
+
+
+def test_chat_receives_bounded_timeout(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content="done")])
+    r = Runner(client, executor, transcript, model="m", timeout=30)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert client.timeouts and client.timeouts[0] is not None
+    assert 0 < client.timeouts[0] <= 30
 
 
 def test_interrupted_status(parts):

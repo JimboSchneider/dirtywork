@@ -15,14 +15,16 @@ class LMStudioClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    def _request(self, path: str, payload: dict | None = None) -> dict:
+    def _request(self, path: str, payload: dict | None = None,
+                 timeout: float | None = None) -> dict:
         url = f"{self.base_url}{path}"
         data = json.dumps(payload).encode() if payload is not None else None
         req = urllib.request.Request(
             url, data=data, headers={"Content-Type": "application/json"}
         )
+        effective_timeout = timeout if timeout is not None else self.timeout
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
                 body = resp.read()
         except urllib.error.HTTPError as e:
             try:
@@ -48,10 +50,11 @@ class LMStudioClient:
         tools: list,
         temperature: float | None = None,
         max_tokens: int = 4096,
+        timeout: float | None = None,
     ) -> dict:
         payload = {"model": model, "messages": messages, "max_tokens": max_tokens}
         if tools:
             payload["tools"] = tools
         if temperature is not None:
             payload["temperature"] = temperature
-        return self._request("/chat/completions", payload)
+        return self._request("/chat/completions", payload, timeout=timeout)

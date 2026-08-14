@@ -72,6 +72,8 @@ class Runner:
         turns = 0
         failures = 0
         start = time.monotonic()
+        deadline = start + self.timeout
+        self.executor.deadline = deadline
 
         def finish(status: str, final: str) -> RunResult:
             self.transcript.write("run_end", status=status, turns=turns,
@@ -83,16 +85,20 @@ class Runner:
             while True:
                 if turns >= self.max_turns:
                     return finish("max_turns", "")
-                if time.monotonic() - start > self.timeout:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     return finish("timeout", "")
                 if not trim_messages(messages, self.char_budget):
                     return finish("context_exhausted", "")
 
                 resp = self.client.chat(self.model, messages, tools=TOOL_SCHEMAS,
-                                        temperature=self.temperature)
+                                        temperature=self.temperature,
+                                        timeout=max(1.0, remaining))
                 turns += 1
                 try:
                     msg = resp["choices"][0]["message"]
+                    if not isinstance(msg, dict):
+                        raise TypeError("message is not an object")
                 except (KeyError, IndexError, TypeError):
                     return finish("model_error",
                                   "malformed response from server (no choices[0].message)")

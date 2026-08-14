@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import secrets
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -25,10 +26,12 @@ def preflight_repo(repo: Path) -> None:
         raise WorkspaceError(f"{repo} has no commits (worktrees need a base ref)")
 
 
-def make_slug(task: str, now: datetime) -> str:
+def make_slug(task: str, now: datetime, salt: str | None = None) -> str:
     words = re.sub(r"[^a-z0-9\s-]", "", task.lower()).split()[:5]
     base = re.sub(r"-+", "-", "-".join(words))[:40].strip("-") or "task"
-    return f"{base}-{now.strftime('%m%d%H%M')}"
+    if salt is None:
+        salt = secrets.token_hex(2)
+    return f"{base}-{now.strftime('%m%d%H%M%S')}-{salt}"
 
 
 def create_worktree(repo: Path, slug: str, branch_from: str | None) -> Path:
@@ -42,13 +45,16 @@ def create_worktree(repo: Path, slug: str, branch_from: str | None) -> Path:
 
 
 def ensure_worktrees_excluded(repo: Path) -> None:
-    res = _git(repo, "rev-parse", "--git-dir")
+    # Use --git-path (not --git-dir) so this resolves to the shared repository's
+    # info/exclude even when `repo` is itself a linked worktree — a linked
+    # worktree's --git-dir is its private .git/worktrees/<name> dir, but git only
+    # ever consults the common/shared info/exclude for status/ignore purposes.
+    res = _git(repo, "rev-parse", "--git-path", "info/exclude")
     if res.returncode != 0:
         raise WorkspaceError(f"cannot locate git dir for {repo}")
-    git_dir = Path(res.stdout.strip())
-    if not git_dir.is_absolute():
-        git_dir = repo / git_dir
-    exclude = git_dir / "info" / "exclude"
+    exclude = Path(res.stdout.strip())
+    if not exclude.is_absolute():
+        exclude = repo / exclude
     exclude.parent.mkdir(parents=True, exist_ok=True)
     existing = exclude.read_text() if exclude.exists() else ""
     if ".worktrees/" not in existing:

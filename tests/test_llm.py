@@ -65,6 +65,12 @@ def test_chat_temperature_included(server: str):
     assert _FakeLMStudio.last_payload["temperature"] == 0.2
 
 
+def test_chat_timeout_kwarg_passthrough(server: str):
+    client = LMStudioClient(base_url=server)
+    resp = client.chat("m1", [{"role": "user", "content": "x"}], tools=[], timeout=5)
+    assert resp["choices"][0]["message"]["content"] == "hi"
+
+
 def test_connection_error_raises_llmerror():
     client = LMStudioClient(base_url="http://127.0.0.1:1/v1", timeout=2)
     with pytest.raises(LLMError):

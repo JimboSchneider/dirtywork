@@ -66,6 +66,42 @@ def test_transcript_closed_even_on_unexpected_error(tmp_path, monkeypatch):
     assert closed.get("yes")
 
 
+def test_load_repo_context_uses_worktree_not_caller_checkout(tmp_path, monkeypatch):
+    import subprocess
+    import localagent.__main__ as m
+    from localagent.runner import RunResult
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
+                    "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
+                   capture_output=True)
+    (repo / "CLAUDE.md").write_text("CONVENTIONS-FROM-COMMIT")
+    subprocess.run(["git", "-C", str(repo), "add", "CLAUDE.md"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
+                    "-c", "user.name=t", "commit", "-m", "add conventions"],
+                   capture_output=True)
+    # Dirty the working tree AFTER the commit — the worktree branches from
+    # HEAD (the commit), so it must never see this uncommitted content.
+    (repo / "CLAUDE.md").write_text("CONVENTIONS-DIRTY")
+
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+
+    captured = {}
+
+    def fake_run(self, system_prompt, task):
+        captured["system_prompt"] = system_prompt
+        return RunResult("completed", 1, "ok", {})
+
+    monkeypatch.setattr(m.Runner, "run", fake_run)
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])
+    assert rc == 0
+    assert "CONVENTIONS-FROM-COMMIT" in captured["system_prompt"]
+    assert "CONVENTIONS-DIRTY" not in captured["system_prompt"]
+
+
 def test_llm_error_during_run_prints_model_error_json(tmp_path, monkeypatch, capsys):
     import subprocess
     import localagent.__main__ as m
