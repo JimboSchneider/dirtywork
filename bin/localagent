@@ -1,0 +1,2 @@
+#!/bin/bash
+exec env PYTHONPATH="$HOME/repos/localagent" python3 -m localagent "$@"
