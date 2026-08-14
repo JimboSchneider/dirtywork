@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from localagent.tools import TOOL_SCHEMAS, ToolExecutor, bash
+from localagent.tools import TOOL_SCHEMAS, ToolExecutor, bash, grep
 from localagent.transcript import Transcript
 
 
@@ -80,6 +80,28 @@ def test_executor_clamps_bash_timeout_to_remaining_deadline(wt: Path):
     ex.deadline = time.monotonic() + 3
 
     ex.execute("bash", {"command": "true", "timeout": 600})
+
+    assert captured["timeout"] <= 3
+    assert captured["timeout"] >= 1
+
+
+def test_grep_timeout_kwarg_works(wt: Path):
+    out = grep(wt, "hi", timeout=5)
+    assert "hello.txt" in out
+
+
+def test_executor_clamps_grep_timeout_to_remaining_deadline(wt: Path):
+    captured = {}
+
+    def fake_grep(worktree, pattern, path=".", glob=None, timeout=30):
+        captured["timeout"] = timeout
+        return "No matches found."
+
+    ex = ToolExecutor(wt)
+    ex._table["grep"] = fake_grep
+    ex.deadline = time.monotonic() + 3
+
+    ex.execute("grep", {"pattern": "hi"})
 
     assert captured["timeout"] <= 3
     assert captured["timeout"] >= 1

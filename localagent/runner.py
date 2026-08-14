@@ -4,6 +4,8 @@ import json
 import time
 from dataclasses import dataclass, field
 
+from .llm import LLMTimeout
+
 CONTEXT_WINDOWS = {
     "qwen/qwen3-coder-next": 65536,
     "mistralai/devstral-small-2-2512": 32768,
@@ -20,6 +22,8 @@ def _total_chars(messages: list) -> int:
     for m in messages:
         total += len(m.get("content") or "")
         for tc in m.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
             total += len((tc.get("function") or {}).get("arguments") or "")
     return total
 
@@ -91,9 +95,16 @@ class Runner:
                 if not trim_messages(messages, self.char_budget):
                     return finish("context_exhausted", "")
 
-                resp = self.client.chat(self.model, messages, tools=TOOL_SCHEMAS,
-                                        temperature=self.temperature,
-                                        timeout=max(1.0, remaining))
+                try:
+                    resp = self.client.chat(self.model, messages, tools=TOOL_SCHEMAS,
+                                            temperature=self.temperature,
+                                            timeout=max(1.0, remaining))
+                except LLMTimeout:
+                    if time.monotonic() >= deadline - 0.5:
+                        return finish("timeout", "")
+                    else:
+                        return finish("model_error",
+                                      "model request timed out before the run deadline")
                 turns += 1
                 try:
                     msg = resp["choices"][0]["message"]
@@ -106,7 +117,11 @@ class Runner:
                 resp_usage = resp.get("usage") or {}
                 for k in usage:
                     usage[k] += resp_usage.get(k, 0) or 0
-                tool_calls = msg.get("tool_calls") or []
+                raw = msg.get("tool_calls") or []
+                if not isinstance(raw, list):
+                    raw = []
+                tool_calls = [tc for tc in raw if isinstance(tc, dict)]
+                malformed_count = len(raw) - len(tool_calls)
                 self.transcript.write(
                     "assistant", text=msg.get("content"),
                     tool_calls=[{"name": (tc.get("function") or {}).get("name"),
@@ -114,8 +129,17 @@ class Runner:
                                 for tc in tool_calls])
                 messages.append(msg)
 
-                if not tool_calls:
+                if not raw:
                     return finish("completed", msg.get("content") or "")
+
+                for _ in range(malformed_count):
+                    failures += 1
+                    result = "ERROR: malformed tool call entry (not an object)"
+                    self.transcript.write("tool_result", tool="", args="", result=result)
+                    messages.append({"role": "tool", "tool_call_id": "", "content": result})
+                    if failures >= MAX_CONSECUTIVE_FAILURES:
+                        return finish("model_error",
+                                      "aborted after repeated malformed tool calls")
 
                 for tc in tool_calls:
                     fn_info = tc.get("function") or {}

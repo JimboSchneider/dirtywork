@@ -90,7 +90,8 @@ def list_dir(worktree: Path, path: str = ".") -> str:
     return _cap("\n".join(rows) or "(empty directory)")
 
 
-def grep(worktree: Path, pattern: str, path: str = ".", glob: str | None = None) -> str:
+def grep(worktree: Path, pattern: str, path: str = ".", glob: str | None = None,
+         timeout: int = 30) -> str:
     try:
         p = resolve_in_worktree(path, worktree)
     except GuardrailError as e:
@@ -109,9 +110,9 @@ def grep(worktree: Path, pattern: str, path: str = ".", glob: str | None = None)
             cmd += [f"--include={glob}"]
         cmd.append(str(p))
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return "ERROR: grep timed out after 30s — narrow the pattern or path."
+        return f"ERROR: grep timed out after {timeout}s — narrow the pattern or path."
     except OSError as e:
         return f"ERROR: grep failed: {e}"
     if res.returncode not in (0, 1):
@@ -228,9 +229,10 @@ class ToolExecutor:
             if remaining <= 0:
                 return ("ERROR: run deadline exceeded; stop calling tools and "
                         "summarize what you have done.")
-            if name == "bash":
+            if name in ("bash", "grep"):
                 args = dict(args)
-                args["timeout"] = min(int(args.get("timeout", 120)), max(1, int(remaining)))
+                default = 120 if name == "bash" else 30
+                args["timeout"] = min(int(args.get("timeout", default)), max(1, int(remaining)))
         result = fn(self.worktree, **args)
         if result.startswith("BLOCKED:") and self.transcript is not None:
             self.transcript.write("guardrail_block", tool=name, args=args, reason=result)

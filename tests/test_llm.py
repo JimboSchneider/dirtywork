@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from localagent.llm import LLMError, LMStudioClient
+from localagent.llm import LLMError, LLMTimeout, LMStudioClient
 
 
 class _FakeLMStudio(BaseHTTPRequestHandler):
@@ -38,6 +39,33 @@ class _FakeLMStudio(BaseHTTPRequestHandler):
 @pytest.fixture()
 def server():
     srv = HTTPServer(("127.0.0.1", 0), _FakeLMStudio)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}/v1"
+    srv.shutdown()
+
+
+class _SlowLMStudio(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        self.rfile.read(length)
+        time.sleep(2)
+        body = json.dumps({
+            "choices": [{"message": {"role": "assistant", "content": "hi"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):  # silence test output
+        pass
+
+
+@pytest.fixture()
+def slow_server():
+    srv = HTTPServer(("127.0.0.1", 0), _SlowLMStudio)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{srv.server_address[1]}/v1"
@@ -81,6 +109,13 @@ def test_chat_tools_omitted_when_empty(server: str):
     client = LMStudioClient(base_url=server)
     client.chat("m1", [], tools=[])
     assert "tools" not in _FakeLMStudio.last_payload
+
+
+def test_chat_timeout_raises_llmtimeout(slow_server: str):
+    client = LMStudioClient(base_url=slow_server, timeout=0.5)
+    with pytest.raises(LLMTimeout) as exc_info:
+        client.chat("m1", [{"role": "user", "content": "x"}], tools=[])
+    assert isinstance(exc_info.value, LLMError)
 
 
 def test_chat_tools_included_when_nonempty(server: str):

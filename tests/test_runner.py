@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
 
+from localagent.llm import LLMTimeout
 from localagent.runner import (
     DEFAULT_WINDOW,
     TRIM_MARKER,
@@ -278,6 +280,69 @@ def test_chat_receives_bounded_timeout(parts):
     assert result.status == "completed"
     assert client.timeouts and client.timeouts[0] is not None
     assert 0 < client.timeouts[0] <= 30
+
+
+def test_llm_timeout_near_deadline_gives_timeout_status(parts):
+    wt, executor, transcript, tmp = parts
+
+    class SlowTimeoutClient:
+        def chat(self, *a, **k):
+            time.sleep(0.3)
+            raise LLMTimeout("request timed out")
+
+    r = Runner(SlowTimeoutClient(), executor, transcript, model="m", timeout=0.2)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "timeout"
+
+
+def test_llm_timeout_far_from_deadline_gives_model_error(parts):
+    wt, executor, transcript, tmp = parts
+
+    class ImmediateTimeoutClient:
+        def chat(self, *a, **k):
+            raise LLMTimeout("request timed out")
+
+    r = Runner(ImmediateTimeoutClient(), executor, transcript, model="m", timeout=1800)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+
+
+def test_malformed_tool_call_null_entry_recovers(parts):
+    wt, executor, transcript, tmp = parts
+    bad = {"choices": [{"message": {"role": "assistant", "content": None,
+                                     "tool_calls": [None]}}]}
+    client = FakeClient([bad, _resp(content="ok done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    tool_msgs = [m for m in client.requests[1] if m["role"] == "tool"]
+    assert "malformed tool call" in tool_msgs[0]["content"].lower()
+
+
+def test_tool_calls_non_list_treated_as_absent(parts):
+    wt, executor, transcript, tmp = parts
+    resp = {"choices": [{"message": {"role": "assistant", "content": "done",
+                                      "tool_calls": "notalist"}}]}
+    client = FakeClient([resp])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.turns == 1
+
+
+def test_three_consecutive_malformed_tool_calls_aborts(parts):
+    wt, executor, transcript, tmp = parts
+    bad = {"choices": [{"message": {"role": "assistant", "content": None,
+                                     "tool_calls": [None]}}]}
+    client = FakeClient([bad, bad, bad])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
 
 
 def test_interrupted_status(parts):

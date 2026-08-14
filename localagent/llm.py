@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import urllib.error
 import urllib.request
 
 
 class LLMError(Exception):
     """Raised when the LM Studio server is unreachable or returns garbage."""
+
+
+class LLMTimeout(LLMError):
+    """Raised when a request to LM Studio times out."""
 
 
 class LMStudioClient:
@@ -33,6 +38,8 @@ class LMStudioClient:
                 detail = b"<unreadable error body>"
             raise LLMError(f"LM Studio HTTP {e.code} on {path}: {detail!r}")
         except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+            if isinstance(e, socket.timeout) or isinstance(getattr(e, "reason", None), socket.timeout):
+                raise LLMTimeout(f"request to {path} timed out after {effective_timeout}s")
             raise LLMError(f"cannot reach LM Studio at {self.base_url}: {e}")
         try:
             return json.loads(body.decode())
