@@ -1,6 +1,7 @@
 # localagent
 
 [![CI](https://github.com/JimboSchneider/localagent/actions/workflows/ci.yml/badge.svg)](https://github.com/JimboSchneider/localagent/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/dirtsimple-agent.svg)](https://pypi.org/project/dirtsimple-agent/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
 
