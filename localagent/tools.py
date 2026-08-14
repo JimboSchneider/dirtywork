@@ -60,7 +60,10 @@ def edit_file(worktree: Path, path: str, old_string: str, new_string: str) -> st
             f"ERROR: old_string occurs {count} times in {path}; it must occur exactly "
             f"once. Include more surrounding context to make it unique."
         )
-    p.write_text(text.replace(old_string, new_string, 1), encoding="utf-8")
+    try:
+        p.write_text(text.replace(old_string, new_string, 1), encoding="utf-8")
+    except OSError as e:
+        return f"ERROR: cannot write '{path}': {e}"
     return f"Edited {path}"
 
 
@@ -74,10 +77,13 @@ def list_dir(worktree: Path, path: str = ".") -> str:
         return f"ERROR: cannot list '{path}': {e}"
     rows = []
     for e in entries:
-        if e.is_dir():
-            rows.append(f"{e.name}/")
-        else:
-            rows.append(f"{e.name}  ({e.stat().st_size} bytes)")
+        try:
+            if e.is_dir():
+                rows.append(f"{e.name}/")
+            else:
+                rows.append(f"{e.name}  ({e.stat().st_size} bytes)")
+        except OSError:
+            rows.append(f"{e.name}  (broken symlink)")
     return _cap("\n".join(rows) or "(empty directory)")
 
 
@@ -86,6 +92,8 @@ def grep(worktree: Path, pattern: str, path: str = ".", glob: str | None = None)
         p = resolve_in_worktree(path, worktree)
     except GuardrailError as e:
         return f"ERROR: {e}"
+    except OSError as e:
+        return f"ERROR: cannot access '{path}': {e}"
     rg = shutil.which("rg")
     if rg:
         cmd = [rg, "-n", "--no-heading", "-M", "300", "-e", pattern]
@@ -101,6 +109,8 @@ def grep(worktree: Path, pattern: str, path: str = ".", glob: str | None = None)
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
         return "ERROR: grep timed out after 30s — narrow the pattern or path."
+    except OSError as e:
+        return f"ERROR: grep failed: {e}"
     if res.returncode not in (0, 1):
         return f"ERROR: grep failed: {res.stderr.strip()[:500]}"
     if not res.stdout.strip():

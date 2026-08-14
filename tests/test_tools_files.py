@@ -87,3 +87,12 @@ def test_result_cap(wt: Path):
     out = tools.read_file(wt, "big.txt")
     assert len(out) <= tools.MAX_RESULT_CHARS + 200  # cap + truncation note
     assert "truncated" in out.lower()
+
+
+def test_grep_rg_branch(wt: Path, tmp_path: Path, monkeypatch):
+    fake_rg = tmp_path / "fake-rg"
+    fake_rg.write_text("#!/bin/bash\necho \"$PWD/src/app.py:2:    return 42\"\n")
+    fake_rg.chmod(0o755)
+    monkeypatch.setattr(tools.shutil, "which", lambda name: str(fake_rg) if name == "rg" else None)
+    out = tools.grep(wt, "return 42")
+    assert "app.py" in out
