@@ -1,5 +1,7 @@
 # localagent Implementation Plan
 
+> Historical design record from the original build session — machine-specific details are period-accurate, not requirements.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A stdlib-only Python CLI that runs one coding task against a local LM Studio model in an agentic tool-use loop inside an isolated git worktree, producing a reviewable diff and JSONL transcript.

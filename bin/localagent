@@ -1,2 +1,6 @@
 #!/bin/bash
-exec env PYTHONPATH="$HOME/repos/localagent" python3 -m localagent "$@"
+# Self-locating launcher for running localagent straight from a git checkout.
+# Prefer `pipx install local-agent` (or `pipx install git+<repo-url>`) instead.
+SOURCE=$(readlink -f "${BASH_SOURCE[0]}")
+REPO_ROOT=$(dirname "$(dirname "$SOURCE")")
+exec env PYTHONPATH="$REPO_ROOT" python3 -m localagent "$@"

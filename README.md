@@ -27,11 +27,25 @@ processes — LM Studio serves 4 concurrent requests per model.
 
 ## Install
 
-    chmod +x bin/localagent
-    ln -sf ~/repos/localagent/bin/localagent ~/.local/bin/localagent
+**pipx (PyPI):**
 
-The launcher assumes this repo lives at `~/repos/localagent`; edit
-`bin/localagent` if yours lives elsewhere.
+    pipx install local-agent
+
+(PyPI publish pending — the distribution name is `local-agent`, but the
+installed command is still `localagent`.)
+
+**pipx (straight from GitHub):**
+
+    pipx install git+https://github.com/JimboSchneider/localagent
+
+**From source:**
+
+    git clone https://github.com/JimboSchneider/localagent
+    cd localagent
+    chmod +x bin/localagent
+    ln -sf "$PWD/bin/localagent" ~/.local/bin/localagent
+
+The launcher is self-locating, so this works from any clone location.
 
 ## Use
 
