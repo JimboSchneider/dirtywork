@@ -1,16 +1,19 @@
 # localagent
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
+
 Runs one coding task against a local LM Studio model in an agentic tool-use
-loop, inside an isolated git worktree. Built to be driven by Claude Code —
-the expensive model orchestrates and reviews, the free local model grinds.
-Humans watch with `tail -f`.
+loop, inside an isolated git worktree. Built to be driven by an orchestrating
+agent (Claude Code, in our case) — the expensive frontier model orchestrates
+and reviews, the free local model grinds. Humans watch with `tail -f`.
 
 **The division of labor:**
 
 | | Role |
 |---|---|
-| Claude Code | Picks the task, invokes `localagent`, reviews the worktree diff and transcript, commits/PRs what survives review |
-| Local model (via localagent) | Explores the repo, edits files, runs builds/tests — inside a worktree it cannot escape |
+| Orchestrator (a frontier model, e.g. Claude Code — or you) | Picks the task, invokes `localagent`, reviews the worktree diff and transcript, commits/PRs what survives review |
+| Worker (local model, via localagent) | Explores the repo, edits files, runs builds/tests — inside a worktree it cannot escape |
 
 Nothing the local model does touches your main checkout, and nothing it
 produces merges without review. Parallelism comes from launching multiple
@@ -25,13 +28,32 @@ processes — LM Studio serves 4 concurrent requests per model.
   `mistralai/devstral-small-2-2512` (32k context)
 - The target repo must be a git repo with at least one commit
 
+**Other servers:** anything speaking the OpenAI chat-completions API with tool
+calling should work via `--base-url` (e.g. Ollama at
+`http://localhost:11434/v1`) — but only LM Studio is tested today. Reports
+welcome.
+
 ## Install
 
-    chmod +x bin/localagent
-    ln -sf ~/repos/localagent/bin/localagent ~/.local/bin/localagent
+**pipx (PyPI):**
 
-The launcher assumes this repo lives at `~/repos/localagent`; edit
-`bin/localagent` if yours lives elsewhere.
+    pipx install local-agent
+
+(PyPI publish pending — the distribution name is `local-agent`, but the
+installed command is still `localagent`.)
+
+**pipx (straight from GitHub):**
+
+    pipx install git+https://github.com/JimboSchneider/localagent
+
+**From source:**
+
+    git clone https://github.com/JimboSchneider/localagent
+    cd localagent
+    chmod +x bin/localagent
+    ln -sf "$PWD/bin/localagent" ~/.local/bin/localagent
+
+The launcher is self-locating, so this works from any clone location.
 
 ## Use
 
@@ -79,6 +101,9 @@ the real gate:
 - Network is allowed (package restores need it); per-command timeout 120s
   default, 600s max.
 
+Plainly: this is **not a sandbox**. Run it against repos where you'd trust
+yourself to review the diff — because that review is the actual gate.
+
 ## Development
 
     python3 -m pytest              # unit suite (no LM Studio needed)
@@ -88,6 +113,16 @@ the real gate:
 Design docs: `docs/superpowers/specs/2026-08-13-localagent-design.md`
 (architecture and contracts) and
 `docs/superpowers/plans/2026-08-14-localagent.md` (implementation plan).
+
+## The story
+
+localagent was designed, built, reviewed, and shipped in one day — by the
+exact orchestrator/worker pattern it implements — and its first production
+run surfaced a real cent-level rounding bug in the invoicing app it was
+pointed at. The full postmortem, including a build-one-yourself recipe:
+[docs/2026-08-14-building-localagent.md](docs/2026-08-14-building-localagent.md)
+(or the designed HTML edition,
+[docs/building-localagent.html](docs/building-localagent.html)).
 
 ## Troubleshooting
 
@@ -161,3 +196,20 @@ written to stderr; watch a live run with `tail -f` on the transcript path.
 **Transcript events** (JSONL, one per line): `run_start` (task, repo, model,
 config), `assistant` (text + tool calls), `tool_result` (truncated),
 `guardrail_block`, `run_end` (status, turns, duration, cumulative usage).
+
+## Contributing
+
+Issues and PRs welcome. Ground rules:
+
+- Runtime stays **stdlib-only** — that zero-dependency install is a feature,
+  not an accident. Dev-only dependencies (pytest) are fine.
+- `python3 -m pytest` must be green; if your change touches the model-facing
+  path, run the live suite too (`python3 -m pytest -m live -v`, needs a
+  running LM Studio).
+- Tool functions never raise; the client raises `LLMError` only; stdout is
+  exactly one JSON object post-preflight. These contracts have tests — keep
+  them green.
+
+## License
+
+[MIT](LICENSE) © 2026 Dirt Simple Solutions, LLC

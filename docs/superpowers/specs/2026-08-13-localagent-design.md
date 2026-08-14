@@ -1,5 +1,7 @@
 # localagent — local LLM agent loop harness
 
+> Historical design record from the original build session — machine-specific details are period-accurate, not requirements.
+
 **Date:** 2026-08-13
 **Status:** Approved design, pre-implementation
 
