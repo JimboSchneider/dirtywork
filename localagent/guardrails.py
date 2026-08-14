@@ -30,3 +30,38 @@ def resolve_in_worktree(path_str: str, worktree: Path, writing: bool = False) ->
                 f"Writing inside .git/ is not allowed (got '{path_str}')."
             )
     return resolved
+
+
+import os
+import re
+
+# (reason, pattern) — case-insensitive. Blocks accidents, not adversaries.
+_DENYLIST: list[tuple[str, str]] = [
+    ("sudo is not allowed", r"\bsudo\b"),
+    ("git push is not allowed — leave changes uncommitted for review",
+     r"\bgit\s+push\b"),
+    ("destructive command targeting an absolute or home path",
+     r"\b(rm|mv|chmod|chown)\b[^|;&]*\s['\"]?(/|~)"),
+    ("piping a download into a shell is not allowed",
+     r"\b(curl|wget)\b[^|;&]*\|\s*['\"]?\w*\s*(ba|z|da)?sh\b"),
+    ("system-control commands are not allowed",
+     r"\b(osascript|launchctl|shutdown|reboot|killall)\b"),
+    ("redirecting output to an absolute or home path outside the worktree",
+     r">>?\s*['\"]?(?!/dev/null)(/|~)"),
+]
+
+_COMPILED = [(reason, re.compile(pat, re.IGNORECASE)) for reason, pat in _DENYLIST]
+
+
+def check_bash_command(command: str) -> str | None:
+    """Return a rejection reason if the command matches the denylist, else None."""
+    for reason, rx in _COMPILED:
+        if rx.search(command):
+            return f"BLOCKED: {reason}. Rework the command to stay inside the worktree."
+    return None
+
+
+def build_env() -> dict:
+    """Minimal env for bash subprocesses — parent shell secrets are not inherited."""
+    keep = ("PATH", "HOME", "TERM", "LANG", "TMPDIR")
+    return {k: os.environ[k] for k in keep if k in os.environ}
