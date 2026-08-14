@@ -1,0 +1,9 @@
+[project]
+name = "localagent"
+version = "0.1.0"
+description = "Agentic tool-use loop harness for local LM Studio models"
+requires-python = ">=3.9"
+
+[tool.pytest.ini_options]
+markers = ["live: requires a running LM Studio server"]
+addopts = "-m 'not live'"
