@@ -187,7 +187,7 @@ pytest, run locally (no CI in v1):
 
 ## Risks / notes
 
-- Devstral tool-calling unverified until implementation (see above).
+- Devstral tool-calling verified working 2026-08-14 (see Environment facts).
 - Denylists are bypassable by construction; the threat model is accidental
   damage from a weak model, not an adversarial one. The worktree + minimal env
   + review gate carry the real safety weight.
