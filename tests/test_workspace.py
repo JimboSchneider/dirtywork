@@ -65,6 +65,27 @@ def test_make_slug_default_salt_is_random():
     assert s1 != s2
 
 
+def test_make_slug_empty_task():
+    now = datetime(2026, 8, 14, 11, 9)
+    slug = make_slug("", now, salt="ab12")
+    assert slug == "task-0814110900-ab12"
+
+
+def test_make_slug_punctuation_only():
+    now = datetime(2026, 8, 14, 11, 9)
+    slug = make_slug("!!! ???", now, salt="ab12")
+    assert slug == "task-0814110900-ab12"
+
+
+def test_make_slug_long_task_truncates():
+    now = datetime(2026, 8, 14, 11, 9)
+    long_task = "a" * 50 + " b"
+    slug = make_slug(long_task, now, salt="ab12")
+    base_part = slug.rsplit("-", 3)[0]
+    assert len(base_part) <= 40
+    assert base_part == "a" * 40
+
+
 def test_create_worktree(repo: Path):
     wt = create_worktree(repo, "demo-08141109", None)
     assert wt == repo / ".worktrees" / "la-demo-08141109"
