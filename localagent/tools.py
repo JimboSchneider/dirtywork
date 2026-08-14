@@ -141,6 +141,8 @@ def bash(worktree: Path, command: str, timeout: int = 120) -> str:
         )
     except subprocess.TimeoutExpired:
         return f"ERROR: command timed out after {timeout}s."
+    except OSError as e:
+        return f"ERROR: bash failed: {e}"
     combined = (res.stdout + res.stderr).strip()
     return _cap(f"exit code: {res.returncode}\n{combined}", cap=MAX_BASH_CHARS)
 
