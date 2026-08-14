@@ -2,8 +2,8 @@
 
 [![CI](https://github.com/JimboSchneider/localagent/actions/workflows/ci.yml/badge.svg)](https://github.com/JimboSchneider/localagent/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/dirtsimple-agent.svg)](https://pypi.org/project/dirtsimple-agent/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/JimboSchneider/localagent/blob/main/LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://github.com/JimboSchneider/localagent/blob/main/pyproject.toml)
 
 Runs one coding task against a local LM Studio model in an agentic tool-use
 loop, inside an isolated git worktree. Built to be driven by an orchestrating
@@ -122,9 +122,9 @@ localagent was designed, built, reviewed, and shipped in one day — by the
 exact orchestrator/worker pattern it implements — and its first production
 run surfaced a real cent-level rounding bug in the invoicing app it was
 pointed at. The full postmortem, including a build-one-yourself recipe:
-[docs/2026-08-14-building-localagent.md](docs/2026-08-14-building-localagent.md)
-(or the designed HTML edition,
-[docs/building-localagent.html](docs/building-localagent.html)).
+[the postmortem](https://github.com/JimboSchneider/localagent/blob/main/docs/2026-08-14-building-localagent.md)
+(or read [the designed HTML edition](https://jimboschneider.github.io/localagent/building-localagent.html)
+served via Pages).
 
 ## Troubleshooting
 
