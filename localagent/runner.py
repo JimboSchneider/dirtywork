@@ -17,6 +17,22 @@ BUDGET_FRACTION = 0.75
 MAX_CONSECUTIVE_FAILURES = 3
 
 
+def _valid_tool_call(tc) -> bool:
+    """Structurally valid OpenAI tool call: non-empty string id, function object
+    with non-empty string name, arguments absent/None or a string."""
+    if not isinstance(tc, dict):
+        return False
+    if not isinstance(tc.get("id"), str) or not tc["id"]:
+        return False
+    fn = tc.get("function")
+    if not isinstance(fn, dict):
+        return False
+    if not isinstance(fn.get("name"), str) or not fn["name"]:
+        return False
+    args = fn.get("arguments")
+    return args is None or isinstance(args, str)
+
+
 def _total_chars(messages: list) -> int:
     total = 0
     for m in messages:
@@ -120,7 +136,7 @@ class Runner:
                 raw = msg.get("tool_calls") or []
                 if not isinstance(raw, list):
                     raw = []
-                tool_calls = [tc for tc in raw if isinstance(tc, dict)]
+                tool_calls = [tc for tc in raw if _valid_tool_call(tc)]
                 malformed_count = len(raw) - len(tool_calls)
                 self.transcript.write(
                     "assistant", text=msg.get("content"),
@@ -142,7 +158,7 @@ class Runner:
 
                 for _ in range(malformed_count):
                     failures += 1
-                    result = "ERROR: malformed tool call entry (not an object)"
+                    result = "ERROR: malformed tool call entry (missing or invalid id/function fields)"
                     self.transcript.write("tool_result", tool="", args="", result=result)
                 if malformed_count > 0 and failures >= MAX_CONSECUTIVE_FAILURES:
                     return finish("model_error",
@@ -190,8 +206,8 @@ class Runner:
                     messages.append({
                         "role": "user",
                         "content": (f"{malformed_count} of your tool calls were malformed "
-                                    "(not an object) and were discarded. Re-issue them as "
-                                    "valid tool calls."),
+                                    "(missing or invalid id/function fields) and were "
+                                    "discarded. Re-issue them as valid tool calls."),
                     })
         except KeyboardInterrupt:
             return finish("interrupted", "")

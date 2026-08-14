@@ -12,6 +12,7 @@ from localagent.runner import (
     TRIM_MARKER,
     RunResult,
     Runner,
+    _valid_tool_call,
     trim_messages,
 )
 from localagent.tools import ToolExecutor
@@ -164,6 +165,8 @@ def test_arguments_null_treated_as_empty(parts):
 
 
 def test_malformed_tool_call_entry_recovers(parts):
+    # Missing "function" entirely is structurally invalid (not just an unknown
+    # tool name) and now routes through the malformed-tool-call recovery path.
     wt, executor, transcript, tmp = parts
     bad = {"id": "c1", "type": "function"}
     client = FakeClient([_resp(tool_calls=[bad]), _resp(content="ok done")])
@@ -171,8 +174,10 @@ def test_malformed_tool_call_entry_recovers(parts):
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
-    tool_msgs = [m for m in client.requests[1] if m["role"] == "tool"]
-    assert "unknown tool" in tool_msgs[0]["content"].lower()
+    second = client.requests[1]
+    assert not [m for m in second if m["role"] == "tool"]
+    user_msgs = [m for m in second if m["role"] == "user"]
+    assert any("malformed" in (m.get("content") or "").lower() for m in user_msgs)
 
 
 def test_malformed_response_is_model_error(parts):
@@ -359,6 +364,66 @@ def test_mixed_null_and_valid_tool_call_recovers(parts):
                            if m["role"] == "user"
                            and "malformed" in (m.get("content") or "").lower())
     assert correction_idx > assistant_idx + 1
+
+
+def test_empty_object_tool_call_recovers(parts):
+    # {} is dict-shaped but has no id/function — must not pass the validity filter.
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(tool_calls=[{}]), _resp(content="ok done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+
+    second = client.requests[1]
+    assert not any(m["role"] == "tool" and m.get("tool_call_id") == "" for m in second)
+    user_msgs = [m for m in second if m["role"] == "user"]
+    assert any("malformed" in (m.get("content") or "").lower() for m in user_msgs)
+
+
+def test_empty_id_tool_call_recovers(parts):
+    # Valid function, but an empty string id can't be matched to a tool result.
+    wt, executor, transcript, tmp = parts
+    bad = {"id": "", "type": "function",
+           "function": {"name": "list_dir", "arguments": json.dumps({"path": "."})}}
+    client = FakeClient([_resp(tool_calls=[bad]), _resp(content="ok done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+
+    second = client.requests[1]
+    assert not any(m["role"] == "tool" and m.get("tool_call_id") == "" for m in second)
+    user_msgs = [m for m in second if m["role"] == "user"]
+    assert any("malformed" in (m.get("content") or "").lower() for m in user_msgs)
+
+
+def test_missing_function_name_tool_call_recovers(parts):
+    # Non-empty id, but the function object has no name field.
+    wt, executor, transcript, tmp = parts
+    bad = {"id": "c1", "type": "function", "function": {"arguments": "{}"}}
+    client = FakeClient([_resp(tool_calls=[bad]), _resp(content="ok done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+
+    second = client.requests[1]
+    assert not any(m["role"] == "tool" for m in second)
+    user_msgs = [m for m in second if m["role"] == "user"]
+    assert any("malformed" in (m.get("content") or "").lower() for m in user_msgs)
+
+
+def test_valid_tool_call_predicate():
+    valid = _call("c1", "list_dir", {"path": "."})
+    assert _valid_tool_call(valid) is True
+
+    assert _valid_tool_call(None) is False  # not a dict
+    assert _valid_tool_call({}) is False  # no id, no function
+    assert _valid_tool_call({"id": "", "function": {"name": "list_dir"}}) is False  # empty id
+    assert _valid_tool_call({"id": "c1", "function": {"arguments": "{}"}}) is False  # no name
+    assert _valid_tool_call({"id": "c1", "function": {"name": "list_dir",
+                                                        "arguments": 123}}) is False  # bad args type
 
 
 def test_tool_calls_non_list_treated_as_absent(parts):
