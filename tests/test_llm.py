@@ -12,9 +12,10 @@ from localagent.llm import LLMError, LLMTimeout, LMStudioClient
 
 class _FakeLMStudio(BaseHTTPRequestHandler):
     last_payload: dict = {}
+    get_body: object = {"data": [{"id": "m1"}, {"id": "m2"}]}
 
     def do_GET(self):
-        body = json.dumps({"data": [{"id": "m1"}, {"id": "m2"}]}).encode()
+        body = json.dumps(_FakeLMStudio.get_body).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -38,11 +39,13 @@ class _FakeLMStudio(BaseHTTPRequestHandler):
 
 @pytest.fixture()
 def server():
+    _FakeLMStudio.get_body = {"data": [{"id": "m1"}, {"id": "m2"}]}
     srv = HTTPServer(("127.0.0.1", 0), _FakeLMStudio)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{srv.server_address[1]}/v1"
     srv.shutdown()
+    _FakeLMStudio.get_body = {"data": [{"id": "m1"}, {"id": "m2"}]}
 
 
 class _SlowLMStudio(BaseHTTPRequestHandler):
@@ -75,6 +78,18 @@ def slow_server():
 def test_list_models(server: str):
     client = LMStudioClient(base_url=server)
     assert client.list_models() == ["m1", "m2"]
+
+
+@pytest.mark.parametrize("bad_body", [
+    [],
+    {"data": {}},
+    {"data": [{}]},
+])
+def test_list_models_unexpected_shape_raises_llmerror(server: str, bad_body):
+    _FakeLMStudio.get_body = bad_body
+    client = LMStudioClient(base_url=server)
+    with pytest.raises(LLMError):
+        client.list_models()
 
 
 def test_chat_payload_and_response(server: str):

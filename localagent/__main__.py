@@ -97,9 +97,10 @@ def main(argv: list | None = None) -> int:
     system_prompt = build_system_prompt(worktree, load_repo_context(worktree))
     try:
         result = runner.run(system_prompt, args.task)
-    except LLMError as e:
-        transcript.write("run_end", status="model_error", error=str(e))
-        _err(str(e))
+    except Exception as e:  # LLMError included — machine contract: always emit JSON
+        message = str(e) if isinstance(e, LLMError) else f"unexpected error: {e!r}"
+        transcript.write("run_end", status="model_error", error=message)
+        _err(message)
         print(json.dumps({
             "status": "model_error",
             "worktree": str(worktree),
@@ -107,7 +108,7 @@ def main(argv: list | None = None) -> int:
             "transcript": str(transcript.path),
             "turns": None,
             "usage": {},
-            "final_message": f"LLM error: {e}",
+            "final_message": message,
         }, indent=2))
         return 1
     finally:

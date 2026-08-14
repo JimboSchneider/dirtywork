@@ -48,7 +48,14 @@ class LMStudioClient:
 
     def list_models(self) -> list[str]:
         body = self._request("/models")
-        return [m["id"] for m in body.get("data", [])]
+        if not isinstance(body, dict) or not isinstance(body.get("data"), list):
+            raise LLMError("unexpected /models response shape from LM Studio")
+        ids = []
+        for m in body["data"]:
+            if not isinstance(m, dict) or not isinstance(m.get("id"), str):
+                raise LLMError("unexpected /models entry shape from LM Studio")
+            ids.append(m["id"])
+        return ids
 
     def chat(
         self,

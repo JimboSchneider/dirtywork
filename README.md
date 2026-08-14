@@ -138,16 +138,22 @@ printed to stdout (nothing else goes to stdout):
 
 `status` is one of: `completed`, `max_turns`, `timeout`,
 `context_exhausted`, `model_error`, `interrupted`. When the run fails before
-a `RunResult` exists (e.g. the LLM client raises mid-run), `turns` is `null`
-and `usage` is `{}`, but `status`, `worktree`, `branch`, and `transcript` are
-still populated so the worktree can be located for salvage.
+a `RunResult` exists — the LLM client raises, or any other exception escapes
+`runner.run` (status `model_error` either way) — `turns` is `null` and `usage`
+is `{}`, but `status`, `worktree`, `branch`, and `transcript` are still
+populated so the worktree can be located for salvage.
 
 **Exit codes:**
 
 - `0` — `completed`.
 - `1` — run ended abnormally (`max_turns`, `timeout`, `context_exhausted`,
   `model_error`, `interrupted`); the worktree and branch are kept for
-  salvage/review.
+  salvage/review. `main` catches every `Exception` the run raises (not just
+  ones the runner itself converts to a status) and reports it as
+  `model_error` via the same JSON contract, so a post-preflight run never
+  tracebacks. (Ctrl-C is a `KeyboardInterrupt`, a `BaseException`, not caught
+  here — but the run loop itself already converts in-loop Ctrl-C to status
+  `interrupted` before it would reach this point.)
 - `2` — preflight or environment error (LM Studio unreachable, model not
   loaded, `--repo` not a git repo, etc.); nothing is created.
 

@@ -40,7 +40,10 @@ def test_main_lmstudio_down_exits_2(tmp_path: Path, capsys, monkeypatch):
     assert rc == 2
 
 
-def test_transcript_closed_even_on_unexpected_error(tmp_path, monkeypatch):
+def test_transcript_closed_even_on_unexpected_error(tmp_path, monkeypatch, capsys):
+    # Machine contract: every post-preflight run prints exactly one JSON object,
+    # even on an exception the runner doesn't itself convert to a status (e.g. a
+    # bare RuntimeError escaping runner.run). No traceback, no missing run_end.
     import subprocess
     import localagent.__main__ as m
     repo = tmp_path / "r"
@@ -60,10 +63,19 @@ def test_transcript_closed_even_on_unexpected_error(tmp_path, monkeypatch):
     def boom(self, system_prompt, task):
         raise RuntimeError("boom")
     monkeypatch.setattr(m.Runner, "run", boom)
-    import pytest as _pytest
-    with _pytest.raises(RuntimeError):
-        m.main(["run", "--repo", str(repo), "some task"])
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])
+
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "model_error"
+    assert "unexpected" in payload["final_message"]
     assert closed.get("yes")
+
+    transcript_files = list((tmp_path / "runs").rglob("transcript.jsonl"))
+    assert len(transcript_files) == 1
+    events = [json.loads(line) for line in transcript_files[0].read_text().splitlines()]
+    assert events[-1]["event"] == "run_end"
 
 
 def test_load_repo_context_uses_worktree_not_caller_checkout(tmp_path, monkeypatch):
