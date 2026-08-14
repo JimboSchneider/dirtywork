@@ -84,3 +84,12 @@ def test_load_repo_context(repo: Path):
     assert load_repo_context(repo) == "agents rules"
     (repo / "CLAUDE.md").write_text("claude rules")  # CLAUDE.md wins
     assert load_repo_context(repo) == "claude rules"
+
+
+def test_create_worktree_existing_dir_no_stale_branch(repo: Path):
+    (repo / ".worktrees" / "la-dup-08141109").mkdir(parents=True)
+    (repo / ".worktrees" / "la-dup-08141109" / "junk.txt").write_text("junk")
+    with pytest.raises(WorkspaceError):
+        create_worktree(repo, "dup-08141109", None)
+    branches = _git(repo, "branch", "--list", "localagent/dup-08141109")
+    assert "localagent/dup-08141109" not in branches

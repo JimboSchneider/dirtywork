@@ -36,6 +36,7 @@ def create_worktree(repo: Path, slug: str, branch_from: str | None) -> Path:
     ref = branch_from or "HEAD"
     res = _git(repo, "worktree", "add", "-b", f"localagent/{slug}", str(rel), ref)
     if res.returncode != 0:
+        _git(repo, "branch", "-D", f"localagent/{slug}")  # best-effort cleanup; ignore result
         raise WorkspaceError(f"git worktree add failed: {res.stderr.strip()}")
     return repo / rel
 
