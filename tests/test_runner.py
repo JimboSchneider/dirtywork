@@ -318,8 +318,47 @@ def test_malformed_tool_call_null_entry_recovers(parts):
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
-    tool_msgs = [m for m in client.requests[1] if m["role"] == "tool"]
-    assert "malformed tool call" in tool_msgs[0]["content"].lower()
+
+    second = client.requests[1]
+    # No protocol-invalid tool result with an unmatched empty tool_call_id.
+    assert not any(m["role"] == "tool" and m["tool_call_id"] == "" for m in second)
+    # No None entries survive inside any assistant message's tool_calls.
+    for m in second:
+        if m["role"] == "assistant":
+            assert None not in (m.get("tool_calls") or [])
+    # A protocol-valid user message calls out the malformed tool call instead.
+    user_msgs = [m for m in second if m["role"] == "user"]
+    assert any("malformed" in (m.get("content") or "").lower() for m in user_msgs)
+
+
+def test_mixed_null_and_valid_tool_call_recovers(parts):
+    wt, executor, transcript, tmp = parts
+    valid_call = _call("c1", "list_dir", {"path": "."})
+    bad = {"choices": [{"message": {"role": "assistant", "content": None,
+                                     "tool_calls": [None, valid_call]}}]}
+    client = FakeClient([bad, _resp(content="ok done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+
+    second = client.requests[1]
+    assistant_idx = next(i for i, m in enumerate(second)
+                          if m["role"] == "assistant" and m.get("tool_calls"))
+    assert second[assistant_idx]["tool_calls"] == [valid_call]
+    assert None not in second[assistant_idx]["tool_calls"]
+
+    # The valid call's tool result must directly follow the assistant message.
+    tool_result = second[assistant_idx + 1]
+    assert tool_result["role"] == "tool"
+    assert tool_result["tool_call_id"] == "c1"
+    assert "f.txt" in tool_result["content"]
+
+    # The user correction comes after the valid tool result(s).
+    correction_idx = next(i for i, m in enumerate(second)
+                           if m["role"] == "user"
+                           and "malformed" in (m.get("content") or "").lower())
+    assert correction_idx > assistant_idx + 1
 
 
 def test_tool_calls_non_list_treated_as_absent(parts):

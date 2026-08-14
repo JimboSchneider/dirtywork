@@ -127,7 +127,15 @@ class Runner:
                     tool_calls=[{"name": (tc.get("function") or {}).get("name"),
                                  "arguments": ((tc.get("function") or {}).get("arguments") or "")[:2000]}
                                 for tc in tool_calls])
-                messages.append(msg)
+                if malformed_count > 0:
+                    # Sanitize: drop malformed entries (e.g. None) so the history we
+                    # send back stays protocol-valid for strict OpenAI-compatible servers.
+                    clean_msg = {"role": "assistant", "content": msg.get("content") or ""}
+                    if tool_calls:
+                        clean_msg["tool_calls"] = tool_calls
+                    messages.append(clean_msg)
+                else:
+                    messages.append(msg)
 
                 if not raw:
                     return finish("completed", msg.get("content") or "")
@@ -136,10 +144,9 @@ class Runner:
                     failures += 1
                     result = "ERROR: malformed tool call entry (not an object)"
                     self.transcript.write("tool_result", tool="", args="", result=result)
-                    messages.append({"role": "tool", "tool_call_id": "", "content": result})
-                    if failures >= MAX_CONSECUTIVE_FAILURES:
-                        return finish("model_error",
-                                      "aborted after repeated malformed tool calls")
+                if malformed_count > 0 and failures >= MAX_CONSECUTIVE_FAILURES:
+                    return finish("model_error",
+                                  "aborted after repeated malformed tool calls")
 
                 for tc in tool_calls:
                     fn_info = tc.get("function") or {}
@@ -178,5 +185,13 @@ class Runner:
                     if failures >= MAX_CONSECUTIVE_FAILURES:
                         return finish("model_error",
                                       "aborted after repeated malformed tool calls")
+
+                if malformed_count > 0:
+                    messages.append({
+                        "role": "user",
+                        "content": (f"{malformed_count} of your tool calls were malformed "
+                                    "(not an object) and were discarded. Re-issue them as "
+                                    "valid tool calls."),
+                    })
         except KeyboardInterrupt:
             return finish("interrupted", "")
