@@ -34,8 +34,8 @@ processes (LM Studio serves 4 concurrent requests per model), not from the CLI.
   live test; a `tools` array produced a well-formed `tool_calls` response).
 - Models: `qwen/qwen3-coder-next` (65,536 ctx, default) and
   `mistralai/devstral-small-2-2512` (32,768 ctx; its chat template consumes
-  ~500 prompt tokens per call). **Devstral tool-calling is not yet verified —
-  verify during implementation before documenting it as supported.**
+  ~500 prompt tokens per call). Devstral tool-calling verified working on
+  2026-08-14 (live smoke test).
 - System Python is 3.9.6; no `uv`. Target: Python 3.9+, stdlib only, no venv.
 - A real `rg` binary may not be on PATH for subprocesses (Claude Code shims it
   as a shell function); `grep` tool must fall back to `grep -rn`.
@@ -67,6 +67,7 @@ localagent run --repo <path> "<task>"
     [--max-turns 40]
     [--timeout 1800]                  # whole-run wall clock, seconds
     [--temperature <f>]               # omitted by default → server preset
+    [--base-url <url>]                # default http://localhost:1234/v1 — testability/deviation: lets tests point at a fake server instead of real LM Studio
 ```
 
 **Lifecycle:**
@@ -187,7 +188,7 @@ pytest, run locally (no CI in v1):
 
 ## Risks / notes
 
-- Devstral tool-calling unverified until implementation (see above).
+- Devstral tool-calling verified working 2026-08-14 (see Environment facts).
 - Denylists are bypassable by construction; the threat model is accidental
   damage from a weak model, not an adversarial one. The worktree + minimal env
   + review gate carry the real safety weight.

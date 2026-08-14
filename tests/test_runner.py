@@ -1,0 +1,489 @@
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+import pytest
+
+from localagent.llm import LLMTimeout
+from localagent.runner import (
+    DEFAULT_WINDOW,
+    TRIM_MARKER,
+    RunResult,
+    Runner,
+    _valid_tool_call,
+    trim_messages,
+)
+from localagent.tools import ToolExecutor
+from localagent.transcript import Transcript
+
+
+def _resp(content=None, tool_calls=None, usage=None):
+    msg = {"role": "assistant", "content": content}
+    if tool_calls:
+        msg["tool_calls"] = tool_calls
+    return {"choices": [{"message": msg}],
+            "usage": usage or {"prompt_tokens": 10, "completion_tokens": 5}}
+
+
+def _call(call_id, name, args: dict):
+    return {"id": call_id, "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)}}
+
+
+class FakeClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.requests = []
+        self.timeouts = []
+
+    def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+        self.requests.append([json.loads(json.dumps(m)) for m in messages])
+        self.timeouts.append(timeout)
+        return self.responses.pop(0)
+
+
+@pytest.fixture()
+def parts(tmp_path: Path):
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "f.txt").write_text("data\n")
+    transcript = Transcript(tmp_path / "t.jsonl")
+    executor = ToolExecutor(wt, transcript=transcript)
+    return wt, executor, transcript, tmp_path
+
+
+def _events(tmp_path: Path):
+    return [json.loads(l) for l in (tmp_path / "t.jsonl").read_text().splitlines()]
+
+
+def test_two_turn_run(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([
+        _resp(tool_calls=[_call("c1", "read_file", {"path": "f.txt"})]),
+        _resp(content="Done: file says data"),
+    ])
+    r = Runner(client, executor, transcript, model="qwen/qwen3-coder-next")
+    result = r.run("sysprompt", "read the file")
+    transcript.close()
+
+    assert result.status == "completed"
+    assert result.turns == 2
+    assert "Done" in result.final_message
+    assert result.usage == {"prompt_tokens": 20, "completion_tokens": 10}
+
+    # second request must include the tool result message with matching id
+    second = client.requests[1]
+    tool_msgs = [m for m in second if m["role"] == "tool"]
+    assert tool_msgs and tool_msgs[0]["tool_call_id"] == "c1"
+    assert "data" in tool_msgs[0]["content"]
+
+    kinds = [e["event"] for e in _events(tmp)]
+    assert kinds[0] == "run_start" and kinds[-1] == "run_end"
+    assert "assistant" in kinds and "tool_result" in kinds
+
+
+def test_max_turns(parts):
+    wt, executor, transcript, tmp = parts
+    loop_resp = _resp(tool_calls=[_call("c", "list_dir", {"path": "."})])
+    client = FakeClient([loop_resp] * 3)
+    r = Runner(client, executor, transcript, model="m", max_turns=3)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "max_turns"
+    assert result.turns == 3
+
+
+def test_malformed_args_three_strikes(parts):
+    wt, executor, transcript, tmp = parts
+    bad = _resp(tool_calls=[{"id": "x", "type": "function",
+                             "function": {"name": "read_file", "arguments": "{not json"}}])
+    client = FakeClient([bad, bad, bad])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+
+
+def test_unknown_tool_counts_as_strike_but_recovers(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([
+        _resp(tool_calls=[_call("c1", "no_such_tool", {})]),
+        _resp(content="ok done"),
+    ])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    # the model got an error message back as the tool result
+    second = client.requests[1]
+    tool_msgs = [m for m in second if m["role"] == "tool"]
+    assert "unknown tool" in tool_msgs[0]["content"].lower()
+
+
+def test_trim_messages():
+    msgs = [
+        {"role": "system", "content": "s" * 100},
+        {"role": "tool", "tool_call_id": "1", "content": "x" * 1000},
+        {"role": "assistant", "content": "a" * 100},
+        {"role": "tool", "tool_call_id": "2", "content": "y" * 1000},
+    ]
+    fits = trim_messages(msgs, char_budget=1300)
+    assert fits
+    assert msgs[1]["content"] == TRIM_MARKER      # oldest trimmed first
+    assert msgs[3]["content"] == "y" * 1000        # newer kept
+    assert msgs[0]["content"] == "s" * 100         # system never trimmed
+
+
+def test_trim_cannot_fit():
+    msgs = [{"role": "system", "content": "s" * 5000}]
+    assert trim_messages(msgs, char_budget=100) is False
+
+
+def test_trim_counts_tool_call_arguments():
+    msgs = [
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "1", "type": "function",
+                         "function": {"name": "write_file", "arguments": "a" * 1000}}]},
+    ]
+    # No role=="tool" messages exist to trim, so this only passes if the
+    # tool_call arguments are counted toward the budget in the first place.
+    assert trim_messages(msgs, char_budget=500) is False
+
+
+def test_arguments_null_treated_as_empty(parts):
+    wt, executor, transcript, tmp = parts
+    call = {"id": "c1", "type": "function", "function": {"name": "list_dir", "arguments": None}}
+    client = FakeClient([_resp(tool_calls=[call]), _resp(content="done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    tool_msgs = [m for m in client.requests[1] if m["role"] == "tool"]
+    assert "f.txt" in tool_msgs[0]["content"]
+
+    # The resent history must carry the canonical wire shape: type "function" and
+    # arguments coerced to a string, even though the original entry had arguments:
+    # None.
+    second = client.requests[1]
+    assistant_msg = next(m for m in second
+                          if m["role"] == "assistant" and m.get("tool_calls"))
+    assert assistant_msg["tool_calls"][0]["type"] == "function"
+    assert assistant_msg["tool_calls"][0]["function"]["arguments"] == "{}"
+
+
+def test_valid_call_missing_type_field_canonicalized_on_resend(parts):
+    # No malformed siblings -- this is the previously-verbatim path. The call is
+    # otherwise valid (non-empty id, function.name) but omits "type" entirely,
+    # which a strict server still requires on resend.
+    wt, executor, transcript, tmp = parts
+    call = {"id": "c1", "function": {"name": "list_dir", "arguments": json.dumps({"path": "."})}}
+    client = FakeClient([_resp(tool_calls=[call]), _resp(content="done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+
+    second = client.requests[1]
+    assistant_msg = next(m for m in second
+                          if m["role"] == "assistant" and m.get("tool_calls"))
+    assert assistant_msg["tool_calls"][0]["type"] == "function"
+
+
+def test_malformed_tool_call_entry_recovers(parts):
+    # Missing "function" entirely is structurally invalid (not just an unknown
+    # tool name) and now routes through the malformed-tool-call recovery path.
+    wt, executor, transcript, tmp = parts
+    bad = {"id": "c1", "type": "function"}
+    client = FakeClient([_resp(tool_calls=[bad]), _resp(content="ok done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    second = client.requests[1]
+    assert not [m for m in second if m["role"] == "tool"]
+    user_msgs = [m for m in second if m["role"] == "user"]
+    assert any("malformed" in (m.get("content") or "").lower() for m in user_msgs)
+
+
+def test_malformed_response_is_model_error(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([{"choices": []}])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+
+
+def test_null_message_is_model_error(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([{"choices": [{"message": None}]}])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+
+
+def test_null_usage_tolerated(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([{"choices": [{"message": {"role": "assistant", "content": "hi"}}], "usage": None}])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.usage == {"prompt_tokens": 0, "completion_tokens": 0}
+
+
+def test_strike_counter_resets_on_success(parts):
+    wt, executor, transcript, tmp = parts
+    bad = _resp(tool_calls=[{"id": "x", "type": "function",
+                             "function": {"name": "read_file", "arguments": "{not json"}}])
+    good = _resp(tool_calls=[_call("g", "list_dir", {"path": "."})])
+    client = FakeClient([bad, bad, good, bad, bad, _resp(content="done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+
+
+def test_timeout_status(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content="never reached")])
+    r = Runner(client, executor, transcript, model="m", timeout=-1)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "timeout"
+    assert result.turns == 0
+
+
+def test_context_exhausted_status(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([])
+    r = Runner(client, executor, transcript, model="m")
+    r.char_budget = 10
+    result = r.run("s" * 100, "t")
+    transcript.close()
+    assert result.status == "context_exhausted"
+
+
+def test_length_finish_reason_gives_helpful_hint(parts):
+    wt, executor, transcript, tmp = parts
+    truncated = {
+        "choices": [{
+            "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{
+                    "id": "c", "type": "function",
+                    "function": {"name": "write_file",
+                                 "arguments": "{\"path\": \"x\", \"content\": \"abc"},
+                }],
+            },
+            "finish_reason": "length",
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+    client = FakeClient([truncated, _resp(content="done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    tool_msgs = [m for m in client.requests[1] if m["role"] == "tool"]
+    assert "cut off at the token limit" in tool_msgs[0]["content"]
+
+
+def test_run_start_includes_run_info(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content="done")])
+    r = Runner(client, executor, transcript, model="m", run_info={"repo": "/r"})
+    result = r.run("s", "t")
+    transcript.close()
+    events = _events(tmp)
+    run_start = next(e for e in events if e["event"] == "run_start")
+    assert run_start["repo"] == "/r"
+
+
+def test_chat_receives_bounded_timeout(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content="done")])
+    r = Runner(client, executor, transcript, model="m", timeout=30)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert client.timeouts and client.timeouts[0] is not None
+    assert 0 < client.timeouts[0] <= 30
+
+
+def test_llm_timeout_near_deadline_gives_timeout_status(parts):
+    wt, executor, transcript, tmp = parts
+
+    class SlowTimeoutClient:
+        def chat(self, *a, **k):
+            time.sleep(0.3)
+            raise LLMTimeout("request timed out")
+
+    r = Runner(SlowTimeoutClient(), executor, transcript, model="m", timeout=0.2)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "timeout"
+
+
+def test_llm_timeout_far_from_deadline_gives_model_error(parts):
+    wt, executor, transcript, tmp = parts
+
+    class ImmediateTimeoutClient:
+        def chat(self, *a, **k):
+            raise LLMTimeout("request timed out")
+
+    r = Runner(ImmediateTimeoutClient(), executor, transcript, model="m", timeout=1800)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+
+
+def test_malformed_tool_call_null_entry_recovers(parts):
+    wt, executor, transcript, tmp = parts
+    bad = {"choices": [{"message": {"role": "assistant", "content": None,
+                                     "tool_calls": [None]}}]}
+    client = FakeClient([bad, _resp(content="ok done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+
+    second = client.requests[1]
+    # No protocol-invalid tool result with an unmatched empty tool_call_id.
+    assert not any(m["role"] == "tool" and m["tool_call_id"] == "" for m in second)
+    # No None entries survive inside any assistant message's tool_calls.
+    for m in second:
+        if m["role"] == "assistant":
+            assert None not in (m.get("tool_calls") or [])
+    # A protocol-valid user message calls out the malformed tool call instead.
+    user_msgs = [m for m in second if m["role"] == "user"]
+    assert any("malformed" in (m.get("content") or "").lower() for m in user_msgs)
+
+
+def test_mixed_null_and_valid_tool_call_recovers(parts):
+    wt, executor, transcript, tmp = parts
+    valid_call = _call("c1", "list_dir", {"path": "."})
+    bad = {"choices": [{"message": {"role": "assistant", "content": None,
+                                     "tool_calls": [None, valid_call]}}]}
+    client = FakeClient([bad, _resp(content="ok done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+
+    second = client.requests[1]
+    assistant_idx = next(i for i, m in enumerate(second)
+                          if m["role"] == "assistant" and m.get("tool_calls"))
+    assert second[assistant_idx]["tool_calls"] == [valid_call]
+    assert None not in second[assistant_idx]["tool_calls"]
+
+    # The valid call's tool result must directly follow the assistant message.
+    tool_result = second[assistant_idx + 1]
+    assert tool_result["role"] == "tool"
+    assert tool_result["tool_call_id"] == "c1"
+    assert "f.txt" in tool_result["content"]
+
+    # The user correction comes after the valid tool result(s).
+    correction_idx = next(i for i, m in enumerate(second)
+                           if m["role"] == "user"
+                           and "malformed" in (m.get("content") or "").lower())
+    assert correction_idx > assistant_idx + 1
+
+
+def test_empty_object_tool_call_recovers(parts):
+    # {} is dict-shaped but has no id/function — must not pass the validity filter.
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(tool_calls=[{}]), _resp(content="ok done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+
+    second = client.requests[1]
+    assert not any(m["role"] == "tool" and m.get("tool_call_id") == "" for m in second)
+    user_msgs = [m for m in second if m["role"] == "user"]
+    assert any("malformed" in (m.get("content") or "").lower() for m in user_msgs)
+
+
+def test_empty_id_tool_call_recovers(parts):
+    # Valid function, but an empty string id can't be matched to a tool result.
+    wt, executor, transcript, tmp = parts
+    bad = {"id": "", "type": "function",
+           "function": {"name": "list_dir", "arguments": json.dumps({"path": "."})}}
+    client = FakeClient([_resp(tool_calls=[bad]), _resp(content="ok done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+
+    second = client.requests[1]
+    assert not any(m["role"] == "tool" and m.get("tool_call_id") == "" for m in second)
+    user_msgs = [m for m in second if m["role"] == "user"]
+    assert any("malformed" in (m.get("content") or "").lower() for m in user_msgs)
+
+
+def test_missing_function_name_tool_call_recovers(parts):
+    # Non-empty id, but the function object has no name field.
+    wt, executor, transcript, tmp = parts
+    bad = {"id": "c1", "type": "function", "function": {"arguments": "{}"}}
+    client = FakeClient([_resp(tool_calls=[bad]), _resp(content="ok done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+
+    second = client.requests[1]
+    assert not any(m["role"] == "tool" for m in second)
+    user_msgs = [m for m in second if m["role"] == "user"]
+    assert any("malformed" in (m.get("content") or "").lower() for m in user_msgs)
+
+
+def test_valid_tool_call_predicate():
+    valid = _call("c1", "list_dir", {"path": "."})
+    assert _valid_tool_call(valid) is True
+
+    assert _valid_tool_call(None) is False  # not a dict
+    assert _valid_tool_call({}) is False  # no id, no function
+    assert _valid_tool_call({"id": "", "function": {"name": "list_dir"}}) is False  # empty id
+    assert _valid_tool_call({"id": "c1", "function": {"arguments": "{}"}}) is False  # no name
+    assert _valid_tool_call({"id": "c1", "function": {"name": "list_dir",
+                                                        "arguments": 123}}) is False  # bad args type
+
+
+def test_tool_calls_non_list_treated_as_absent(parts):
+    wt, executor, transcript, tmp = parts
+    resp = {"choices": [{"message": {"role": "assistant", "content": "done",
+                                      "tool_calls": "notalist"}}]}
+    client = FakeClient([resp])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.turns == 1
+
+
+def test_three_consecutive_malformed_tool_calls_aborts(parts):
+    wt, executor, transcript, tmp = parts
+    bad = {"choices": [{"message": {"role": "assistant", "content": None,
+                                     "tool_calls": [None]}}]}
+    client = FakeClient([bad, bad, bad])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+
+
+def test_interrupted_status(parts):
+    wt, executor, transcript, tmp = parts
+    class InterruptingClient:
+        def chat(self, *a, **k):
+            raise KeyboardInterrupt
+    r = Runner(InterruptingClient(), executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "interrupted"
+    events = _events(tmp)
+    assert events[-1]["event"] == "run_end"
