@@ -5,7 +5,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from .guardrails import GuardrailError, resolve_in_worktree
+from .guardrails import GuardrailError, build_env, check_bash_command, resolve_in_worktree
 
 MAX_RESULT_CHARS = 8000
 
@@ -123,8 +123,6 @@ def grep(worktree: Path, pattern: str, path: str = ".", glob: str | None = None,
     out = res.stdout.replace(str(worktree.resolve()) + "/", "")
     return _cap(out, note=" — narrow the pattern or path for full results")
 
-
-from .guardrails import build_env, check_bash_command
 
 MAX_BASH_CHARS = 10000
 
