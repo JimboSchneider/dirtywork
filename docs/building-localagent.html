@@ -516,6 +516,28 @@
   at least, it worked exactly as drawn.</p>
 </section>
 
+<section>
+  <div class="sec-mark"><span class="n">08</span><h2>Update — the same evening</h2></div>
+  <p>The "sample size is one" caveat aged fast. By evening, four production runs:</p>
+  <ul>
+    <li><strong>The tool refactored its own source.</strong> Asked for four hygiene
+    changes, it delivered three and <em>declined the fourth</em> — correctly judging it
+    couldn't be done without touching tested error strings, exactly as instructed. Along
+    the way its own <code>cd</code>-escape guardrail blocked it seven times; it recovered
+    each time and kept its own 130-test suite green. The tool policed its own developer.</li>
+    <li><strong>Devstral's first production task, run concurrently</strong> with a qwen
+    task in a different repo — validating the parallel workflow, the salted-slug collision
+    design, and the 32k-context path in one shot. (Observed cost: devstral takes roughly
+    1.5× qwen's turns and tokens for similar-sized tasks.)</li>
+    <li>Every deliverable survived independent review plus a human review round, and
+    merged behind CI gates.</li>
+  </ul>
+  <p>Also since publishing: the project is MIT-licensed, CI-gated on three
+  platform/Python legs, and pip-installable — <code>pipx install dirtsimple-agent</code>
+  (every obvious name was taken or tripped PyPI's similarity filter; the installed
+  command is still <code>localagent</code>).</p>
+</section>
+
 <p class="footnote">Written from the session record, 2026-08-14. Source and design docs:
 <a href="https://github.com/JimboSchneider/localagent">github.com/JimboSchneider/localagent</a>
 (<span class="mono">docs/superpowers/specs</span> and

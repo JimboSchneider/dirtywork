@@ -244,3 +244,25 @@ One day, end to end:
 The expensive model spent its tokens where judgment lives — design, review,
 verification — and the free model did the typing. That's the whole idea, and for
 one day at least, it worked exactly as drawn.
+
+## Update — the same evening
+
+The "sample size is one" caveat aged fast. By evening, four production runs:
+
+- **The tool refactored its own source.** Asked for four hygiene changes, it
+  delivered three and *declined the fourth* — correctly judging it couldn't be
+  done without touching tested error strings, exactly as instructed. Along the
+  way its own `cd`-escape guardrail blocked it seven times; it recovered each
+  time and kept its own 130-test suite green. The tool policed its own
+  developer.
+- **Devstral's first production task, run concurrently** with a qwen task in a
+  different repo — validating the parallel workflow, the salted-slug collision
+  design, and the 32k-context path in one shot. (Observed cost: devstral takes
+  roughly 1.5× qwen's turns and tokens for similar-sized tasks.)
+- Every deliverable survived independent review plus a human review round, and
+  merged behind CI gates.
+
+Also since publishing: the project is MIT-licensed, CI-gated on three
+platform/Python legs, and pip-installable — `pipx install dirtsimple-agent`
+(every obvious name was taken or tripped PyPI's similarity filter; the command
+installed is still `localagent`).
