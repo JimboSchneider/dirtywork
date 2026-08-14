@@ -98,10 +98,10 @@ def main(argv: list | None = None) -> int:
         result = runner.run(system_prompt, args.task)
     except LLMError as e:
         transcript.write("run_end", status="model_error", error=str(e))
-        transcript.close()
         _err(str(e))
         return 1
-    transcript.close()
+    finally:
+        transcript.close()
 
     print(json.dumps({
         "status": result.status,
