@@ -34,8 +34,8 @@ processes (LM Studio serves 4 concurrent requests per model), not from the CLI.
   live test; a `tools` array produced a well-formed `tool_calls` response).
 - Models: `qwen/qwen3-coder-next` (65,536 ctx, default) and
   `mistralai/devstral-small-2-2512` (32,768 ctx; its chat template consumes
-  ~500 prompt tokens per call). **Devstral tool-calling is not yet verified —
-  verify during implementation before documenting it as supported.**
+  ~500 prompt tokens per call). Devstral tool-calling verified working on
+  2026-08-14 (live smoke test).
 - System Python is 3.9.6; no `uv`. Target: Python 3.9+, stdlib only, no venv.
 - A real `rg` binary may not be on PATH for subprocesses (Claude Code shims it
   as a shell function); `grep` tool must fall back to `grep -rn`.
