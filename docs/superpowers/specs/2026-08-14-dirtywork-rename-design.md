@@ -89,7 +89,7 @@ imperative: *dirtywork, run*.
 | Pages custom-domain DNS propagation lag | Set DNS immediately after purchase; verify before announcing |
 
 ## Success criteria
-- `pipx install dirtywork` installs; `dirtywork --help` runs; full test suite (130) green
+- `pipx install dirtywork` installs; `dirtywork --help` runs; full test suite (133) green
   under the renamed package.
 - `https://dirtywork.run` serves the docs/blog over HTTPS.
 - `dirtsimple-agent` on PyPI is yanked with a visible pointer.
