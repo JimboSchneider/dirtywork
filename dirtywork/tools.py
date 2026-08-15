@@ -163,7 +163,12 @@ MAX_BASH_CAPTURE_BYTES = 1024 * 1024
 
 
 def _kill_group(pid: int) -> None:
-    """SIGKILL the whole process group led by pid (a no-op if already gone)."""
+    """SIGKILL the whole process group led by pid (a no-op if already gone).
+
+    On the clean-exit path pid is already reaped, so there is a negligible
+    PID-reuse window; it would only signal an unrelated process that had both
+    become a group leader AND reclaimed this exact pgid, which we accept.
+    """
     try:
         os.killpg(pid, signal.SIGKILL)
     except OSError:
@@ -277,7 +282,8 @@ TOOL_SCHEMAS = [
         "name": "bash",
         "description": "Run a shell command in the worktree (cwd is the worktree "
                        "root). Use for builds/tests/git-status, NEVER for editing "
-                       "files. 120s default timeout, 600s max.",
+                       "files. 120s default timeout, 600s max. Backgrounded "
+                       "processes are terminated when the command returns.",
         "parameters": _param({
             "command": {"type": "string"},
             "timeout": {"type": "integer", "description": "Seconds, default 120, max 600"},

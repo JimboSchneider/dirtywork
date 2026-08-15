@@ -53,12 +53,16 @@ _DENYLIST: list[tuple[str, str]] = [
     # Read-only forms (config --get/--list, remote -v, worktree list, bare reflog)
     # are intentionally NOT matched.
     ("git command that writes the parent repo's shared refs/config is not allowed",
-     r"\bgit\s+config\s+[^-]"                       # config <key> <value> (a write)
-     r"|\bgit\s+remote\s+(add|set-url|remove|rename)\b"
+     # config: block writes (--unset/--edit/etc. and `key value` sets); read
+     # forms (--get/--list, or a lone `key`) fall through and are allowed.
+     r"\bgit\s+config\s+(--(unset|unset-all|edit|replace-all|add|remove-section|rename-section)\b"
+     r"|[^-\s]\S*\s+\S)"
+     r"|\bgit\s+remote\s+(add|set-url|remove|rm|rename)\b"
      r"|\bgit\s+(update-ref|gc|filter-branch)\b"
      r"|\bgit\s+reflog\s+(expire|delete)\b"
      r"|\bgit\s+worktree\s+(add|remove|prune|move)\b"
-     r"|\bgit\s+branch\s+-[dDmM]\b|\bgit\s+tag\s+-d\b"),
+     r"|\bgit\s+branch\s+(-[dDmM]\b|--(delete|move)\b)"
+     r"|\bgit\s+tag\s+(-d\b|--delete\b)"),
     ("destructive command targeting a path outside the worktree",
      r"\b(rm|mv|chmod|chown)\b[^|;&]*\s['\"]?" + _ESCAPE_TARGET),
     ("piping a download into an interpreter is not allowed",

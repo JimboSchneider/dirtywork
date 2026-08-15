@@ -36,8 +36,13 @@ BLOCKED = [
     "git config core.hooksPath /tmp/evil",
     "git remote add evil https://evil.example/x",
     "git remote set-url origin https://evil.example/x",
+    "git remote rm origin",              # rm is a git alias for remove
+    "git config --unset core.hooksPath", # long-flag write
+    "git config core.editor vim",        # key value (a set)
     "git branch -D main",
+    "git branch --delete main",          # long-flag delete
     "git tag -d v1.0",
+    "git tag --delete v1.0",
     "git update-ref -d refs/heads/main",
     "git reflog expire --all",
     "git gc --prune=now",
@@ -64,6 +69,7 @@ ALLOWED = [
     "git add . && git commit -m wip", # commit is discouraged by prompt, not denied here
     "cd sub && cat ../README.md",     # .. that stays inside the worktree
     "git config --get user.name",     # read-only git config
+    "git config user.name",           # single-arg read (no value)
     "git config --list",
     "git remote -v",                  # read-only remote
     "git worktree list",
