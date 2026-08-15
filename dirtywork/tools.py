@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import shutil
+import stat
 import subprocess
+import threading
 import time
 from pathlib import Path
 
 from .guardrails import GuardrailError, build_env, check_bash_command, resolve_in_worktree
 
 MAX_RESULT_CHARS = 8000
+# Refuse to load a file larger than this into memory. read_file/edit_file read
+# the whole file (offset/limit only window the result), so an unbounded read is a
+# memory-DoS; a non-regular file (FIFO/device) would also block read_text forever.
+MAX_READ_BYTES = 5 * 1024 * 1024
 
 
 def _cap(text: str, cap: int = MAX_RESULT_CHARS, note: str = "") -> str:
@@ -17,12 +23,30 @@ def _cap(text: str, cap: int = MAX_RESULT_CHARS, note: str = "") -> str:
     return text[:cap] + suffix
 
 
+def _guard_readable(p: Path, path: str) -> str | None:
+    """ERROR string if p is not a bounded, regular file, else None."""
+    try:
+        st = p.stat()
+    except OSError as e:
+        return f"ERROR: cannot read '{path}': {e}"
+    if not stat.S_ISREG(st.st_mode):
+        return f"ERROR: '{path}' is not a regular file (refusing FIFO/device/socket)"
+    if st.st_size > MAX_READ_BYTES:
+        return (f"ERROR: '{path}' is {st.st_size} bytes, over the {MAX_READ_BYTES}-byte "
+                f"read limit; use grep to search it instead of reading it whole")
+    return None
+
+
 def read_file(worktree: Path, path: str, offset: int = 0, limit: int = 400) -> str:
     try:
         p = resolve_in_worktree(path, worktree)
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
     except GuardrailError as e:
         return f"ERROR: {e}"
+    err = _guard_readable(p, path)
+    if err:
+        return err
+    try:
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as e:
         return f"ERROR: cannot read '{path}': {e}"
     window = lines[offset : offset + limit]
@@ -50,9 +74,13 @@ def write_file(worktree: Path, path: str, content: str) -> str:
 def edit_file(worktree: Path, path: str, old_string: str, new_string: str) -> str:
     try:
         p = resolve_in_worktree(path, worktree, writing=True)
-        text = p.read_text(encoding="utf-8")
     except GuardrailError as e:
         return f"ERROR: {e}"
+    err = _guard_readable(p, path)
+    if err:
+        return err
+    try:
+        text = p.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return f"ERROR: {path} is not valid UTF-8 text; edit_file only works on text files"
     except OSError as e:
@@ -125,6 +153,11 @@ def grep(worktree: Path, pattern: str, path: str = ".", glob: str | None = None,
 
 
 MAX_BASH_CHARS = 10000
+# Hard cap on child output buffered in memory. subprocess.run(capture_output=True)
+# buffers the whole stream before we can truncate it, so `cat /dev/zero` would OOM
+# the process. We drain the pipe on a thread (so the child never blocks on a full
+# pipe) but keep only the first MAX_BASH_CAPTURE_BYTES.
+MAX_BASH_CAPTURE_BYTES = 1024 * 1024
 
 
 def bash(worktree: Path, command: str, timeout: int = 120) -> str:
@@ -133,20 +166,43 @@ def bash(worktree: Path, command: str, timeout: int = 120) -> str:
         return reason  # starts with "BLOCKED:"
     timeout = max(1, min(int(timeout), 600))
     try:
-        res = subprocess.run(
+        proc = subprocess.Popen(
             ["bash", "-c", command],
             cwd=str(worktree),
             env=build_env(home=worktree),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
         )
-    except subprocess.TimeoutExpired:
-        return f"ERROR: command timed out after {timeout}s."
     except OSError as e:
         return f"ERROR: bash failed: {e}"
-    combined = (res.stdout + res.stderr).strip()
-    return _cap(f"exit code: {res.returncode}\n{combined}", cap=MAX_BASH_CHARS)
+
+    captured = bytearray()
+    truncated = False
+
+    def _drain() -> None:
+        nonlocal truncated
+        with proc.stdout:  # type: ignore[union-attr]
+            for chunk in iter(lambda: proc.stdout.read(65536), b""):  # type: ignore[union-attr]
+                room = MAX_BASH_CAPTURE_BYTES - len(captured)
+                if room > 0:
+                    captured.extend(chunk[:room])
+                if len(chunk) > room:
+                    truncated = True  # keep draining so the child never blocks
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    reader.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        reader.join(timeout=5)
+        return f"ERROR: command timed out after {timeout}s."
+    reader.join(timeout=5)
+
+    out = captured.decode("utf-8", errors="replace").strip()
+    note = " — bash output capped" if truncated else ""
+    return _cap(f"exit code: {proc.returncode}\n{out}", cap=MAX_BASH_CHARS, note=note)
 
 
 def _param(props: dict, required: list) -> dict:
