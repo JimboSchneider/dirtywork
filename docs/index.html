@@ -254,7 +254,7 @@ free on your own machine, and <strong>nothing merges without review</strong>.</p
   <h2>How a run works</h2>
   <div class="run">
 <pre><span class="who fr">1 · you/ai</span> <span class="dim">$</span> dirtywork run --repo ~/code/app <span class="dim">"Add unit tests for parser.ts"</span>
-<span class="who lo">2 · local</span> explores the repo, edits, runs the tests — sandboxed in an
+<span class="who lo">2 · local</span> explores the repo, edits, runs the tests — in an
 <span class="who lo"></span> isolated git worktree <span class="dim">(.worktrees/dw-…)</span>, guardrails on every
 <span class="who lo"></span> tool call, full JSONL transcript, no auto-commit — for $0
 <span class="who fr">3 · you/ai</span> audit the transcript, review the diff, re-run the gates,

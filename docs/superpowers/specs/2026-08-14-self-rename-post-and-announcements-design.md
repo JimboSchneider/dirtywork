@@ -77,7 +77,12 @@
 ## Announcements
 
 - Framing: **"dirtywork 0.2 (beta)"** — copy-only beta label; APIs may shift; feedback
-  wanted; works-on-my-setup honesty (LM Studio + qwen3-coder / devstral verified).
+  wanted; works-on-my-setup honesty (LM Studio + qwen3-coder / devstral verified;
+  Claude Code has been the orchestrator for every production run to date, including the
+  rename itself — naming it as the verified orchestrator setup is ledger-accurate).
+- Guardrail phrasing rule (from SECURITY.md): guardrails stop accidents, not
+  adversaries; review is the real boundary. Never describe the worktree as a "sandbox"
+  in public copy — "isolated git worktree" is the honest term.
 - All three lead with the flip, link `https://dirtywork.run` and the GitHub repo;
   r/LocalLLaMA + blog post may link each other. Install: `pipx install dirtywork`.
 - LinkedIn About copy is business-flavored (what DSS is, invoicr + dirtywork as proof of
