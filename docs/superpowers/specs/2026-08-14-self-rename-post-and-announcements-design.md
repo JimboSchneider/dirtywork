@@ -48,9 +48,13 @@
    registered (confirmed via RDAP), `dirtywork.com` a $57,500 premium; `dirtywork.run`
    available at $6.99 for year one — bought for three years on the spot. The domain is an
    imperative: *dirtywork, run*.
-3. The rename executed itself: spec → plan → subagent-driven execution where the tool was
-   the implementer for its own package rename (Task 1) and docs rename (Task 3), each a
-   qwen3-coder worker in an isolated worktree. Task 1: 24 turns, all 133 tests green.
+3. The rename executed itself: spec → an eleven-task plan → subagent-driven execution
+   where the tool was the implementer for its own package rename (Task 1) and docs
+   rename (Task 3), each a qwen3-coder worker in an isolated worktree. Task 1: 24 turns,
+   executed tests-first per its prompt (test expectations updated, suite red with
+   ModuleNotFoundError, package renamed, all 133 back to green); its task review
+   approved with no code findings. The PR (#5) totaled six commits, two of which carried
+   the tool's own work (the package rename and the docs sweep).
 4. The exit-127 beat: launching Task 3 failed — `command not found` — because Task 1 had
    renamed `bin/localagent`, orphaning the launcher symlink. The rename's first casualty
    was the renamer. Relaunched via `bin/dirtywork`; the run returned in a
@@ -58,14 +62,17 @@
    `~/.dirtywork/runs/` — the rename validating itself in production before the PR opened.
    Task 3: 47 turns, ~1.1M prompt tokens, $0 in API fees.
 5. Honest review section: the worker dropped one plan line item (README `la-`→`dw-`
-   examples) and twice invented decorative HTML nobody asked for; reviewers caught both.
+   examples) — that line existed in the plan but was omitted from the worker's task
+   prompt, an orchestrator error acknowledged in-session and twice invented decorative HTML nobody asked for; reviewers caught both.
    The final whole-branch review caught the one defect the *plan* missed
    (`__version__` still 0.1.0). Lesson stated plainly: audit local-worker diffs for
    additions beyond the ask, not just misses — and review catches the orchestrator's
    mistakes too.
 6. Close on the flip thesis + tagline. Timeline (verified against session timestamps):
    survey → name → domain bought ≈ half an hour; "we need a new name" (18:41 CDT) to
-   `dirtywork 0.2.0` installable from PyPI (20:07 CDT) ≈ an hour and a half, same evening.
+   `dirtywork 0.2.0` installable from PyPI (20:07 CDT) ≈ an hour and a half, same
+   evening. Also same evening: repo renamed with redirects, DNS live (4×A + 4×AAAA +
+   www CNAME, IPs verified against GitHub's docs), TLS cert issued and HTTPS enforced.
 
 ## Announcements
 
