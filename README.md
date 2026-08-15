@@ -70,7 +70,7 @@ The launcher is self-locating, so this works from any clone location.
 
 1. **Preflight** — LM Studio reachable, model loaded, repo valid. Any
    failure exits 2 with nothing created.
-2. **Worktree** — a fresh worktree at `<repo>/.worktrees/la-<slug>` on new
+2. **Worktree** — a fresh worktree at `<repo>/.worktrees/dw-<slug>` on new
    branch `dirtywork/<slug>`, branched from `--branch-from` (default:
    repo HEAD). `.worktrees/` is added to the repo's local
    `.git/info/exclude` automatically. If the repo has a `CLAUDE.md` or
@@ -162,7 +162,7 @@ printed to stdout (nothing else goes to stdout):
 ```json
 {
   "status": "completed",
-  "worktree": "/path/to/repo/.worktrees/la-<slug>",
+  "worktree": "/path/to/repo/.worktrees/dw-<slug>",
   "branch": "dirtywork/<slug>",
   "transcript": "/path/to/transcript.jsonl",
   "turns": 7,
