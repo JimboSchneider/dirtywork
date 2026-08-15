@@ -17,6 +17,10 @@
    newest first) / Dirt Simple Solutions credit. One static self-contained HTML file,
    same design tokens as the blog pages, responsive, no JS framework, no analytics.
    Blog posts keep their existing URLs. Same held PR.
+   Basic SEO/link-preview hygiene rides along: meta descriptions + canonical URLs on all
+   three pages, OpenGraph/Twitter-card tags with a 1200×630 OG card image (best effort),
+   robots.txt, sitemap.xml, and JSON-LD SoftwareApplication on the landing page. A full
+   multi-page docs/SEO site is explicitly deferred until post-announcement traction.
 2. **r/LocalLLaMA post** — text file, delivered for Jimbo to paste. Not committed.
 3. **Show HN blurb** — title + two-paragraph text, delivered for Jimbo to paste. Not committed.
 4. **DSS LinkedIn kit** — company-page fields (name, tagline, ~2000-char About) plus the
