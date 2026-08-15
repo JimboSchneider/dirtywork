@@ -63,8 +63,9 @@
    (`__version__` still 0.1.0). Lesson stated plainly: audit local-worker diffs for
    additions beyond the ask, not just misses — and review catches the orchestrator's
    mistakes too.
-6. Close on the flip thesis + tagline. From "we need a new name" to `dirtywork 0.2.0` on
-   PyPI: about three and a half hours, same evening.
+6. Close on the flip thesis + tagline. Timeline (verified against session timestamps):
+   survey → name → domain bought ≈ half an hour; "we need a new name" (18:41 CDT) to
+   `dirtywork 0.2.0` installable from PyPI (20:07 CDT) ≈ an hour and a half, same evening.
 
 ## Announcements
 
