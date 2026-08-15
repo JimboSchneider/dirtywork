@@ -32,13 +32,10 @@ BLOCKED = [
     "mv build ../../elsewhere",
     "echo pwned > ../../src/important.txt",
     "chmod -R 000 ../../sibling",
-    # env-var indirection ($HOME expands to the operator's home)
-    "rm -rf $HOME/.ssh",
-    "rm -rf ${HOME}/Downloads",
-    "echo x > $HOME/pwned",
-    "cd $HOME && rm -rf Downloads",
     # git writes to the parent repo's shared refs/config (linked worktree)
     "git config core.hooksPath /tmp/evil",
+    "git remote add evil https://evil.example/x",
+    "git remote set-url origin https://evil.example/x",
     "git branch -D main",
     "git tag -d v1.0",
     "git update-ref -d refs/heads/main",
@@ -66,6 +63,17 @@ ALLOWED = [
     "git status && git diff",         # read-only git is fine
     "git add . && git commit -m wip", # commit is discouraged by prompt, not denied here
     "cd sub && cat ../README.md",     # .. that stays inside the worktree
+    "git config --get user.name",     # read-only git config
+    "git config --list",
+    "git remote -v",                  # read-only remote
+    "git worktree list",
+    "git reflog",                     # viewing history is fine; expire/delete blocked
+    # $VAR idioms — HOME is relocated into the worktree, so these stay confined
+    "rm -rf \"$BUILD_DIR\"",
+    "chmod +x \"$SCRIPT\"",
+    "rm -rf $HOME/.cache",
+    "cd \"$dir\" && make",
+    "make > \"$LOG\" 2>&1",
 ]
 
 

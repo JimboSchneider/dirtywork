@@ -16,9 +16,9 @@ class Transcript:
     def write(self, event: str, **fields) -> None:
         record = {"ts": datetime.now(timezone.utc).isoformat(), "event": event}
         record.update(fields)
-        # allow_nan=False keeps the JSONL strictly valid (NaN/Infinity from a
-        # hostile server response would otherwise emit invalid JSON); fall back to
-        # a coerced dump so a bad value can never crash the run mid-transcript.
+        # allow_nan=False keeps the JSONL strictly valid; a NaN/Infinity that
+        # reached here (e.g. from a hostile server response) is re-dumped with
+        # those constants coerced to null rather than emitting invalid JSON.
         try:
             line = json.dumps(record, ensure_ascii=False, allow_nan=False)
         except ValueError:

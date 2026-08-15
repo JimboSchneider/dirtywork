@@ -37,11 +37,12 @@ def resolve_in_worktree(path_str: str, worktree: Path, writing: bool = False) ->
 # security boundary: bash is a general shell, so a determined or prompt-injected
 # model can still read absolute host paths or obfuscate its way past these. The
 # real containment is OS-level sandboxing (see SECURITY.md); these only raise the
-# bar for a *confused* model. The escape-target rules therefore match the natural
-# accident forms — absolute (/), home (~), parent-relative (..), and env-var
-# indirection ($HOME/$VAR) — since a worktree at <repo>/.worktrees/dw-<slug> is
-# escaped by `../..`, and $HOME expands to the operator's home.
-_ESCAPE_TARGET = r"(/|~|\.\.|\$)"
+# bar for a *confused* model. The escape-target rules match the natural accident
+# forms — absolute (/), home (~), and parent-relative (..) — since a worktree at
+# <repo>/.worktrees/dw-<slug> is escaped by `../..`. We deliberately do NOT match
+# a leading `$`: HOME is relocated into the worktree (so $HOME/~ stay confined),
+# and a blanket `$` would reject ordinary idioms like `rm -rf "$BUILD_DIR"`.
+_ESCAPE_TARGET = r"(/|~|\.\.)"
 _DENYLIST: list[tuple[str, str]] = [
     ("sudo is not allowed", r"\bsudo\b"),
     ("git push is not allowed — leave changes uncommitted for review",
@@ -49,9 +50,15 @@ _DENYLIST: list[tuple[str, str]] = [
     # A linked worktree SHARES refs/config/objects with the parent repo, so these
     # git subcommands mutate the parent's state from inside the worktree.
     # core.hooksPath in particular is a persistent host-code-execution pivot.
-    ("git command that writes the parent repo's shared refs/config/tags is not allowed",
-     r"\bgit\s+(config|update-ref|reflog|gc|worktree|filter-branch)\b"
-     r"|\bgit\s+branch\s+-[dD]\b|\bgit\s+tag\s+-d\b"),
+    # Read-only forms (config --get/--list, remote -v, worktree list, bare reflog)
+    # are intentionally NOT matched.
+    ("git command that writes the parent repo's shared refs/config is not allowed",
+     r"\bgit\s+config\s+[^-]"                       # config <key> <value> (a write)
+     r"|\bgit\s+remote\s+(add|set-url|remove|rename)\b"
+     r"|\bgit\s+(update-ref|gc|filter-branch)\b"
+     r"|\bgit\s+reflog\s+(expire|delete)\b"
+     r"|\bgit\s+worktree\s+(add|remove|prune|move)\b"
+     r"|\bgit\s+branch\s+-[dDmM]\b|\bgit\s+tag\s+-d\b"),
     ("destructive command targeting a path outside the worktree",
      r"\b(rm|mv|chmod|chown)\b[^|;&]*\s['\"]?" + _ESCAPE_TARGET),
     ("piping a download into an interpreter is not allowed",

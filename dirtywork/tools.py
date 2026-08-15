@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import shutil
+import signal
 import stat
 import subprocess
 import threading
@@ -160,6 +162,14 @@ MAX_BASH_CHARS = 10000
 MAX_BASH_CAPTURE_BYTES = 1024 * 1024
 
 
+def _kill_group(pid: int) -> None:
+    """SIGKILL the whole process group led by pid (a no-op if already gone)."""
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
 def bash(worktree: Path, command: str, timeout: int = 120) -> str:
     reason = check_bash_command(command)
     if reason:
@@ -172,36 +182,51 @@ def bash(worktree: Path, command: str, timeout: int = 120) -> str:
             env=build_env(home=worktree),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            start_new_session=True,  # own process group so we can reap the whole tree
         )
     except OSError as e:
         return f"ERROR: bash failed: {e}"
 
     captured = bytearray()
     truncated = False
+    lock = threading.Lock()
 
     def _drain() -> None:
         nonlocal truncated
         with proc.stdout:  # type: ignore[union-attr]
             for chunk in iter(lambda: proc.stdout.read(65536), b""):  # type: ignore[union-attr]
-                room = MAX_BASH_CAPTURE_BYTES - len(captured)
-                if room > 0:
-                    captured.extend(chunk[:room])
-                if len(chunk) > room:
-                    truncated = True  # keep draining so the child never blocks
+                with lock:
+                    room = MAX_BASH_CAPTURE_BYTES - len(captured)
+                    if room > 0:
+                        captured.extend(chunk[:room])
+                    if len(chunk) > room:
+                        truncated = True  # keep draining so the child never blocks
 
     reader = threading.Thread(target=_drain, daemon=True)
     reader.start()
+
+    timed_out = False
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        reader.join(timeout=5)
-        return f"ERROR: command timed out after {timeout}s."
+        timed_out = True
+    # Reap the whole group: kills the main process AND any backgrounded children
+    # still holding the stdout pipe (so the reader sees EOF and never stalls/leaks).
+    # On clean completion with no stragglers this is a harmless no-op.
+    _kill_group(proc.pid)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
     reader.join(timeout=5)
 
-    out = captured.decode("utf-8", errors="replace").strip()
-    note = " — bash output capped" if truncated else ""
+    with lock:
+        out = bytes(captured).decode("utf-8", errors="replace").strip()
+        note = " — bash output capped" if truncated else ""
+    if timed_out:
+        tail = f"\n{out}" if out else ""
+        return _cap(f"ERROR: command timed out after {timeout}s.{tail}",
+                    cap=MAX_BASH_CHARS, note=note)
     return _cap(f"exit code: {proc.returncode}\n{out}", cap=MAX_BASH_CHARS, note=note)
 
 
