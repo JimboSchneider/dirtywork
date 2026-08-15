@@ -103,3 +103,30 @@ def test_grep_rg_branch(wt: Path, tmp_path: Path, monkeypatch):
     monkeypatch.setattr(tools.shutil, "which", lambda name: str(fake_rg) if name == "rg" else None)
     out = tools.grep(wt, "return 42")
     assert "app.py" in out
+
+
+def test_read_file_refuses_oversized(wt: Path):
+    # sparse 6 MB file — over the 5 MB read cap
+    big = wt / "big.bin"
+    with open(big, "wb") as f:
+        f.seek(6 * 1024 * 1024)
+        f.write(b"x")
+    out = tools.read_file(wt, "big.bin")
+    assert "over the" in out and "read limit" in out
+
+
+def test_read_file_refuses_fifo(wt: Path):
+    import os
+    fifo = wt / "pipe"
+    os.mkfifo(fifo)
+    out = tools.read_file(wt, "pipe")
+    assert "not a regular file" in out
+
+
+def test_edit_file_refuses_oversized(wt: Path):
+    big = wt / "big.txt"
+    with open(big, "wb") as f:
+        f.seek(6 * 1024 * 1024)
+        f.write(b"x")
+    out = tools.edit_file(wt, "big.txt", "x", "y")
+    assert "over the" in out

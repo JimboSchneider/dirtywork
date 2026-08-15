@@ -30,3 +30,14 @@ def test_flushes_each_line_before_close(tmp_path: Path):
     # Do NOT close — the line must already be on disk (tail -f contract)
     assert path.read_text().count("\n") == 1
     t.close()
+
+
+def test_non_finite_field_stays_valid_json(tmp_path: Path):
+    t = Transcript(tmp_path / "t.jsonl")
+    t.write("run_end", usage={"prompt_tokens": float("nan"), "completion_tokens": float("inf")})
+    t.close()
+    text = (tmp_path / "t.jsonl").read_text()
+    assert "NaN" not in text and "Infinity" not in text
+    import json as _json
+    for line in text.splitlines():
+        _json.loads(line)  # each line parses

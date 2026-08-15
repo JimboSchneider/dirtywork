@@ -115,3 +115,32 @@ def test_executor_logs_guardrail_block(wt: Path, tmp_path: Path):
     assert out.startswith("BLOCKED:")
     events = [json.loads(l) for l in (tmp_path / "log.jsonl").read_text().splitlines()]
     assert any(e["event"] == "guardrail_block" for e in events)
+
+
+def test_bash_output_is_capped(wt: Path):
+    # 2 MB of output must not blow up; it is capped and noted.
+    out = bash(wt, "python3 -c \"import sys; sys.stdout.write('A'*2000000)\"")
+    assert len(out) < 20000
+    assert "capped" in out
+
+
+def test_bash_runaway_output_times_out_without_ooming(wt: Path):
+    # cat /dev/zero would OOM under unbounded capture; here it is drained and killed.
+    out = bash(wt, "cat /dev/zero", timeout=1)
+    assert "timed out" in out.lower()
+
+
+def test_bash_backgrounded_child_does_not_stall(wt: Path):
+    start = time.monotonic()
+    out = bash(wt, "sleep 30 & echo hi", timeout=10)
+    assert "hi" in out
+    # Before the process-group fix, the reader thread stalled ~5s on the
+    # backgrounded sleep still holding the stdout pipe.
+    assert time.monotonic() - start < 3.0
+
+
+def test_bash_timeout_reaps_process_tree(wt: Path):
+    out = bash(wt, "(sleep 2 && touch survived.txt) & wait", timeout=1)
+    assert "timed out" in out.lower()
+    time.sleep(2.5)  # past when the sleep would fire if it had survived the kill
+    assert not (wt / "survived.txt").exists()  # killpg reaped the whole group

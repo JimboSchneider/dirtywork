@@ -152,3 +152,50 @@ def test_chat_tools_included_when_nonempty(server: str):
     tools = [{"type": "function", "function": {"name": "t", "parameters": {"type": "object", "properties": {}}}}]
     client.chat("m1", [], tools=tools)
     assert _FakeLMStudio.last_payload["tools"] == tools
+
+
+class _DripLMStudio(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        self.rfile.read(length)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        # Valid body delivered one byte at a time — each write lands within the
+        # per-socket timeout, so only a whole-transfer deadline can stop it.
+        body = json.dumps({"choices": [{"message": {"content": "hi"}}]}).encode()
+        try:
+            for b in body:
+                self.wfile.write(bytes([b]))
+                self.wfile.flush()
+                time.sleep(0.05)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
+    def log_message(self, *a):
+        pass
+
+
+@pytest.fixture()
+def drip_server():
+    srv = HTTPServer(("127.0.0.1", 0), _DripLMStudio)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}/v1"
+    srv.shutdown()
+
+
+def test_drip_feed_response_hits_wallclock_deadline(drip_server: str):
+    client = LMStudioClient(base_url=drip_server, timeout=0.5)
+    start = time.monotonic()
+    with pytest.raises(LLMTimeout):
+        client.chat("m1", [{"role": "user", "content": "x"}], tools=[])
+    assert time.monotonic() - start < 2.0  # hard deadline ~0.5s, not the full ~2s drip (CI regression was 4.47s)
+
+
+def test_oversized_response_raises_llmerror(server: str, monkeypatch):
+    import dirtywork.llm as llm_mod
+    monkeypatch.setattr(llm_mod, "MAX_RESPONSE_BYTES", 10)
+    client = LMStudioClient(base_url=server)
+    with pytest.raises(LLMError):
+        client.chat("m1", [{"role": "user", "content": "x"}], tools=[])

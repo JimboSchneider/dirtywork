@@ -17,11 +17,35 @@ and reviews, the free local model grinds. Humans watch with `tail -f`.
 | | Role |
 |---|---|
 | Orchestrator (a frontier model, e.g. Claude Code — or you) | Picks the task, invokes `dirtywork`, reviews the worktree diff and transcript, commits/PRs what survives review |
-| Worker (local model, via dirtywork) | Explores the repo, edits files, runs builds/tests — inside a worktree it cannot escape |
+| Worker (local model, via dirtywork) | Explores the repo, edits files, runs builds/tests — file tools are confined to the worktree; `bash` is a real shell (see [Security & trust](#security--trust)) |
 
-Nothing the local model does touches your main checkout, and nothing it
-produces merges without review. Parallelism comes from launching multiple
+File edits go through path confinement into an isolated git worktree, and nothing
+the worker produces merges without your review. But the worker can run `bash`, and
+a shell is a shell — read [Security & trust](#security--trust) before pointing this
+at a model or repo you don't trust. Parallelism comes from launching multiple
 processes — LM Studio serves 4 concurrent requests per model.
+
+## Security & trust
+
+dirtywork's containment is honest about its limits:
+
+- **File tools (`read_file`/`write_file`/`edit_file`/`list_dir`/`grep`) are confined
+  to the worktree** by real path resolution — symlinks, `..`, and absolute paths that
+  escape are rejected.
+- **`bash` is a general shell, not a sandbox.** A denylist blocks common *accidents*
+  (destructive commands aimed outside the worktree, shared-git-state writes, piping a
+  download into an interpreter), and `HOME` is redirected into the worktree so `~`/
+  `$HOME` can't reach your real `~/.ssh` or `~/.aws`. But a determined or
+  prompt-injected model can still read absolute host paths (`cat /etc/…`) — the
+  denylist raises the bar for a confused model, it does not stop an adversarial one.
+- **Review is the real boundary.** Read the transcript and diff before you merge. Note
+  that `bash` side-effects happen at run time, so review catches what lands in the
+  diff, not what a command already did.
+
+**Practical guidance:** run dirtywork against models and repositories you'd trust with
+shell access on your machine. A malicious target repo's `CLAUDE.md`/`AGENTS.md` is
+injected into the worker's prompt, so treat untrusted repos as you would untrusted
+code. True per-run isolation (OS sandbox / container) is the tracked next step.
 
 ## Requirements
 
