@@ -73,8 +73,11 @@
 
 ## Out of scope
 
-- Creating the LinkedIn company page (Jimbo, manual, needs his login).
-- Posting anything anywhere — every public word ships only via Jimbo's paste or his PR merge.
+- Posting anything anywhere — every public word ships only via Jimbo's paste, his PR
+  merge, or (LinkedIn page creation only) a joint browser session where Claude fills the
+  setup form with the approved kit copy in the shared Chrome instance and **Jimbo
+  personally clicks create/submit and handles any verification**. The page's first post
+  is likewise pasted or submitted by Jimbo.
 - Site redesign; the HTML edition reuses the existing post's design system verbatim.
 
 ## Success criteria
