@@ -487,3 +487,17 @@ def test_interrupted_status(parts):
     assert result.status == "interrupted"
     events = _events(tmp)
     assert events[-1]["event"] == "run_end"
+
+
+def test_usage_ignores_non_finite_from_server(parts):
+    wt, executor, transcript, tmp_path = parts
+    client = FakeClient([_resp(content="done",
+                               usage={"prompt_tokens": float("nan"),
+                                      "completion_tokens": float("inf")})])
+    r = Runner(client, executor, transcript, "qwen/qwen3-coder-next")
+    result = r.run("sys", "task")
+    assert result.usage == {"prompt_tokens": 0, "completion_tokens": 0}
+    json.dumps(result.usage, allow_nan=False)  # stdout contract stays valid JSON
+    transcript.close()
+    text = (tmp_path / "t.jsonl").read_text()
+    assert "NaN" not in text and "Infinity" not in text

@@ -3,8 +3,14 @@ from __future__ import annotations
 import http.client
 import json
 import socket
+import time
 import urllib.error
 import urllib.request
+
+# urllib's timeout is per-socket-op, not a whole-transfer deadline, and resp.read()
+# is unbounded — so a hostile/buggy endpoint could drip-feed a response for far
+# longer than the run's timeout, or return a giant body that exhausts memory.
+MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 
 
 class LLMError(Exception):
@@ -31,9 +37,24 @@ class LMStudioClient:
         except (ValueError, TypeError) as e:
             raise LLMError(f"invalid request for LM Studio at {self.base_url!r}: {e}")
         effective_timeout = timeout if timeout is not None else self.timeout
+        deadline = time.monotonic() + effective_timeout
         try:
             with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
-                body = resp.read()
+                body = bytearray()
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    body.extend(chunk)
+                    if len(body) > MAX_RESPONSE_BYTES:
+                        raise LLMError(
+                            f"response from {path} exceeds {MAX_RESPONSE_BYTES} bytes"
+                        )
+                    if time.monotonic() > deadline:
+                        raise LLMTimeout(
+                            f"reading response from {path} exceeded {effective_timeout}s"
+                        )
+                body = bytes(body)
         except urllib.error.HTTPError as e:
             try:
                 detail = e.read()[:500]

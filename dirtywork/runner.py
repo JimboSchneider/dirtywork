@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import dataclass, field
 
@@ -139,7 +140,13 @@ class Runner:
                 finish_reason = resp["choices"][0].get("finish_reason")
                 resp_usage = resp.get("usage") or {}
                 for k in usage:
-                    usage[k] += resp_usage.get(k, 0) or 0
+                    # usage is server-controlled: NaN/Infinity would survive
+                    # json.loads and later emit invalid JSON on our stdout/transcript
+                    # contract. Accept only finite, non-negative numbers.
+                    v = resp_usage.get(k, 0)
+                    if isinstance(v, (int, float)) and not isinstance(v, bool) \
+                            and math.isfinite(v) and v >= 0:
+                        usage[k] += int(v)
                 raw = msg.get("tool_calls") or []
                 if not isinstance(raw, list):
                     raw = []
