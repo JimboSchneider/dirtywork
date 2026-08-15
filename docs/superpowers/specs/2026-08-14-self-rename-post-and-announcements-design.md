@@ -50,7 +50,9 @@
    imperative: *dirtywork, run*.
 3. The rename executed itself: spec → an eleven-task plan → subagent-driven execution
    where the tool was the implementer for its own package rename (Task 1) and docs
-   rename (Task 3), each a qwen3-coder worker in an isolated worktree. Task 1: 24 turns,
+   rename (Task 3), each a qwen3-coder worker in an isolated worktree. Task 1 usage:
+158,297 prompt / 1,140 completion tokens (from its run report); combined with Task 3's
+~1.1M, the two rename runs total ≈1.25M local prompt tokens, $0. Task 1: 24 turns,
    executed tests-first per its prompt (test expectations updated, suite red with
    ModuleNotFoundError, package renamed, all 133 back to green); its task review
    approved with no code findings. The PR (#5) totaled six commits, two of which carried
