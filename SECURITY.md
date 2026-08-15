@@ -3,12 +3,12 @@
 ## Reporting a vulnerability
 
 Please report vulnerabilities privately via
-[GitHub security advisories](https://github.com/JimboSchneider/localagent/security/advisories/new)
+[GitHub security advisories](https://github.com/JimboSchneider/dirtywork/security/advisories/new)
 rather than public issues. You should receive a response within a week.
 
 ## Scope worth knowing
 
-localagent's guardrails (path confinement, bash denylist, environment
+dirtywork's guardrails (path confinement, bash denylist, environment
 scrubbing) are designed to stop **accidents by a confused local model**, not a
 determined adversary — the README says this plainly, and reports that a
 malicious model or prompt can escape the worktree are appreciated but expected

@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from localagent.guardrails import build_env, check_bash_command
+from dirtywork.guardrails import build_env, check_bash_command
 
 BLOCKED = [
     "sudo rm -rf /tmp/x",

@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from localagent.tools import TOOL_SCHEMAS, ToolExecutor, bash, grep
-from localagent.transcript import Transcript
+from dirtywork.tools import TOOL_SCHEMAS, ToolExecutor, bash, grep
+from dirtywork.transcript import Transcript
 
 
 @pytest.fixture()

@@ -3,8 +3,8 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dirtsimple-agent"
-version = "0.1.0"
+name = "dirtywork"
+version = "0.2.0"
 description = "Agentic tool-use loop harness for local LM Studio models — an expensive-model orchestrator's free local workforce"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -22,13 +22,14 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/JimboSchneider/localagent"
+Repository = "https://github.com/JimboSchneider/dirtywork"
+Homepage = "https://dirtywork.run"
 
 [project.scripts]
-localagent = "localagent.__main__:main"
+dirtywork = "dirtywork.__main__:main"
 
 [tool.setuptools]
-packages = ["localagent"]
+packages = ["dirtywork"]
 
 [tool.pytest.ini_options]
 markers = ["live: requires a running LM Studio server"]

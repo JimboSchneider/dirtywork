@@ -35,9 +35,9 @@ def make_slug(task: str, now: datetime, salt: str | None = None) -> str:
 
 
 def create_worktree(repo: Path, slug: str, branch_from: str | None) -> Path:
-    rel = Path(".worktrees") / f"la-{slug}"
+    rel = Path(".worktrees") / f"dw-{slug}"
     ref = branch_from or "HEAD"
-    branch = f"localagent/{slug}"
+    branch = f"dirtywork/{slug}"
     existed = _git(repo, "rev-parse", "--verify", "--quiet",
                     f"refs/heads/{branch}").returncode == 0
     res = _git(repo, "worktree", "add", "-b", branch, str(rel), ref)

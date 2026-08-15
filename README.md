@@ -1,9 +1,11 @@
-# localagent
+# dirtywork
 
-[![CI](https://github.com/JimboSchneider/localagent/actions/workflows/ci.yml/badge.svg)](https://github.com/JimboSchneider/localagent/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/dirtsimple-agent.svg)](https://pypi.org/project/dirtsimple-agent/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/JimboSchneider/localagent/blob/main/LICENSE)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://github.com/JimboSchneider/localagent/blob/main/pyproject.toml)
+[![CI](https://github.com/JimboSchneider/dirtywork/actions/workflows/ci.yml/badge.svg)](https://github.com/JimboSchneider/dirtywork/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/dirtywork.svg)](https://pypi.org/project/dirtywork/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/JimboSchneider/dirtywork/blob/main/LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://github.com/JimboSchneider/dirtywork/blob/main/pyproject.toml)
+
+*Frontier models do the thinking. Local models do the dirty work.*
 
 Runs one coding task against a local LM Studio model in an agentic tool-use
 loop, inside an isolated git worktree. Built to be driven by an orchestrating
@@ -14,8 +16,8 @@ and reviews, the free local model grinds. Humans watch with `tail -f`.
 
 | | Role |
 |---|---|
-| Orchestrator (a frontier model, e.g. Claude Code — or you) | Picks the task, invokes `localagent`, reviews the worktree diff and transcript, commits/PRs what survives review |
-| Worker (local model, via localagent) | Explores the repo, edits files, runs builds/tests — inside a worktree it cannot escape |
+| Orchestrator (a frontier model, e.g. Claude Code — or you) | Picks the task, invokes `dirtywork`, reviews the worktree diff and transcript, commits/PRs what survives review |
+| Worker (local model, via dirtywork) | Explores the repo, edits files, runs builds/tests — inside a worktree it cannot escape |
 
 Nothing the local model does touches your main checkout, and nothing it
 produces merges without review. Parallelism comes from launching multiple
@@ -39,40 +41,37 @@ welcome.
 
 **pipx (PyPI):**
 
-    pipx install dirtsimple-agent
-
-(The distribution name is `dirtsimple-agent`; the
-installed command is still `localagent`.)
+    pipx install dirtywork
 
 **pipx (straight from GitHub):**
 
-    pipx install git+https://github.com/JimboSchneider/localagent
+    pipx install git+https://github.com/JimboSchneider/dirtywork
 
 **From source:**
 
-    git clone https://github.com/JimboSchneider/localagent
-    cd localagent
-    chmod +x bin/localagent
-    ln -sf "$PWD/bin/localagent" ~/.local/bin/localagent
+    git clone https://github.com/JimboSchneider/dirtywork
+    cd dirtywork
+    chmod +x bin/dirtywork
+    ln -sf "$PWD/bin/dirtywork" ~/.local/bin/dirtywork
 
 The launcher is self-locating, so this works from any clone location.
 
 ## Use
 
-    localagent run --repo ~/repos/someproject "Add a unit test for X"
+    dirtywork run --repo ~/repos/someproject "Add a unit test for X"
 
 - **Watch a run:** `tail -f` the transcript path printed on stderr.
 - **Review a run:** `git -C <worktree> diff`, read the transcript, run the
   repo's tests — then commit the branch or discard it.
 - **Discard a run:**
-  `git -C <repo> worktree remove --force <worktree> && git -C <repo> branch -D localagent/<slug>`
+  `git -C <repo> worktree remove --force <worktree> && git -C <repo> branch -D dirtywork/<slug>`
 
 ## How a run works
 
 1. **Preflight** — LM Studio reachable, model loaded, repo valid. Any
    failure exits 2 with nothing created.
-2. **Worktree** — a fresh worktree at `<repo>/.worktrees/la-<slug>` on new
-   branch `localagent/<slug>`, branched from `--branch-from` (default:
+2. **Worktree** — a fresh worktree at `<repo>/.worktrees/dw-<slug>` on new
+   branch `dirtywork/<slug>`, branched from `--branch-from` (default:
    repo HEAD). `.worktrees/` is added to the repo's local
    `.git/info/exclude` automatically. If the repo has a `CLAUDE.md` or
    `AGENTS.md` at its root, its content is injected into the worker's
@@ -83,7 +82,7 @@ The launcher is self-locating, so this works from any clone location.
    model (oldest tool results get trimmed first); three consecutive
    malformed tool calls abort the run.
 4. **No auto-commit** — changes stay uncommitted in the worktree; the
-   transcript lands at `~/.localagent/runs/<slug>/transcript.jsonl`
+   transcript lands at `~/.dirtywork/runs/<slug>/transcript.jsonl`
    (outside the worktree, so it can never pollute the diff).
 
 ## Safety model
@@ -118,13 +117,15 @@ Design docs: `docs/superpowers/specs/2026-08-13-localagent-design.md`
 
 ## The story
 
-localagent was designed, built, reviewed, and shipped in one day — by the
+dirtywork was designed, built, reviewed, and shipped in one day — by the
 exact orchestrator/worker pattern it implements — and its first production
 run surfaced a real cent-level rounding bug in the invoicing app it was
 pointed at. The full postmortem, including a build-one-yourself recipe:
-[the postmortem](https://github.com/JimboSchneider/localagent/blob/main/docs/2026-08-14-building-localagent.md)
-(or read [the designed HTML edition](https://jimboschneider.github.io/localagent/building-localagent.html)
+[the postmortem](https://github.com/JimboSchneider/dirtywork/blob/main/docs/2026-08-14-building-localagent.md)
+(or read [the designed HTML edition](https://dirtywork.run/building-localagent.html)
 served via Pages).
+
+In August 2026 the project was renamed **dirtywork** — same tool, a name that says what it does.
 
 ## Troubleshooting
 
@@ -140,13 +141,13 @@ served via Pages).
 
 ## Machine contract
 
-`localagent` is built to be driven by another agent (Claude Code) rather than
+`dirtywork` is built to be driven by another agent (Claude Code) rather than
 read by a human — the primary consumer parses stdout, not the terminal.
 
 **Flags:**
 
 ```
-localagent run --repo <path> "<task>"
+dirtywork run --repo <path> "<task>"
     [--model qwen/qwen3-coder-next]   # or mistralai/devstral-small-2-2512
     [--branch-from <ref>]             # default: repo HEAD
     [--max-turns 40]
@@ -161,8 +162,8 @@ printed to stdout (nothing else goes to stdout):
 ```json
 {
   "status": "completed",
-  "worktree": "/path/to/repo/.worktrees/la-<slug>",
-  "branch": "localagent/<slug>",
+  "worktree": "/path/to/repo/.worktrees/dw-<slug>",
+  "branch": "dirtywork/<slug>",
   "transcript": "/path/to/transcript.jsonl",
   "turns": 7,
   "usage": {"prompt_tokens": 0, "completion_tokens": 0},
@@ -214,4 +215,4 @@ Issues and PRs welcome. Ground rules:
 
 ## License
 
-[MIT](https://github.com/JimboSchneider/localagent/blob/main/LICENSE) © 2026 Dirt Simple Solutions, LLC
+[MIT](https://github.com/JimboSchneider/dirtywork/blob/main/LICENSE) © 2026 Dirt Simple Solutions, LLC

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from localagent.transcript import Transcript
+from dirtywork.transcript import Transcript
 
 
 def test_writes_jsonl_events_with_ts(tmp_path: Path):

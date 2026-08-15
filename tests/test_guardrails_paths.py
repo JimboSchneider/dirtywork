@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from localagent.guardrails import GuardrailError, resolve_in_worktree
+from dirtywork.guardrails import GuardrailError, resolve_in_worktree
 
 
 @pytest.fixture()

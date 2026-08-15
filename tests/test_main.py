@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from localagent.__main__ import build_system_prompt, main
+from dirtywork.__main__ import build_system_prompt, main
 
 
 def test_build_system_prompt_includes_rules_and_context(tmp_path: Path):
@@ -45,7 +45,7 @@ def test_transcript_closed_even_on_unexpected_error(tmp_path, monkeypatch, capsy
     # even on an exception the runner doesn't itself convert to a status (e.g. a
     # bare RuntimeError escaping runner.run). No traceback, no missing run_end.
     import subprocess
-    import localagent.__main__ as m
+    import dirtywork.__main__ as m
     repo = tmp_path / "r"
     repo.mkdir()
     subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
@@ -83,7 +83,7 @@ def test_transcript_construction_failure_still_prints_json(tmp_path, monkeypatch
     # constructing Transcript itself (e.g. disk unavailable) must still produce
     # the documented stdout JSON instead of a traceback.
     import subprocess
-    import localagent.__main__ as m
+    import dirtywork.__main__ as m
     repo = tmp_path / "r"
     repo.mkdir()
     subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
@@ -109,8 +109,8 @@ def test_transcript_construction_failure_still_prints_json(tmp_path, monkeypatch
 
 def test_load_repo_context_uses_worktree_not_caller_checkout(tmp_path, monkeypatch):
     import subprocess
-    import localagent.__main__ as m
-    from localagent.runner import RunResult
+    import dirtywork.__main__ as m
+    from dirtywork.runner import RunResult
     repo = tmp_path / "r"
     repo.mkdir()
     subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
@@ -145,8 +145,8 @@ def test_load_repo_context_uses_worktree_not_caller_checkout(tmp_path, monkeypat
 
 def test_llm_error_during_run_prints_model_error_json(tmp_path, monkeypatch, capsys):
     import subprocess
-    import localagent.__main__ as m
-    from localagent.llm import LLMError
+    import dirtywork.__main__ as m
+    from dirtywork.llm import LLMError
     repo = tmp_path / "r"
     repo.mkdir()
     subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
