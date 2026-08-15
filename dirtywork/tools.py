@@ -136,7 +136,7 @@ def bash(worktree: Path, command: str, timeout: int = 120) -> str:
         res = subprocess.run(
             ["bash", "-c", command],
             cwd=str(worktree),
-            env=build_env(),
+            env=build_env(home=worktree),
             capture_output=True,
             text=True,
             timeout=timeout,
