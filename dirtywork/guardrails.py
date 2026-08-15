@@ -53,10 +53,11 @@ _DENYLIST: list[tuple[str, str]] = [
     # Read-only forms (config --get/--list, remote -v, worktree list, bare reflog)
     # are intentionally NOT matched.
     ("git command that writes the parent repo's shared refs/config is not allowed",
-     # config: block writes (--unset/--edit/etc. and `key value` sets); read
-     # forms (--get/--list, or a lone `key`) fall through and are allowed.
-     r"\bgit\s+config\s+(--(unset|unset-all|edit|replace-all|add|remove-section|rename-section)\b"
-     r"|[^-\s]\S*\s+\S)"
+     # config: allowlist the read forms (--get*/--list/-l) and block everything
+     # else. Enumerating write flags is whack-a-mole (--local/--global/--system/
+     # --file/--unset/… all write shared config from a linked worktree), so we
+     # invert it: block `git config` unless a read flag precedes the next separator.
+     r"\bgit\s+config\b(?![^;|&]*\s(?:--get\S*|--list|-l)\b)"
      r"|\bgit\s+remote\s+(add|set-url|remove|rm|rename)\b"
      r"|\bgit\s+(update-ref|gc|filter-branch)\b"
      r"|\bgit\s+reflog\s+(expire|delete)\b"

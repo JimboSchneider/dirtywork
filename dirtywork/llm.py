@@ -13,6 +13,13 @@ import urllib.request
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 
 
+def _underlying_socket(resp):
+    """Best-effort access to a urlopen response's raw socket (CPython) so its
+    timeout can be tightened per read; None if the internals differ."""
+    raw = getattr(getattr(resp, "fp", None), "raw", None)
+    return getattr(raw, "_sock", None)
+
+
 class LLMError(Exception):
     """Raised when the LM Studio server is unreachable or returns garbage."""
 
@@ -38,23 +45,33 @@ class LMStudioClient:
             raise LLMError(f"invalid request for LM Studio at {self.base_url!r}: {e}")
         effective_timeout = timeout if timeout is not None else self.timeout
         deadline = time.monotonic() + effective_timeout
+        resp = None
         try:
-            with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
-                body = bytearray()
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    body.extend(chunk)
-                    if len(body) > MAX_RESPONSE_BYTES:
-                        raise LLMError(
-                            f"response from {path} exceeds {MAX_RESPONSE_BYTES} bytes"
-                        )
-                    if time.monotonic() > deadline:
-                        raise LLMTimeout(
-                            f"reading response from {path} exceeded {effective_timeout}s"
-                        )
-                body = bytes(body)
+            resp = urllib.request.urlopen(req, timeout=effective_timeout)
+            # urllib's timeout is per-socket-op and resp.read() refills across many
+            # recvs, so a drip-fed body could outlast the deadline. Read one recv at
+            # a time (read1 returns available bytes) with the socket timeout tightened
+            # to the REMAINING wall-clock budget before each read — a hard bound.
+            sock = _underlying_socket(resp)
+            body = bytearray()
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise LLMTimeout(f"request to {path} exceeded {effective_timeout}s")
+                if sock is not None:
+                    sock.settimeout(remaining)
+                try:
+                    chunk = resp.read1(65536)
+                except socket.timeout:
+                    raise LLMTimeout(f"request to {path} exceeded {effective_timeout}s")
+                if not chunk:
+                    break
+                body.extend(chunk)
+                if len(body) > MAX_RESPONSE_BYTES:
+                    raise LLMError(
+                        f"response from {path} exceeds {MAX_RESPONSE_BYTES} bytes"
+                    )
+            body = bytes(body)
         except urllib.error.HTTPError as e:
             try:
                 detail = e.read()[:500]
@@ -65,6 +82,12 @@ class LMStudioClient:
             if isinstance(e, socket.timeout) or isinstance(getattr(e, "reason", None), socket.timeout):
                 raise LLMTimeout(f"request to {path} timed out after {effective_timeout}s")
             raise LLMError(f"cannot reach LM Studio at {self.base_url}: {e}")
+        finally:
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
         try:
             return json.loads(body.decode())
         except (json.JSONDecodeError, UnicodeDecodeError) as e:

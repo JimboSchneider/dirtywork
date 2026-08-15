@@ -190,7 +190,7 @@ def test_drip_feed_response_hits_wallclock_deadline(drip_server: str):
     start = time.monotonic()
     with pytest.raises(LLMTimeout):
         client.chat("m1", [{"role": "user", "content": "x"}], tools=[])
-    assert time.monotonic() - start < 3.0  # aborted near the 0.5s deadline, not after the full drip
+    assert time.monotonic() - start < 2.0  # hard deadline ~0.5s, not the full ~2s drip (CI regression was 4.47s)
 
 
 def test_oversized_response_raises_llmerror(server: str, monkeypatch):

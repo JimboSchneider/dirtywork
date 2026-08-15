@@ -39,6 +39,10 @@ BLOCKED = [
     "git remote rm origin",              # rm is a git alias for remove
     "git config --unset core.hooksPath", # long-flag write
     "git config core.editor vim",        # key value (a set)
+    "git config --local core.hooksPath /tmp/evil",   # --local still writes shared config
+    "git config --global user.name evil",
+    "git config --system x y",
+    "git config --file cfg core.hooksPath /x",
     "git branch -D main",
     "git branch --delete main",          # long-flag delete
     "git tag -d v1.0",
@@ -68,9 +72,9 @@ ALLOWED = [
     "git status && git diff",         # read-only git is fine
     "git add . && git commit -m wip", # commit is discouraged by prompt, not denied here
     "cd sub && cat ../README.md",     # .. that stays inside the worktree
-    "git config --get user.name",     # read-only git config
-    "git config user.name",           # single-arg read (no value)
+    "git config --get user.name",     # read-only git config (allowlisted)
     "git config --list",
+    "git config --local --get core.editor",  # read even with --local
     "git remote -v",                  # read-only remote
     "git worktree list",
     "git reflog",                     # viewing history is fine; expire/delete blocked
