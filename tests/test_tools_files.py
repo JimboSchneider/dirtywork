@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from localagent import tools
+from dirtywork import tools
 
 
 @pytest.fixture()

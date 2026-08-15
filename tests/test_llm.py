@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from localagent.llm import LLMError, LLMTimeout, LMStudioClient
+from dirtywork.llm import LLMError, LLMTimeout, LMStudioClient
 
 
 class _FakeLMStudio(BaseHTTPRequestHandler):

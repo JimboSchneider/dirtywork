@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from localagent.llm import LLMTimeout
-from localagent.runner import (
+from dirtywork.llm import LLMTimeout
+from dirtywork.runner import (
     DEFAULT_WINDOW,
     TRIM_MARKER,
     RunResult,
@@ -15,8 +15,8 @@ from localagent.runner import (
     _valid_tool_call,
     trim_messages,
 )
-from localagent.tools import ToolExecutor
-from localagent.transcript import Transcript
+from dirtywork.tools import ToolExecutor
+from dirtywork.transcript import Transcript
 
 
 def _resp(content=None, tool_calls=None, usage=None):

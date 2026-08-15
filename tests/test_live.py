@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from localagent.llm import LLMError, LMStudioClient
+from dirtywork.llm import LLMError, LMStudioClient
 
 QWEN = "qwen/qwen3-coder-next"
 DEVSTRAL = "mistralai/devstral-small-2-2512"
@@ -58,7 +58,7 @@ def test_end_to_end_run(tmp_path: Path):
                    check=True, capture_output=True)
 
     res = subprocess.run(
-        ["localagent", "run", "--repo", str(repo), "--max-turns", "10",
+        ["dirtywork", "run", "--repo", str(repo), "--max-turns", "10",
          "Create a file named hello.txt containing exactly the word: hello"],
         capture_output=True, text=True, timeout=600)
     assert res.returncode == 0, res.stderr

@@ -19,7 +19,7 @@ from .workspace import (
     preflight_repo,
 )
 
-RUNS_DIR = Path.home() / ".localagent" / "runs"
+RUNS_DIR = Path.home() / ".dirtywork" / "runs"
 DEFAULT_MODEL = "qwen/qwen3-coder-next"
 
 
@@ -44,7 +44,7 @@ def _err(msg: str) -> None:
 
 
 def main(argv: list | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="localagent")
+    parser = argparse.ArgumentParser(prog="dirtywork")
     sub = parser.add_subparsers(dest="cmd", required=True)
     run_p = sub.add_parser("run", help="run one task in an isolated worktree")
     run_p.add_argument("task")
@@ -114,7 +114,7 @@ def main(argv: list | None = None) -> int:
         print(json.dumps({
             "status": "model_error",
             "worktree": str(worktree),
-            "branch": f"localagent/{slug}",
+            "branch": f"dirtywork/{slug}",
             "transcript": str(transcript_path),
             "turns": None,
             "usage": {},
@@ -131,7 +131,7 @@ def main(argv: list | None = None) -> int:
     print(json.dumps({
         "status": result.status,
         "worktree": str(worktree),
-        "branch": f"localagent/{slug}",
+        "branch": f"dirtywork/{slug}",
         "transcript": str(transcript_path),
         "turns": result.turns,
         "usage": result.usage,
