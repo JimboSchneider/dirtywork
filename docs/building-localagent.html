@@ -4,6 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Building localagent</title>
+<meta name="description" content="How a frontier model designed, built, and shipped a harness that delegates coding work to free local LLMs — and how the first run found a real money bug.">
+<link rel="canonical" href="https://dirtywork.run/building-localagent.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Building localagent">
+<meta property="og:description" content="How a frontier model designed, built, and shipped a harness that delegates coding work to free local LLMs — and how the first run found a real money bug.">
+<meta property="og:url" content="https://dirtywork.run/building-localagent.html">
+<meta property="og:image" content="https://dirtywork.run/og-card.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Building localagent">
+<meta name="twitter:description" content="How a frontier model designed, built, and shipped a harness that delegates coding work to free local LLMs — and how the first run found a real money bug.">
+<meta name="twitter:image" content="https://dirtywork.run/og-card.png">
 <style>
   :root {
     --bg: #F7F8F6;
@@ -11,7 +22,7 @@
     --bg-inset: #EEF1ED;
     --ink: #1B221D;
     --ink-soft: #4A544D;
-    --ink-faint: #75817A;
+    --ink-faint: #657069;
     --line: #D9DFDA;
     --local: #0E7A4E;
     --local-soft: #E2F0E8;
@@ -29,7 +40,7 @@
       --bg-inset: #1C231C;
       --ink: #E4EAE4;
       --ink-soft: #A7B2A8;
-      --ink-faint: #79857B;
+      --ink-faint: #828E84;
       --line: #2A322A;
       --local: #4EC58C;
       --local-soft: #17251D;
@@ -47,7 +58,7 @@
     --bg-inset: #1C231C;
     --ink: #E4EAE4;
     --ink-soft: #A7B2A8;
-    --ink-faint: #79857B;
+    --ink-faint: #828E84;
     --line: #2A322A;
     --local: #4EC58C;
     --local-soft: #17251D;
@@ -261,7 +272,7 @@
 <header>
   <p class="eyebrow">Session postmortem · 2026-08-14</p>
   <h1>Building localagent</h1>
-  <p class="standfirst">How a frontier model designed, built, reviewed, and shipped a harness
+  <p class="standfirst">How a frontier model designed, built, and shipped a harness
   that delegates coding work to <strong>free local LLMs</strong> — and how the first
   production run found a real money bug. One day, end to end.</p>
 
@@ -545,6 +556,8 @@ mostly bets on <em>replacing</em> the frontier model instead. New name, same bet
 frontier models do the thinking, local models do the dirty work.</p>
 
 </section>
+
+<p><strong>Next:</strong> <a href="the-tool-renamed-itself.html">The Tool Renamed Itself</a> — the same-evening sequel, in which the tool executes its own rename.</p>
 
 <p class="footnote">Written from the session record, 2026-08-14. Source and design docs:
 <a href="https://github.com/JimboSchneider/localagent">github.com/JimboSchneider/localagent</a>

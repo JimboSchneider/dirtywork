@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Tool Renamed Itself</title>
+<meta name="description" content="dirtywork renamed itself — its local-model worker ran the rename in an isolated worktree, broke its own launcher, and proved the new name in production.">
+<link rel="canonical" href="https://dirtywork.run/the-tool-renamed-itself.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="The Tool Renamed Itself">
+<meta property="og:description" content="dirtywork renamed itself — its local-model worker ran the rename in an isolated worktree, broke its own launcher, and proved the new name in production.">
+<meta property="og:url" content="https://dirtywork.run/the-tool-renamed-itself.html">
+<meta property="og:image" content="https://dirtywork.run/og-card.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="The Tool Renamed Itself">
+<meta name="twitter:description" content="dirtywork renamed itself — its local-model worker ran the rename in an isolated worktree, broke its own launcher, and proved the new name in production.">
+<meta name="twitter:image" content="https://dirtywork.run/og-card.png">
+<style>
+  :root {
+    --bg: #F7F8F6;
+    --bg-raise: #FFFFFF;
+    --bg-inset: #EEF1ED;
+    --ink: #1B221D;
+    --ink-soft: #4A544D;
+    --ink-faint: #657069;
+    --line: #D9DFDA;
+    --local: #0E7A4E;
+    --local-soft: #E2F0E8;
+    --frontier: #A66A1E;
+    --frontier-soft: #F4EBDD;
+    --code-bg: #10150F;
+    --code-ink: #D6E2D6;
+    --code-accent: #7FC79E;
+    --code-dim: #7C8A7D;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111611;
+      --bg-raise: #171D17;
+      --bg-inset: #1C231C;
+      --ink: #E4EAE4;
+      --ink-soft: #A7B2A8;
+      --ink-faint: #828E84;
+      --line: #2A322A;
+      --local: #4EC58C;
+      --local-soft: #17251D;
+      --frontier: #D9A468;
+      --frontier-soft: #272015;
+      --code-bg: #0B0F0B;
+      --code-ink: #CFDCCF;
+      --code-accent: #7FC79E;
+      --code-dim: #6E7B6F;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111611;
+    --bg-raise: #171D17;
+    --bg-inset: #1C231C;
+    --ink: #E4EAE4;
+    --ink-soft: #A7B2A8;
+    --ink-faint: #828E84;
+    --line: #2A322A;
+    --local: #4EC58C;
+    --local-soft: #17251D;
+    --frontier: #D9A468;
+    --frontier-soft: #272015;
+    --code-bg: #0B0F0B;
+    --code-ink: #CFDCCF;
+    --code-accent: #7FC79E;
+    --code-dim: #6E7B6F;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Charter", "Iowan Old Style", Georgia, "Times New Roman", serif;
+    font-size: 1.0625rem;
+    line-height: 1.65;
+  }
+  .wrap { max-width: 44rem; margin: 0 auto; padding: 0 1.25rem 6rem; }
+
+  .display, h1, h2, h3 {
+    font-family: "Avenir Next", "Avenir", "Segoe UI", "Helvetica Neue", sans-serif;
+  }
+  h1, h2, h3 { text-wrap: balance; }
+  .mono, code, pre, .stat-num { font-family: ui-monospace, "SF Mono", "Menlo", "Cascadia Mono", monospace; }
+
+  header { padding: 4.5rem 0 2.5rem; }
+  .eyebrow {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--local);
+    margin: 0 0 1.1rem;
+  }
+  h1 {
+    font-size: clamp(2.2rem, 6vw, 3.1rem);
+    font-weight: 700;
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    margin: 0 0 1.2rem;
+  }
+  .standfirst {
+    font-size: 1.2rem;
+    line-height: 1.55;
+    color: var(--ink-soft);
+    margin: 0 0 2.2rem;
+    max-width: 38rem;
+  }
+  .standfirst strong { color: var(--ink); font-weight: 600; }
+
+  .terminal {
+    background: var(--code-bg);
+    border-radius: 8px;
+    padding: 1.1rem 1.25rem 1.2rem;
+    overflow-x: auto;
+    box-shadow: 0 1px 0 var(--line);
+  }
+  .terminal pre {
+    margin: 0;
+    color: var(--code-ink);
+    font-size: 0.82rem;
+    line-height: 1.6;
+  }
+  .terminal .c { color: var(--code-dim); }
+  .terminal .k { color: var(--code-accent); }
+  .terminal .err { color: #E08A8A; }
+  .term-cap {
+    font-size: 0.8rem;
+    color: var(--ink-faint);
+    margin: 0.6rem 0 0;
+    font-style: italic;
+  }
+
+  section { margin-top: 3.6rem; }
+  .sec-mark {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    border-top: 1px solid var(--line);
+    padding-top: 1.6rem;
+  }
+  .sec-mark .n {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.78rem;
+    color: var(--local);
+    letter-spacing: 0.08em;
+  }
+  h2 { font-size: 1.5rem; font-weight: 600; margin: 0; }
+  p { margin: 1rem 0; }
+  a { color: var(--local); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--local); outline-offset: 2px; border-radius: 2px; }
+  ul, ol { padding-left: 1.4rem; margin: 1rem 0; }
+  li { margin: 0.45rem 0; }
+  li::marker { color: var(--ink-faint); }
+  strong { font-weight: 600; }
+  em { font-style: italic; }
+
+  code {
+    background: var(--bg-inset);
+    border-radius: 4px;
+    padding: 0.1em 0.35em;
+    font-size: 0.86em;
+  }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 1.6rem 0;
+  }
+  .stat { background: var(--bg-raise); padding: 0.95rem 1rem 1rem; }
+  .stat-num {
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: var(--local);
+    font-variant-numeric: tabular-nums;
+    display: block;
+  }
+  .stat.amber .stat-num { color: var(--frontier); }
+  .stat-cap { font-size: 0.78rem; color: var(--ink-faint); line-height: 1.35; display: block; margin-top: 0.15rem;
+    font-family: "Avenir Next", "Avenir", "Segoe UI", sans-serif; }
+
+  .footnote {
+    margin-top: 4rem;
+    border-top: 1px solid var(--line);
+    padding-top: 1.3rem;
+    font-size: 0.88rem;
+    color: var(--ink-faint);
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">Session postmortem · 2026-08-14 · part two</p>
+  <h1>The Tool Renamed Itself</h1>
+  <p class="standfirst">A follow-up to <a href="building-localagent.html">Building localagent</a>,
+  written the same evening. The tool in that post no longer exists. It has a
+  <strong>better name</strong> now — and it did a good share of the renaming.</p>
+
+  <div class="terminal">
+<pre><span class="c">$ localagent run --repo ~/repos/localagent "Update the docs for the rename…"</span>
+<span class="err">command not found: localagent</span>   <span class="c"># exit 127 — task one renamed the launcher</span>
+<span class="c">$ bin/dirtywork run --repo ~/repos/localagent "Update the docs for the rename…"</span>
+{
+  <span class="k">"status"</span>: <span class="k">"completed"</span>,
+  "worktree": ".worktrees/<span class="k">dw-</span>this-project-was-just-renamed…",
+  "branch": "<span class="k">dirtywork/</span>this-project-was-just-renamed…"
+}</pre>
+  </div>
+  <p class="term-cap">The rename, validating itself mid-rename.</p>
+</header>
+
+<section>
+  <div class="sec-mark"><span class="n">01</span><h2>The survey</h2></div>
+  <p>Before announcing localagent anywhere, I wanted to know the neighborhood. So the
+  orchestrator did what orchestrators do: fanned out three research agents, each sweeping
+  a different angle — established coding CLIs, worktree-isolation tools, and
+  orchestrator/worker patterns.</p>
+  <p>The findings compressed to four lines:</p>
+  <ol>
+    <li><strong>Local-model support is table stakes.</strong> Every surviving coding agent
+    speaks Ollama or LM&nbsp;Studio. That alone differentiates nothing.</li>
+    <li><strong>Worktree isolation is commoditized.</strong> By mid-2026 nearly every
+    serious tool ships it; Claude Code has it as a first-party feature.</li>
+    <li><strong>Nobody with traction ships the combination</strong> — a local model running
+    a real tool loop in an isolated worktree, leaving a full JSONL transcript that a
+    <em>stronger</em> frontier model audits before anything merges. Aider's
+    architect/editor mode hands work down but never audits it afterward. Qwen Code ships
+    worktrees and a review command — the same model grading its own homework. The dozen
+    tiny MCP servers with the "Claude thinks, your local model grunts" tagline forward
+    single prompts and get text back — no tool loop, no transcript, nothing to audit.</li>
+    <li><strong>The ecosystem's big bet is replacement.</strong> Ollama and LM&nbsp;Studio
+    both shipped Anthropic-compatible endpoints in January 2026 so that Claude Code can
+    run entirely on local models. Swap the frontier model out; keep the workflow.</li>
+  </ol>
+  <p>Our bet is the inverse of point four. Keep the frontier model — but only where
+  judgment lives, as planner and auditor. Hand everything else to the models already
+  running for free on the Mac in the corner.</p>
+  <p>Did "localagent" say any of that? It did not. It was a repo called
+  <code>localagent</code>, a command called <code>localagent</code>, and a PyPI dist
+  called <code>dirtsimple-agent</code> — every obvious dist name had tripped PyPI's
+  similarity filter — two names spread across three places, none of them saying anything
+  at all.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">02</span><h2>The name</h2></div>
+  <p><strong>dirtywork.</strong> As in: frontier models do the thinking, local models do
+  the dirty work. The whole architecture in one phrase.</p>
+  <p>The domain hunt was brief. <code>dirty.work</code> — taken, confirmed against the
+  registry's RDAP records. <code>dirtywork.com</code> — a premium listing at $57,500,
+  which is a lot for a tool whose entire pitch is not paying for things.
+  <code>dirtywork.run</code> — available, $6.99 for the first year. Bought for three
+  years on the spot.</p>
+  <p>And the domain is an imperative. <em>dirtywork, run.</em> It's also literally the
+  command.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">03</span><h2>The rename renames itself</h2></div>
+  <p>A rename touches everything — package, CLI, launcher, tests, packaging metadata,
+  README, blog, DNS, PyPI trusted publishing. So it got the same treatment any feature
+  gets here: a spec, an eleven-task implementation plan, and subagent-driven execution
+  with a reviewer gating every task and a held PR at the end.</p>
+  <p>Two of those eleven tasks were the mechanical heart of the job: rename the Python
+  package (imports, branch prefixes, test assertions, launcher) and sweep the docs.
+  Bounded, well-specified, verifiable — exactly the shape of task the tool exists for,
+  and exactly the shape of task I'd normally delegate to it against someone else's repo.
+  So the tool got assigned its own rename. A qwen3-coder worker, in an isolated worktree,
+  renaming the harness it was running inside of.</p>
+  <p>Task one went cleanly, and in the right order: the worker updated the test
+  expectations first, ran the suite to watch it fail with
+  <code>ModuleNotFoundError: No module named 'dirtywork'</code> — red for the right
+  reason — then renamed the package and brought all 133 tests back to green. 24 turns.
+  The task review approved it with nothing to fix.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">04</span><h2>Exit 127</h2></div>
+  <p>Then task three — the docs sweep — refused to start. Exit code 127:
+  <code>command not found</code>.</p>
+  <p>The <code>localagent</code> command on my PATH was a symlink to
+  <code>bin/localagent</code> in the repo. Task one had just renamed that file to
+  <code>bin/dirtywork</code>. The launcher I was using to launch the rename had been
+  renamed out from under me by the rename. The first casualty of the rename was the
+  renamer.</p>
+  <p>One relaunch through the new launcher later, the worker ran fine. And the run's own
+  receipt is the part I'd frame: it came back reporting a worktree at
+  <code>.worktrees/dw-…</code>, on a branch named <code>dirtywork/…</code>, with its
+  transcript under <code>~/.dirtywork/runs/</code>. Every one of those names was minutes
+  old. Task one hadn't even merged — the worker was running inside the renamed harness on
+  its own feature branch, which means the rename was validated in production <em>by the
+  rename itself</em>, before its own pull request existed.</p>
+  <p>That run: 47 turns, about 1.1 million prompt tokens, $0 in API fees.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">05</span><h2>What review caught</h2></div>
+  <p>Here's what didn't go clean.</p>
+  <p>The worker missed one plan line item — a couple of README examples still showed the
+  old worktree prefix. Half of that is on the orchestrator: the line existed in the plan
+  and didn't survive into the worker's prompt. Specs don't delegate themselves.</p>
+  <p>More interesting: the worker <em>added</em> things. Twice, in one docs task, it
+  invented decorative HTML nobody asked for — a styled stats box here, an extra flourish
+  there. Reviewers caught both. That's the sharpened lesson of the day: when you audit a
+  local worker's diff, you're not just looking for what's missing. You're looking for
+  what's extra.</p>
+  <p>And the final whole-branch review caught a defect that wasn't the worker's at all:
+  the module's <code>__version__</code> still said 0.1.0 because the <em>plan</em> never
+  listed that file. The review gate doesn't just catch the cheap model. It catches the
+  orchestrator writing the plan. That's the point of gates.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">06</span><h2>The scoreboard</h2></div>
+  <p>A rename is the purest kind of release: zero functional changes intended, which
+  means any behavior difference at all is a bug. That makes it a clean test of the whole
+  harness — and the harness passed it on itself.</p>
+
+  <div class="stats">
+    <div class="stat"><span class="stat-num">24</span><span class="stat-cap">turns, package rename (task one)</span></div>
+    <div class="stat"><span class="stat-num">47</span><span class="stat-cap">turns, docs sweep (task three)</span></div>
+    <div class="stat"><span class="stat-num">133</span><span class="stat-cap">tests green at every gate</span></div>
+    <div class="stat"><span class="stat-num">$0</span><span class="stat-cap">API fees for the workers</span></div>
+    <div class="stat amber"><span class="stat-num">~90 min</span><span class="stat-cap">name decision → on PyPI</span></div>
+  </div>
+
+  <ul>
+    <li>Competitive survey → name → domain bought: about half an hour</li>
+    <li>Spec, an eleven-task plan, and a six-commit PR (two commits carrying the tool's
+    own work), one worker fix round, one final-review fix</li>
+    <li>Repo renamed (old URLs redirect), DNS live with the Pages IPs checked against
+    GitHub's own docs, TLS issued, HTTPS enforced</li>
+    <li><code>dirtywork 0.2.0</code> on PyPI: <code>pipx install dirtywork</code></li>
+  </ul>
+
+  <p>The first post ended by saying the pattern needed more reps before I'd call it
+  proven. It got its reps the same evening, on itself: same worktrees, same transcripts,
+  same review gate — pointed inward. The tool that delegates dirty work spent the night
+  doing its own, exactly as drawn.</p>
+  <p><strong>Frontier models do the thinking. Local models do the dirty work.</strong>
+  Now the name says so.</p>
+</section>
+
+<p class="footnote">Written from the session record, later the same evening as
+<a href="building-localagent.html">part one</a>. Source:
+<a href="https://github.com/JimboSchneider/dirtywork">github.com/JimboSchneider/dirtywork</a> ·
+install: <span class="mono">pipx install dirtywork</span> ·
+<a href="https://dirtywork.run">dirtywork.run</a></p>
+</div>
+
+</body>
+</html>
