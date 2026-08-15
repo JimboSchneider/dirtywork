@@ -212,8 +212,8 @@ def _param(props: dict, required: list) -> dict:
 TOOL_SCHEMAS = [
     {"type": "function", "function": {
         "name": "read_file",
-        "description": "Read a file, returning numbered lines. Large files are "
-                       "windowed; use offset/limit to page through.",
+        "description": "Read a file, returning numbered lines. Use offset/limit to "
+                       "page through; files over ~5 MB or non-regular files are refused.",
         "parameters": _param({
             "path": {"type": "string", "description": "Path relative to worktree root"},
             "offset": {"type": "integer", "description": "0-based first line, default 0"},
