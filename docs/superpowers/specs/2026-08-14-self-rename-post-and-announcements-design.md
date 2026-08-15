@@ -7,8 +7,16 @@
 
 1. **Blog post** — `docs/2026-08-14-the-tool-renamed-itself.md` (source of truth) +
    `docs/the-tool-renamed-itself.html` (designed edition, same design language as
-   `building-localagent.html`) + `docs/index.html` upgraded from a redirect to a
-   minimal two-post list (newest first). Ships via a **held PR** on this repo.
+   `building-localagent.html`). Ships via a **held PR** on this repo.
+1a. **Landing page** — `docs/index.html` becomes a real front door for dirtywork.run
+   (replacing the redirect): hero (name, tagline, `pipx install dirtywork`), the flip
+   thesis in ~3 sentences, a terminal-styled "how a run works" 3-beat (delegate →
+   isolated `dw-` worktree + JSONL transcript → orchestrator audits transcript + diff,
+   only reviewed work merges), an honest 0.2-beta strip (works-on-my-setup: LM Studio +
+   qwen3-coder / devstral verified), footer with GitHub / PyPI / Writing (both posts,
+   newest first) / Dirt Simple Solutions credit. One static self-contained HTML file,
+   same design tokens as the blog pages, responsive, no JS framework, no analytics.
+   Blog posts keep their existing URLs. Same held PR.
 2. **r/LocalLLaMA post** — text file, delivered for Jimbo to paste. Not committed.
 3. **Show HN blurb** — title + two-paragraph text, delivered for Jimbo to paste. Not committed.
 4. **DSS LinkedIn kit** — company-page fields (name, tagline, ~2000-char About) plus the
@@ -71,8 +79,9 @@
 
 ## Success criteria
 
-- Held PR with the two blog files + index list; HTML valid, both themes legible, no
-  regression to post #1's page.
+- Held PR with the two blog files + the landing page; HTML valid and responsive, no
+  regression to post #1's page; landing page passes the five-second test (a stranger
+  knows what dirtywork is and how to install it without scrolling).
 - Three announcement texts delivered and voice-consistent; every factual claim traceable
   to the fact ledger above.
 - Jimbo reads the blog post and recognizes his own register — the "would I have written
