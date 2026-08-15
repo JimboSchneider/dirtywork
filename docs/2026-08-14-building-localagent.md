@@ -266,3 +266,13 @@ Also since publishing: the project is MIT-licensed, CI-gated on three
 platform/Python legs, and pip-installable — `pipx install dirtsimple-agent`
 (every obvious name was taken or tripped PyPI's similarity filter; the command
 installed is still `localagent`).
+
+---
+
+**Addendum (August 14, 2026, later still):** localagent is now **dirtywork**
+([github.com/JimboSchneider/dirtywork](https://github.com/JimboSchneider/dirtywork),
+`pipx install dirtywork`, [dirtywork.run](https://dirtywork.run)). A competitive
+survey found the pattern this post describes — a frontier model orchestrating
+and auditing cheap local workers — is a lane nobody's driving in; the ecosystem
+mostly bets on *replacing* the frontier model instead. New name, same bet:
+frontier models do the thinking, local models do the dirty work.
