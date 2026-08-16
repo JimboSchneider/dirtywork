@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .llm import LLMError, LMStudioClient
+from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir
 from .runner import Runner
 from .tools import ToolExecutor
 from .transcript import Transcript
@@ -20,7 +21,6 @@ from .workspace import (
     worktree_base_commit,
 )
 
-RUNS_DIR = Path.home() / ".dirtywork" / "runs"
 DEFAULT_MODEL = "qwen/qwen3-coder-next"
 
 
@@ -85,7 +85,16 @@ def main(argv: list | None = None) -> int:
         _err(str(e))
         return 2
 
-    transcript_path = RUNS_DIR / slug / "transcript.jsonl"
+    # ---- run directory (exit 2: the worktree exists but no transcript/run
+    # bookkeeping has started yet, so this is still a preflight-style failure) ----
+    try:
+        runs_dir = ensure_runs_dir(RUNS_DIR)
+        run_dir = create_run_dir(runs_dir, slug)
+    except RunDirError as e:
+        _err(str(e))
+        return 2
+
+    transcript_path = run_dir / "transcript.jsonl"
     print(f"transcript: {transcript_path}", file=sys.stderr)
     print(f"worktree:   {worktree}", file=sys.stderr)
 
