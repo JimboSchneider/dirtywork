@@ -271,33 +271,21 @@ def test_rejects_duplicate_member_paths_and_cleans_up(empty_worktree):
 
 
 def test_rejects_trailing_pax_global_header(empty_worktree):
-    # Build a tar with one regular member, then add a PAX global header after
+    # A PAX global header with no member after it: CPython's tarfile itself
+    # refuses it (SubsequentHeaderError -> ReadError); the validator must
+    # surface that as ExportError and leave only .git behind.
     buf = io.BytesIO()
-    # First write a normal file using PAX format (so we have members)
     with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar:
         info = tarfile.TarInfo("normal.txt")
         data = b"hello"
         info.size = len(data)
         tar.addfile(info, io.BytesIO(data))
-    # Now append a global header by opening again in append mode with pax_headers
-    buf.seek(0)
-    temp_buf = io.BytesIO(buf.read())
-    buf.seek(0)
-    buf.truncate()
-    with tarfile.open(fileobj=temp_buf, mode="r") as tar_in:
-        with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar_out:
-            for member in tar_in:
-                if member.isreg():
-                    tar_out.addfile(member, tar_in.extractfile(member))
-                else:
-                    tar_out.addfile(member)
-    # Now add a global header by opening in append mode with pax_headers
-    buf.seek(0, 2)  # end
-    with tarfile.open(fileobj=buf, mode="a", pax_headers={"comment": "hostile"}) as tar:
-        pass  # Just open to write a global header at end
-    buf.seek(0)
-    with pytest.raises(ExportError, match="PAX global header"):
-        extract_validated(buf, empty_worktree, max_files=100, max_bytes=1_000_000)
-    remaining = list(empty_worktree.iterdir())
-    assert len(remaining) == 1
-    assert remaining[0].name == ".git"
+    body = buf.getvalue()[:-1024]  # drop the two end-of-archive zero blocks
+    gbuf = io.BytesIO()
+    with tarfile.open(fileobj=gbuf, mode="w", format=tarfile.PAX_FORMAT,
+                      pax_headers={"comment": "hostile"}) as tar:
+        pass  # writes just the global header + end-of-archive blocks
+    stream = io.BytesIO(body + gbuf.getvalue())
+    with pytest.raises(ExportError):
+        extract_validated(stream, empty_worktree, max_files=100, max_bytes=10_000)
+    assert [p.name for p in empty_worktree.iterdir()] == [".git"]
