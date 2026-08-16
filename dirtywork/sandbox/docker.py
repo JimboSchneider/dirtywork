@@ -7,6 +7,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from ..budget import BudgetExceeded
 from ..guardrails import check_bash_command
 from ..procs import Captured, run_capped
 from ..tools import MAX_BASH_CHARS, MAX_LIST_ENTRIES, MAX_READ_BYTES, MAX_WRITE_BYTES, _cap, _number_lines
@@ -14,6 +15,7 @@ from . import SandboxError
 from . import docker_args
 from . import docker_cli
 from ..workspace import WorkspaceError
+from .watchdog import Watchdog
 
 # Fixed exec timeouts for tools with no user-facing timeout knob — these
 # operations should complete near-instantly; a hang means the sandbox
@@ -73,6 +75,7 @@ class DockerSandbox:
         self._worktree = None
         self._base_commit = None
         self._stopped = False
+        self.watchdog = None
 
     def start(self, worktree: Path, repo: Path, slug: str, base_commit: str) -> None:
         self._worktree = worktree
@@ -129,6 +132,18 @@ class DockerSandbox:
         self._start_tether()
         self._wait_ready()
         self._init(restart=False)
+        self.watchdog = Watchdog(
+            kill=self._watchdog_kill,
+            sample=self._sample_worktree,
+            storage_paths=docker_cli.docker_storage_paths(run=self._run),
+            min_free_mb=self.cfg.min_free_mb,
+            max_worktree_mb=self.cfg.max_worktree_mb,
+            max_worktree_files=self.cfg.max_worktree_files,
+        )
+        # Constructed, not started: the background thread does real
+        # time.sleep/shutil.disk_usage work with no injectable clock in
+        # production use. dirtywork/__main__.py starts it explicitly right
+        # after a real sandbox.start() succeeds (Task 12).
 
     def _start_tether(self) -> None:
         self._tether = self._popen(
@@ -184,6 +199,10 @@ class DockerSandbox:
         if self._stopped:
             return
         self._stopped = True
+        if self.watchdog is not None:
+            self.watchdog.stop()
+            if self.watchdog.is_alive():
+                self.watchdog.join(timeout=docker_cli.T_LIFECYCLE)
         if self.container is not None:
             try:
                 self._run(["rm", "-f", self.container], timeout=docker_cli.T_LIFECYCLE)
@@ -448,8 +467,46 @@ class DockerSandbox:
         if oom.returncode == 0 and oom.output.decode("utf-8", errors="replace").strip() == "true":
             self.reset("oom")
 
+    def _watchdog_kill(self, reason: str) -> None:
+        try:
+            self._run(["kill", self.container], timeout=docker_cli.T_LIFECYCLE)
+        except docker_cli.DockerError:
+            pass
+
+    def _sample_worktree(self) -> tuple:
+        """(kbytes, entries) for /work, sampled inside the container. On
+        exec failure, resets once and retries; a second failure raises
+        SandboxError (spec §6: "If the exec itself fails ... → reset, then
+        re-measure; a second failure → sandbox_error")."""
+        for attempt in range(2):
+            argv = docker_args.exec_argv(
+                self.container, ["/bin/sh", "-c", "du -sk /work; find /work | wc -l"]
+            )
+            try:
+                captured = self._run(argv, timeout=docker_cli.T_QUERY)
+            except docker_cli.DockerError:
+                captured = None
+            if captured is not None and captured.returncode == 0:
+                lines = captured.output.decode("utf-8", errors="replace").splitlines()
+                try:
+                    kbytes = int(lines[0].split()[0])
+                    entries = int(lines[-1].strip())
+                except (IndexError, ValueError):
+                    pass
+                else:
+                    return kbytes, entries
+            if attempt == 0:
+                self.reset("budget sample failed")
+        raise SandboxError("worktree budget sample failed twice in a row")
+
     def _after_bash(self) -> None:
         self._reap()
+        if self.watchdog is not None:
+            self.watchdog.check_worktree_budget_once()
+            if self.watchdog.violation is not None:
+                violation = self.watchdog.violation
+                self.watchdog.violation = None
+                raise BudgetExceeded(violation)
 
     def bash(self, command: str, timeout: int = 120) -> str:
         reason = check_bash_command(command)
@@ -460,12 +517,18 @@ class DockerSandbox:
             self.container,
             ["/bin/bash", "-c", 'ulimit -f 524288; exec bash -c "$1"', "_", command],
         )
+        if self.watchdog is not None:
+            self.watchdog.note_bash_start()
         try:
             captured = self._run(argv, timeout=timeout + 10)
         except docker_cli.DockerError:
+            if self.watchdog is not None:
+                self.watchdog.note_bash_end()
             result = _cap(f"ERROR: command timed out after {timeout}s.", cap=MAX_BASH_CHARS)
             self._after_bash()
             return result
+        if self.watchdog is not None:
+            self.watchdog.note_bash_end()
         out = captured.output.decode("utf-8", errors="replace").strip()
         note = " — bash output capped" if captured.truncated else ""
         final_text = f"exit code: {captured.returncode}\n{out}"

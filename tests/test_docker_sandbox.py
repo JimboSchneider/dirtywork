@@ -49,6 +49,9 @@ class FakePopen:
 
 _TOP_HEADER = b"UID  PID  PPID  C  STIME  TTY  TIME  CMD\n"
 
+_SAMPLE_ARGV = ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
+                "du -sk /work; find /work | wc -l"]
+
 
 class FakeDocker:
     """Scriptable stand-in for docker_cli.run and subprocess.Popen, shared by
@@ -162,6 +165,7 @@ def _fake_repo(tmp_path: Path) -> Path:
 @pytest.fixture()
 def started(docker, tmp_path: Path):
     sb, fake, run_dir = docker
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))  # 1 MB, 5 files: safely under caps
     repo = _fake_repo(tmp_path)
     worktree = tmp_path / "wt"
     worktree.mkdir()
@@ -182,6 +186,7 @@ def started_with_transcript(tmp_path: Path):
     fake.script(["run"], _ok())
     fake.script(["create"], _ok())
     fake.script(["exec"], _ok())
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
     cfg = DockerConfig()
     run_dir = tmp_path / "rundir"
     run_dir.mkdir()
@@ -699,7 +704,9 @@ def test_reset_uses_restart_variant_init(started_with_transcript):
 
     sb.bash("echo ok")
 
-    init_calls = [c for c in fake.calls if c[0][0] == "exec" and "/bin/sh" in c[0]]
+    # Filter out worktree sample execs (which also use /bin/sh)
+    init_calls = [c for c in fake.calls if c[0][0] == "exec" and "/bin/sh" in c[0]
+                  and not any("du -sk /work" in str(arg) for arg in c[0])]
     assert init_calls
     last_init_script = init_calls[-1][0][-1]
     assert "git read-tree HEAD" in last_init_script
@@ -786,3 +793,82 @@ def test_reset_raises_when_container_does_not_come_back(started, monkeypatch):
     
     with pytest.raises(SandboxError):
         sb.reset("x")
+
+
+def test_start_creates_watchdog_with_configured_caps_but_does_not_start_thread(docker, tmp_path):
+    sb, fake, run_dir = docker
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+
+    assert sb.watchdog is not None
+    assert sb.watchdog.min_free_mb == sb.cfg.min_free_mb
+    assert sb.watchdog.max_worktree_mb == sb.cfg.max_worktree_mb
+    assert sb.watchdog.max_worktree_files == sb.cfg.max_worktree_files
+    assert not sb.watchdog.is_alive()
+
+
+def test_bash_calls_watchdog_note_start_and_end(started):
+    sb, fake, run_dir = started
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+    fake.script(["exec"], _ok(b"ok\n"))
+    events = []
+    sb.watchdog.note_bash_start = lambda: events.append("start")
+    sb.watchdog.note_bash_end = lambda: events.append("end")
+
+    sb.bash("echo ok")
+
+    assert events == ["start", "end"]
+
+
+def test_bash_raises_budget_exceeded_when_watchdog_violation_already_set(started):
+    from dirtywork.budget import BudgetExceeded
+    sb, fake, run_dir = started
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+    fake.script(["exec"], _ok(b"ok\n"))
+    sb.watchdog.violation = "pre-existing violation for this test"
+
+    with pytest.raises(BudgetExceeded, match="pre-existing violation"):
+        sb.bash("echo ok")
+
+
+def test_bash_watchdog_detects_over_cap_sample_and_raises(started):
+    from dirtywork.budget import BudgetExceeded
+    sb, fake, run_dir = started
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+    fake.script(["exec"], _ok(b"ok\n"))
+    fake.script(_SAMPLE_ARGV, _ok(b"3145728\t/work\n10\n"))  # 3 GB, over the 2048 MB default
+
+    with pytest.raises(BudgetExceeded, match="worktree exceeds"):
+        sb.bash("echo ok")
+
+    assert any(c[0][0] == "kill" for c in fake.calls)
+
+
+def test_sample_worktree_failure_then_success_after_reset(started):
+    sb, fake, run_dir = started
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+    fake.script(["exec"], _ok(b"ok\n"))
+    fake.script(_SAMPLE_ARGV, [_fail(b"exec failed: pid saturation"), _ok(b"1024\t/work\n5\n")])
+
+    out = sb.bash("echo ok")  # must not raise
+
+    assert "ok" in out
+    assert any(c[0][0] == "kill" for c in fake.calls)  # the sample-failure reset
+
+
+def test_sample_worktree_failure_twice_raises_sandboxerror(started):
+    sb, fake, run_dir = started
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+    fake.script(["exec"], _ok(b"ok\n"))
+    fake.script(_SAMPLE_ARGV, _fail(b"exec failed: pid saturation"))  # always fails
+
+    with pytest.raises(SandboxError, match="sample failed twice"):
+        sb.bash("echo ok")
