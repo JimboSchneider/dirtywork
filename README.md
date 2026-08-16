@@ -68,7 +68,7 @@ hint) — there is no silent fallback to unsandboxed execution.
   plus `docker run` against the volume recovers them if you need to.
   Non-Windows.
 
-**`--sandbox none`** is the explicit opt-in to pre-0.3 host-mode behavior:
+**`--sandbox none`** is the explicit opt-in to pre-0.4 host-mode behavior:
 tools are path-confined to the worktree (symlink-safe realpath checks,
 `.git/` write-protected), but `bash` is a general shell gated only by a
 best-effort regex denylist and a `HOME` redirected into the worktree. A
@@ -153,6 +153,9 @@ The launcher is self-locating, so this works from any clone location.
 - **Discard a run:**
   `git -C <repo> worktree remove --force <worktree> && git -C <repo> branch -D dirtywork/<slug>`
 
+- **All flags, stdout JSON, exit codes, transcript events:** see
+  [Machine contract](#machine-contract).
+
 ## How a run works
 
 1. **Preflight** — LM Studio reachable, model loaded, repo valid. Any
@@ -184,7 +187,7 @@ mounted in except a read-only copy of the parent object store. The
 worktree reaches the host only through the validated tar export. See
 "Security & trust" above for what this does and does not cover.
 
-**`--sandbox none` (host mode, pre-0.3 behavior):** guardrails block
+**`--sandbox none` (host mode, pre-0.4 behavior):** guardrails block
 **accidents, not adversaries** — the post-run review is the real gate:
 
 - All file tools are path-confined to the worktree (symlink-safe realpath
@@ -340,15 +343,21 @@ salvage.
 All progress (transcript path, worktree path, `error:`-prefixed messages) is
 written to stderr; watch a live run with `tail -f` on the transcript path.
 
-**Transcript events** (JSONL, one per line): `run_start` gains
-`schema_version: 2` and the `sandbox` dict (`"docker"` or `"none"`). In
-host mode, `run_end` carries `diff_stat` and `untracked` (as today); in
-docker mode it carries `diff_stat`, `untracked` (always ""), `patch_path`,
-`worktree_bytes`, `worktree_files`, `escaping_symlinks`, `dropped_git_entries`,
-`export_status`. `run_end` (status, turns, duration, cumulative usage,
-plus `diff_stat` in host mode — `git diff --stat` against the base commit,
-tracked changes only, capped at 64 000 chars — and `untracked`,
-`git status --porcelain` `??` entries, capped at 64 000 chars).
+**Transcript events** (JSONL, one per line): `run_start` (task, repo, model,
+config, `schema_version: 2`, plus provenance: `base_commit`, `branch`,
+`branch_from`, `base_url`, `dirtywork_version`, `temperature`, `sandbox`
+— the docker settings dict, or `"none"` — and `provider`), `assistant`
+(text + tool calls — text capped at 64 000 chars in the transcript only,
+the full text is still sent to the model), `tool_result` (truncated),
+`guardrail_block`, `sandbox_reset` (docker mode: the container was
+reset — reason), and `run_end` (status, turns, duration, cumulative usage,
+plus the run's artifacts: in host mode `diff_stat` — `git diff --stat`
+against the base commit, tracked changes only — and `untracked` — `git
+status --porcelain` `??` entries — each capped at 64 000 chars; in docker
+mode `diff_stat` (which already includes new files, since the export
+stages everything first), `untracked` (always `""`), `patch_path`,
+`worktree_bytes`, `worktree_files`, `escaping_symlinks`,
+`dropped_git_entries`, and `export_status`).
 
 ## Contributing
 

@@ -305,7 +305,7 @@ def main(argv: list | None = None) -> int:
         try:
             image_ref = _docker_preflight(repo, args.image)
         except DockerError as e:
-            _err(f"{e}\nDocker is the default sandbox since 0.3. Start Docker Desktop / "
+            _err(f"{e}\nDocker is the default sandbox since 0.4. Start Docker Desktop / "
                  f"dockerd, or pass --sandbox none to run unsandboxed on the host.")
             return 2
         except WorkspaceError as e:

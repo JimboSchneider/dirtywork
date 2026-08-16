@@ -8,7 +8,7 @@ rather than public issues. You should receive a response within a week.
 
 ## Scope worth knowing
 
-As of 0.3, **Docker mode is the default** and is a real containment
+As of 0.4, **Docker mode is the default** and is a real containment
 boundary: `--network none`, `--read-only` root filesystem,
 `--cap-drop ALL`, kernel-enforced memory/CPU/process-count/per-file-size
 limits, no host path mounted in except a read-only copy of the parent
