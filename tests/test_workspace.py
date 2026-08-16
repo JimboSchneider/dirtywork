@@ -265,14 +265,16 @@ def test_worktree_base_commit(repo: Path):
 
 def test_host_diff_stat_reports_tracked_changes(repo: Path):
     wt = create_worktree(repo, "diff-08141109", None)
+    base = worktree_base_commit(wt)
     (wt / "f.txt").write_text("changed content")
-    out = host_diff_stat(wt)
+    out = host_diff_stat(wt, base)
     assert "f.txt" in out
 
 
 def test_host_diff_stat_no_changes_is_empty(repo: Path):
     wt = create_worktree(repo, "nodiff-08141109", None)
-    out = host_diff_stat(wt)
+    base = worktree_base_commit(wt)
+    out = host_diff_stat(wt, base)
     assert out.strip() == ""
 
 
@@ -281,9 +283,35 @@ def test_host_diff_stat_ignores_untracked_new_files(repo: Path):
     # was never `git add`ed does not appear. This is a documented limitation
     # of host-mode diff_stat, not a bug.
     wt = create_worktree(repo, "untracked-08141109", None)
+    base = worktree_base_commit(wt)
     (wt / "new.txt").write_text("hello")
-    out = host_diff_stat(wt)
+    out = host_diff_stat(wt, base)
     assert "new.txt" not in out
+
+
+def test_host_diff_stat_includes_staged_changes(repo: Path):
+    # The model is allowed to run `git add` inside the worktree; diff_stat
+    # compares against base_commit so staged-but-uncommitted changes must
+    # still show up (a plain `git diff --stat` with no ref would miss them).
+    wt = create_worktree(repo, "staged-08141109", None)
+    base = worktree_base_commit(wt)
+    (wt / "f.txt").write_text("staged content")
+    _git(wt, "add", "f.txt")
+    out = host_diff_stat(wt, base)
+    assert "f.txt" in out
+
+
+def test_host_diff_stat_includes_committed_changes(repo: Path):
+    # The model is also allowed to `git commit` inside the worktree; diff_stat
+    # compares against base_commit (not HEAD vs index) so committed changes
+    # must still show up.
+    wt = create_worktree(repo, "committed-08141109", None)
+    base = worktree_base_commit(wt)
+    (wt / "f.txt").write_text("committed content")
+    _git(wt, "add", "f.txt")
+    _git(wt, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "change f.txt")
+    out = host_diff_stat(wt, base)
+    assert "f.txt" in out
 
 
 def test_host_diff_stat_truncates(repo: Path):
@@ -295,9 +323,10 @@ def test_host_diff_stat_truncates(repo: Path):
     _git(repo, "add", ".")
     _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "add files")
     wt = create_worktree(repo, "trunc-08141109", None)
+    base = worktree_base_commit(wt)
     for i in range(50):
         (wt / f"file{i}.txt").write_text("changed content\n" * 5)
-    out = host_diff_stat(wt, cap=200)
+    out = host_diff_stat(wt, base, cap=200)
     assert len(out) <= 200 + len("\n[truncated at 200 chars]")
     assert "truncated at 200 chars" in out
 

@@ -56,9 +56,10 @@ dirtywork's containment is honest about its limits:
   quota — see SECURITY.md.
 - **Review is the real boundary.** Read the transcript and diff before you merge. Note
   that `bash` side-effects happen at run time, so review catches what lands in the
-  diff, not what a command already did. `git diff --stat` in host mode reports
-  **tracked changes only** — a new file the model wrote but never `git add`ed
-  won't appear in `diff_stat`; `git status` in the worktree shows it.
+  diff, not what a command already did. `git diff --stat` in host mode compares
+  against the run's base commit, so unstaged, staged, and committed changes to
+  **tracked** files all show up — but a new file the model wrote and never
+  `git add`ed won't appear in `diff_stat`; `git status` in the worktree shows it.
 
 **Practical guidance:** run dirtywork against models and repositories you'd trust with
 shell access on your machine. A malicious target repo's `CLAUDE.md`/`AGENTS.md` is

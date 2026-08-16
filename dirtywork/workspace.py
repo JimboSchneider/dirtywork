@@ -167,12 +167,14 @@ def worktree_base_commit(worktree: Path) -> str:
     return res.stdout.strip()
 
 
-def host_diff_stat(worktree: Path, cap: int = 64_000) -> str:
-    """`git diff --stat` in the worktree, capped. Host mode only — this
-    compares the worktree's working tree against its index, so it reports
-    TRACKED changes only; a brand-new file the model wrote but never staged
-    is invisible here (documented in README.md/SECURITY.md)."""
-    res = _git(worktree, "diff", "--stat")
+def host_diff_stat(worktree: Path, base_commit: str, cap: int = 64_000) -> str:
+    """`git diff --stat` of the worktree's working tree against base_commit,
+    capped. Host mode only — comparing against base_commit (not the index)
+    means unstaged, staged, AND committed changes to TRACKED files all show
+    up, since the model is allowed to `git add`/`git commit` in the worktree.
+    A brand-new file the model wrote but never `git add`ed is still invisible
+    here (documented in README.md/SECURITY.md)."""
+    res = _git(worktree, "diff", "--stat", base_commit)
     if res.returncode != 0:
         return f"[diff --stat failed: {res.stderr.strip()[:500]}]"
     out = res.stdout

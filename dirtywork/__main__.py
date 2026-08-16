@@ -135,7 +135,7 @@ def main(argv: list | None = None) -> int:
                         max_turns=args.max_turns, timeout=args.timeout,
                         temperature=args.temperature,
                         run_info=run_info,
-                        finalize=lambda: {"diff_stat": host_diff_stat(worktree)})
+                        finalize=lambda: {"diff_stat": host_diff_stat(worktree, base_commit)})
         system_prompt = build_system_prompt(worktree, load_repo_context(repo, base_commit))
         result = runner.run(system_prompt, args.task)
     except Exception as e:
