@@ -79,12 +79,15 @@ def _worktree_candidate(path_str: str, worktree: Path) -> Path:
     resolves symlinks, so it proves the effective target — if any — is
     inside the worktree); using its return value directly for a WRITE would
     hand `_open_regular` the already-dereferenced target, defeating
-    O_NOFOLLOW. Using this unresolved join instead lets O_NOFOLLOW see and
-    refuse a real symlink at the final path component.
+    O_NOFOLLOW. Using this parent-resolved, final-component-unresolved join instead lets O_NOFOLLOW see and refuse a real symlink at the final path component while intermediate components stay dereferenced.
     """
     wt = worktree.resolve()
     raw = Path(path_str)
-    return raw if raw.is_absolute() else wt / raw
+    candidate = raw if raw.is_absolute() else wt / raw
+    # Resolve every PARENT component (so an intermediate symlink is
+    # dereferenced now, at check time, like resolve_in_worktree did) but keep
+    # the final component unresolved so O_NOFOLLOW can refuse a symlink there.
+    return candidate.parent.resolve() / candidate.name
 
 
 def read_file(worktree: Path, path: str, offset: int = 0, limit: int = 400) -> str:
