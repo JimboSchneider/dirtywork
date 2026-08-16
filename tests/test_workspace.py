@@ -148,6 +148,19 @@ def test_ensure_worktrees_excluded_from_linked_worktree(repo: Path, tmp_path: Pa
     assert ".worktrees" not in status
 
 
+def test_ensure_worktrees_excluded_rejects_symlinked_exclude(repo: Path, tmp_path: Path):
+    exclude = repo / ".git" / "info" / "exclude"
+    outside = tmp_path / "outside-exclude.txt"
+    outside.write_text("original content\n")
+    exclude.unlink()
+    exclude.symlink_to(outside)
+
+    with pytest.raises(WorkspaceError):
+        ensure_worktrees_excluded(repo)
+
+    assert outside.read_text() == "original content\n"  # untouched
+
+
 def _commit_file(repo: Path, name: str, content: str) -> str:
     (repo / name).write_text(content)
     _git(repo, "add", name)

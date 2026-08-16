@@ -100,19 +100,56 @@ def ensure_worktrees_excluded(repo: Path) -> None:
     # info/exclude even when `repo` is itself a linked worktree — a linked
     # worktree's --git-dir is its private .git/worktrees/<name> dir, but git only
     # ever consults the common/shared info/exclude for status/ignore purposes.
-    res = _git(repo, "rev-parse", "--git-path", "info/exclude")
-    if res.returncode != 0:
+    common_res = _git(repo, "rev-parse", "--git-common-dir")
+    if common_res.returncode != 0:
+        raise WorkspaceError(f"cannot locate git common dir for {repo}")
+    common = Path(common_res.stdout.strip())
+    if not common.is_absolute():
+        common = repo / common
+    common = common.resolve()
+
+    exclude_res = _git(repo, "rev-parse", "--git-path", "info/exclude")
+    if exclude_res.returncode != 0:
         raise WorkspaceError(f"cannot locate git dir for {repo}")
-    exclude = Path(res.stdout.strip())
+    exclude = Path(exclude_res.stdout.strip())
     if not exclude.is_absolute():
         exclude = repo / exclude
     exclude.parent.mkdir(parents=True, exist_ok=True)
-    existing = exclude.read_text() if exclude.exists() else ""
-    if ".worktrees/" not in existing:
-        with open(exclude, "a", encoding="utf-8") as fh:
-            if existing and not existing.endswith("\n"):
-                fh.write("\n")
-            fh.write(".worktrees/\n")
+
+    # A replaced info/exclude (symlink to a file outside the repo, planted by a
+    # hostile committed tree or a prior compromised run) must not redirect this
+    # write outside the git dir. Require the resolved path inside the resolved
+    # common dir before opening it at all.
+    resolved_exclude = exclude.resolve()
+    if resolved_exclude.parent != common and common not in resolved_exclude.parents:
+        raise WorkspaceError(
+            f"info/exclude resolved to {resolved_exclude}, outside the git "
+            f"common dir {common} — refusing to write"
+        )
+
+    try:
+        read_fd = os.open(str(exclude), os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        existing = ""
+    except OSError as e:
+        raise WorkspaceError(f"cannot read {exclude}: {e}")
+    else:
+        with os.fdopen(read_fd, "r", encoding="utf-8") as fh:
+            existing = fh.read()
+
+    if ".worktrees/" in existing:
+        return
+
+    try:
+        write_fd = os.open(
+            str(exclude), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o644
+        )
+    except OSError as e:
+        raise WorkspaceError(f"cannot open {exclude} for writing: {e}")
+    with os.fdopen(write_fd, "a", encoding="utf-8") as fh:
+        if existing and not existing.endswith("\n"):
+            fh.write("\n")
+        fh.write(".worktrees/\n")
 
 
 def worktree_base_commit(worktree: Path) -> str:
