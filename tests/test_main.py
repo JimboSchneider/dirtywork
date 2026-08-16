@@ -7,6 +7,179 @@ import pytest
 
 from dirtywork.__main__ import build_system_prompt, main
 
+def test_main_docker_preflight_failure_exits_2_with_hint(tmp_path, monkeypatch, capsys):
+    import subprocess
+    import dirtywork.__main__ as m
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
+                    "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
+                   capture_output=True)
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+
+    def boom(*a, **k):
+        raise DockerError("Cannot connect to the Docker daemon")
+
+    monkeypatch.setattr(m, "docker_version", boom)
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])  # --sandbox defaults to docker
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "Docker" in err
+    assert "--sandbox none" in err
+
+
+def test_main_docker_mode_happy_path_with_fake_sandbox(tmp_path, monkeypatch, capsys):
+    import subprocess
+    import dirtywork.__main__ as m
+    from dirtywork.runner import RunResult
+    from dirtywork.sandbox import RunArtifacts
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
+                    "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
+                   capture_output=True)
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+    monkeypatch.setattr(m, "docker_version", lambda *a, **k: "29.7.2")
+    monkeypatch.setattr(m, "resolve_image", lambda *a, **k: "dirtywork/worker@sha256:" + "a" * 64)
+    monkeypatch.setattr(m, "validate_objects_dir", lambda repo: repo / ".git" / "objects")
+    # the pre-worktree collision check inspects the container/volume names;
+    # rc 1 == "no such object" == no collision
+    from dirtywork.procs import Captured
+    monkeypatch.setattr(m.docker_cli, "run",
+                        lambda argv, *, timeout, stdin=None: Captured(1, b"", False, False))
+
+    class FakeWatchdog:
+        def start(self):
+            pass
+
+    class FakeDockerSandbox:
+        def __init__(self, cfg, *, run_dir, transcript=None):
+            self.cfg = cfg
+            self.run_dir = run_dir
+            self.uid = 501
+            self.gid = 20
+            self.watchdog = FakeWatchdog()
+
+        def start(self, worktree, repo, slug, base_commit):
+            pass
+
+        def stop(self):
+            pass
+
+        def read_file(self, path: str, offset: int = 0, limit: int = 400) -> str:
+            return ""
+
+        def write_file(self, path: str, content: str) -> str:
+            return ""
+
+        def edit_file(self, path: str, old_string: str, new_string: str) -> str:
+            return ""
+
+        def list_dir(self, path: str = ".") -> str:
+            return ""
+
+        def grep(self, pattern: str, path: str = ".", glob: str | None = None,
+                 timeout: int = 30) -> str:
+            return ""
+
+        def bash(self, command: str, timeout: int = 120) -> str:
+            return ""
+
+        def finalize(self):
+            return RunArtifacts(export_status="ok", diff_stat="1 file changed")
+
+    monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
+
+    def fake_run(self, system_prompt, task):
+        return RunResult("completed", 1, "ok", {})
+
+    monkeypatch.setattr(m.Runner, "run", fake_run)
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])  # --sandbox defaults to docker
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == 2
+    assert "run_dir" in payload
+    assert payload["status"] == "completed"
+
+
+def _docker_mode_scaffold(tmp_path, monkeypatch):
+    """Shared setup for the docker-mode CLI tests below: a one-commit repo,
+    LM Studio and docker preflight faked, run dir under tmp_path. Returns
+    (module, repo)."""
+    import subprocess
+    import dirtywork.__main__ as m
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
+                    "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
+                   capture_output=True)
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+    monkeypatch.setattr(m, "docker_version", lambda *a, **k: "29.7.2")
+    monkeypatch.setattr(m, "resolve_image", lambda *a, **k: "dirtywork/worker@sha256:" + "a" * 64)
+    monkeypatch.setattr(m, "validate_objects_dir", lambda repo: repo / ".git" / "objects")
+    return m, repo
+
+
+def test_main_docker_name_collision_exits_2_and_creates_nothing(tmp_path, monkeypatch, capsys):
+    import subprocess
+    from dirtywork.procs import Captured
+    m, repo = _docker_mode_scaffold(tmp_path, monkeypatch)
+    # `docker container inspect dw-<slug>` succeeds → the name is taken
+    monkeypatch.setattr(m.docker_cli, "run",
+                        lambda argv, *, timeout, stdin=None: Captured(0, b"[{}]", False, False))
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "already exists" in err and "runs clean" in err
+    assert not (tmp_path / "runs").exists() or not any((tmp_path / "runs").iterdir())
+    wl = subprocess.run(["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+                        capture_output=True, text=True).stdout
+    assert wl.count("worktree ") == 1  # only the main checkout
+
+
+def test_main_docker_start_failure_is_sandbox_error_exit_1(tmp_path, monkeypatch, capsys):
+    from dirtywork.procs import Captured
+    from dirtywork.sandbox import SandboxError
+    m, repo = _docker_mode_scaffold(tmp_path, monkeypatch)
+    monkeypatch.setattr(m.docker_cli, "run",
+                        lambda argv, *, timeout, stdin=None: Captured(1, b"", False, False))
+
+    class BoomSandbox:
+        def __init__(self, cfg, *, run_dir, transcript=None):
+            self.uid, self.gid = 501, 20
+            self.stopped = False
+
+        def start(self, worktree, repo, slug, base_commit):
+            raise SandboxError("in-container git init failed: rc 128")
+
+        def stop(self):
+            self.stopped = True
+
+    monkeypatch.setattr(m, "DockerSandbox", BoomSandbox)
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])
+
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "sandbox_error"
+    assert "git init failed" in payload["final_message"]
+    run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert run_json["status"] == "sandbox_error"
+
+from dirtywork.sandbox.docker_cli import DockerError
+
 
 def test_build_system_prompt_includes_rules_and_context(tmp_path: Path):
     p = build_system_prompt(tmp_path, "REPO RULES HERE")
@@ -64,7 +237,7 @@ def test_transcript_closed_even_on_unexpected_error(tmp_path, monkeypatch, capsy
         raise RuntimeError("boom")
     monkeypatch.setattr(m.Runner, "run", boom)
 
-    rc = m.main(["run", "--repo", str(repo), "some task"])
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "some task"])
 
     assert rc == 1
     payload = json.loads(capsys.readouterr().out)
@@ -99,7 +272,7 @@ def test_transcript_construction_failure_still_prints_json(tmp_path, monkeypatch
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
     monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
 
-    rc = m.main(["run", "--repo", str(repo), "some task"])
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "some task"])
 
     assert rc == 1
     payload = json.loads(capsys.readouterr().out)
@@ -137,7 +310,7 @@ def test_load_repo_context_uses_worktree_not_caller_checkout(tmp_path, monkeypat
 
     monkeypatch.setattr(m.Runner, "run", fake_run)
 
-    rc = m.main(["run", "--repo", str(repo), "some task"])
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "some task"])
     assert rc == 0
     assert "CONVENTIONS-FROM-COMMIT" in captured["system_prompt"]
     assert "CONVENTIONS-DIRTY" not in captured["system_prompt"]
@@ -160,7 +333,7 @@ def test_llm_error_during_run_prints_model_error_json(tmp_path, monkeypatch, cap
         raise LLMError("boom")
     monkeypatch.setattr(m.Runner, "run", boom)
 
-    rc = m.main(["run", "--repo", str(repo), "some task"])
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "some task"])
     assert rc == 1
     out = capsys.readouterr().out
     payload = json.loads(out)
@@ -197,7 +370,7 @@ def test_run_start_has_all_provenance_fields(tmp_path, monkeypatch):
 
     monkeypatch.setattr(m, "LMStudioClient", ImmediateDoneClient)
 
-    rc = m.main(["run", "--repo", str(repo), "some task"])
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "some task"])
     assert rc == 0
 
     transcript_files = list((tmp_path / "runs").rglob("transcript.jsonl"))
@@ -245,7 +418,7 @@ def test_run_end_has_diff_stat_after_writing_tracked_file(tmp_path, monkeypatch)
 
     monkeypatch.setattr(m, "LMStudioClient", WritingFakeClient)
 
-    rc = m.main(["run", "--repo", str(repo), "some task"])
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "some task"])
     assert rc == 0
 
     transcript_files = list((tmp_path / "runs").rglob("transcript.jsonl"))
@@ -293,7 +466,7 @@ def test_run_end_has_untracked_after_writing_new_file(tmp_path, monkeypatch):
 
     monkeypatch.setattr(m, "LMStudioClient", WritingFakeClient)
 
-    rc = m.main(["run", "--repo", str(repo), "some task"])
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "some task"])
     assert rc == 0
 
     transcript_files = list((tmp_path / "runs").rglob("transcript.jsonl"))
@@ -319,7 +492,7 @@ def test_rundir_error_exits_2(tmp_path, monkeypatch):
     runs_dir.mkdir(parents=True)
     (runs_dir / "fixed-slug").mkdir()  # pre-existing run dir collides
 
-    rc = m.main(["run", "--repo", str(repo), "some task"])
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "some task"])
     assert rc == 2
 
 
@@ -341,7 +514,7 @@ def test_rundir_error_removes_orphaned_worktree(tmp_path, monkeypatch):
     runs_dir.mkdir(parents=True)
     (runs_dir / "fixed-slug").mkdir()  # pre-existing run dir collides
 
-    rc = m.main(["run", "--repo", str(repo), "some task"])
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "some task"])
     assert rc == 2
 
     assert not (repo / ".worktrees" / "dw-fixed-slug").exists()
@@ -367,7 +540,7 @@ def test_stdout_json_has_run_dir_and_base_commit(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
     monkeypatch.setattr(m.Runner, "run", lambda self, sp, t: RunResult("completed", 1, "ok", {}))
 
-    rc = m.main(["run", "--repo", str(repo), "some task"])
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "some task"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["run_dir"].endswith("run_dir_placeholder") is False  # sanity: it's a real path

@@ -1,16 +1,21 @@
+# dirtywork/__main__.py
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__
-from .budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB
 from .llm import LLMError, LMStudioClient
-from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir
+from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json, write_run_json
 from .runner import Runner
+from .sandbox import SandboxError, docker_args, docker_cli
+from .sandbox.docker import DockerSandbox
+from .sandbox.docker_args import DEFAULT_IMAGE, DockerConfig
+from .sandbox.docker_cli import DockerError, docker_version, resolve_image, validate_objects_dir
 from .sandbox.host import HostSandbox
 from .tools import ToolExecutor
 from .transcript import Transcript
@@ -18,8 +23,6 @@ from .workspace import (
     WorkspaceError,
     create_worktree,
     ensure_worktrees_excluded,
-    host_diff_stat,
-    host_untracked,
     load_repo_context,
     make_slug,
     preflight_repo,
@@ -50,6 +53,17 @@ def _err(msg: str) -> None:
     print(f"error: {msg}", file=sys.stderr)
 
 
+def _docker_preflight(repo: Path, image: str):
+    """Spec §2 step 1: docker_version (daemon reachable) → resolve_image
+    (digest, pulling if absent — the only network use at start) →
+    validate_objects_dir (the only host path ever mounted). All read-only
+    on the operator's clone; nothing is created yet."""
+    docker_version()
+    image_ref = resolve_image(image, pinned_digest=docker_args.PINNED_DIGEST)
+    validate_objects_dir(repo)
+    return image_ref
+
+
 def main(argv: list | None = None) -> int:
     parser = argparse.ArgumentParser(prog="dirtywork")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -62,8 +76,18 @@ def main(argv: list | None = None) -> int:
     run_p.add_argument("--timeout", type=int, default=1800)
     run_p.add_argument("--temperature", type=float, default=None)
     run_p.add_argument("--base-url", default="http://localhost:1234/v1")
-    run_p.add_argument("--max-worktree-mb", type=int, default=DEFAULT_MAX_WORKTREE_MB)
-    run_p.add_argument("--max-worktree-files", type=int, default=DEFAULT_MAX_WORKTREE_FILES)
+    run_p.add_argument("--max-worktree-mb", type=int, default=2048)
+    run_p.add_argument("--max-worktree-files", type=int, default=200_000)
+    run_p.add_argument("--sandbox", choices=["docker", "none"], default="docker")
+    run_p.add_argument("--image", default=DEFAULT_IMAGE)
+    run_p.add_argument("--allow-network", action="store_true", default=False)
+    run_p.add_argument("--memory", default="4g")
+    run_p.add_argument("--cpus", default="2")
+    run_p.add_argument("--tmp-size", default="1g")
+    run_p.add_argument("--gitdir-size", default="512m")
+    run_p.add_argument("--min-free-mb", type=int, default=2048)
+    run_p.add_argument("--keep-volume", action="store_true", default=False)
+    run_p.add_argument("--max-patch-mb", type=int, default=10)
     args = parser.parse_args(argv)
 
     repo = args.repo.expanduser().resolve()
@@ -84,74 +108,165 @@ def main(argv: list | None = None) -> int:
              f"Load it with: lms load {args.model}")
         return 2
 
+    image_ref = None
+    if args.sandbox == "docker":
+        try:
+            image_ref = _docker_preflight(repo, args.image)
+        except DockerError as e:
+            _err(f"{e}\nDocker is the default sandbox since 0.3. Start Docker Desktop / "
+                 f"dockerd, or pass --sandbox none to run unsandboxed on the host.")
+            return 2
+        except WorkspaceError as e:
+            _err(str(e))
+            return 2
+
     # ---- workspace ----
     slug = make_slug(args.task, datetime.now())
+    if args.sandbox == "docker":
+        # Spec §3 name collision: refuse (exit 2) BEFORE creating anything —
+        # DockerSandbox.start() re-checks as defense in depth, but by then the
+        # worktree and run dir exist, and "exit 2 creates nothing" must hold.
+        for kind, argv in (("container", ["container", "inspect", docker_args.container_name(slug)]),
+                           ("volume", ["volume", "inspect", docker_args.volume_name(slug)])):
+            try:
+                if docker_cli.run(argv, timeout=docker_cli.T_QUERY).returncode == 0:
+                    _err(f"{kind} {argv[-1]} already exists; run `dirtywork runs clean {slug}` "
+                         f"(dirtywork never removes anything it did not create in this run)")
+                    return 2
+            except DockerError as e:
+                _err(str(e))
+                return 2
     try:
         ensure_worktrees_excluded(repo)
-        worktree = create_worktree(repo, slug, args.branch_from)
+        worktree = create_worktree(repo, slug, args.branch_from,
+                                    no_checkout=(args.sandbox == "docker"))
     except WorkspaceError as e:
         _err(str(e))
         return 2
 
-    # ---- run directory (exit 2: the worktree exists but no transcript/run
-    # bookkeeping has started yet, so this is still a preflight-style failure —
-    # the worktree and branch just created above are rolled back below) ----
     try:
         runs_dir = ensure_runs_dir(RUNS_DIR)
         run_dir = create_run_dir(runs_dir, slug)
     except RunDirError as e:
-        remove_worktree(repo, slug)
+        remove_worktree(repo, slug)  # SP1 rule: never orphan the worktree on a preflight-style failure
         _err(str(e))
         return 2
-
     transcript_path = run_dir / "transcript.jsonl"
     print(f"transcript: {transcript_path}", file=sys.stderr)
     print(f"worktree:   {worktree}", file=sys.stderr)
 
+    write_run_json(run_dir, {
+        "schema_version": 2,
+        "status": "running",
+        "slug": slug,
+        "repo": str(repo),
+        "worktree": str(worktree),
+        "branch": f"dirtywork/{slug}",
+        "base_commit": worktree_base_commit(worktree),
+        "container": docker_args.container_name(slug) if args.sandbox == "docker" else None,
+        "volume": docker_args.volume_name(slug) if args.sandbox == "docker" else None,
+        "image": args.image if args.sandbox == "docker" else None,
+        "image_digest": image_ref,
+        "host_pid": os.getpid(),
+        "started": datetime.now(timezone.utc).isoformat(),
+        "sandbox": args.sandbox,
+    })
+
     # ---- run ----
-    # Everything from here on -- Transcript/ToolExecutor/Runner construction,
-    # system-prompt assembly, and the run itself -- is wrapped in one boundary so
-    # the machine contract (exactly one JSON object on stdout, post-preflight)
-    # holds even if a component other than runner.run() blows up.
+    # Everything from here on is wrapped in one boundary so the machine
+    # contract (exactly one JSON object on stdout, post-preflight) holds
+    # even if a component other than runner.run() blows up.
+    base_commit = worktree_base_commit(worktree)
     transcript = None
     sandbox = None
     try:
-        base_commit = worktree_base_commit(worktree)
-        transcript = Transcript(transcript_path)
-        sandbox = HostSandbox(worktree, max_worktree_mb=args.max_worktree_mb,
-                               max_worktree_files=args.max_worktree_files)
-        sandbox.start(worktree, repo, slug, base_commit)
+        if args.sandbox == "docker":
+            cfg = DockerConfig(
+                image=args.image,
+                network="bridge" if args.allow_network else "none",
+                memory=args.memory,
+                cpus=args.cpus,
+                tmp_size=args.tmp_size,
+                gitdir_size=args.gitdir_size,
+                max_worktree_mb=args.max_worktree_mb,
+                max_worktree_files=args.max_worktree_files,
+                min_free_mb=args.min_free_mb,
+                max_patch_mb=args.max_patch_mb,
+                keep_volume=args.keep_volume,
+            )
+            transcript = Transcript(transcript_path)  # constructed BEFORE the sandbox so sandbox_reset events reach it
+            sandbox = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript)
+            sandbox.start(worktree, repo, slug, base_commit)
+            sandbox.watchdog.start()  # only place a real Watchdog thread is started
+            sandbox_info = {
+                "backend": "docker", "image": args.image, "image_digest": image_ref,
+                "network": cfg.network, "memory": cfg.memory, "cpus": cfg.cpus,
+                "pids_limit": cfg.pids_limit, "tmp_size": cfg.tmp_size,
+                "gitdir_size": cfg.gitdir_size, "max_worktree_mb": cfg.max_worktree_mb,
+                "max_worktree_files": cfg.max_worktree_files,
+                "user": f"{sandbox.uid}:{sandbox.gid}",
+            }
+        else:
+            transcript = Transcript(transcript_path)
+            sandbox = HostSandbox(worktree, max_worktree_mb=args.max_worktree_mb,
+                                   max_worktree_files=args.max_worktree_files)
+            sandbox.start(worktree, repo, slug, base_commit)
+            sandbox_info = "none"
+
         executor = ToolExecutor(sandbox, transcript=transcript)
-        run_info = {
-            "repo": str(repo),
-            "worktree": str(worktree),
-            "base_commit": base_commit,
-            "branch": f"dirtywork/{slug}",
-            "branch_from": args.branch_from,
-            "base_url": args.base_url,
-            "dirtywork_version": __version__,
-            "temperature": args.temperature,
-            "sandbox": "none",
-            "provider": "openai",
-        }
-        runner = Runner(client, executor, transcript, model=args.model,
-                        max_turns=args.max_turns, timeout=args.timeout,
-                        temperature=args.temperature,
-                        run_info=run_info,
-                        finalize=lambda: {"diff_stat": host_diff_stat(worktree, base_commit),
-                                          "untracked": host_untracked(worktree)})
+
+        def finalize():
+            artifacts = sandbox.finalize()
+            return {
+                "diff_stat": artifacts.diff_stat,
+                "untracked": artifacts.untracked,  # host mode: git status ?? entries; docker mode: "" (git add -A folds new files into diff_stat)
+                "patch_path": artifacts.patch_path,
+                "worktree_bytes": artifacts.worktree_bytes,
+                "worktree_files": artifacts.worktree_files,
+                "escaping_symlinks": artifacts.escaping_symlinks,
+                "dropped_git_entries": artifacts.dropped_git_entries,
+                "export_status": artifacts.export_status,
+            }
+
+        runner = Runner(
+            client, executor, transcript, model=args.model,
+            max_turns=args.max_turns, timeout=args.timeout, temperature=args.temperature,
+            run_info={
+                "repo": str(repo), "worktree": str(worktree), "branch": f"dirtywork/{slug}",
+                "branch_from": args.branch_from, "base_commit": base_commit,
+                "base_url": args.base_url, "dirtywork_version": __version__,
+                "temperature": args.temperature, "sandbox": sandbox_info, "provider": "openai",
+            },
+            finalize=finalize,
+        )
         system_prompt = build_system_prompt(worktree, load_repo_context(repo, base_commit))
         result = runner.run(system_prompt, args.task)
     except Exception as e:
-        message = str(e) if isinstance(e, LLMError) else f"unexpected error: {e!r}"
+        # A SandboxError here comes from sandbox.start()/init or from a
+        # sandbox failure the runner did not itself convert (spec §2 step 7:
+        # teardown, status sandbox_error, exit 1). Everything else keeps the
+        # existing model_error contract.
+        if isinstance(e, SandboxError):
+            fail_status, message = "sandbox_error", str(e)
+        elif isinstance(e, LLMError):
+            fail_status, message = "model_error", str(e)
+        else:
+            fail_status, message = "model_error", f"unexpected error: {e!r}"
         if transcript is not None:
             try:
-                transcript.write("run_end", status="model_error", error=message)
+                transcript.write("run_end", status=fail_status, error=message)
             except Exception:
                 pass
         _err(message)
+        try:
+            existing = read_run_json(run_dir)
+            existing.update(status=fail_status, ended=datetime.now(timezone.utc).isoformat())
+            write_run_json(run_dir, existing)
+        except Exception:
+            pass
         print(json.dumps({
-            "status": "model_error",
+            "schema_version": 2,
+            "status": fail_status,
             "worktree": str(worktree),
             "branch": f"dirtywork/{slug}",
             "transcript": str(transcript_path),
@@ -174,8 +289,29 @@ def main(argv: list | None = None) -> int:
             except Exception:
                 pass
 
+    extra = result.extra or {}
+    export_status = extra.get("export_status", "n/a")
+    final_status = result.status
+    if isinstance(export_status, str) and export_status.startswith("export_failed") \
+            and final_status == "completed":
+        final_status = "export_failed"
+
+    try:
+        existing = read_run_json(run_dir)
+        existing.update(
+            status=final_status,
+            ended=datetime.now(timezone.utc).isoformat(),
+            diff_stat=extra.get("diff_stat"),
+            export_status=export_status,
+            patch_path=extra.get("patch_path"),
+        )
+        write_run_json(run_dir, existing)
+    except Exception:
+        pass
+
     print(json.dumps({
-        "status": result.status,
+        "schema_version": 2,
+        "status": final_status,
         "worktree": str(worktree),
         "branch": f"dirtywork/{slug}",
         "transcript": str(transcript_path),
@@ -185,7 +321,7 @@ def main(argv: list | None = None) -> int:
         "run_dir": str(run_dir),
         "base_commit": base_commit,
     }, indent=2))
-    return 0 if result.status == "completed" else 1
+    return 0 if final_status == "completed" else 1
 
 
 if __name__ == "__main__":
