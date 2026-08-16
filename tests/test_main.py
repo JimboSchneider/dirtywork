@@ -255,6 +255,54 @@ def test_run_end_has_diff_stat_after_writing_tracked_file(tmp_path, monkeypatch)
     assert "existing.txt" in run_end["diff_stat"]
 
 
+def test_run_end_has_untracked_after_writing_new_file(tmp_path, monkeypatch):
+    # A model deliverable that's a brand-new file it never `git add`ed is
+    # invisible to diff_stat (tracked changes only) — this pins that
+    # untracked picks it up instead.
+    import subprocess
+    import dirtywork.__main__ as m
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
+    (repo / "existing.txt").write_text("original\n")
+    subprocess.run(["git", "-C", str(repo), "add", "existing.txt"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
+                    "-c", "user.name=t", "commit", "-m", "init"],
+                   capture_output=True)
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
+
+    class WritingFakeClient:
+        def __init__(self, base_url=None):
+            self.calls = 0
+
+        def list_models(self):
+            return [m.DEFAULT_MODEL]
+
+        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                return {"choices": [{"message": {
+                    "role": "assistant", "content": None,
+                    "tool_calls": [{"id": "c1", "type": "function",
+                                     "function": {"name": "write_file",
+                                                  "arguments": json.dumps(
+                                                      {"path": "brand_new.txt", "content": "hi\n"})}}],
+                }}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+            return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    monkeypatch.setattr(m, "LMStudioClient", WritingFakeClient)
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])
+    assert rc == 0
+
+    transcript_files = list((tmp_path / "runs").rglob("transcript.jsonl"))
+    events = [json.loads(l) for l in transcript_files[0].read_text().splitlines()]
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end["untracked"] == "brand_new.txt"
+    assert run_end["diff_stat"] == ""
+
+
 def test_rundir_error_exits_2(tmp_path, monkeypatch):
     import subprocess
     import dirtywork.__main__ as m

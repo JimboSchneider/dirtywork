@@ -183,6 +183,28 @@ def host_diff_stat(worktree: Path, base_commit: str, cap: int = 64_000) -> str:
     return out
 
 
+def host_untracked(worktree: Path, cap: int = 64_000) -> str:
+    """Untracked paths in the worktree, capped. Complements host_diff_stat,
+    which only sees TRACKED files — a new file the model wrote and never
+    `git add`ed is invisible to `git diff --stat` but shows up here. Uses
+    `git status --porcelain` in its DEFAULT untracked mode, deliberately NOT
+    `-uall`: default mode collapses a whole untracked directory into one
+    `?? dir/` line, so a model that ran `npm ci`/`volta install` under the
+    worktree yields `.npm/`, `.volta/` rather than thousands of paths.
+    Gitignored paths are excluded automatically. Read-only — this never runs
+    `git add` on the model's behalf, it only reports what's already there."""
+    res = _git(worktree, "status", "--porcelain")
+    if res.returncode != 0:
+        return f"[status failed: {res.stderr.strip()[:500]}]"
+    lines = [
+        line[len("?? "):] for line in res.stdout.splitlines() if line.startswith("?? ")
+    ]
+    out = "\n".join(lines)
+    if len(out) > cap:
+        out = out[:cap] + f"\n[truncated at {cap} chars]"
+    return out
+
+
 def load_repo_context(repo: Path, base_commit: str) -> str | None:
     """Read CLAUDE.md/AGENTS.md from the base commit's git object store, not
     the filesystem. This closes two problems with a filesystem read: a

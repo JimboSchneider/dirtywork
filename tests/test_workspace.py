@@ -11,6 +11,7 @@ from dirtywork.workspace import (
     create_worktree,
     ensure_worktrees_excluded,
     host_diff_stat,
+    host_untracked,
     load_repo_context,
     make_slug,
     preflight_repo,
@@ -329,6 +330,52 @@ def test_host_diff_stat_truncates(repo: Path):
     out = host_diff_stat(wt, base, cap=200)
     assert len(out) <= 200 + len("\n[truncated at 200 chars]")
     assert "truncated at 200 chars" in out
+
+
+def test_host_untracked_lists_new_file(repo: Path):
+    wt = create_worktree(repo, "untracked-list-08161109", None)
+    (wt / "new.txt").write_text("hello")
+    out = host_untracked(wt)
+    assert out == "new.txt"
+
+
+def test_host_untracked_collapses_directory(repo: Path):
+    # Default `git status --porcelain` mode (not -uall) reports a whole
+    # untracked directory as one `?? dir/` line rather than every file
+    # inside it — this is what keeps a `npm ci`/`volta install` run from
+    # producing thousands of lines here.
+    wt = create_worktree(repo, "untracked-dir-08161109", None)
+    pkgs = wt / "pkgs"
+    pkgs.mkdir()
+    (pkgs / "a.txt").write_text("a")
+    (pkgs / "b.txt").write_text("b")
+    out = host_untracked(wt)
+    assert out == "pkgs/"
+
+
+def test_host_untracked_empty_when_clean(repo: Path):
+    wt = create_worktree(repo, "untracked-clean-08161109", None)
+    out = host_untracked(wt)
+    assert out == ""
+
+
+def test_host_untracked_excludes_staged(repo: Path):
+    # Once `git add`ed, a file is staged (not untracked) and is covered by
+    # host_diff_stat instead — it must not also show up here.
+    wt = create_worktree(repo, "untracked-staged-08161109", None)
+    (wt / "new.txt").write_text("hello")
+    _git(wt, "add", "new.txt")
+    out = host_untracked(wt)
+    assert "new.txt" not in out
+
+
+def test_host_untracked_truncates(repo: Path):
+    wt = create_worktree(repo, "untracked-trunc-08161109", None)
+    for i in range(300):
+        (wt / f"file-with-a-long-name-{i:04d}.txt").write_text("x")
+    out = host_untracked(wt, cap=200)
+    assert len(out) <= 200 + len("\n[truncated at 200 chars]")
+    assert out.endswith("[truncated at 200 chars]")
 
 
 def test_create_worktree_existing_dir_no_stale_branch(repo: Path):

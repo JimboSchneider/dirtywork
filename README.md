@@ -59,7 +59,9 @@ dirtywork's containment is honest about its limits:
   diff, not what a command already did. `git diff --stat` in host mode compares
   against the run's base commit, so unstaged, staged, and committed changes to
   **tracked** files all show up — but a new file the model wrote and never
-  `git add`ed won't appear in `diff_stat`; `git status` in the worktree shows it.
+  `git add`ed won't appear in `diff_stat`. Such files are listed separately in
+  `run_end.untracked` (untracked paths, one per line; a whole untracked
+  directory collapses to a single `dir/` entry).
 
 **Practical guidance:** run dirtywork against models and repositories you'd trust with
 shell access on your machine. A malicious target repo's `CLAUDE.md`/`AGENTS.md` is
@@ -298,7 +300,9 @@ config, plus provenance: `base_commit`, `branch`, `branch_from`,
 transcript only, the full text is still sent to the model), `tool_result`
 (truncated), `guardrail_block`, `run_end` (status, turns, duration,
 cumulative usage, plus `diff_stat` in host mode — `git diff --stat`
-against the base commit, tracked changes only, capped at 64 000 chars).
+against the base commit, tracked changes only, capped at 64 000 chars —
+and `untracked`, `git status --porcelain` `??` entries, capped at
+64 000 chars).
 
 ## Contributing
 
