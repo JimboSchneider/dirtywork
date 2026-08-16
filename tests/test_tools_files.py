@@ -130,3 +130,89 @@ def test_edit_file_refuses_oversized(wt: Path):
         f.write(b"x")
     out = tools.edit_file(wt, "big.txt", "x", "y")
     assert "over the" in out
+
+
+import errno
+import os
+import signal
+from contextlib import contextmanager
+
+
+@contextmanager
+def _hang_guard(seconds=5):
+    """Fail loudly instead of hanging the whole suite if a FIFO-hardening
+    regression reintroduces a blocking open."""
+    def _on_alarm(signum, frame):
+        raise TimeoutError(f"operation did not return within {seconds}s — likely hung on a FIFO")
+    old = signal.signal(signal.SIGALRM, _on_alarm)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs require a POSIX OS")
+def test_edit_file_refuses_fifo(wt: Path):
+    fifo = wt / "pipe"
+    os.mkfifo(fifo)
+    with _hang_guard():
+        out = tools.edit_file(wt, "pipe", "a", "b")
+    assert "not a regular file" in out
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs require a POSIX OS")
+def test_write_file_refuses_fifo(wt: Path):
+    fifo = wt / "pipe"
+    os.mkfifo(fifo)
+    with _hang_guard():
+        out = tools.write_file(wt, "pipe", "new content")
+    assert out.startswith("ERROR:")
+    assert "not a regular file" in out
+
+
+def test_write_file_refuses_symlink_final_component(wt: Path):
+    target = wt / "real.txt"
+    target.write_text("original")
+    link = wt / "link.txt"
+    os.symlink(target, link)
+    out = tools.write_file(wt, "link.txt", "new content")
+    assert out.startswith("ERROR:")
+    assert "symlink" in out.lower()
+    assert target.read_text() == "original"  # never written through the symlink
+
+
+def test_edit_file_refuses_symlink_final_component(wt: Path):
+    target = wt / "real2.txt"
+    target.write_text("aaa")
+    link = wt / "link2.txt"
+    os.symlink(target, link)
+    out = tools.edit_file(wt, "link2.txt", "aaa", "bbb")
+    assert out.startswith("ERROR:")
+    assert "symlink" in out.lower()
+    assert target.read_text() == "aaa"  # never written through the symlink
+
+
+def test_write_file_refuses_oversized_content(wt: Path):
+    huge = "x" * (tools.MAX_WRITE_BYTES + 1)
+    out = tools.write_file(wt, "big_write.txt", huge)
+    assert out.startswith("ERROR:")
+    assert "write limit" in out
+    assert not (wt / "big_write.txt").exists()
+
+
+def test_list_dir_truncates_at_max_entries(wt: Path, monkeypatch):
+    # Monkeypatching the constant down (rather than creating 2001 real
+    # files) exercises the exact same truncation code path while keeping
+    # the rendered listing well under MAX_RESULT_CHARS, so the entry-count
+    # marker isn't itself swallowed by the unrelated char-count cap.
+    monkeypatch.setattr(tools, "MAX_LIST_ENTRIES", 3)
+    many_dir = wt / "many"
+    many_dir.mkdir()
+    for i in range(5):
+        (many_dir / f"f{i}.txt").write_text("x")
+    out = tools.list_dir(wt, "many")
+    assert "[listing truncated at 3 entries]" in out
+    shown = [l for l in out.splitlines() if l.endswith("bytes)")]
+    assert len(shown) == 3
