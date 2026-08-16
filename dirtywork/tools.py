@@ -3,10 +3,8 @@ from __future__ import annotations
 import errno
 import os
 import shutil
-import signal
 import stat
 import subprocess
-import threading
 import time
 from pathlib import Path
 
@@ -264,6 +262,8 @@ def bash(worktree: Path, command: str, timeout: int = 120) -> str:
     if reason:
         return reason  # starts with "BLOCKED:"
     timeout = max(1, min(int(timeout), 600))
+    # Note: child stdin is /dev/null (never the operator's stdin); worker commands
+    # that read stdin receive EOF immediately instead of blocking.
     captured = run_capped(
         ["bash", "-c", command],
         cwd=str(worktree),
@@ -277,6 +277,8 @@ def bash(worktree: Path, command: str, timeout: int = 120) -> str:
         tail = f"\n{out}" if out else ""
         return _cap(f"ERROR: command timed out after {timeout}s.{tail}",
                     cap=MAX_BASH_CHARS, note=note)
+    if captured.returncode is None and not captured.timed_out:
+        return _cap(f"ERROR: bash failed: {captured.output.decode('utf-8', 'replace').strip()}", cap=MAX_BASH_CHARS, note=note)
     return _cap(f"exit code: {captured.returncode}\n{out}", cap=MAX_BASH_CHARS, note=note)
 
 

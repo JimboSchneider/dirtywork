@@ -46,3 +46,9 @@ def test_run_capped_respects_cwd_and_env():
                          cwd="/tmp", env={"MY_VAR": "hello", "PATH": "/usr/bin:/bin"})
     assert b"/tmp" in result.output
     assert b"hello" in result.output
+
+
+def test_run_capped_stdin_is_devnull_by_default():
+    result = run_capped(["bash", "-c", "read x; echo got:$x"], timeout=5)
+    assert result.output.strip() == b"got:"
+    assert result.timed_out is False

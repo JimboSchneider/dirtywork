@@ -30,7 +30,7 @@ def _kill_group(pid: int) -> None:
         pass
 
 
-def run_capped(argv: list, *, timeout: float, cwd=None, env=None,
+def run_capped(argv: list[str], *, timeout: float, cwd=None, env=None,
                stdin: bytes | None = None, cap: int = MAX_CAPTURE_BYTES,
                kill_group: bool = True) -> Captured:
     """Run argv, capturing merged stdout+stderr up to `cap` bytes without

@@ -156,3 +156,16 @@ def test_executor_raises_budget_exceeded_over_file_limit(wt: Path):
     ex.execute("write_file", {"path": "b.txt", "content": "x"})
     with pytest.raises(BudgetExceeded):
         ex.execute("write_file", {"path": "c.txt", "content": "x"})
+
+
+def test_bash_popen_failure_returns_error_prefix(wt: Path, monkeypatch):
+    import dirtywork.procs
+    original_popen = dirtywork.procs.subprocess.Popen
+
+    def fake_popen(*args, **kwargs):
+        raise OSError("boom")
+
+    monkeypatch.setattr(dirtywork.procs.subprocess, "Popen", fake_popen)
+    out = bash(wt, "true")
+    assert out.startswith("ERROR: bash failed:")
+    assert "boom" in out
