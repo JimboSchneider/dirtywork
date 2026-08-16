@@ -83,6 +83,27 @@ class DockerSandbox:
         self._objects_dir = None
         self._export_failed = False
 
+    @staticmethod
+    def check_name_collision(run, slug: str) -> None:
+        """Refuse to reuse a container/volume name that already exists (spec
+        §3 'Name collision'): never remove anything this invocation did not
+        create — a collision is either a stale leftover or something else's
+        resource, and both deserve a human. Raises SandboxError. Called both
+        from __main__'s pre-worktree preflight and from start() itself
+        (defense in depth against a same-slug race between the two)."""
+        name = docker_args.container_name(slug)
+        c_inspect = run(["container", "inspect", name], timeout=docker_cli.T_QUERY)
+        if c_inspect.returncode == 0:
+            raise SandboxError(
+                f"container {name} already exists; run `dirtywork runs clean {slug}`"
+            )
+        vol = docker_args.volume_name(slug)
+        v_inspect = run(["volume", "inspect", vol], timeout=docker_cli.T_QUERY)
+        if v_inspect.returncode == 0:
+            raise SandboxError(
+                f"volume {vol} already exists; run `dirtywork runs clean {slug}`"
+            )
+
     def start(self, worktree: Path, repo: Path, slug: str, base_commit: str) -> None:
         self._worktree = worktree
         self._repo = repo
@@ -91,19 +112,7 @@ class DockerSandbox:
         name = docker_args.container_name(slug)
         vol = docker_args.volume_name(slug)
 
-        # Name collision refusal (spec §3): never remove anything this
-        # invocation did not create — a collision is either a stale leftover
-        # or something else's resource, and both deserve a human.
-        c_inspect = self._run(["container", "inspect", name], timeout=docker_cli.T_QUERY)
-        if c_inspect.returncode == 0:
-            raise SandboxError(
-                f"container {name} already exists; run `dirtywork runs clean {slug}`"
-            )
-        v_inspect = self._run(["volume", "inspect", vol], timeout=docker_cli.T_QUERY)
-        if v_inspect.returncode == 0:
-            raise SandboxError(
-                f"volume {vol} already exists; run `dirtywork runs clean {slug}`"
-            )
+        self.check_name_collision(self._run, slug)
 
         self.uid = os.getuid() if os.name == "posix" else 1000
         self.gid = os.getgid() if os.name == "posix" else 1000

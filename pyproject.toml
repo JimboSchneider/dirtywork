@@ -29,7 +29,7 @@ Homepage = "https://dirtywork.run"
 dirtywork = "dirtywork.__main__:main"
 
 [tool.setuptools]
-packages = ["dirtywork"]
+packages = ["dirtywork", "dirtywork.sandbox"]
 
 [tool.pytest.ini_options]
 markers = ["live: requires a running LM Studio server"]
