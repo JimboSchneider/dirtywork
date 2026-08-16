@@ -144,6 +144,9 @@ def extract_validated(stream, dest: Path, *, max_files: int, max_bytes: int) -> 
                         if (posixpath.isabs(link_target) or normalized == ".."
                                 or normalized.startswith("../")):
                             escaping_symlinks.append(name)
+            if tar.pax_headers:  # defense in depth: a trailing global header (tarfile itself normally refuses one)
+                raise ExportError(_PAX_GLOBAL_MSG)
+
     except ExportError:
         _cleanup_to_dot_git_only(dest)
         raise

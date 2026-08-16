@@ -271,21 +271,25 @@ def test_rejects_duplicate_member_paths_and_cleans_up(empty_worktree):
 
 
 def test_rejects_trailing_pax_global_header(empty_worktree):
-    # A PAX global header with no member after it: CPython's tarfile itself
-    # refuses it (SubsequentHeaderError -> ReadError); the validator must
-    # surface that as ExportError and leave only .git behind.
+    # A PAX global header with no member after it. tarfile itself refuses it
+    # (SubsequentHeaderError -> ReadError) and the validator surfaces that as
+    # ExportError, leaving only .git behind. Strip ALL trailing zero blocks
+    # first: TarFile.close() pads to a full record, so stripping just the two
+    # EOF blocks would leave an EOF marker in front of the appended header.
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar:
         info = tarfile.TarInfo("normal.txt")
         data = b"hello"
         info.size = len(data)
         tar.addfile(info, io.BytesIO(data))
-    body = buf.getvalue()[:-1024]  # drop the two end-of-archive zero blocks
+    body = buf.getvalue()
+    while body.endswith(b"\0" * 512):
+        body = body[:-512]
     gbuf = io.BytesIO()
     with tarfile.open(fileobj=gbuf, mode="w", format=tarfile.PAX_FORMAT,
                       pax_headers={"comment": "hostile"}) as tar:
-        pass  # writes just the global header + end-of-archive blocks
+        pass  # just the global header + end-of-archive blocks
     stream = io.BytesIO(body + gbuf.getvalue())
-    with pytest.raises(ExportError):
-        extract_validated(stream, empty_worktree, max_files=100, max_bytes=10_000)
+    with pytest.raises(ExportError, match="export extraction failed|PAX global header"):
+        extract_validated(stream, empty_worktree, max_files=100, max_bytes=1_000_000)
     assert [p.name for p in empty_worktree.iterdir()] == [".git"]
