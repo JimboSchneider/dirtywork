@@ -18,9 +18,9 @@ class WorkspaceError(Exception):
     """Raised when the target repo or worktree operation is unusable."""
 
 
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+def _git(repo: Path, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, env=env
     )
 
 
@@ -43,15 +43,15 @@ def make_slug(task: str, now: datetime, salt: str | None = None) -> str:
 
 def create_worktree(repo: Path, slug: str, branch_from: str | None, *,
                      no_checkout: bool = False) -> Path:
-    dot_worktrees = repo / ".worktrees"
+    worktrees_dir = repo / ".worktrees"
     try:
-        wt_stat = os.lstat(dot_worktrees)
+        wd_st = os.lstat(worktrees_dir)
     except FileNotFoundError:
         pass
     else:
-        if not stat.S_ISDIR(wt_stat.st_mode):
+        if not stat.S_ISDIR(wd_st.st_mode):
             raise WorkspaceError(
-                f"{dot_worktrees} exists and is not a directory — refusing to "
+                f"{worktrees_dir} exists and is not a directory — refusing to "
                 f"create a worktree through a symlink or other non-directory here"
             )
 
@@ -62,6 +62,10 @@ def create_worktree(repo: Path, slug: str, branch_from: str | None, *,
     except FileNotFoundError:
         pass
     else:
+        # A pre-existing file, directory, or symlink at the EXACT destination
+        # must abort before `git worktree add` runs: git would create through
+        # a symlink, and a later `worktree remove` would then clean an
+        # unrelated outside directory.
         raise WorkspaceError(
             f"{dest} already exists; refusing to create a worktree through a "
             f"pre-existing file, directory, or symlink at the exact destination"
@@ -82,12 +86,15 @@ def create_worktree(repo: Path, slug: str, branch_from: str | None, *,
         raise WorkspaceError(f"git worktree add failed: {res.stderr.strip()}")
 
     worktree = repo / rel
-    repo_worktrees_resolved = repo.resolve() / ".worktrees"
-    if repo_worktrees_resolved not in worktree.resolve().parents:
+    # Never `.resolve()` the joined path and compare — that variant passes
+    # wrongly when a component is a symlink. Resolve each side separately.
+    expected_parent = repo.resolve() / ".worktrees"
+    if expected_parent not in worktree.resolve().parents:
         remove_worktree(repo, slug)
         raise WorkspaceError(
-            f"worktree {worktree} did not land inside {repo_worktrees_resolved} "
-            f"after creation — aborting"
+            f"worktree resolved to {worktree.resolve()}, outside the expected "
+            f"{expected_parent} — refusing (a symlinked .worktrees or ref "
+            f"could redirect git worktree add outside the repo)"
         )
     return worktree
 
@@ -268,11 +275,7 @@ def host_read_tree(worktree: Path) -> None:
     env = dict(os.environ)
     env["GIT_CONFIG_GLOBAL"] = "/dev/null"
     env["GIT_CONFIG_NOSYSTEM"] = "1"
-    res = subprocess.run(
-        ["git", "-C", str(worktree),
-         "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
-         "read-tree", "HEAD"],
-        capture_output=True, text=True, env=env,
-    )
+    res = _git(worktree, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+               "read-tree", "HEAD", env=env)
     if res.returncode != 0:
         raise WorkspaceError(f"git read-tree HEAD failed in {worktree}: {res.stderr.strip()}")
