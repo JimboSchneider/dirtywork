@@ -569,3 +569,39 @@ def test_bash_output_capped(started):
     fake.script(["exec"], Captured(returncode=0, output=b"x" * 100, truncated=True, timed_out=False))
     out = sb.bash("big output")
     assert "capped" in out
+
+
+def test_list_dir_falls_back_to_ls_when_no_gnu_find(started):
+    sb, fake, run_dir = started
+    # Script find --version to fail (no GNU find), then ls -1Ap, then wc -c
+    # The _probe makes a call first to check for GNU find (fails)
+    # Then list_dir uses the fallback which needs ls -1Ap and wc -c (2 more calls)
+    fake.script(["exec"], [_fail(b"find: not found"), _ok(b"b.txt\nsub/\na.txt\n"), _ok(b"3 b.txt\n5 a.txt\n8 total\n")])
+    out = sb.list_dir(".")
+    assert out == "a.txt  (5 bytes)\nb.txt  (3 bytes)\nsub/"
+    # Verify exactly three exec calls: one for find probe, one for ls -1Ap, one for wc -c
+    # No per-file stat calls should exist
+    assert len(fake.calls) == 3
+    for call in fake.calls:
+        assert "/usr/bin/stat" not in call[0]
+
+
+def test_list_dir_fallback_passes_target_dir(started):
+    sb, fake, run_dir = started
+    # Script find --version to fail (no GNU find), then ls with "src", then wc -c
+    fake.script(["exec"], [_fail(b""), _ok(b"file.txt\n"), _ok(b"10 file.txt\n10 total\n")])
+    out = sb.list_dir("src")
+    assert "file.txt  (10 bytes)" in out
+    # Verify the ls exec's argv contains "src" (the target dir is passed)
+    assert any("src" in str(call[0]) for call in fake.calls)
+
+
+def test_grep_falls_back_to_grep_rn_when_no_rg(started):
+    sb, fake, run_dir = started
+    # Script rg --version to fail (no ripgrep), then grep -rn for search
+    fake.script(["exec"], [_fail(b"rg: not found"), _ok(b"src/app.py:2:hello\n")])
+    out = sb.grep("hello")
+    assert "src/app.py:2" in out
+    # Verify the exec uses grep -rn (fallback), not rg
+    assert "-rn" in fake.calls[-1][0]
+    assert "/usr/bin/rg" not in fake.calls[-1][0]
