@@ -42,11 +42,25 @@ def resolve_in_worktree(path_str: str, worktree: Path, writing: bool = False) ->
 # <repo>/.worktrees/dw-<slug> is escaped by `../..`. We deliberately do NOT match
 # a leading `$`: HOME is relocated into the worktree (so $HOME/~ stay confined),
 # and a blanket `$` would reject ordinary idioms like `rm -rf "$BUILD_DIR"`.
+#
+# NOTE ON SCOPE: none of this — including the git-subcommand rules below —
+# blocks a model from writing outside the worktree via an *interpreter*, e.g.
+# `python3 -c "open('/tmp/x','w').write('y')"`. Enumerating every interpreter's
+# write primitive is not a regex-shaped problem. Host mode (`--sandbox none`)
+# does not close that gap; the fix is a real OS process boundary (the Docker
+# sandbox, sub-project 2), not a bigger denylist. Documented in README.md and
+# SECURITY.md.
 _ESCAPE_TARGET = r"(/|~|\.\.)"
+# git accepts global options (-C <path>, -c <key>=<value>, --<flag>[=value],
+# -<x>) before the subcommand. The old \bgit\s+<subcommand> rules didn't skip
+# these, so `git -C ../.. config ...` or `git -c core.hooksPath=x push` had the
+# exact same effect as the plain form but slipped past the denylist. Every
+# git-subcommand rule below is prefixed with this instead of a bare `\bgit\s+`.
+_GIT_OPTS = r"\bgit\s+(?:(?:-C\s+\S+|-c\s+\S+|--\S+|-[A-Za-z]\S*)\s+)*"
 _DENYLIST: list[tuple[str, str]] = [
     ("sudo is not allowed", r"\bsudo\b"),
     ("git push is not allowed — leave changes uncommitted for review",
-     r"\bgit\s+push\b"),
+     _GIT_OPTS + r"push\b"),
     # A linked worktree SHARES refs/config/objects with the parent repo, so these
     # git subcommands mutate the parent's state from inside the worktree.
     # core.hooksPath in particular is a persistent host-code-execution pivot.
@@ -57,13 +71,13 @@ _DENYLIST: list[tuple[str, str]] = [
      # else. Enumerating write flags is whack-a-mole (--local/--global/--system/
      # --file/--unset/… all write shared config from a linked worktree), so we
      # invert it: block `git config` unless a read flag precedes the next separator.
-     r"\bgit\s+config\b(?![^;|&]*\s(?:--get\S*|--list|-l)\b)"
-     r"|\bgit\s+remote\s+(add|set-url|remove|rm|rename)\b"
-     r"|\bgit\s+(update-ref|gc|filter-branch)\b"
-     r"|\bgit\s+reflog\s+(expire|delete)\b"
-     r"|\bgit\s+worktree\s+(add|remove|prune|move)\b"
-     r"|\bgit\s+branch\s+(-[dDmM]\b|--(delete|move)\b)"
-     r"|\bgit\s+tag\s+(-d\b|--delete\b)"),
+     _GIT_OPTS + r"config\b(?![^;|&]*\s(?:--get\S*|--list|-l)\b)"
+     r"|" + _GIT_OPTS + r"remote\s+(add|set-url|remove|rm|rename)\b"
+     r"|" + _GIT_OPTS + r"(update-ref|gc|filter-branch)\b"
+     r"|" + _GIT_OPTS + r"reflog\s+(expire|delete)\b"
+     r"|" + _GIT_OPTS + r"worktree\s+(add|remove|prune|move)\b"
+     r"|" + _GIT_OPTS + r"branch\s+(-[dDmM]\b|--(delete|move)\b)"
+     r"|" + _GIT_OPTS + r"tag\s+(-d\b|--delete\b)"),
     ("destructive command targeting a path outside the worktree",
      r"\b(rm|mv|chmod|chown)\b[^|;&]*\s['\"]?" + _ESCAPE_TARGET),
     ("piping a download into an interpreter is not allowed",
