@@ -10,6 +10,7 @@ from dirtywork.workspace import (
     WorkspaceError,
     create_worktree,
     ensure_worktrees_excluded,
+    host_diff_stat,
     load_repo_context,
     make_slug,
     preflight_repo,
@@ -236,6 +237,45 @@ def test_worktree_base_commit(repo: Path):
     wt = create_worktree(repo, "ctx-08141109", None)
     expected = _git(repo, "rev-parse", "HEAD").strip()
     assert worktree_base_commit(wt) == expected
+
+
+def test_host_diff_stat_reports_tracked_changes(repo: Path):
+    wt = create_worktree(repo, "diff-08141109", None)
+    (wt / "f.txt").write_text("changed content")
+    out = host_diff_stat(wt)
+    assert "f.txt" in out
+
+
+def test_host_diff_stat_no_changes_is_empty(repo: Path):
+    wt = create_worktree(repo, "nodiff-08141109", None)
+    out = host_diff_stat(wt)
+    assert out.strip() == ""
+
+
+def test_host_diff_stat_ignores_untracked_new_files(repo: Path):
+    # git diff --stat only reports TRACKED changes — a brand-new file that
+    # was never `git add`ed does not appear. This is a documented limitation
+    # of host-mode diff_stat, not a bug.
+    wt = create_worktree(repo, "untracked-08141109", None)
+    (wt / "new.txt").write_text("hello")
+    out = host_diff_stat(wt)
+    assert "new.txt" not in out
+
+
+def test_host_diff_stat_truncates(repo: Path):
+    # git diff --stat only reports TRACKED changes (see the untracked-files
+    # test above) — commit the files first, then modify them, so there is
+    # real tracked diff output to truncate.
+    for i in range(50):
+        (repo / f"file{i}.txt").write_text("x\n")
+    _git(repo, "add", ".")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "add files")
+    wt = create_worktree(repo, "trunc-08141109", None)
+    for i in range(50):
+        (wt / f"file{i}.txt").write_text("changed content\n" * 5)
+    out = host_diff_stat(wt, cap=200)
+    assert len(out) <= 200 + len("\n[truncated at 200 chars]")
+    assert "truncated at 200 chars" in out
 
 
 def test_create_worktree_existing_dir_no_stale_branch(repo: Path):

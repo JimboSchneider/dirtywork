@@ -159,6 +159,20 @@ def worktree_base_commit(worktree: Path) -> str:
     return res.stdout.strip()
 
 
+def host_diff_stat(worktree: Path, cap: int = 64_000) -> str:
+    """`git diff --stat` in the worktree, capped. Host mode only — this
+    compares the worktree's working tree against its index, so it reports
+    TRACKED changes only; a brand-new file the model wrote but never staged
+    is invisible here (documented in README.md/SECURITY.md)."""
+    res = _git(worktree, "diff", "--stat")
+    if res.returncode != 0:
+        return f"[diff --stat failed: {res.stderr.strip()[:500]}]"
+    out = res.stdout
+    if len(out) > cap:
+        out = out[:cap] + f"\n[truncated at {cap} chars]"
+    return out
+
+
 def load_repo_context(repo: Path, base_commit: str) -> str | None:
     """Read CLAUDE.md/AGENTS.md from the base commit's git object store, not
     the filesystem. This closes two problems with a filesystem read: a

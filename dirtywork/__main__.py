@@ -6,6 +6,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from . import __version__
+from .budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB
 from .llm import LLMError, LMStudioClient
 from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir
 from .runner import Runner
@@ -15,6 +17,7 @@ from .workspace import (
     WorkspaceError,
     create_worktree,
     ensure_worktrees_excluded,
+    host_diff_stat,
     load_repo_context,
     make_slug,
     preflight_repo,
@@ -56,6 +59,8 @@ def main(argv: list | None = None) -> int:
     run_p.add_argument("--timeout", type=int, default=1800)
     run_p.add_argument("--temperature", type=float, default=None)
     run_p.add_argument("--base-url", default="http://localhost:1234/v1")
+    run_p.add_argument("--max-worktree-mb", type=int, default=DEFAULT_MAX_WORKTREE_MB)
+    run_p.add_argument("--max-worktree-files", type=int, default=DEFAULT_MAX_WORKTREE_FILES)
     args = parser.parse_args(argv)
 
     repo = args.repo.expanduser().resolve()
@@ -104,14 +109,30 @@ def main(argv: list | None = None) -> int:
     # the machine contract (exactly one JSON object on stdout, post-preflight)
     # holds even if a component other than runner.run() blows up.
     transcript = None
+    base_commit = None
     try:
+        base_commit = worktree_base_commit(worktree)
         transcript = Transcript(transcript_path)
-        executor = ToolExecutor(worktree, transcript=transcript)
+        executor = ToolExecutor(worktree, transcript=transcript,
+                                max_worktree_mb=args.max_worktree_mb,
+                                max_worktree_files=args.max_worktree_files)
+        run_info = {
+            "repo": str(repo),
+            "worktree": str(worktree),
+            "base_commit": base_commit,
+            "branch": f"dirtywork/{slug}",
+            "branch_from": args.branch_from,
+            "base_url": args.base_url,
+            "dirtywork_version": __version__,
+            "temperature": args.temperature,
+            "sandbox": "none",
+            "provider": "openai",
+        }
         runner = Runner(client, executor, transcript, model=args.model,
                         max_turns=args.max_turns, timeout=args.timeout,
                         temperature=args.temperature,
-                        run_info={"repo": str(repo), "worktree": str(worktree)})
-        base_commit = worktree_base_commit(worktree)
+                        run_info=run_info,
+                        finalize=lambda: {"diff_stat": host_diff_stat(worktree)})
         system_prompt = build_system_prompt(worktree, load_repo_context(repo, base_commit))
         result = runner.run(system_prompt, args.task)
     except Exception as e:
@@ -130,6 +151,8 @@ def main(argv: list | None = None) -> int:
             "turns": None,
             "usage": {},
             "final_message": message,
+            "run_dir": str(run_dir),
+            "base_commit": base_commit,
         }, indent=2))
         return 1
     finally:
@@ -147,6 +170,8 @@ def main(argv: list | None = None) -> int:
         "turns": result.turns,
         "usage": result.usage,
         "final_message": result.final_message,
+        "run_dir": str(run_dir),
+        "base_commit": base_commit,
     }, indent=2))
     return 0 if result.status == "completed" else 1
 
