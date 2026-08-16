@@ -200,7 +200,10 @@ class DockerSandbox:
         """Spec §2 steps 10-11: stop the worker container (but NOT the
         volume — export needs it), export into the still-empty host
         worktree, then host_read_tree — the one host git command allowed to
-        touch anything the worker produced."""
+        touch anything the worker produced. `RunArtifacts.untracked` stays ""
+        in docker mode: the export's `git add -A` before `write-tree` already
+        folds new files into `diff_stat`/`diff.patch`, so there is nothing
+        separate to report."""
         self._stop_container()
         label = docker_args.repo_label(self._repo)
         artifacts = export.export_run(
