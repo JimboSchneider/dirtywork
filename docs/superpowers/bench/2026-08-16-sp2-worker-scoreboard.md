@@ -26,3 +26,6 @@
 | T7a impl [qwen3.6-35b-a3b] | qwen/qwen3.6-35b-a3b | completed | 23 | 2.1m | 610199 | 7916 | 3I (same 2 defects, one split) /1M; did NOT commit — tie on code, loses on instruction-following |
 | T7a fix1 [qwen3-coder-next] | qwen/qwen3-coder-next | max_turns | 60 | 3.6m | 1424538 | 13955 | max_turns; work done, 1 mis-scripted test, uncommitted (ctrl committed WIP) |
 | T7a fix2 [qwen3-coder-next] | qwen/qwen3-coder-next | completed | 11 | 0.8m | 57550 | 1520 | ✅ 3/3 addressed |
+| T7b impl [qwen3-coder-next] | qwen/qwen3-coder-next | max_turns | 80 | 5.2m | 3021157 | 14490 | ❌ 5I (fallback path broken, N+1 stat, no fallback tests, dup)/1M; max_turns right after green |
+| T7b impl [qwen3.6-35b-a3b] | qwen/qwen3.6-35b-a3b | completed | 16 | 3.2m | 385888 | 10855 | ❌ stopped at 16 turns, EMPTY final msg, 2 tests failing, no commit — LOSES |
+| T7b fix1 [qwen3-coder-next] | qwen/qwen3-coder-next | completed | 47 | 3.4m | 857279 | 8202 | ✅ 5/5 addressed |
