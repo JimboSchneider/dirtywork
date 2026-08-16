@@ -74,7 +74,7 @@ class LMStudioClient:
             body = bytes(body)
         except urllib.error.HTTPError as e:
             try:
-                detail = e.read()[:500]
+                detail = e.read(500)
             except Exception:
                 detail = b"<unreadable error body>"
             raise LLMError(f"LM Studio HTTP {e.code} on {path}: {detail!r}")
