@@ -191,9 +191,11 @@ def host_untracked(worktree: Path, cap: int = 64_000) -> str:
     `-uall`: default mode collapses a whole untracked directory into one
     `?? dir/` line, so a model that ran `npm ci`/`volta install` under the
     worktree yields `.npm/`, `.volta/` rather than thousands of paths.
+    `--untracked-files=normal` is passed explicitly so a user-level
+    `status.showUntrackedFiles=no`/`all` cannot hide or explode the list.
     Gitignored paths are excluded automatically. Read-only — this never runs
     `git add` on the model's behalf, it only reports what's already there."""
-    res = _git(worktree, "status", "--porcelain")
+    res = _git(worktree, "status", "--porcelain", "--untracked-files=normal")
     if res.returncode != 0:
         return f"[status failed: {res.stderr.strip()[:500]}]"
     lines = [
