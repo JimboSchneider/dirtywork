@@ -206,12 +206,12 @@ class DockerSandbox:
             except docker_cli.DockerError:
                 pass
 
-    def _read_raw(self, path: str):
+    def _read_raw(self, path: str, *, strict: bool = False):
         rel, err = _rel(path)
         if err:
             return None, err
         argv = docker_args.exec_argv(
-            self.container, ["/usr/bin/head", "-c", str(MAX_READ_BYTES), "--", rel]
+            self.container, ["/usr/bin/head", "-c", str(MAX_READ_BYTES + 1), "--", rel]
         )
         captured = self._run(argv, timeout=READ_EXEC_TIMEOUT)
         if captured.returncode != 0:
@@ -219,6 +219,18 @@ class DockerSandbox:
                 f"ERROR: cannot read '{path}': "
                 f"{captured.output.decode('utf-8', 'replace')[:500]}"
             )
+        if len(captured.output) > MAX_READ_BYTES:
+            return None, (
+                f"ERROR: '{path}' exceeds {MAX_READ_BYTES} bytes; refusing to read"
+            )
+        if strict:
+            try:
+                text = captured.output.decode("utf-8", errors="strict")
+            except UnicodeDecodeError:
+                return None, (
+                    f"ERROR: '{path}' is not valid UTF-8; refusing to edit"
+                )
+            return text, None
         return captured.output.decode("utf-8", errors="replace"), None
 
     def read_file(self, path: str, offset: int = 0, limit: int = 400) -> str:
@@ -251,7 +263,7 @@ class DockerSandbox:
         return f"Wrote {len(encoded)} bytes to {path}"
 
     def edit_file(self, path: str, old_string: str, new_string: str) -> str:
-        text, err = self._read_raw(path)
+        text, err = self._read_raw(path, strict=True)
         if err:
             return err
         count = text.count(old_string)
@@ -260,5 +272,7 @@ class DockerSandbox:
                 f"ERROR: old_string occurs {count} times in {path}; it must occur "
                 f"exactly once. Include more surrounding context to make it unique."
             )
-        self.write_file(path, text.replace(old_string, new_string, 1))
+        result = self.write_file(path, text.replace(old_string, new_string, 1))
+        if result.startswith("ERROR:"):
+            return result
         return f"Edited {path}"

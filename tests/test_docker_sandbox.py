@@ -343,7 +343,7 @@ def test_read_file_exec_argv_and_shaping(started):
     out = sb.read_file("src/app.py")
     assert fake.calls[-1][0] == [
         "exec", "-w", "/work", "dw-abc123",
-        "/usr/bin/head", "-c", str(MAX_READ_BYTES), "--", "src/app.py",
+        "/usr/bin/head", "-c", str(MAX_READ_BYTES + 1), "--", "src/app.py",
     ]
     assert "     1\tline one" in out
     assert "     2\tline two" in out
@@ -415,3 +415,46 @@ def test_edit_file_multiple_matches(started):
     fake.script(["exec"], _ok(b"aa\naa\n"))
     out = sb.edit_file("dup.txt", "aa", "bb")
     assert out.startswith("ERROR:") and "2 times" in out
+
+
+def test_edit_file_write_failure(started):
+    """When edit_file's write exec fails, the error should be propagated."""
+    sb, fake, run_dir = started
+    # Read succeeds with content containing "old"
+    fake.script(["exec"], [_ok(b"def main():\n    return old\n")])
+    # Write fails with non-zero return code
+    fake.script(["exec"], [_fail(b"write failed")])
+    out = sb.edit_file("src/app.py", "old", "new")
+    assert out.startswith("ERROR:")
+    # Verify write was attempted (1 read + 1 write = 2 exec calls)
+    heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
+    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    assert len(heads) == 1
+    assert len(writes) == 1
+
+
+def test_read_file_oversize(started):
+    """When file exceeds MAX_READ_BYTES, read_file should return error."""
+    from dirtywork.tools import MAX_READ_BYTES
+    sb, fake, run_dir = started
+    # Script read to return MAX_READ_BYTES+1 bytes
+    oversize_content = b"x" * (MAX_READ_BYTES + 1)
+    fake.script(["exec"], _ok(oversize_content))
+    out = sb.read_file("big.txt")
+    assert out.startswith("ERROR:")
+    assert f"exceeds {MAX_READ_BYTES} bytes" in out
+
+
+def test_edit_file_non_utf8(started):
+    """When file contains non-UTF-8 bytes, edit_file should return error without writing."""
+    sb, fake, run_dir = started
+    # Read succeeds with invalid UTF-8 bytes - should trigger error before write
+    fake.script(["exec"], [_ok(b"\xff\xfe old")])
+    out = sb.edit_file("bin.dat", "old", "new")
+    assert out.startswith("ERROR:")
+    assert "not valid UTF-8" in out
+    # Verify no write was attempted (1 read, 0 writes)
+    heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
+    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    assert len(heads) == 1
+    assert len(writes) == 0
