@@ -579,18 +579,19 @@ def test_bash_blocked_command_never_execs(started):
 
 def test_bash_timeout_returns_text_not_raise(started):
     sb, fake, run_dir = started
-    # Script the exec that will timeout
-    def raise_timeout(argv, *, timeout, stdin=None):
-        fake.calls.append((list(argv), timeout, stdin))
-        raise DockerError("docker exec ... timed out after 11s")
-    sb._run = raise_timeout
-    # Script top/inspect for the _reap() call after timeout (they succeed)
+    real_run = sb._run
+    def run_with_timeout(argv, *, timeout, stdin=None):
+        # Only the model's own bash exec times out; docker top/inspect keep working.
+        if "sleep 600" in " ".join(argv):
+            fake.calls.append((list(argv), timeout, stdin))
+            raise DockerError("docker exec ... timed out after 1s")
+        return real_run(argv, timeout=timeout, stdin=stdin)
+    sb._run = run_with_timeout
     fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
     fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
-    # Script reset path: kill (fail), exec /bin/true (succeed for ready check)
-    fake.script(["exec"], _ok(b""))
     out = sb.bash("sleep 600", timeout=1)
     assert "timed out after 1s" in out
+    assert not any(c[0][:1] == ["kill"] for c in fake.calls)  # healthy container: no reset
 
 
 def test_bash_nonzero_exit_reported(started):
@@ -772,3 +773,16 @@ def test_reap_allows_docker_init_tether(started):
     out = sb.bash("echo ok")
 
     assert not any(c[0][0] == "kill" for c in fake.calls)
+
+
+def test_reset_raises_when_container_does_not_come_back(started, monkeypatch):
+    # Make _wait_ready fail fast by monkeypatching the lifecycle timeout
+    import dirtywork.sandbox.docker as docker_module
+    monkeypatch.setattr(docker_module.docker_cli, "T_LIFECYCLE", 0.2)
+    
+    sb, fake, run_dir = started
+    # Script exec to fail (the ready-wait /bin/true exec)
+    fake.script(["exec"], _fail(b""))
+    
+    with pytest.raises(SandboxError):
+        sb.reset("x")

@@ -394,13 +394,9 @@ class DockerSandbox:
                 self._tether.wait(timeout=docker_cli.T_LIFECYCLE)
             except Exception:
                 pass
-        try:
-            self._start_tether()
-            self._wait_ready()
-            self._init(restart=True)
-        except SandboxError:
-            # If we can't reset properly, still write the event if transcript is available
-            pass
+        self._start_tether()
+        self._wait_ready()
+        self._init(restart=True)
         if self.transcript is not None:
             try:
                 self.transcript.write("sandbox_reset", reason=reason)
@@ -418,10 +414,10 @@ class DockerSandbox:
         container is in, a fresh one via reset() is the safe recovery."""
         try:
             top = self._run(["top", self.container], timeout=docker_cli.T_QUERY)
+            unreachable = top.returncode != 0
         except docker_cli.DockerError:
-            self.reset("container unreachable after bash")
-            return
-        if top.returncode != 0:
+            unreachable = True
+        if unreachable:
             self.reset("container unreachable after bash")
             return
         lines = top.output.decode("utf-8", errors="replace").splitlines()
