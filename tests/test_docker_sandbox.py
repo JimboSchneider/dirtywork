@@ -47,6 +47,9 @@ class FakePopen:
         self.kill()
 
 
+_TOP_HEADER = b"UID  PID  PPID  C  STIME  TTY  TIME  CMD\n"
+
+
 class FakeDocker:
     """Scriptable stand-in for docker_cli.run and subprocess.Popen, shared by
     every DockerSandbox/export unit test in this plan.
@@ -165,6 +168,31 @@ def started(docker, tmp_path: Path):
     sb.start(worktree, repo, "abc123", "deadbeef" * 5)
     fake.calls.clear()
     return sb, fake, run_dir
+
+
+@pytest.fixture()
+def started_with_transcript(tmp_path: Path):
+    from dirtywork.transcript import Transcript
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{json .RepoDigests}}"],
+                _ok(b'["dirtywork/worker@sha256:' + b"a" * 64 + b'"]'))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+    fake.calls.clear()
+    return sb, fake, run_dir, transcript
 
 
 def test_start_sets_attributes(docker, tmp_path):
@@ -524,11 +552,17 @@ def test_grep_timeout_returns_error_text(started):
 
 def test_bash_exec_argv_and_shaping(started):
     sb, fake, run_dir = started
+    # Script the top and inspect calls that _reap() will make after bash
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
     fake.script(["exec"], _ok(b"hi\n"))
     out = sb.bash("echo hi")
     assert "exit code: 0" in out
     assert "hi" in out
-    argv, timeout, stdin = fake.calls[-1]
+    # Find the last exec call (which is the bash command)
+    exec_calls = [c for c in fake.calls if "exec" in c[0] and "/bin/bash" in str(c[0])]
+    assert len(exec_calls) == 1
+    argv, timeout, stdin = exec_calls[-1]
     assert argv == [
         "exec", "-w", "/work", "dw-abc123",
         "/bin/bash", "-c", 'ulimit -f 524288; exec bash -c "$1"', "_", "echo hi",
@@ -545,12 +579,16 @@ def test_bash_blocked_command_never_execs(started):
 
 def test_bash_timeout_returns_text_not_raise(started):
     sb, fake, run_dir = started
-
+    # Script the exec that will timeout
     def raise_timeout(argv, *, timeout, stdin=None):
         fake.calls.append((list(argv), timeout, stdin))
         raise DockerError("docker exec ... timed out after 11s")
-
     sb._run = raise_timeout
+    # Script top/inspect for the _reap() call after timeout (they succeed)
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+    # Script reset path: kill (fail), exec /bin/true (succeed for ready check)
+    fake.script(["exec"], _ok(b""))
     out = sb.bash("sleep 600", timeout=1)
     assert "timed out after 1s" in out
 
@@ -558,6 +596,9 @@ def test_bash_timeout_returns_text_not_raise(started):
 def test_bash_nonzero_exit_reported(started):
     sb, fake, run_dir = started
     from dirtywork.procs import Captured
+    # Script the top and inspect calls that _reap() will make after bash
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
     fake.script(["exec"], Captured(returncode=3, output=b"", truncated=False, timed_out=False))
     out = sb.bash("exit 3")
     assert "exit code: 3" in out
@@ -566,6 +607,9 @@ def test_bash_nonzero_exit_reported(started):
 def test_bash_output_capped(started):
     sb, fake, run_dir = started
     from dirtywork.procs import Captured
+    # Script the top and inspect calls that _reap() will make after bash
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
     fake.script(["exec"], Captured(returncode=0, output=b"x" * 100, truncated=True, timed_out=False))
     out = sb.bash("big output")
     assert "capped" in out
@@ -605,3 +649,126 @@ def test_grep_falls_back_to_grep_rn_when_no_rg(started):
     # Verify the exec uses grep -rn (fallback), not rg
     assert "-rn" in fake.calls[-1][0]
     assert "/usr/bin/rg" not in fake.calls[-1][0]
+
+
+def test_reap_resets_and_writes_sandbox_reset_event_on_stray_process(started_with_transcript):
+    import json
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], _ok(
+        _TOP_HEADER
+        + b"501  1  0  0  10:00  ?  00:00:00  cat\n"
+        + b"501  42  1  0  10:00  ?  00:00:00  sleep 300\n"
+    ))
+    fake.script(["exec"], _ok(b"ok\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+
+    sb.bash("echo ok")
+    transcript.close()
+
+    events = [json.loads(l) for l in (run_dir / "transcript.jsonl").read_text().splitlines()]
+    reset_events = [e for e in events if e["event"] == "sandbox_reset"]
+    assert reset_events and reset_events[0]["reason"] == "stray process after bash"
+    assert any(c[0][0] == "kill" for c in fake.calls)
+
+
+def test_reap_resets_on_oom(started_with_transcript):
+    import json
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["exec"], _ok(b"ok\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"true\n"))
+
+    sb.bash("echo ok")
+    transcript.close()
+
+    events = [json.loads(l) for l in (run_dir / "transcript.jsonl").read_text().splitlines()]
+    reset_events = [e for e in events if e["event"] == "sandbox_reset"]
+    assert reset_events and reset_events[0]["reason"] == "oom"
+
+
+def test_reset_uses_restart_variant_init(started_with_transcript):
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], _ok(
+        _TOP_HEADER
+        + b"501  1  0  0  10:00  ?  00:00:00  cat\n"
+        + b"501  42  1  0  10:00  ?  00:00:00  sleep 300\n"
+    ))
+    fake.script(["exec"], _ok(b"ok\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+
+    sb.bash("echo ok")
+
+    init_calls = [c for c in fake.calls if c[0][0] == "exec" and "/bin/sh" in c[0]]
+    assert init_calls
+    last_init_script = init_calls[-1][0][-1]
+    assert "git read-tree HEAD" in last_init_script
+    assert "read-tree -m -u HEAD" not in last_init_script
+
+
+def test_reset_creates_a_fresh_tether(started_with_transcript):
+    sb, fake, run_dir, transcript = started_with_transcript
+    popens_before = len(fake.popens)
+    fake.script(["top"], _ok(
+        _TOP_HEADER
+        + b"501  1  0  0  10:00  ?  00:00:00  cat\n"
+        + b"501  42  1  0  10:00  ?  00:00:00  sleep 300\n"
+    ))
+    fake.script(["exec"], _ok(b"ok\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+
+    sb.bash("echo ok")
+
+    assert len(fake.popens) == popens_before + 1
+
+
+def test_reset_can_be_called_directly(started_with_transcript):
+    import json
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["exec"], _ok())
+
+    sb.reset("manual test reset")
+    transcript.close()
+
+    events = [json.loads(l) for l in (run_dir / "transcript.jsonl").read_text().splitlines()]
+    assert any(e["event"] == "sandbox_reset" and e["reason"] == "manual test reset" for e in events)
+
+
+def test_reap_resets_when_docker_top_itself_fails(started_with_transcript):
+    # A container killed while a docker exec was in flight (Task 16's live
+    # lifecycle case) makes the SUBSEQUENT `docker top` call fail outright —
+    # not "succeeds but shows a stray row". That must ALSO trigger a reset.
+    import json
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], _fail(b"Error: No such container: dw-abc123"))
+    fake.script(["exec"], _ok(b"ok\n"))
+
+    sb.bash("echo ok")  # must not raise — reap recovers via reset
+    transcript.close()
+
+    events = [json.loads(l) for l in (run_dir / "transcript.jsonl").read_text().splitlines()]
+    reset_events = [e for e in events if e["event"] == "sandbox_reset"]
+    assert reset_events and reset_events[0]["reason"] == "container unreachable after bash"
+    assert any(c[0][0] == "kill" for c in fake.calls)
+
+
+def test_reap_allows_bare_cat_tether(started):
+    sb, fake, run_dir = started
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+    fake.script(["exec"], _ok(b"ok\n"))
+
+    out = sb.bash("echo ok")
+
+    assert "ok" in out
+    assert not any(c[0][0] == "kill" for c in fake.calls)
+
+
+def test_reap_allows_docker_init_tether(started):
+    sb, fake, run_dir = started
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  /sbin/docker-init -- cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+    fake.script(["exec"], _ok(b"ok\n"))
+
+    out = sb.bash("echo ok")
+
+    assert not any(c[0][0] == "kill" for c in fake.calls)

@@ -372,6 +372,89 @@ class DockerSandbox:
         lines = [(l[2:] if l.startswith("./") else l) for l in text.splitlines()]
         return _cap("\n".join(lines), note=" — narrow the pattern or path for full results")
 
+    def reset(self, reason: str) -> None:
+        """Spec §3 "Reset" (used on a stray process, OOM, or a watchdog
+        kill): docker kill SIGKILLs PID 1, so the whole container namespace
+        dies and its tmpfs is wiped — but the volume and its contents
+        persist (verified). Fresh tether, ready-wait, then init's restart
+        variant (index only — never touches /work, so the working tree
+        survives a reset even though the worker's git metadata in /gitdir
+        does not)."""
+        try:
+            self._run(["kill", self.container], timeout=docker_cli.T_LIFECYCLE)
+        except docker_cli.DockerError:
+            pass
+        if self._tether is not None:
+            try:
+                if self._tether.stdin is not None:
+                    self._tether.stdin.close()
+            except OSError:
+                pass
+            try:
+                self._tether.wait(timeout=docker_cli.T_LIFECYCLE)
+            except Exception:
+                pass
+        try:
+            self._start_tether()
+            self._wait_ready()
+            self._init(restart=True)
+        except SandboxError:
+            # If we can't reset properly, still write the event if transcript is available
+            pass
+        if self.transcript is not None:
+            try:
+                self.transcript.write("sandbox_reset", reason=reason)
+            except Exception:
+                pass
+
+    def _reap(self) -> None:
+        """After every bash call (spec §6): docker top should show at most
+        the lifetime tether (bare "cat", or "/sbin/docker-init -- cat" while
+        tini is still attached). Any other row means a backgrounded process
+        outlived the call — reset restores the documented contract. A
+        nonzero `docker top` itself (the container is stopped, killed, or
+        otherwise unreachable — e.g. `docker kill` fired while a `docker
+        exec` was in flight) is ALSO a reset trigger: whatever state the
+        container is in, a fresh one via reset() is the safe recovery."""
+        try:
+            top = self._run(["top", self.container], timeout=docker_cli.T_QUERY)
+        except docker_cli.DockerError:
+            self.reset("container unreachable after bash")
+            return
+        if top.returncode != 0:
+            self.reset("container unreachable after bash")
+            return
+        lines = top.output.decode("utf-8", errors="replace").splitlines()
+        if lines:
+            header_cols = lines[0].split()
+            n = max(len(header_cols), 1)
+            for line in lines[1:]:
+                if not line.strip():
+                    continue
+                fields = line.split(None, n - 1)
+                cmd = fields[-1] if fields else ""
+                # --entrypoint /bin/cat means the tether row reads "/bin/cat"
+                # (and tini's row "/sbin/docker-init -- /bin/cat"); a bare
+                # "cat" is what the spec's experiment showed — accept both.
+                if cmd in ("cat", "/bin/cat") or cmd.endswith("docker-init -- cat") \
+                        or cmd.endswith("docker-init -- /bin/cat"):
+                    continue
+                self.reset("stray process after bash")
+                return
+        try:
+            oom = self._run(
+                ["inspect", "--format", "{{.State.OOMKilled}}", self.container],
+                timeout=docker_cli.T_QUERY,
+            )
+        except docker_cli.DockerError:
+            # If inspect fails, don't reset - it would be recursive
+            return
+        if oom.returncode == 0 and oom.output.decode("utf-8", errors="replace").strip() == "true":
+            self.reset("oom")
+
+    def _after_bash(self) -> None:
+        self._reap()
+
     def bash(self, command: str, timeout: int = 120) -> str:
         reason = check_bash_command(command)
         if reason:
@@ -384,10 +467,14 @@ class DockerSandbox:
         try:
             captured = self._run(argv, timeout=timeout + 10)
         except docker_cli.DockerError:
-            return _cap(f"ERROR: command timed out after {timeout}s.", cap=MAX_BASH_CHARS)
+            result = _cap(f"ERROR: command timed out after {timeout}s.", cap=MAX_BASH_CHARS)
+            self._after_bash()
+            return result
         out = captured.output.decode("utf-8", errors="replace").strip()
         note = " — bash output capped" if captured.truncated else ""
         final_text = f"exit code: {captured.returncode}\n{out}"
         if captured.truncated:
             final_text += "\n[output capped]"
-        return _cap(final_text, cap=MAX_BASH_CHARS, note=note)
+        result = _cap(final_text, cap=MAX_BASH_CHARS, note=note)
+        self._after_bash()
+        return result
