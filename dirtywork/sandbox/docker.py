@@ -18,6 +18,9 @@ from . import lifecycle
 from ..workspace import WorkspaceError
 from .watchdog import Watchdog
 
+from . import export
+from ..workspace import host_read_tree
+
 # Fixed exec timeouts for tools with no user-facing timeout knob — these
 # operations should complete near-instantly; a hang means the sandbox
 # itself is broken, so DockerError is allowed to propagate as sandbox_error
@@ -77,6 +80,8 @@ class DockerSandbox:
         self._base_commit = None
         self._stopped = False
         self.watchdog = None
+        self._objects_dir = None
+        self._export_failed = False
 
     def start(self, worktree: Path, repo: Path, slug: str, base_commit: str) -> None:
         self._worktree = worktree
@@ -105,6 +110,7 @@ class DockerSandbox:
 
         try:
             objects_dir = docker_cli.validate_objects_dir(repo)
+            self._objects_dir = objects_dir
         except WorkspaceError as e:
             raise SandboxError(str(e)) from e
         self.image_ref = docker_cli.resolve_image(
@@ -163,10 +169,7 @@ class DockerSandbox:
         if res.returncode != 0:
             raise SandboxError(f"{what}: {res.output.decode('utf-8', 'replace')[:500]}")
 
-    def stop(self) -> None:
-        if self._stopped:
-            return
-        self._stopped = True
+    def _stop_container(self) -> None:
         if self.watchdog is not None:
             self.watchdog.stop()
             if self.watchdog.is_alive():
@@ -178,11 +181,42 @@ class DockerSandbox:
                 pass
         if self._tether is not None:
             lifecycle.close_tether(self._tether)
-        if self.volume is not None and not self.cfg.keep_volume:
+
+    def _stop_volume(self) -> None:
+        if self.volume is not None and not self.cfg.keep_volume and not self._export_failed:
             try:
                 self._run(["volume", "rm", self.volume], timeout=docker_cli.T_QUERY)
             except docker_cli.DockerError:
                 pass
+
+    def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
+        self._stop_container()
+        self._stop_volume()
+
+    def finalize(self) -> export.RunArtifacts:
+        """Spec §2 steps 10-11: stop the worker container (but NOT the
+        volume — export needs it), export into the still-empty host
+        worktree, then host_read_tree — the one host git command allowed to
+        touch anything the worker produced."""
+        self._stop_container()
+        label = docker_args.repo_label(self._repo)
+        artifacts = export.export_run(
+            self.cfg, slug=self._slug, base_commit=self._base_commit,
+            worktree=self._worktree, run_dir=self.run_dir, objects_dir=self._objects_dir,
+            image_ref=self.image_ref, uid=self.uid, gid=self.gid, repo_label=label,
+            run=self._run, popen=self._popen,
+        )
+        if artifacts.export_status.startswith("export_failed"):
+            # Leave the host worktree as it was (.git file only): read-tree
+            # after a failed export would make host `git status` claim mass
+            # deletions that never happened.
+            self._export_failed = True
+            return artifacts
+        host_read_tree(self._worktree)
+        return artifacts
 
     def _read_raw(self, path: str, *, strict: bool = False):
         rel, err = _rel(path)

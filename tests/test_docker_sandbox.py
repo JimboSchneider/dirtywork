@@ -760,3 +760,80 @@ def test_sample_worktree_failure_twice_raises_sandboxerror(started):
 
     with pytest.raises(SandboxError, match="sample failed twice"):
         sb.bash("echo ok")
+
+
+def test_finalize_stops_container_calls_export_run_and_host_read_tree(started, monkeypatch):
+    from dirtywork.sandbox import RunArtifacts
+    sb, fake, run_dir = started
+    seen = {}
+
+    def fake_export_run(cfg, **kwargs):
+        seen["export_kwargs"] = kwargs
+        return RunArtifacts(export_status="ok", diff_stat="stat", worktree_bytes=10, worktree_files=1)
+
+    def fake_host_read_tree(worktree):
+        seen["host_read_tree_worktree"] = worktree
+
+    import dirtywork.sandbox.docker as docker_mod
+    monkeypatch.setattr(docker_mod.export, "export_run", fake_export_run)
+    monkeypatch.setattr(docker_mod, "host_read_tree", fake_host_read_tree)
+
+    artifacts = sb.finalize()
+
+    assert artifacts.export_status == "ok"
+    assert seen["export_kwargs"]["slug"] == "abc123"
+    assert seen["host_read_tree_worktree"] == sb._worktree
+    assert any(c[0][:2] == ["rm", "-f"] for c in fake.calls)  # worker container removed
+
+
+def test_stop_after_finalize_keeps_volume_when_export_failed(started, monkeypatch):
+    from dirtywork.sandbox import RunArtifacts
+    sb, fake, run_dir = started
+
+    import dirtywork.sandbox.docker as docker_mod
+    monkeypatch.setattr(docker_mod.export, "export_run",
+                         lambda cfg, **kw: RunArtifacts(export_status="export_failed: worktree not empty"))
+    monkeypatch.setattr(docker_mod, "host_read_tree", lambda worktree: None)
+
+    sb.finalize()
+    fake.calls.clear()
+    sb.stop()
+
+    assert not any(c[0][:2] == ["volume", "rm"] for c in fake.calls)
+
+
+def test_stop_after_finalize_removes_volume_when_export_succeeded(started, monkeypatch):
+    from dirtywork.sandbox import RunArtifacts
+    sb, fake, run_dir = started
+
+    import dirtywork.sandbox.docker as docker_mod
+    monkeypatch.setattr(docker_mod.export, "export_run",
+                         lambda cfg, **kw: RunArtifacts(export_status="ok"))
+    monkeypatch.setattr(docker_mod, "host_read_tree", lambda worktree: None)
+
+    sb.finalize()
+    fake.calls.clear()
+    sb.stop()
+
+    assert any(c[0][:2] == ["volume", "rm"] for c in fake.calls)
+
+
+def test_finalize_skips_host_read_tree_when_export_failed(started, monkeypatch):
+    from dirtywork.sandbox import RunArtifacts
+    sb, fake, run_dir = started
+
+    import dirtywork.sandbox.docker as docker_mod
+    monkeypatch.setattr(docker_mod.export, "export_run",
+                         lambda cfg, **kw: RunArtifacts(export_status="export_failed: boom"))
+    host_read_tree_called = []
+
+    def track_host_read_tree(worktree):
+        host_read_tree_called.append(worktree)
+
+    monkeypatch.setattr(docker_mod, "host_read_tree", track_host_read_tree)
+
+    artifacts = sb.finalize()
+
+    assert artifacts.export_status == "export_failed: boom"
+    assert not host_read_tree_called  # host_read_tree should NOT be called on export failure
+    assert sb._export_failed is True
