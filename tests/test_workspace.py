@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -232,3 +230,40 @@ def test_create_worktree_existing_dir_no_stale_branch(repo: Path):
         create_worktree(repo, "dup-08141109", None)
     branches = _git(repo, "branch", "--list", "dirtywork/dup-08141109")
     assert "dirtywork/dup-08141109" not in branches
+
+
+def test_create_worktree_worktrees_symlink_rejected(repo: Path, tmp_path: Path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (repo / ".worktrees").symlink_to(outside)
+    with pytest.raises(WorkspaceError):
+        create_worktree(repo, "sym-08141109", None)
+    assert list(outside.iterdir()) == []  # nothing created through the symlink
+
+
+def test_create_worktree_destination_symlink_rejected(repo: Path, tmp_path: Path):
+    (repo / ".worktrees").mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (repo / ".worktrees" / "dw-pre-08141109").symlink_to(elsewhere)
+    with pytest.raises(WorkspaceError):
+        create_worktree(repo, "pre-08141109", None)
+    porcelain = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert porcelain.count("worktree ") == 1  # only the main worktree
+
+
+def test_create_worktree_destination_empty_dir_rejected(repo: Path):
+    (repo / ".worktrees" / "dw-emptydir-08141109").mkdir(parents=True)
+    with pytest.raises(WorkspaceError):
+        create_worktree(repo, "emptydir-08141109", None)
+
+
+def test_make_slug_salt_is_8_hex_chars():
+    now = datetime(2026, 8, 14, 11, 9)
+    slug = make_slug("same task", now)
+    salt = slug.rsplit("-", 1)[-1]
+    assert len(salt) == 8
+    int(salt, 16)  # raises ValueError if not valid hex

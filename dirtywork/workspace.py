@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
 import secrets
+import stat
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -35,12 +37,39 @@ def make_slug(task: str, now: datetime, salt: str | None = None) -> str:
     words = re.sub(r"[^a-z0-9\s-]", "", task.lower()).split()[:5]
     base = re.sub(r"-+", "-", "-".join(words))[:40].strip("-") or "task"
     if salt is None:
-        salt = secrets.token_hex(2)
+        salt = secrets.token_hex(4)
     return f"{base}-{now.strftime('%m%d%H%M%S')}-{salt}"
 
 
 def create_worktree(repo: Path, slug: str, branch_from: str | None) -> Path:
+    worktrees_dir = repo / ".worktrees"
+    try:
+        wd_st = os.lstat(worktrees_dir)
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISDIR(wd_st.st_mode):
+            raise WorkspaceError(
+                f"{worktrees_dir} exists and is not a directory — refusing to "
+                f"create a worktree through a symlink or other non-directory here"
+            )
+
     rel = Path(".worktrees") / f"dw-{slug}"
+    dest = repo / rel
+    try:
+        os.lstat(dest)
+    except FileNotFoundError:
+        pass
+    else:
+        # A pre-existing file, directory, or symlink at the EXACT destination
+        # must abort before `git worktree add` runs: git would create through
+        # a symlink, and a later `worktree remove` would then clean an
+        # unrelated outside directory.
+        raise WorkspaceError(
+            f"{dest} already exists; refusing to create a worktree through a "
+            f"pre-existing file, directory, or symlink at the exact destination"
+        )
+
     ref = branch_from or "HEAD"
     branch = f"dirtywork/{slug}"
     existed = _git(repo, "rev-parse", "--verify", "--quiet",
@@ -50,7 +79,20 @@ def create_worktree(repo: Path, slug: str, branch_from: str | None) -> Path:
         if not existed:
             _git(repo, "branch", "-D", branch)  # best-effort cleanup; ignore result
         raise WorkspaceError(f"git worktree add failed: {res.stderr.strip()}")
-    return repo / rel
+
+    worktree = repo / rel
+    # Never `.resolve()` the joined path and compare — that variant passes
+    # wrongly when a component is a symlink. Resolve each side separately.
+    expected_parent = repo.resolve() / ".worktrees"
+    if expected_parent not in worktree.resolve().parents:
+        _git(repo, "worktree", "remove", "--force", str(rel))
+        _git(repo, "branch", "-D", branch)
+        raise WorkspaceError(
+            f"worktree resolved to {worktree.resolve()}, outside the expected "
+            f"{expected_parent} — refusing (a symlinked .worktrees or ref "
+            f"could redirect git worktree add outside the repo)"
+        )
+    return worktree
 
 
 def ensure_worktrees_excluded(repo: Path) -> None:
