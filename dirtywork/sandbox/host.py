@@ -9,8 +9,8 @@ from ..budget import (
     BudgetExceeded,
     measure_worktree,
 )
-from ..workspace import host_diff_stat
-from . import RunArtifacts
+from ..workspace import host_diff_stat, host_untracked
+from . import RunArtifacts, SandboxError
 
 
 class HostSandbox:
@@ -29,10 +29,15 @@ class HostSandbox:
     def start(self, worktree: Path, repo: Path, slug: str, base_commit: str) -> None:
         self.worktree = worktree  # host mode: no container to create
         self.base_commit = base_commit
+        self.repo = repo
+        self.slug = slug
+
+    def _measure(self) -> dict:
+        return measure_worktree(self.worktree, max_bytes=self.max_worktree_mb * 1024 * 1024,
+                                   max_files=self.max_worktree_files)
 
     def _check_budget(self) -> None:
-        report = measure_worktree(self.worktree, max_bytes=self.max_worktree_mb * 1024 * 1024,
-                                   max_files=self.max_worktree_files)
+        report = self._measure()
         if report.violation:
             raise BudgetExceeded(report.violation)
 
@@ -62,11 +67,12 @@ class HostSandbox:
         return result
 
     def finalize(self) -> RunArtifacts:
-        assert self.base_commit is not None
-        report = measure_worktree(self.worktree, max_bytes=self.max_worktree_mb * 1024 * 1024,
-                                   max_files=self.max_worktree_files)
+        if self.base_commit is None:
+            raise SandboxError("finalize() called before start()")
+        report = self._measure()
         return RunArtifacts(
             diff_stat=host_diff_stat(self.worktree, self.base_commit),
+            untracked=host_untracked(self.worktree),
             worktree_bytes=report.bytes,
             worktree_files=report.files,
             escaping_symlinks=list(report.escaping_symlinks),

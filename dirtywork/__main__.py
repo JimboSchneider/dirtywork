@@ -120,7 +120,7 @@ def main(argv: list | None = None) -> int:
         transcript = Transcript(transcript_path)
         sandbox = HostSandbox(worktree, max_worktree_mb=args.max_worktree_mb,
                                max_worktree_files=args.max_worktree_files)
-        sandbox.start(worktree, repo, slug, worktree_base_commit(worktree))
+        sandbox.start(worktree, repo, slug, base_commit)
         executor = ToolExecutor(sandbox, transcript=transcript)
         run_info = {
             "repo": str(repo),

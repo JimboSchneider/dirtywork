@@ -17,6 +17,7 @@ class RunArtifacts:
     """What a Sandbox reports at the end of a run. export_status is one of
     "ok", f"export_failed: {reason}", or "n/a" (host mode never exports)."""
     diff_stat: str = ""
+    untracked: str = ""
     patch_path: str | None = None
     worktree_bytes: int | None = None
     worktree_files: int | None = None
@@ -29,7 +30,9 @@ class Sandbox(Protocol):
     """Every tool call and the run's start/finalize/stop lifecycle go through
     exactly this surface. HostSandbox (dirtywork.sandbox.host) and
     DockerSandbox (dirtywork.sandbox.docker) both implement it; ToolExecutor
-    never knows which one it holds."""
+    never knows which one it holds.
+
+    Tool methods (read_file/write_file/edit_file/list_dir/grep/bash) may raise BudgetExceeded (worktree over budget) or SandboxError (backend failure); the runner catches both."""
 
     def start(self, worktree: Path, repo: Path, slug: str, base_commit: str) -> None: ...
 

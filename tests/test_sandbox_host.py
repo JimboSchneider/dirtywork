@@ -56,6 +56,26 @@ def test_host_sandbox_finalize_returns_run_artifacts(wt: Path):
     assert artifacts.worktree_files is not None
 
 
+def test_host_sandbox_finalize_reports_untracked(wt: Path):
+    # Initialize git repo in the worktree
+    import subprocess
+    subprocess.run(["git", "init"], cwd=wt, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=wt, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=wt, check=True, capture_output=True)
+    # Create initial commit
+    (wt / "initial.txt").write_text("initial\n")
+    subprocess.run(["git", "add", "."], cwd=wt, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=wt, check=True, capture_output=True)
+    base_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt, check=True, capture_output=True, text=True).stdout.strip()
+    
+    sb = HostSandbox(wt)
+    sb.start(wt, wt, "slug", base_commit)
+    (wt / "brand_new.txt").write_text("new file\n")
+    artifacts = sb.finalize()
+    assert artifacts.untracked == "brand_new.txt"
+    assert isinstance(artifacts.diff_stat, str)
+
+
 def test_host_sandbox_stop_is_noop(wt: Path):
     sb = HostSandbox(wt)
     sb.start(wt, wt, "slug", "deadbeef")

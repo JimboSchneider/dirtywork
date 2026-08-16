@@ -8,7 +8,6 @@ import subprocess
 import time
 from pathlib import Path
 
-from .budget import BudgetExceeded, DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB, measure_worktree
 from .guardrails import GuardrailError, build_env, check_bash_command, resolve_in_worktree
 from .procs import run_capped
 
