@@ -8,6 +8,7 @@ from typing import Callable
 
 from .budget import BudgetExceeded
 from .llm import LLMTimeout
+from .sandbox import SandboxError
 
 MAX_ASSISTANT_TEXT_CHARS = 64_000
 
@@ -102,7 +103,7 @@ class Runner:
         ]
         self.transcript.write("run_start", task=task, model=self.model,
                               max_turns=self.max_turns, timeout=self.timeout,
-                              **(self.run_info or {}))
+                              schema_version=2, **(self.run_info or {}))
         usage = {"prompt_tokens": 0, "completion_tokens": 0}
         turns = 0
         failures = 0
@@ -216,6 +217,8 @@ class Runner:
                         failures = 0
                     except BudgetExceeded as e:
                         return finish("budget_exceeded", e.reason)
+                    except SandboxError as e:
+                        return finish("sandbox_error", str(e))
                     except (json.JSONDecodeError, ValueError) as e:
                         failures += 1
                         if finish_reason == "length":

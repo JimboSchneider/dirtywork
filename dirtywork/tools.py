@@ -339,23 +339,21 @@ TOOL_SCHEMAS = [
 
 
 class ToolExecutor:
-    """Dispatches validated tool calls. Unknown names raise KeyError."""
+    """Dispatches validated tool calls onto a Sandbox. Unknown names raise
+    KeyError. Deadline clamping for bash/grep and guardrail_block transcript
+    logging are unchanged from the pre-sandbox executor."""
 
-    def __init__(self, worktree: Path, transcript=None, *,
-                 max_worktree_mb: int = DEFAULT_MAX_WORKTREE_MB,
-                 max_worktree_files: int = DEFAULT_MAX_WORKTREE_FILES):
-        self.worktree = worktree
+    def __init__(self, sandbox, transcript=None):
+        self.sandbox = sandbox
         self.transcript = transcript
         self.deadline = None
-        self.max_worktree_bytes = max_worktree_mb * 1024 * 1024
-        self.max_worktree_files = max_worktree_files
         self._table = {
-            "read_file": read_file,
-            "write_file": write_file,
-            "edit_file": edit_file,
-            "list_dir": list_dir,
-            "grep": grep,
-            "bash": bash,
+            "read_file": sandbox.read_file,
+            "write_file": sandbox.write_file,
+            "edit_file": sandbox.edit_file,
+            "list_dir": sandbox.list_dir,
+            "grep": sandbox.grep,
+            "bash": sandbox.bash,
         }
 
     def execute(self, name: str, args: dict) -> str:
@@ -369,11 +367,7 @@ class ToolExecutor:
                 args = dict(args)
                 default = 120 if name == "bash" else 30
                 args["timeout"] = min(int(args.get("timeout", default)), max(1, int(remaining)))
-        result = fn(self.worktree, **args)
+        result = fn(**args)
         if result.startswith("BLOCKED:") and self.transcript is not None:
             self.transcript.write("guardrail_block", tool=name, args=args, reason=result)
-        report = measure_worktree(self.worktree, max_bytes=self.max_worktree_bytes,
-                                  max_files=self.max_worktree_files)
-        if report.violation:
-            raise BudgetExceeded(report.violation)
         return result

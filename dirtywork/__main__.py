@@ -11,6 +11,7 @@ from .budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB
 from .llm import LLMError, LMStudioClient
 from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir
 from .runner import Runner
+from .sandbox.host import HostSandbox
 from .tools import ToolExecutor
 from .transcript import Transcript
 from .workspace import (
@@ -113,13 +114,14 @@ def main(argv: list | None = None) -> int:
     # the machine contract (exactly one JSON object on stdout, post-preflight)
     # holds even if a component other than runner.run() blows up.
     transcript = None
-    base_commit = None
+    sandbox = None
     try:
         base_commit = worktree_base_commit(worktree)
         transcript = Transcript(transcript_path)
-        executor = ToolExecutor(worktree, transcript=transcript,
-                                max_worktree_mb=args.max_worktree_mb,
-                                max_worktree_files=args.max_worktree_files)
+        sandbox = HostSandbox(worktree, max_worktree_mb=args.max_worktree_mb,
+                               max_worktree_files=args.max_worktree_files)
+        sandbox.start(worktree, repo, slug, worktree_base_commit(worktree))
+        executor = ToolExecutor(sandbox, transcript=transcript)
         run_info = {
             "repo": str(repo),
             "worktree": str(worktree),
@@ -161,6 +163,11 @@ def main(argv: list | None = None) -> int:
         }, indent=2))
         return 1
     finally:
+        if sandbox is not None:
+            try:
+                sandbox.stop()
+            except Exception:
+                pass
         if transcript is not None:
             try:
                 transcript.close()
