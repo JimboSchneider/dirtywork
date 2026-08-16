@@ -17,6 +17,7 @@ from .workspace import (
     load_repo_context,
     make_slug,
     preflight_repo,
+    worktree_base_commit,
 )
 
 RUNS_DIR = Path.home() / ".dirtywork" / "runs"
@@ -101,7 +102,8 @@ def main(argv: list | None = None) -> int:
                         max_turns=args.max_turns, timeout=args.timeout,
                         temperature=args.temperature,
                         run_info={"repo": str(repo), "worktree": str(worktree)})
-        system_prompt = build_system_prompt(worktree, load_repo_context(worktree))
+        base_commit = worktree_base_commit(worktree)
+        system_prompt = build_system_prompt(worktree, load_repo_context(repo, base_commit))
         result = runner.run(system_prompt, args.task)
     except Exception as e:
         message = str(e) if isinstance(e, LLMError) else f"unexpected error: {e!r}"

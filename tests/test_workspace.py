@@ -13,6 +13,7 @@ from dirtywork.workspace import (
     load_repo_context,
     make_slug,
     preflight_repo,
+    worktree_base_commit,
 )
 
 
@@ -147,12 +148,81 @@ def test_ensure_worktrees_excluded_from_linked_worktree(repo: Path, tmp_path: Pa
     assert ".worktrees" not in status
 
 
-def test_load_repo_context(repo: Path):
-    assert load_repo_context(repo) is None
-    (repo / "AGENTS.md").write_text("agents rules")
-    assert load_repo_context(repo) == "agents rules"
-    (repo / "CLAUDE.md").write_text("claude rules")  # CLAUDE.md wins
-    assert load_repo_context(repo) == "claude rules"
+def _commit_file(repo: Path, name: str, content: str) -> str:
+    (repo / name).write_text(content)
+    _git(repo, "add", name)
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", f"add {name}")
+    return _git(repo, "rev-parse", "HEAD").strip()
+
+
+def test_load_repo_context_none_when_absent(repo: Path):
+    base = _git(repo, "rev-parse", "HEAD").strip()
+    assert load_repo_context(repo, base) is None
+
+
+def test_load_repo_context_reads_from_base_commit(repo: Path):
+    base = _commit_file(repo, "CLAUDE.md", "claude rules")
+    assert load_repo_context(repo, base) == "claude rules"
+
+
+def test_load_repo_context_agents_md_fallback(repo: Path):
+    base = _commit_file(repo, "AGENTS.md", "agents rules")
+    assert load_repo_context(repo, base) == "agents rules"
+
+
+def test_load_repo_context_claude_md_preferred_over_agents_md(repo: Path):
+    _commit_file(repo, "AGENTS.md", "agents rules")
+    base = _commit_file(repo, "CLAUDE.md", "claude rules")
+    assert load_repo_context(repo, base) == "claude rules"
+
+
+def test_load_repo_context_mode_100755_accepted(repo: Path):
+    (repo / "CLAUDE.md").write_text("exec rules")
+    (repo / "CLAUDE.md").chmod(0o755)
+    _git(repo, "add", "CLAUDE.md")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "exec claude")
+    base = _git(repo, "rev-parse", "HEAD").strip()
+    assert load_repo_context(repo, base) == "exec rules"
+
+
+def test_load_repo_context_ignores_uncommitted_file(repo: Path):
+    # File exists on disk but was never committed at base_commit — must be
+    # invisible. This is the whole point of reading from the object store
+    # instead of the filesystem.
+    base = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "CLAUDE.md").write_text("not committed")
+    assert load_repo_context(repo, base) is None
+
+
+def test_load_repo_context_ignores_symlink(repo: Path):
+    import os
+    os.symlink("/etc/passwd", repo / "CLAUDE.md")
+    _git(repo, "add", "CLAUDE.md")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "symlinked claude md")
+    base = _git(repo, "rev-parse", "HEAD").strip()
+    assert load_repo_context(repo, base) is None
+
+
+def test_load_repo_context_skips_oversized_blob(repo: Path, monkeypatch):
+    import dirtywork.workspace as workspace_mod
+    monkeypatch.setattr(workspace_mod, "MAX_CONTEXT_BYTES", 10)
+    base = _commit_file(repo, "CLAUDE.md", "this content is over ten bytes")
+    assert load_repo_context(repo, base) is None
+
+
+def test_load_repo_context_truncates_long_content(repo: Path):
+    base = _commit_file(repo, "CLAUDE.md", "x" * 40000)
+    result = load_repo_context(repo, base)
+    assert result is not None
+    marker = "\n[truncated at 32000 chars]"
+    assert result.endswith(marker)
+    assert len(result) == 32000 + len(marker)
+
+
+def test_worktree_base_commit(repo: Path):
+    wt = create_worktree(repo, "ctx-08141109", None)
+    expected = _git(repo, "rev-parse", "HEAD").strip()
+    assert worktree_base_commit(wt) == expected
 
 
 def test_create_worktree_existing_dir_no_stale_branch(repo: Path):
