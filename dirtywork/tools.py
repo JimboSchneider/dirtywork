@@ -272,7 +272,7 @@ def _kill_group(pid: int) -> None:
 
 
 def bash(worktree: Path, command: str, timeout: int = 120) -> str:
-    reason = check_bash_command(command)
+    reason = check_bash_command(command, worktree)
     if reason:
         return reason  # starts with "BLOCKED:"
     timeout = max(1, min(int(timeout), 600))
@@ -387,6 +387,10 @@ TOOL_SCHEMAS = [
 ]
 
 
+_TOOL_PARAMS = {s["function"]["name"]: set(s["function"]["parameters"]["properties"])
+                for s in TOOL_SCHEMAS}
+
+
 class ToolExecutor:
     """Dispatches validated tool calls. Unknown names raise KeyError."""
 
@@ -409,6 +413,13 @@ class ToolExecutor:
 
     def execute(self, name: str, args: dict) -> str:
         fn = self._table[name]  # KeyError → runner counts a model failure
+        # Local models routinely attach parameters from other harnesses' tool
+        # schemas (e.g. Claude Code's `description` on bash). Dropping unknown
+        # keys instead of raising TypeError keeps a habit from becoming three
+        # "bad arguments" failures and an aborted run; missing/invalid REQUIRED
+        # args still surface as TypeError from the tool function itself.
+        allowed = _TOOL_PARAMS[name]
+        args = {k: v for k, v in args.items() if k in allowed}
         if self.deadline is not None:
             remaining = self.deadline - time.monotonic()
             if remaining <= 0:

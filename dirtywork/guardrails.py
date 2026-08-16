@@ -43,6 +43,15 @@ def resolve_in_worktree(path_str: str, worktree: Path, writing: bool = False) ->
 # a leading `$`: HOME is relocated into the worktree (so $HOME/~ stay confined),
 # and a blanket `$` would reject ordinary idioms like `rm -rf "$BUILD_DIR"`.
 #
+# WHY the cd/pushd and redirect rules below get a worktree-aware rewrite before
+# they run: absolute paths INTO the worktree are legitimate — local models cd
+# there by absolute path constantly (`cd /abs/repo/.worktrees/dw-slug && pytest`)
+# — while everything else absolute (or parent-relative past the root) stays
+# blocked. See check_bash_command().
+#
+# `(?:\./)*` prefix on the escape target: rewriting the worktree root to `.`
+# can leave a real escape directly behind it, e.g. `cd /wt/../x` rewrites to
+# `cd ./../x` — the target must still match the `..` past that leading `./`.
 # NOTE ON SCOPE: none of this — including the git-subcommand rules below —
 # blocks a model from writing outside the worktree via an *interpreter*, e.g.
 # `python3 -c "open('/tmp/x','w').write('y')"`. Enumerating every interpreter's
@@ -50,7 +59,7 @@ def resolve_in_worktree(path_str: str, worktree: Path, writing: bool = False) ->
 # does not close that gap; the fix is a real OS process boundary (the Docker
 # sandbox, sub-project 2), not a bigger denylist. Documented in README.md and
 # SECURITY.md.
-_ESCAPE_TARGET = r"(/|~|\.\.)"
+_ESCAPE_TARGET = r"(?:\./)*(?:/|~|\.\.)"
 # git accepts global options (-C <path>, -c <key>=<value>, --<flag>[=value],
 # -<x>) before the subcommand. The old \bgit\s+<subcommand> rules didn't skip
 # these, so `git -C ../.. config ...` or `git -c core.hooksPath=x push` had the
@@ -94,10 +103,40 @@ _DENYLIST: list[tuple[str, str]] = [
 _COMPILED = [(reason, re.compile(pat, re.IGNORECASE)) for reason, pat in _DENYLIST]
 
 
-def check_bash_command(command: str) -> str | None:
-    """Return a rejection reason if the command matches the denylist, else None."""
+_ROOT_BOUNDARY = r"""(?=[/\s'"]|$)"""  # root must end at a path/word boundary
+
+
+def _rewrite_worktree_refs(command: str, worktree: Path) -> str:
+    """Rewrite absolute references to the worktree root to a relative `.` form.
+
+    Tries both str(worktree) and str(worktree.resolve()) as roots (they can
+    differ, e.g. macOS /tmp vs /private/tmp) so a caller-supplied symlinked
+    worktree path and its resolved form are both recognized. Only rewrites
+    the STRING BEING CHECKED, never the command that actually executes.
+    """
+    roots = []
+    for root in (str(worktree), str(worktree.resolve())):
+        if root not in roots:
+            roots.append(root)
+    roots.sort(key=len, reverse=True)  # longer (more specific) root first
+
+    checked = command
+    for root in roots:
+        checked = re.sub(re.escape(root) + _ROOT_BOUNDARY, ".", checked)
+    return checked
+
+
+def check_bash_command(command: str, worktree: Path | None = None) -> str | None:
+    """Return a rejection reason if the command matches the denylist, else None.
+
+    When `worktree` is given, absolute references to the worktree root are
+    rewritten to a relative `.` form before the denylist runs, so cd-ing or
+    redirecting INTO the worktree by absolute path is allowed while escapes
+    past the root are still blocked. See the WHY comment above _DENYLIST.
+    """
+    checked = command if worktree is None else _rewrite_worktree_refs(command, worktree)
     for reason, rx in _COMPILED:
-        if rx.search(command):
+        if rx.search(checked):
             return f"BLOCKED: {reason}. Rework the command to stay inside the worktree."
     return None
 

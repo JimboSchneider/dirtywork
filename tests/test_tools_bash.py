@@ -38,6 +38,14 @@ def test_bash_timeout(wt: Path):
     assert "timed out" in out.lower()
 
 
+def test_bash_cd_into_worktree_by_absolute_path_allowed(wt: Path):
+    # A model cd-ing into the worktree with an absolute path (common local-model
+    # behavior) must not be denylisted — only escapes past the worktree root should be.
+    out = bash(wt, f"cd {wt} && pwd")
+    assert not out.startswith("BLOCKED")
+    assert str(wt.resolve()) in out
+
+
 def test_bash_env_is_minimal(wt: Path, monkeypatch):
     monkeypatch.setenv("MY_SECRET", "sekrit")
     out = bash(wt, "env")
@@ -58,6 +66,21 @@ def test_executor_dispatch_and_unknown(wt: Path):
     assert "hi" in ex.execute("read_file", {"path": "hello.txt"})
     with pytest.raises(KeyError):
         ex.execute("format_disk", {})
+
+
+def test_executor_drops_unknown_tool_args(wt: Path):
+    # qwen/other local models attach e.g. Claude Code's `description` to bash
+    # calls; that must not become a TypeError (3 in a row aborts the run).
+    ex = ToolExecutor(wt)
+    out = ex.execute("bash", {"command": "echo ok", "description": "say ok"})
+    assert "ok" in out and "ERROR" not in out
+    assert "hi" in ex.execute("read_file", {"path": "hello.txt", "reason": "x"})
+
+
+def test_executor_still_raises_on_missing_required_arg(wt: Path):
+    ex = ToolExecutor(wt)
+    with pytest.raises(TypeError):
+        ex.execute("bash", {"description": "no command"})
 
 
 def test_executor_deadline_exceeded_blocks_execution(wt: Path):
