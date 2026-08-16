@@ -27,50 +27,86 @@ processes — LM Studio serves 4 concurrent requests per model.
 
 ## Security & trust
 
-dirtywork's containment is honest about its limits:
+> **Docker mode protects host integrity and host execution, not
+> repository-history confidentiality.** The worker can read the *entire*
+> parent object store (all branches, other worktrees' objects, unreachable
+> objects). Do not run it on a clone whose history holds secrets you would
+> not show the worker.
 
-- **File tools (`read_file`/`write_file`/`edit_file`/`list_dir`/`grep`) are confined
-  to the worktree** by real path resolution — symlinks, `..`, and absolute paths that
-  escape are rejected. Writes additionally refuse to go through a symlink at the
-  final path component (even one pointing back inside the worktree) and refuse
-  any non-regular-file target (FIFO/device/socket) outright.
-- **`bash` is a general shell, not a sandbox.** A denylist blocks common *accidents*
-  (destructive commands aimed outside the worktree, shared-git-state writes, piping a
-  download into an interpreter), and `HOME` is redirected into the worktree so `~`/
-  `$HOME` can't reach your real `~/.ssh` or `~/.aws`. But a determined or
-  prompt-injected model can still read absolute host paths (`cat /etc/…`) — the
-  denylist raises the bar for a confused model, it does not stop an adversarial one.
-  Concretely, host mode (`--sandbox none`, the only mode this version has) does
-  **not** block writes made through an interpreter — e.g.
-  `python3 -c "open('/tmp/x','w').write('y')"` succeeds. Enumerating every
-  interpreter's write primitive is not a regex-shaped problem; the real fix is a
-  process boundary (an OS-level sandbox), tracked as the next release.
-- **`.git/info/exclude` gains a line.** The first run against a repo appends
-  `.worktrees/` to the shared repository's `.git/info/exclude` (not tracked, not
-  committed, idempotent) so worktree directories don't show up as untracked noise
-  in `git status`. This is the only host-side git state a run writes outside its
-  own worktree.
-- **Worktree growth is checked after every tool call.** Past `--max-worktree-mb`
-  (default 2048) or `--max-worktree-files` (default 200000) the run ends with
-  status `budget_exceeded`. This is a best-effort, sampled bound, not a kernel
-  quota — see SECURITY.md.
-- **Review is the real boundary.** Read the transcript and diff before you merge. Note
-  that `bash` side-effects happen at run time, so review catches what lands in the
-  diff, not what a command already did. `git diff --stat` in host mode compares
-  against the run's base commit, so unstaged, staged, and committed changes to
-  **tracked** files all show up — but a new file the model wrote and never
-  `git add`ed won't appear in `diff_stat`. Such files are listed separately in
-  `run_end.untracked` (untracked paths, one per line; a whole untracked
-  directory collapses to a single `dir/` entry).
+> **Windows: designed for Docker Desktop on Windows; not supported until a
+> Windows integration suite passes.** Items that need real Windows testing:
+> Git for Windows paths and `\\?\` handling, `docker` CLI behavior, uid
+> `1000:1000`, symlink-as-file export, case-insensitivity, long paths,
+> `core.symlinks=false`, `core.longpaths`.
 
-**Practical guidance:** run dirtywork against models and repositories you'd trust with
-shell access on your machine. A malicious target repo's `CLAUDE.md`/`AGENTS.md` is
-injected into the worker's prompt, so treat untrusted repos as you would untrusted
-code. True per-run isolation (OS sandbox / container) is the tracked next step.
+**Docker is the default sandbox as of 0.4 — a breaking change from 0.2.**
+Every tool call (`read_file`/`write_file`/`edit_file`/`list_dir`/`grep`/
+`bash`) runs inside a locked-down container: `--network none` by default,
+`--read-only` root filesystem, `--cap-drop ALL`, kernel-enforced memory/CPU/
+process-count/per-file-size limits, and no host path mounted in except the
+parent repository's read-only git object store. The worker's tree lives on
+a Docker volume, never a bind mount, so host git never touches worker
+content — a hostile `.gitattributes` plus a local git filter cannot execute
+on the host. The tree reaches your worktree only after the run ends,
+through a validated tar export (`dirtywork/sandbox/export.py`): file/dir/
+symlink members only, path-escape and `.git`-named-entry checks, count and
+byte caps, extraction that never calls `tarfile.extract()`/`extractall()`.
+Docker missing or the daemon down is a preflight error (exit 2, with a
+hint) — there is no silent fallback to unsandboxed execution.
+
+**What Docker mode does *not* give you:**
+
+- **Confidentiality of repository history** (see the callout above).
+- **A portable disk quota.** Total disk is a best-effort bound: worktree
+  size is sampled during commands and a host free-space floor is polled,
+  but a burst inside one sampling interval (0.5-5 s) can exceed the limit
+  before the container is killed. The exported tree is hard-capped by the
+  validator regardless.
+- **Git-ignored files in the exported worktree.** Build outputs
+  (`node_modules`, `bin`/`obj`, `.venv`) stay inside the container's volume
+  and are never exported — only the git-visible tree is. `--keep-volume`
+  plus `docker run` against the volume recovers them if you need to.
+  Non-Windows.
+
+**`--sandbox none`** is the explicit opt-in to pre-0.3 host-mode behavior:
+tools are path-confined to the worktree (symlink-safe realpath checks,
+`.git/` write-protected), but `bash` is a general shell gated only by a
+best-effort regex denylist and a `HOME` redirected into the worktree. A
+determined or prompt-injected model can still read absolute host paths
+(`cat /etc/...`). Use it only against models and repositories you would
+trust with unconfined shell access on your machine — the same caveat 0.2
+carried, unchanged.
+
+**Residual exposures (documented, accepted, both modes where relevant):**
+
+- Object-store confidentiality (docker mode) — see the callout above.
+- Escaping symlinks (committed in the base tree, or created by the worker)
+  are created on the host inside the worktree; dirtywork never follows
+  them and lists them in `run_end.escaping_symlinks`. Anything *else* you
+  run in that worktree afterward must not follow symlinks blindly.
+- Host `git status`/`diff`/`add`/`merge` that *you* run afterward use your
+  own git config; a worker-authored `.gitattributes` can trigger a
+  configured filter (git-lfs and similar). Review via `runs show --diff`
+  (the container-computed patch — no host git ever touches worker content
+  for that path) or with `GIT_CONFIG_GLOBAL=/dev/null`.
+- A malicious target repo's `CLAUDE.md`/`AGENTS.md` (read from the base
+  commit via git, not the filesystem — symlinks and oversized files are
+  rejected) is injected into the worker's prompt; treat untrusted repos'
+  documentation as you would untrusted code.
+
+**Practical guidance:** run dirtywork against models and repositories
+you'd trust with the equivalent of a locked-down container on your
+machine. Read the transcript and diff before you merge — that review is
+still the real gate for *what a run produced*, even though docker mode now
+also gates *what a run could do to your host while producing it*.
 
 ## Requirements
 
 - macOS/Linux, Python 3.9+ (stdlib only — no venv, no pip deps)
+- **Docker Desktop or dockerd** (default sandbox as of 0.4) — `docker
+  version` must succeed. Missing/unreachable Docker is a preflight error
+  with a hint; pass `--sandbox none` to skip this requirement and run
+  unsandboxed on the host instead.
 - [LM Studio](https://lmstudio.ai) serving its OpenAI-compatible API at
   `localhost:1234` with a tool-calling-capable model loaded. Verified
   working: `qwen/qwen3-coder-next` (65k context, default) and
@@ -105,15 +141,17 @@ The launcher is self-locating, so this works from any clone location.
 
     dirtywork run --repo ~/repos/someproject "Add a unit test for X"
 
-- **Watch a run:** `tail -f` the transcript path printed on stderr
-  (`~/.dirtywork/runs/<slug>/transcript.jsonl`).
-- **Review a run:** `git -C <worktree> diff`, read the transcript (`run_end`
-  carries `diff_stat` and `untracked`), run the repo's tests — then commit
-  the branch or discard it.
+> **Docker mode protects host integrity and host execution, not
+> repository-history confidentiality.** The worker can read the *entire*
+> parent object store. Do not run it on a clone whose history holds
+> secrets you would not show the worker.
+
+- **Watch a run:** `tail -f` the transcript path printed on stderr.
+- **Review a run:** `git -C <worktree> diff`, read the transcript, run the
+  repo's tests — then commit the branch or discard it. (The worktree is
+  only populated after the run ends, once the export step completes.)
 - **Discard a run:**
   `git -C <repo> worktree remove --force <worktree> && git -C <repo> branch -D dirtywork/<slug>`
-- **All flags, stdout JSON, exit codes, transcript events:** see
-  [Machine contract](#machine-contract).
 
 ## How a run works
 
@@ -121,10 +159,13 @@ The launcher is self-locating, so this works from any clone location.
    failure exits 2 with nothing created.
 2. **Worktree** — a fresh worktree at `<repo>/.worktrees/dw-<slug>` on new
    branch `dirtywork/<slug>`, branched from `--branch-from` (default:
-   repo HEAD). `.worktrees/` is added to the repo's local
+   repo HEAD). In docker mode (the default) the worktree stays empty
+   (only its `.git` file) for the whole run — the worker's tree lives on a
+   Docker volume and reaches the worktree only via the validated export
+   after the run ends. `.worktrees/` is added to the repo's local
    `.git/info/exclude` automatically. If the repo has a `CLAUDE.md` or
-   `AGENTS.md` at its root, its content is injected into the worker's
-   system prompt so it inherits your conventions.
+   `AGENTS.md` at its base commit, its content is injected into the
+   worker's system prompt so it inherits your conventions.
 3. **The loop** — the model gets six tools (`read_file`, `write_file`,
    `edit_file`, `list_dir`, `grep`, `bash`) via OpenAI function-calling and
    works until it replies without calling a tool. Context is budgeted per
@@ -136,8 +177,15 @@ The launcher is self-locating, so this works from any clone location.
 
 ## Safety model
 
-Guardrails block **accidents, not adversaries** — the post-run review is
-the real gate:
+**Docker mode (default):** the container is the real boundary —
+`--network none`, `--read-only` root filesystem, `--cap-drop ALL`,
+kernel-enforced memory/CPU/process/per-file-size limits, no host path
+mounted in except a read-only copy of the parent object store. The
+worktree reaches the host only through the validated tar export. See
+"Security & trust" above for what this does and does not cover.
+
+**`--sandbox none` (host mode, pre-0.3 behavior):** guardrails block
+**accidents, not adversaries** — the post-run review is the real gate:
 
 - All file tools are path-confined to the worktree (symlink-safe realpath
   checks; `.git/` is write-protected against hook injection).
@@ -167,9 +215,11 @@ yourself to review the diff — because that review is the actual gate.
 
 ## Development
 
-    python3 -m pytest              # unit suite (no LM Studio needed)
-    python3 -m pytest -m live -v   # live suite (requires LM Studio running;
-                                   # includes a real end-to-end agent run)
+    python3 -m pytest                    # unit suite (no LM Studio or Docker needed)
+    python3 -m pytest -m live -v         # live suite (requires LM Studio running;
+                                          # includes a real end-to-end agent run)
+    python3 -m pytest -m docker -v       # docker suite (requires a running Docker
+                                          # daemon; host-sentinel and lifecycle tests)
 
 Design docs: `docs/superpowers/specs/2026-08-13-localagent-design.md`
 (architecture and contracts) and
@@ -202,6 +252,20 @@ In August 2026 the project was renamed **dirtywork** — same tool, a name that 
   `--max-worktree-mb`/`--max-worktree-files` during a tool call; the
   worktree and branch are kept for salvage. Raise the limit or investigate
   what wrote so much.
+- **exit 2, "Docker is the default sandbox since 0.4..."** — Docker
+  Desktop/dockerd isn't running or isn't reachable. Start it, or pass
+  `--sandbox none` to run unsandboxed on the host.
+- **status `sandbox_error`** — a docker command failed or timed out mid-run
+  (daemon hang, container killed unexpectedly twice in a row, etc.); the
+  worktree may be partially or not exported. Check `run_end.error` in the
+  transcript and `docker ps -a --filter label=dirtywork.run=<slug>`.
+- **status `export_failed` (in `run.json`'s `export_status`, and as the
+  overall `status` if the agent loop itself otherwise completed)** — the
+  worker's tree could not be validated/exported (e.g. it exceeded
+  `--max-worktree-mb`/`--max-worktree-files`). The Docker volume is kept
+  (unless it was already going to be removed); re-run export after raising
+  the limit, or inspect the volume directly with `--keep-volume` on a
+  fresh run.
 
 ## Machine contract
 
@@ -218,8 +282,18 @@ dirtywork run --repo <path> "<task>"
     [--timeout 1800]                  # whole-run wall clock, seconds
     [--temperature <f>]               # omitted by default → server preset
     [--base-url http://localhost:1234/v1]  # LM Studio's OpenAI-compatible endpoint
-    [--max-worktree-mb 2048]          # best-effort worktree size bound
-    [--max-worktree-files 200000]     # best-effort worktree entry-count bound
+    [--max-worktree-mb 2048]
+    [--max-worktree-files 200000]
+    [--sandbox docker|none]           # default: docker
+    [--image dirtywork/worker:0.4]    # docker mode only
+    [--allow-network]                 # docker mode only; default --network none
+    [--memory 4g]                     # docker mode only
+    [--cpus 2]                        # docker mode only
+    [--tmp-size 1g]                   # docker mode only
+    [--gitdir-size 512m]              # docker mode only
+    [--min-free-mb 2048]              # docker mode only; host free-space floor
+    [--keep-volume]                   # docker mode only; skip volume cleanup
+    [--max-patch-mb 10]               # docker mode only; diff.patch cap
 ```
 
 **stdout:** on any run that gets past preflight, exactly one JSON object is
@@ -227,6 +301,7 @@ printed to stdout (nothing else goes to stdout):
 
 ```json
 {
+  "schema_version": 2,
   "status": "completed",
   "worktree": "/path/to/repo/.worktrees/dw-<slug>",
   "branch": "dirtywork/<slug>",
@@ -234,19 +309,18 @@ printed to stdout (nothing else goes to stdout):
   "turns": 7,
   "usage": {"prompt_tokens": 0, "completion_tokens": 0},
   "final_message": "...",
-  "run_dir": "/home/you/.dirtywork/runs/<slug>",
-  "base_commit": "abc123def456..."
+  "run_dir": "/home/you/.dirtywork/runs/<slug>"
 }
 ```
 
 `status` is one of: `completed`, `max_turns`, `timeout`,
-`context_exhausted`, `model_error`, `interrupted`, `budget_exceeded`. When
-the run fails before a `RunResult` exists — the LLM client raises,
-post-worktree setup fails (e.g. the transcript can't be created), or any
-other exception escapes the run (status `model_error` in every case) —
-`turns` is `null` and `usage` is `{}`, but `status`, `worktree`, `branch`,
-`transcript`, `run_dir`, and (when it was resolved before the failure)
-`base_commit` are still populated so the worktree can be located for
+`context_exhausted`, `model_error`, `interrupted`, `budget_exceeded`,
+`sandbox_error`, `export_failed`. When the run fails before a `RunResult`
+exists — the LLM client raises, post-worktree setup fails (e.g. the
+transcript can't be created), or any other exception escapes the run
+(status `model_error` in every case) — `turns` is `null` and `usage` is
+`{}`, but `status`, `worktree`, `branch`, `transcript`, and `run_dir` are
+still populated so the worktree and run directory can be located for
 salvage.
 
 **Exit codes:**
@@ -266,16 +340,15 @@ salvage.
 All progress (transcript path, worktree path, `error:`-prefixed messages) is
 written to stderr; watch a live run with `tail -f` on the transcript path.
 
-**Transcript events** (JSONL, one per line): `run_start` (task, repo, model,
-config, plus provenance: `base_commit`, `branch`, `branch_from`,
-`base_url`, `dirtywork_version`, `temperature`, `sandbox`, `provider`),
-`assistant` (text + tool calls — text capped at 64 000 chars in the
-transcript only, the full text is still sent to the model), `tool_result`
-(truncated), `guardrail_block`, `run_end` (status, turns, duration,
-cumulative usage, plus `diff_stat` in host mode — `git diff --stat`
-against the base commit, tracked changes only, capped at 64 000 chars —
-and `untracked`, `git status --porcelain` `??` entries, capped at
-64 000 chars).
+**Transcript events** (JSONL, one per line): `run_start` gains
+`schema_version: 2` and the `sandbox` dict (`"docker"` or `"none"`). In
+host mode, `run_end` carries `diff_stat` and `untracked` (as today); in
+docker mode it carries `diff_stat`, `untracked` (always ""), `patch_path`,
+`worktree_bytes`, `worktree_files`, `escaping_symlinks`, `dropped_git_entries`,
+`export_status`. `run_end` (status, turns, duration, cumulative usage,
+plus `diff_stat` in host mode — `git diff --stat` against the base commit,
+tracked changes only, capped at 64 000 chars — and `untracked`,
+`git status --porcelain` `??` entries, capped at 64 000 chars).
 
 ## Contributing
 

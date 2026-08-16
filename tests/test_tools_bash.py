@@ -194,3 +194,10 @@ def test_bash_popen_failure_returns_error_prefix(wt: Path, monkeypatch):
     out = bash(wt, "true")
     assert out.startswith("ERROR: bash failed:")
     assert "boom" in out
+
+
+def test_bash_schema_mentions_reset_behavior():
+    schema = next(s for s in TOOL_SCHEMAS if s["function"]["name"] == "bash")
+    description = schema["function"]["description"]
+    assert "reset" in description.lower()
+    assert "index" in description.lower() or "git state" in description.lower()

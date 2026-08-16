@@ -8,41 +8,41 @@ rather than public issues. You should receive a response within a week.
 
 ## Scope worth knowing
 
-dirtywork's guardrails are designed to stop **accidents by a confused local
-model**, not a determined adversary — the README says this plainly, and reports
-that a malicious model or prompt can escape the worktree are appreciated but
-expected to exist by design. The post-run human review is the actual security
-boundary.
+As of 0.3, **Docker mode is the default** and is a real containment
+boundary: `--network none`, `--read-only` root filesystem,
+`--cap-drop ALL`, kernel-enforced memory/CPU/process-count/per-file-size
+limits, no host path mounted in except a read-only copy of the parent
+repository's git object store, and a validated tar export as the only path
+from the worker's tree back to the host. Escapes from docker mode — a
+container breakout, a way to write outside the run's worktree or
+`~/.dirtywork/runs/<slug>/`, a way to reach the network, a way for the
+export validator to write through a symlink or a `.git`-named path — are
+in scope and taken seriously.
 
-Concretely, the containment is uneven by design:
+**Known, accepted exposures in docker mode** (see README's Security &
+trust section for the full list): the worker can read the *entire* parent
+git object store (all branches, unreachable objects — not a
+confidentiality boundary); total disk is a best-effort sampled bound, not
+a kernel quota; escaping symlinks are created (not followed) inside the
+worktree and reported; host git commands the *operator* runs afterward on
+the exported tree use the operator's own config and can trigger a
+worker-authored `.gitattributes`' configured filter.
 
-- **File tools are confined** to the worktree by real path resolution (symlink,
-  `..`, and absolute-path escapes are rejected); writes additionally refuse to
-  go through a symlink at the final path component and refuse any
-  non-regular-file target (FIFO/device/socket).
-- **`bash` is a general shell and is NOT confined** — it is gated only by a
-  best-effort regex denylist plus a `HOME` redirected into the worktree (so
-  `~`/`$HOME` can't reach `~/.ssh`/`~/.aws`). A determined or prompt-injected
-  model can still read absolute host paths, and can still WRITE outside the
-  worktree through an interpreter (e.g. `python3 -c "open('/tmp/x','w')..."`)
-  — the denylist matches shell-command *forms*, not every write primitive
-  every interpreter offers. Do not treat `bash` as a sandbox.
-- **`.git/info/exclude` is modified.** Every run appends `.worktrees/` to the
-  shared repository's `.git/info/exclude` (idempotent; not committed). This is
-  the only host-side git state a run writes outside its own worktree.
-- **Worktree disk/file-count growth is a best-effort, sampled bound**
-  (`--max-worktree-mb`/`--max-worktree-files`, checked after every tool
-  call), not a kernel quota — a large write within a single tool call can
-  exceed the limit before it is caught.
+**`--sandbox none`** keeps 0.2's guardrail-only behavior and its caveats
+unchanged: file tools are path-confined (symlink-safe), but `bash` is a
+general shell gated only by a best-effort regex denylist plus a `HOME`
+redirected into the worktree — not confined. A determined or
+prompt-injected model can still read absolute host paths. Do not treat
+`--sandbox none` as a sandbox; it exists for operators who cannot or do
+not want to run Docker.
 
-True per-run isolation (OS sandbox / container rooted at the worktree) is the
-real fix and is tracked as future work; until then, run dirtywork only against
-models and repositories you'd trust with shell access.
-
-Reports that DO qualify: guardrail bypasses reachable by a *well-intentioned*
-model (accident-grade escapes), anything that lets a run touch the parent
-checkout or leak the caller's environment secrets, and violations of the
-documented machine contract that could mislead an orchestrating agent.
+Reports that DO qualify: any docker-mode escape as described above,
+guardrail bypasses reachable by a *well-intentioned* model in
+`--sandbox none` mode (accident-grade escapes), anything that lets a run
+touch the parent checkout's git state beyond dirtywork's own bookkeeping,
+anything that lets a run reach the network in the default (`--network
+none`) configuration, and violations of the documented machine contract
+that could mislead an orchestrating agent.
 
 ## Supported versions
 
