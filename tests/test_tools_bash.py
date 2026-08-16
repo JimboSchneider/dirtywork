@@ -72,14 +72,14 @@ def test_executor_dispatch_and_unknown(wt: Path):
 def test_executor_drops_unknown_tool_args(wt: Path):
     # qwen/other local models attach e.g. Claude Code's `description` to bash
     # calls; that must not become a TypeError (3 in a row aborts the run).
-    ex = ToolExecutor(wt)
+    ex = ToolExecutor(HostSandbox(wt))
     out = ex.execute("bash", {"command": "echo ok", "description": "say ok"})
     assert "ok" in out and "ERROR" not in out
     assert "hi" in ex.execute("read_file", {"path": "hello.txt", "reason": "x"})
 
 
 def test_executor_still_raises_on_missing_required_arg(wt: Path):
-    ex = ToolExecutor(wt)
+    ex = ToolExecutor(HostSandbox(wt))
     with pytest.raises(TypeError):
         ex.execute("bash", {"description": "no command"})
 
