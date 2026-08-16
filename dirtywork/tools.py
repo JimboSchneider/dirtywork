@@ -10,6 +10,7 @@ import threading
 import time
 from pathlib import Path
 
+from .budget import BudgetExceeded, DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB, measure_worktree
 from .guardrails import GuardrailError, build_env, check_bash_command, resolve_in_worktree
 
 MAX_RESULT_CHARS = 8000
@@ -389,10 +390,14 @@ TOOL_SCHEMAS = [
 class ToolExecutor:
     """Dispatches validated tool calls. Unknown names raise KeyError."""
 
-    def __init__(self, worktree: Path, transcript=None):
+    def __init__(self, worktree: Path, transcript=None, *,
+                 max_worktree_mb: int = DEFAULT_MAX_WORKTREE_MB,
+                 max_worktree_files: int = DEFAULT_MAX_WORKTREE_FILES):
         self.worktree = worktree
         self.transcript = transcript
         self.deadline = None
+        self.max_worktree_bytes = max_worktree_mb * 1024 * 1024
+        self.max_worktree_files = max_worktree_files
         self._table = {
             "read_file": read_file,
             "write_file": write_file,
@@ -416,4 +421,8 @@ class ToolExecutor:
         result = fn(self.worktree, **args)
         if result.startswith("BLOCKED:") and self.transcript is not None:
             self.transcript.write("guardrail_block", tool=name, args=args, reason=result)
+        report = measure_worktree(self.worktree, max_bytes=self.max_worktree_bytes,
+                                  max_files=self.max_worktree_files)
+        if report.violation:
+            raise BudgetExceeded(report.violation)
         return result
