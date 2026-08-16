@@ -2,6 +2,8 @@
 
 Built from `docker/Dockerfile`: Debian bookworm-slim, `USER worker` (uid
 1000), git, bash, coreutils, findutils, python3, node, .NET SDK, ripgrep.
+.NET SDK 8.0 is installed with Microsoft's official `dotnet-install.sh`
+(channel 8.0) because the apt feed lacks arm64 packages for Debian 12.
 No `ENTRYPOINT`/`CMD` — every `docker create`/`run`/`exec` in dirtywork
 passes its own explicit `--entrypoint` or absolute binary path.
 

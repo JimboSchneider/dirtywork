@@ -16,16 +16,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gnupg \
     && rm -rf /var/lib/apt/lists/*
 
-# .NET SDK via Microsoft's apt package feed — the documented route for
-# Debian 12 (bookworm): https://learn.microsoft.com/en-us/dotnet/core/install/linux-debian
-# Use the ARM64-specific repository for bookworm
-RUN wget -q https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb \
-        -O /tmp/packages-microsoft-prod.deb \
-    && dpkg -i /tmp/packages-microsoft-prod.deb \
-    && rm /tmp/packages-microsoft-prod.deb \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends dotnet-sdk-8.0 \
+# .NET SDK 8.0 via Microsoft's official installer script. Microsoft's apt feed
+# for Debian 12 does not publish dotnet-sdk-8.0 for arm64 (verified 2026-08-16
+# on Apple Silicon: "E: Unable to locate package dotnet-sdk-8.0"); the script
+# installs the right build for arm64 or x64. libicu/libssl are the runtime deps.
+RUN apt-get update && apt-get install -y --no-install-recommends libicu72 libssl3 \
+    && wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh \
+    && bash /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet \
+    && ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet \
+    && rm /tmp/dotnet-install.sh \
     && rm -rf /var/lib/apt/lists/*
+ENV DOTNET_ROOT=/usr/share/dotnet \
+    DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
 
 RUN useradd -u 1000 -m worker
 
