@@ -21,6 +21,7 @@ from .workspace import (
     load_repo_context,
     make_slug,
     preflight_repo,
+    remove_worktree,
     worktree_base_commit,
 )
 
@@ -91,11 +92,13 @@ def main(argv: list | None = None) -> int:
         return 2
 
     # ---- run directory (exit 2: the worktree exists but no transcript/run
-    # bookkeeping has started yet, so this is still a preflight-style failure) ----
+    # bookkeeping has started yet, so this is still a preflight-style failure —
+    # the worktree and branch just created above are rolled back below) ----
     try:
         runs_dir = ensure_runs_dir(RUNS_DIR)
         run_dir = create_run_dir(runs_dir, slug)
     except RunDirError as e:
+        remove_worktree(repo, slug)
         _err(str(e))
         return 2
 

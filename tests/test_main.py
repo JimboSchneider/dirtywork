@@ -275,6 +275,36 @@ def test_rundir_error_exits_2(tmp_path, monkeypatch):
     assert rc == 2
 
 
+def test_rundir_error_removes_orphaned_worktree(tmp_path, monkeypatch):
+    # create_worktree already succeeded by the time RunDirError fires, so
+    # without rollback the worktree dir + branch are silently orphaned.
+    import subprocess
+    import dirtywork.__main__ as m
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
+                    "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
+                   capture_output=True)
+    runs_dir = tmp_path / "runs"
+    monkeypatch.setattr(m, "RUNS_DIR", runs_dir)
+    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+    monkeypatch.setattr(m, "make_slug", lambda task, now: "fixed-slug")
+    runs_dir.mkdir(parents=True)
+    (runs_dir / "fixed-slug").mkdir()  # pre-existing run dir collides
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])
+    assert rc == 2
+
+    assert not (repo / ".worktrees" / "dw-fixed-slug").exists()
+    branch_check = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet",
+         "refs/heads/dirtywork/fixed-slug"],
+        capture_output=True,
+    )
+    assert branch_check.returncode != 0
+
+
 def test_stdout_json_has_run_dir_and_base_commit(tmp_path, monkeypatch, capsys):
     import subprocess
     import dirtywork.__main__ as m

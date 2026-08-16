@@ -85,14 +85,22 @@ def create_worktree(repo: Path, slug: str, branch_from: str | None) -> Path:
     # wrongly when a component is a symlink. Resolve each side separately.
     expected_parent = repo.resolve() / ".worktrees"
     if expected_parent not in worktree.resolve().parents:
-        _git(repo, "worktree", "remove", "--force", str(rel))
-        _git(repo, "branch", "-D", branch)
+        remove_worktree(repo, slug)
         raise WorkspaceError(
             f"worktree resolved to {worktree.resolve()}, outside the expected "
             f"{expected_parent} — refusing (a symlinked .worktrees or ref "
             f"could redirect git worktree add outside the repo)"
         )
     return worktree
+
+
+def remove_worktree(repo: Path, slug: str) -> None:
+    """Best-effort removal of the worktree and branch that `create_worktree`
+    created for `slug`. Used to roll back when a later preflight step fails
+    so a `return 2` doesn't leave an orphaned .worktrees/dw-<slug> + branch.
+    Never raises; git errors are ignored."""
+    _git(repo, "worktree", "remove", "--force", str(Path(".worktrees") / f"dw-{slug}"))
+    _git(repo, "branch", "-D", f"dirtywork/{slug}")
 
 
 def ensure_worktrees_excluded(repo: Path) -> None:

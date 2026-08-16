@@ -14,6 +14,7 @@ from dirtywork.workspace import (
     load_repo_context,
     make_slug,
     preflight_repo,
+    remove_worktree,
     worktree_base_commit,
 )
 
@@ -116,6 +117,29 @@ def test_create_worktree_preexisting_branch_not_deleted(repo: Path):
 
     branches = _git(repo, "branch", "--list", "dirtywork/pre-08141109-ab12")
     assert "dirtywork/pre-08141109-ab12" in branches
+
+
+def test_remove_worktree_removes_dir_and_branch(repo: Path):
+    wt = create_worktree(repo, "abc", None)
+    assert wt.is_dir()
+    branch_check = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "refs/heads/dirtywork/abc"],
+        capture_output=True, text=True,
+    )
+    assert branch_check.returncode == 0
+
+    remove_worktree(repo, "abc")
+
+    assert not wt.exists()
+    branch_check = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "refs/heads/dirtywork/abc"],
+        capture_output=True, text=True,
+    )
+    assert branch_check.returncode != 0
+
+
+def test_remove_worktree_is_idempotent(repo: Path):
+    remove_worktree(repo, "never-created")  # no raise
 
 
 def test_ensure_worktrees_excluded_idempotent(repo: Path):
