@@ -38,6 +38,14 @@ def test_bash_timeout(wt: Path):
     assert "timed out" in out.lower()
 
 
+def test_bash_cd_into_worktree_by_absolute_path_allowed(wt: Path):
+    # A model cd-ing into the worktree with an absolute path (common local-model
+    # behavior) must not be denylisted — only escapes past the worktree root should be.
+    out = bash(wt, f"cd {wt} && pwd")
+    assert not out.startswith("BLOCKED")
+    assert str(wt.resolve()) in out
+
+
 def test_bash_env_is_minimal(wt: Path, monkeypatch):
     monkeypatch.setenv("MY_SECRET", "sekrit")
     out = bash(wt, "env")

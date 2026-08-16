@@ -272,7 +272,7 @@ def _kill_group(pid: int) -> None:
 
 
 def bash(worktree: Path, command: str, timeout: int = 120) -> str:
-    reason = check_bash_command(command)
+    reason = check_bash_command(command, worktree)
     if reason:
         return reason  # starts with "BLOCKED:"
     timeout = max(1, min(int(timeout), 600))
