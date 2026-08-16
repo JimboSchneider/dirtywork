@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Callable
 
 
+MAX_DISK_CHECK_FAILURES = 3  # consecutive stat failures before the unmeasurable bound is treated as violated
+
+
 class Watchdog(threading.Thread):
     """Background thread for the container's whole lifetime (spec §6):
     every 0.5s, the smaller of the host free-space across `storage_paths`
@@ -41,6 +44,7 @@ class Watchdog(threading.Thread):
         self._bash_in_flight = False
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
+        self._disk_check_failures = 0
 
     def note_bash_start(self) -> None:
         with self._lock:
@@ -56,8 +60,17 @@ class Watchdog(threading.Thread):
     def _check_disk(self) -> bool:
         try:
             free_mb = min(shutil.disk_usage(str(p)).free for p in self.storage_paths) / (1024 * 1024)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as e:
+            # A bound we cannot measure is a bound we are not enforcing: tolerate
+            # transient stat failures, but fail CLOSED after a few in a row.
+            self._disk_check_failures += 1
+            if self._disk_check_failures >= MAX_DISK_CHECK_FAILURES:
+                reason = f"host free-space check failing ({e!s}); refusing to run unmeasured"
+                self.violation = reason
+                self.kill(reason)
+                return True
             return False
+        self._disk_check_failures = 0
         if free_mb < self.min_free_mb:
             reason = f"host free space below {self.min_free_mb} MB"
             self.violation = reason
