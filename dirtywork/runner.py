@@ -4,8 +4,12 @@ import json
 import math
 import time
 from dataclasses import dataclass, field
+from typing import Callable
 
+from .budget import BudgetExceeded
 from .llm import LLMTimeout
+
+MAX_ASSISTANT_TEXT_CHARS = 64_000
 
 CONTEXT_WINDOWS = {
     "qwen/qwen3-coder-next": 65536,
@@ -68,13 +72,15 @@ class RunResult:
     turns: int
     final_message: str
     usage: dict = field(default_factory=dict)
+    extra: dict = field(default_factory=dict)
 
 
 class Runner:
     def __init__(self, client, executor, transcript, model,
                  max_turns: int = 40, timeout: int = 1800,
                  temperature: float | None = None,
-                 run_info: dict | None = None):
+                 run_info: dict | None = None,
+                 finalize: Callable[[], dict] | None = None):
         self.client = client
         self.executor = executor
         self.transcript = transcript
@@ -83,6 +89,7 @@ class Runner:
         self.timeout = timeout
         self.temperature = temperature
         self.run_info = run_info
+        self.finalize = finalize
         window = CONTEXT_WINDOWS.get(model, DEFAULT_WINDOW)
         self.char_budget = int(window * BUDGET_FRACTION * CHARS_PER_TOKEN)
 
@@ -104,10 +111,21 @@ class Runner:
         self.executor.deadline = deadline
 
         def finish(status: str, final: str) -> RunResult:
+            extra: dict = {}
+            finalize_error = None
+            if self.finalize is not None:
+                try:
+                    finalize_result = self.finalize()
+                    if isinstance(finalize_result, dict):
+                        extra.update(finalize_result)
+                except Exception as e:
+                    finalize_error = f"{type(e).__name__}: {e}"
+            if finalize_error is not None:
+                extra["finalize_error"] = finalize_error
             self.transcript.write("run_end", status=status, turns=turns,
                                   duration_s=round(time.monotonic() - start, 1),
-                                  usage=usage)
-            return RunResult(status, turns, final, usage)
+                                  usage=usage, **extra)
+            return RunResult(status, turns, final, usage, extra=extra)
 
         try:
             while True:
@@ -152,8 +170,15 @@ class Runner:
                     raw = []
                 tool_calls = [_canonical_tool_call(tc) for tc in raw if _valid_tool_call(tc)]
                 malformed_count = len(raw) - len(tool_calls)
+                transcript_text = msg.get("content")
+                if isinstance(transcript_text, str) and len(transcript_text) > MAX_ASSISTANT_TEXT_CHARS:
+                    transcript_text = (
+                        transcript_text[:MAX_ASSISTANT_TEXT_CHARS]
+                        + f"\n[truncated at {MAX_ASSISTANT_TEXT_CHARS} chars in the transcript "
+                          f"only — the full text was sent to the model]"
+                    )
                 self.transcript.write(
-                    "assistant", text=msg.get("content"),
+                    "assistant", text=transcript_text,
                     tool_calls=[{"name": (tc.get("function") or {}).get("name"),
                                  "arguments": ((tc.get("function") or {}).get("arguments") or "")[:2000]}
                                 for tc in tool_calls])
@@ -189,6 +214,8 @@ class Runner:
                             raise ValueError("arguments must be a JSON object")
                         result = self.executor.execute(name, args)
                         failures = 0
+                    except BudgetExceeded as e:
+                        return finish("budget_exceeded", e.reason)
                     except (json.JSONDecodeError, ValueError) as e:
                         failures += 1
                         if finish_reason == "length":

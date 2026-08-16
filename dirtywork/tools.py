@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import signal
@@ -9,6 +10,7 @@ import threading
 import time
 from pathlib import Path
 
+from .budget import BudgetExceeded, DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB, measure_worktree
 from .guardrails import GuardrailError, build_env, check_bash_command, resolve_in_worktree
 
 MAX_RESULT_CHARS = 8000
@@ -16,6 +18,8 @@ MAX_RESULT_CHARS = 8000
 # the whole file (offset/limit only window the result), so an unbounded read is a
 # memory-DoS; a non-regular file (FIFO/device) would also block read_text forever.
 MAX_READ_BYTES = 5 * 1024 * 1024
+MAX_WRITE_BYTES = 5 * 1024 * 1024
+MAX_LIST_ENTRIES = 2000
 
 
 def _cap(text: str, cap: int = MAX_RESULT_CHARS, note: str = "") -> str:
@@ -25,18 +29,66 @@ def _cap(text: str, cap: int = MAX_RESULT_CHARS, note: str = "") -> str:
     return text[:cap] + suffix
 
 
-def _guard_readable(p: Path, path: str) -> str | None:
-    """ERROR string if p is not a bounded, regular file, else None."""
+def _open_regular(path: Path, flags: int, *, mode: int = 0o644, max_size: int | None = None):
+    """Open `path` as a real file, refusing symlinks/FIFOs/devices/sockets and
+    (for reads) oversized files, then return a binary fd-backed file object.
+
+    `flags` is the caller's os.O_* combination (e.g. O_RDONLY, or
+    O_WRONLY|O_CREAT|O_TRUNC for writes) WITHOUT O_NOFOLLOW/O_NONBLOCK/
+    O_CLOEXEC — this function always adds those three:
+    - O_NOFOLLOW closes the final-component symlink TOCTOU: writing through a
+      symlink is refused (raises OSError with errno ELOOP) even when its
+      target is inside the worktree.
+    - O_NONBLOCK makes opening a FIFO return immediately instead of hanging —
+      a read with no writer returns a valid fd instantly (caught below by the
+      S_ISREG check); a write with no reader raises OSError with errno ENXIO
+      immediately. Either way the process never blocks.
+    - O_CLOEXEC keeps the fd from leaking into any subprocess this process
+      later spawns (e.g. the `bash`/`grep` tools).
+    O_NONBLOCK is cleared (via os.set_blocking) once S_ISREG is confirmed, so
+    ordinary reads/writes on the returned file object behave normally.
+    """
+    full_flags = flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    fd = os.open(str(path), full_flags, mode)
     try:
-        st = p.stat()
-    except OSError as e:
-        return f"ERROR: cannot read '{path}': {e}"
-    if not stat.S_ISREG(st.st_mode):
-        return f"ERROR: '{path}' is not a regular file (refusing FIFO/device/socket)"
-    if st.st_size > MAX_READ_BYTES:
-        return (f"ERROR: '{path}' is {st.st_size} bytes, over the {MAX_READ_BYTES}-byte "
-                f"read limit; use grep to search it instead of reading it whole")
-    return None
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"'{path}' is not a regular file (refusing FIFO/device/socket)")
+        if max_size is not None and st.st_size > max_size:
+            raise OSError(
+                f"'{path}' is {st.st_size} bytes, over the {max_size}-byte "
+                f"read limit; use grep to search it instead of reading it whole"
+            )
+        os.set_blocking(fd, True)
+    except Exception:
+        os.close(fd)
+        raise
+    if flags & os.O_WRONLY:
+        pymode = "wb"
+    elif flags & os.O_RDWR:
+        pymode = "r+b"
+    else:
+        pymode = "rb"
+    return os.fdopen(fd, pymode)
+
+
+def _worktree_candidate(path_str: str, worktree: Path) -> Path:
+    """The worktree-joined path BEFORE symlink resolution — the same join
+    `resolve_in_worktree` performs internally, but without following a
+    symlink at the final component. Call this only AFTER
+    `resolve_in_worktree` has already validated containment (it fully
+    resolves symlinks, so it proves the effective target — if any — is
+    inside the worktree); using its return value directly for a WRITE would
+    hand `_open_regular` the already-dereferenced target, defeating
+    O_NOFOLLOW. Using this parent-resolved, final-component-unresolved join instead lets O_NOFOLLOW see and refuse a real symlink at the final path component while intermediate components stay dereferenced.
+    """
+    wt = worktree.resolve()
+    raw = Path(path_str)
+    candidate = raw if raw.is_absolute() else wt / raw
+    # Resolve every PARENT component (so an intermediate symlink is
+    # dereferenced now, at check time, like resolve_in_worktree did) but keep
+    # the final component unresolved so O_NOFOLLOW can refuse a symlink there.
+    return candidate.parent.resolve() / candidate.name
 
 
 def read_file(worktree: Path, path: str, offset: int = 0, limit: int = 400) -> str:
@@ -44,13 +96,15 @@ def read_file(worktree: Path, path: str, offset: int = 0, limit: int = 400) -> s
         p = resolve_in_worktree(path, worktree)
     except GuardrailError as e:
         return f"ERROR: {e}"
-    err = _guard_readable(p, path)
-    if err:
-        return err
     try:
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        fh = _open_regular(p, os.O_RDONLY, max_size=MAX_READ_BYTES)
     except OSError as e:
         return f"ERROR: cannot read '{path}': {e}"
+    try:
+        raw = fh.read()
+    finally:
+        fh.close()
+    lines = raw.decode("utf-8", errors="replace").splitlines()
     window = lines[offset : offset + limit]
     numbered = "\n".join(f"{i:6}\t{line}" for i, line in enumerate(window, offset + 1))
     if offset + limit < len(lines):
@@ -62,15 +116,37 @@ def read_file(worktree: Path, path: str, offset: int = 0, limit: int = 400) -> s
 
 
 def write_file(worktree: Path, path: str, content: str) -> str:
+    encoded = content.encode("utf-8")
+    if len(encoded) > MAX_WRITE_BYTES:
+        return (
+            f"ERROR: content is {len(encoded)} bytes, over the {MAX_WRITE_BYTES}-byte "
+            f"write limit; write the file in smaller pieces"
+        )
     try:
-        p = resolve_in_worktree(path, worktree, writing=True)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
+        resolve_in_worktree(path, worktree, writing=True)  # containment check only
     except GuardrailError as e:
         return f"ERROR: {e}"
+    p = _worktree_candidate(path, worktree)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         return f"ERROR: cannot write '{path}': {e}"
-    return f"Wrote {len(content.encode('utf-8'))} bytes to {path}"
+    try:
+        fh = _open_regular(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            return (
+                f"ERROR: '{path}' is a symlink; writing through a symlink is not "
+                f"allowed even when its target is inside the worktree"
+            )
+        if e.errno == errno.ENXIO:
+            return f"ERROR: '{path}' is not a regular file (refusing FIFO/device/socket)"
+        return f"ERROR: cannot write '{path}': {e}"
+    try:
+        fh.write(encoded)
+    finally:
+        fh.close()
+    return f"Wrote {len(encoded)} bytes to {path}"
 
 
 def edit_file(worktree: Path, path: str, old_string: str, new_string: str) -> str:
@@ -78,25 +154,41 @@ def edit_file(worktree: Path, path: str, old_string: str, new_string: str) -> st
         p = resolve_in_worktree(path, worktree, writing=True)
     except GuardrailError as e:
         return f"ERROR: {e}"
-    err = _guard_readable(p, path)
-    if err:
-        return err
     try:
-        text = p.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return f"ERROR: {path} is not valid UTF-8 text; edit_file only works on text files"
+        fh = _open_regular(p, os.O_RDONLY, max_size=MAX_READ_BYTES)
     except OSError as e:
         return f"ERROR: cannot read '{path}': {e}"
+    try:
+        raw = fh.read()
+    finally:
+        fh.close()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return f"ERROR: {path} is not valid UTF-8 text; edit_file only works on text files"
     count = text.count(old_string)
     if count != 1:
         return (
             f"ERROR: old_string occurs {count} times in {path}; it must occur exactly "
             f"once. Include more surrounding context to make it unique."
         )
+    new_text = text.replace(old_string, new_string, 1)
+    write_target = _worktree_candidate(path, worktree)
     try:
-        p.write_text(text.replace(old_string, new_string, 1), encoding="utf-8")
+        wfh = _open_regular(write_target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
     except OSError as e:
+        if e.errno == errno.ELOOP:
+            return (
+                f"ERROR: '{path}' is a symlink; writing through a symlink is not "
+                f"allowed even when its target is inside the worktree"
+            )
+        if e.errno == errno.ENXIO:
+            return f"ERROR: '{path}' is not a regular file (refusing FIFO/device/socket)"
         return f"ERROR: cannot write '{path}': {e}"
+    try:
+        wfh.write(new_text.encode("utf-8"))
+    finally:
+        wfh.close()
     return f"Edited {path}"
 
 
@@ -108,6 +200,8 @@ def list_dir(worktree: Path, path: str = ".") -> str:
         return f"ERROR: {e}"
     except OSError as e:
         return f"ERROR: cannot list '{path}': {e}"
+    truncated = len(entries) > MAX_LIST_ENTRIES
+    entries = entries[:MAX_LIST_ENTRIES]
     rows = []
     for e in entries:
         try:
@@ -117,6 +211,8 @@ def list_dir(worktree: Path, path: str = ".") -> str:
                 rows.append(f"{e.name}  ({e.stat().st_size} bytes)")
         except OSError:
             rows.append(f"{e.name}  (broken symlink)")
+    if truncated:
+        rows.append(f"[listing truncated at {MAX_LIST_ENTRIES} entries]")
     return _cap("\n".join(rows) or "(empty directory)")
 
 
@@ -294,10 +390,14 @@ TOOL_SCHEMAS = [
 class ToolExecutor:
     """Dispatches validated tool calls. Unknown names raise KeyError."""
 
-    def __init__(self, worktree: Path, transcript=None):
+    def __init__(self, worktree: Path, transcript=None, *,
+                 max_worktree_mb: int = DEFAULT_MAX_WORKTREE_MB,
+                 max_worktree_files: int = DEFAULT_MAX_WORKTREE_FILES):
         self.worktree = worktree
         self.transcript = transcript
         self.deadline = None
+        self.max_worktree_bytes = max_worktree_mb * 1024 * 1024
+        self.max_worktree_files = max_worktree_files
         self._table = {
             "read_file": read_file,
             "write_file": write_file,
@@ -321,4 +421,8 @@ class ToolExecutor:
         result = fn(self.worktree, **args)
         if result.startswith("BLOCKED:") and self.transcript is not None:
             self.transcript.write("guardrail_block", tool=name, args=args, reason=result)
+        report = measure_worktree(self.worktree, max_bytes=self.max_worktree_bytes,
+                                  max_files=self.max_worktree_files)
+        if report.violation:
+            raise BudgetExceeded(report.violation)
         return result

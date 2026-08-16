@@ -144,3 +144,15 @@ def test_bash_timeout_reaps_process_tree(wt: Path):
     assert "timed out" in out.lower()
     time.sleep(2.5)  # past when the sleep would fire if it had survived the kill
     assert not (wt / "survived.txt").exists()  # killpg reaped the whole group
+
+
+def test_executor_raises_budget_exceeded_over_file_limit(wt: Path):
+    from dirtywork.budget import BudgetExceeded
+    ex = ToolExecutor(wt, max_worktree_files=3)
+    # wt already has 1 entry (hello.txt from the fixture). Each write adds
+    # one more; the check runs AFTER the write, so it must succeed through
+    # exactly 3 total entries and only raise once a 4th is created.
+    ex.execute("write_file", {"path": "a.txt", "content": "x"})
+    ex.execute("write_file", {"path": "b.txt", "content": "x"})
+    with pytest.raises(BudgetExceeded):
+        ex.execute("write_file", {"path": "c.txt", "content": "x"})

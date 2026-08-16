@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from dirtywork.transcript import Transcript
 
 
 def test_writes_jsonl_events_with_ts(tmp_path: Path):
-    t = Transcript(tmp_path / "sub" / "transcript.jsonl")  # parent dirs auto-created
+    (tmp_path / "sub").mkdir()  # the run dir now exists before Transcript is built
+    t = Transcript(tmp_path / "sub" / "transcript.jsonl")
     t.write("run_start", task="do a thing", model="m")
     t.write("assistant", text="hello")
     t.close()
@@ -41,3 +44,27 @@ def test_non_finite_field_stays_valid_json(tmp_path: Path):
     import json as _json
     for line in text.splitlines():
         _json.loads(line)  # each line parses
+
+
+def test_refuses_preexisting_file(tmp_path: Path):
+    path = tmp_path / "transcript.jsonl"
+    path.write_text("stale content from a slug collision\n")
+    with pytest.raises(FileExistsError):
+        Transcript(path)
+
+
+def test_refuses_symlink(tmp_path: Path):
+    real = tmp_path / "elsewhere.jsonl"
+    link = tmp_path / "transcript.jsonl"
+    link.symlink_to(real)
+    with pytest.raises(OSError):
+        Transcript(link)
+    assert not real.exists()  # nothing was ever written through the symlink
+
+
+def test_file_mode_is_0600(tmp_path: Path):
+    import stat
+    path = tmp_path / "transcript.jsonl"
+    t = Transcript(path)
+    t.close()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600

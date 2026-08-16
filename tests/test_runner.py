@@ -501,3 +501,78 @@ def test_usage_ignores_non_finite_from_server(parts):
     transcript.close()
     text = (tmp_path / "t.jsonl").read_text()
     assert "NaN" not in text and "Infinity" not in text
+
+
+def test_finalize_merges_into_run_end_and_result_extra(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content="done")])
+    r = Runner(client, executor, transcript, model="m",
+              finalize=lambda: {"diff_stat": " 1 file changed"})
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.extra == {"diff_stat": " 1 file changed"}
+    events = _events(tmp)
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end["diff_stat"] == " 1 file changed"
+
+
+def test_finalize_exception_recorded_status_preserved(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content="done")])
+
+    def boom():
+        raise RuntimeError("disk gone")
+
+    r = Runner(client, executor, transcript, model="m", finalize=boom)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    events = _events(tmp)
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert "disk gone" in run_end["finalize_error"]
+
+
+def test_assistant_text_capped_in_transcript_full_text_resent(parts):
+    wt, executor, transcript, tmp = parts
+    # Over MAX_ASSISTANT_TEXT_CHARS (64_000) but comfortably under the
+    # default model's char_budget (~98_304 for the fallback DEFAULT_WINDOW),
+    # so trim_messages doesn't ALSO trigger context_exhausted — this test is
+    # about the transcript-only cap, not the trim path.
+    huge_text = "y" * 70_000
+    client = FakeClient([
+        _resp(tool_calls=[_call("c1", "list_dir", {"path": "."})], content=huge_text),
+        _resp(content="done"),
+    ])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+
+    events = _events(tmp)
+    assistant_event = next(e for e in events if e["event"] == "assistant")
+    assert len(assistant_event["text"]) < 70_000
+    assert "truncated" in assistant_event["text"]
+
+    # the resent history to the model must keep the FULL text
+    second = client.requests[1]
+    assistant_msg = next(m for m in second if m["role"] == "assistant" and m.get("tool_calls"))
+    assert assistant_msg["content"] == huge_text
+
+
+def test_budget_exceeded_from_executor_ends_run(parts):
+    wt, executor, transcript, tmp = parts
+    from dirtywork.budget import BudgetExceeded
+
+    class BudgetBustingExecutor:
+        def execute(self, name, args):
+            raise BudgetExceeded("worktree exceeds 2048 MB")
+
+    client = FakeClient([_resp(tool_calls=[_call("c1", "write_file", {"path": "x", "content": "y"})])])
+    r = Runner(client, BudgetBustingExecutor(), transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "budget_exceeded"
+    assert "2048 MB" in result.final_message
+    events = _events(tmp)
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end["status"] == "budget_exceeded"

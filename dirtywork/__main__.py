@@ -6,7 +6,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from . import __version__
+from .budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB
 from .llm import LLMError, LMStudioClient
+from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir
 from .runner import Runner
 from .tools import ToolExecutor
 from .transcript import Transcript
@@ -14,12 +17,15 @@ from .workspace import (
     WorkspaceError,
     create_worktree,
     ensure_worktrees_excluded,
+    host_diff_stat,
+    host_untracked,
     load_repo_context,
     make_slug,
     preflight_repo,
+    remove_worktree,
+    worktree_base_commit,
 )
 
-RUNS_DIR = Path.home() / ".dirtywork" / "runs"
 DEFAULT_MODEL = "qwen/qwen3-coder-next"
 
 
@@ -55,6 +61,8 @@ def main(argv: list | None = None) -> int:
     run_p.add_argument("--timeout", type=int, default=1800)
     run_p.add_argument("--temperature", type=float, default=None)
     run_p.add_argument("--base-url", default="http://localhost:1234/v1")
+    run_p.add_argument("--max-worktree-mb", type=int, default=DEFAULT_MAX_WORKTREE_MB)
+    run_p.add_argument("--max-worktree-files", type=int, default=DEFAULT_MAX_WORKTREE_FILES)
     args = parser.parse_args(argv)
 
     repo = args.repo.expanduser().resolve()
@@ -84,7 +92,18 @@ def main(argv: list | None = None) -> int:
         _err(str(e))
         return 2
 
-    transcript_path = RUNS_DIR / slug / "transcript.jsonl"
+    # ---- run directory (exit 2: the worktree exists but no transcript/run
+    # bookkeeping has started yet, so this is still a preflight-style failure —
+    # the worktree and branch just created above are rolled back below) ----
+    try:
+        runs_dir = ensure_runs_dir(RUNS_DIR)
+        run_dir = create_run_dir(runs_dir, slug)
+    except RunDirError as e:
+        remove_worktree(repo, slug)
+        _err(str(e))
+        return 2
+
+    transcript_path = run_dir / "transcript.jsonl"
     print(f"transcript: {transcript_path}", file=sys.stderr)
     print(f"worktree:   {worktree}", file=sys.stderr)
 
@@ -94,14 +113,32 @@ def main(argv: list | None = None) -> int:
     # the machine contract (exactly one JSON object on stdout, post-preflight)
     # holds even if a component other than runner.run() blows up.
     transcript = None
+    base_commit = None
     try:
+        base_commit = worktree_base_commit(worktree)
         transcript = Transcript(transcript_path)
-        executor = ToolExecutor(worktree, transcript=transcript)
+        executor = ToolExecutor(worktree, transcript=transcript,
+                                max_worktree_mb=args.max_worktree_mb,
+                                max_worktree_files=args.max_worktree_files)
+        run_info = {
+            "repo": str(repo),
+            "worktree": str(worktree),
+            "base_commit": base_commit,
+            "branch": f"dirtywork/{slug}",
+            "branch_from": args.branch_from,
+            "base_url": args.base_url,
+            "dirtywork_version": __version__,
+            "temperature": args.temperature,
+            "sandbox": "none",
+            "provider": "openai",
+        }
         runner = Runner(client, executor, transcript, model=args.model,
                         max_turns=args.max_turns, timeout=args.timeout,
                         temperature=args.temperature,
-                        run_info={"repo": str(repo), "worktree": str(worktree)})
-        system_prompt = build_system_prompt(worktree, load_repo_context(worktree))
+                        run_info=run_info,
+                        finalize=lambda: {"diff_stat": host_diff_stat(worktree, base_commit),
+                                          "untracked": host_untracked(worktree)})
+        system_prompt = build_system_prompt(worktree, load_repo_context(repo, base_commit))
         result = runner.run(system_prompt, args.task)
     except Exception as e:
         message = str(e) if isinstance(e, LLMError) else f"unexpected error: {e!r}"
@@ -119,6 +156,8 @@ def main(argv: list | None = None) -> int:
             "turns": None,
             "usage": {},
             "final_message": message,
+            "run_dir": str(run_dir),
+            "base_commit": base_commit,
         }, indent=2))
         return 1
     finally:
@@ -136,6 +175,8 @@ def main(argv: list | None = None) -> int:
         "turns": result.turns,
         "usage": result.usage,
         "final_message": result.final_message,
+        "run_dir": str(run_dir),
+        "base_commit": base_commit,
     }, indent=2))
     return 0 if result.status == "completed" else 1
 

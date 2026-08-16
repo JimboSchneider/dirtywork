@@ -31,16 +31,37 @@ dirtywork's containment is honest about its limits:
 
 - **File tools (`read_file`/`write_file`/`edit_file`/`list_dir`/`grep`) are confined
   to the worktree** by real path resolution — symlinks, `..`, and absolute paths that
-  escape are rejected.
+  escape are rejected. Writes additionally refuse to go through a symlink at the
+  final path component (even one pointing back inside the worktree) and refuse
+  any non-regular-file target (FIFO/device/socket) outright.
 - **`bash` is a general shell, not a sandbox.** A denylist blocks common *accidents*
   (destructive commands aimed outside the worktree, shared-git-state writes, piping a
   download into an interpreter), and `HOME` is redirected into the worktree so `~`/
   `$HOME` can't reach your real `~/.ssh` or `~/.aws`. But a determined or
   prompt-injected model can still read absolute host paths (`cat /etc/…`) — the
   denylist raises the bar for a confused model, it does not stop an adversarial one.
+  Concretely, host mode (`--sandbox none`, the only mode this version has) does
+  **not** block writes made through an interpreter — e.g.
+  `python3 -c "open('/tmp/x','w').write('y')"` succeeds. Enumerating every
+  interpreter's write primitive is not a regex-shaped problem; the real fix is a
+  process boundary (an OS-level sandbox), tracked as the next release.
+- **`.git/info/exclude` gains a line.** The first run against a repo appends
+  `.worktrees/` to the shared repository's `.git/info/exclude` (not tracked, not
+  committed, idempotent) so worktree directories don't show up as untracked noise
+  in `git status`. This is the only host-side git state a run writes outside its
+  own worktree.
+- **Worktree growth is checked after every tool call.** Past `--max-worktree-mb`
+  (default 2048) or `--max-worktree-files` (default 200000) the run ends with
+  status `budget_exceeded`. This is a best-effort, sampled bound, not a kernel
+  quota — see SECURITY.md.
 - **Review is the real boundary.** Read the transcript and diff before you merge. Note
   that `bash` side-effects happen at run time, so review catches what lands in the
-  diff, not what a command already did.
+  diff, not what a command already did. `git diff --stat` in host mode compares
+  against the run's base commit, so unstaged, staged, and committed changes to
+  **tracked** files all show up — but a new file the model wrote and never
+  `git add`ed won't appear in `diff_stat`. Such files are listed separately in
+  `run_end.untracked` (untracked paths, one per line; a whole untracked
+  directory collapses to a single `dir/` entry).
 
 **Practical guidance:** run dirtywork against models and repositories you'd trust with
 shell access on your machine. A malicious target repo's `CLAUDE.md`/`AGENTS.md` is
@@ -84,11 +105,15 @@ The launcher is self-locating, so this works from any clone location.
 
     dirtywork run --repo ~/repos/someproject "Add a unit test for X"
 
-- **Watch a run:** `tail -f` the transcript path printed on stderr.
-- **Review a run:** `git -C <worktree> diff`, read the transcript, run the
-  repo's tests — then commit the branch or discard it.
+- **Watch a run:** `tail -f` the transcript path printed on stderr
+  (`~/.dirtywork/runs/<slug>/transcript.jsonl`).
+- **Review a run:** `git -C <worktree> diff`, read the transcript (`run_end`
+  carries `diff_stat` and `untracked`), run the repo's tests — then commit
+  the branch or discard it.
 - **Discard a run:**
   `git -C <repo> worktree remove --force <worktree> && git -C <repo> branch -D dirtywork/<slug>`
+- **All flags, stdout JSON, exit codes, transcript events:** see
+  [Machine contract](#machine-contract).
 
 ## How a run works
 
@@ -118,11 +143,22 @@ the real gate:
   checks; `.git/` is write-protected against hook injection).
 - `bash` runs cwd-pinned in the worktree with a minimal environment (your
   shell's tokens/keys are not inherited) and a regex denylist: `sudo`,
-  `git push`, `rm`/`mv`/`chmod`/`chown` on absolute or `~` paths,
+  `git push`, `git config`/`remote`/`worktree`/`branch -D`/… that would write
+  the parent repo's shared state (including through `git -C`/`git -c`/`--flag`
+  global options), `rm`/`mv`/`chmod`/`chown` on absolute or `~` paths,
   `cd`/`pushd` escapes, downloads piped to a shell, system-control
   commands, redirects outside the worktree.
 - Every denylist rejection is logged to the transcript as a
   `guardrail_block` event, so attempted escapes are visible at review time.
+- File tools refuse to operate on anything that isn't a regular file (FIFOs,
+  devices, sockets) and refuse to write through a symlink at the final path
+  component, even when its target is inside the worktree. `write_file`
+  content is capped at 5 MB, `list_dir` output at 2000 entries, and the
+  assistant's own text is capped at 64 000 chars in the transcript (the
+  full text is still sent to the model).
+- Worktree growth is sampled after every tool call against
+  `--max-worktree-mb`/`--max-worktree-files`; past either, the run ends with
+  status `budget_exceeded`.
 - Network is allowed (package restores need it); per-command timeout 120s
   default, 600s max.
 
@@ -162,6 +198,10 @@ In August 2026 the project was renamed **dirtywork** — same tool, a name that 
   higher limits.
 - **status `context_exhausted`** — the task needed more context than the
   model's window; split the task or use the larger-context model.
+- **status `budget_exceeded`** — the worktree grew past
+  `--max-worktree-mb`/`--max-worktree-files` during a tool call; the
+  worktree and branch are kept for salvage. Raise the limit or investigate
+  what wrote so much.
 
 ## Machine contract
 
@@ -178,6 +218,8 @@ dirtywork run --repo <path> "<task>"
     [--timeout 1800]                  # whole-run wall clock, seconds
     [--temperature <f>]               # omitted by default → server preset
     [--base-url http://localhost:1234/v1]  # LM Studio's OpenAI-compatible endpoint
+    [--max-worktree-mb 2048]          # best-effort worktree size bound
+    [--max-worktree-files 200000]     # best-effort worktree entry-count bound
 ```
 
 **stdout:** on any run that gets past preflight, exactly one JSON object is
@@ -191,27 +233,31 @@ printed to stdout (nothing else goes to stdout):
   "transcript": "/path/to/transcript.jsonl",
   "turns": 7,
   "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-  "final_message": "..."
+  "final_message": "...",
+  "run_dir": "/home/you/.dirtywork/runs/<slug>",
+  "base_commit": "abc123def456..."
 }
 ```
 
 `status` is one of: `completed`, `max_turns`, `timeout`,
-`context_exhausted`, `model_error`, `interrupted`. When the run fails before
-a `RunResult` exists — the LLM client raises, post-worktree setup fails (e.g.
-the transcript can't be created), or any other exception escapes the run
-(status `model_error` in every case) — `turns` is `null` and `usage` is `{}`,
-but `status`, `worktree`, `branch`, and `transcript` are still populated so
-the worktree can be located for salvage.
+`context_exhausted`, `model_error`, `interrupted`, `budget_exceeded`. When
+the run fails before a `RunResult` exists — the LLM client raises,
+post-worktree setup fails (e.g. the transcript can't be created), or any
+other exception escapes the run (status `model_error` in every case) —
+`turns` is `null` and `usage` is `{}`, but `status`, `worktree`, `branch`,
+`transcript`, `run_dir`, and (when it was resolved before the failure)
+`base_commit` are still populated so the worktree can be located for
+salvage.
 
 **Exit codes:**
 
 - `0` — `completed`.
 - `1` — run ended abnormally (`max_turns`, `timeout`, `context_exhausted`,
-  `model_error`, `interrupted`); the worktree and branch are kept for
-  salvage/review. `main` catches every `Exception` the run raises (not just
-  ones the runner itself converts to a status) and reports it as
-  `model_error` via the same JSON contract, so a post-preflight run never
-  tracebacks. (Ctrl-C is a `KeyboardInterrupt`, a `BaseException`, not caught
+  `model_error`, `interrupted`, `budget_exceeded`); the worktree and branch
+  are kept for salvage/review. `main` catches every `Exception` the run
+  raises (not just ones the runner itself converts to a status) and reports
+  it as `model_error` via the same JSON contract, so a post-preflight run
+  never tracebacks. (Ctrl-C is a `KeyboardInterrupt`, a `BaseException`, not caught
   here — but the run loop itself already converts in-loop Ctrl-C to status
   `interrupted` before it would reach this point.)
 - `2` — preflight or environment error (LM Studio unreachable, model not
@@ -221,8 +267,15 @@ All progress (transcript path, worktree path, `error:`-prefixed messages) is
 written to stderr; watch a live run with `tail -f` on the transcript path.
 
 **Transcript events** (JSONL, one per line): `run_start` (task, repo, model,
-config), `assistant` (text + tool calls), `tool_result` (truncated),
-`guardrail_block`, `run_end` (status, turns, duration, cumulative usage).
+config, plus provenance: `base_commit`, `branch`, `branch_from`,
+`base_url`, `dirtywork_version`, `temperature`, `sandbox`, `provider`),
+`assistant` (text + tool calls — text capped at 64 000 chars in the
+transcript only, the full text is still sent to the model), `tool_result`
+(truncated), `guardrail_block`, `run_end` (status, turns, duration,
+cumulative usage, plus `diff_stat` in host mode — `git diff --stat`
+against the base commit, tracked changes only, capped at 64 000 chars —
+and `untracked`, `git status --porcelain` `??` entries, capped at
+64 000 chars).
 
 ## Contributing
 

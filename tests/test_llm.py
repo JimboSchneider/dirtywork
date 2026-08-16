@@ -199,3 +199,27 @@ def test_oversized_response_raises_llmerror(server: str, monkeypatch):
     client = LMStudioClient(base_url=server)
     with pytest.raises(LLMError):
         client.chat("m1", [{"role": "user", "content": "x"}], tools=[])
+
+
+def test_http_error_body_read_is_bounded(monkeypatch):
+    import urllib.error
+    import urllib.request
+
+    calls = []
+
+    class BoundedFP:
+        def read(self, n=-1):
+            calls.append(n)
+            return b"x" * 10
+
+        def close(self):
+            pass
+
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 500, "boom", {}, BoundedFP())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = LMStudioClient(base_url="http://127.0.0.1:9/v1")
+    with pytest.raises(LLMError):
+        client.list_models()
+    assert calls == [500]
