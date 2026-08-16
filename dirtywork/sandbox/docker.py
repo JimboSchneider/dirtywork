@@ -74,29 +74,18 @@ class DockerSandbox:
              "--label", f"dirtywork.repo={label}", vol],
             timeout=docker_cli.T_QUERY,
         )
-        if create_vol.returncode != 0:
-            raise SandboxError(
-                f"docker volume create {vol} failed: "
-                f"{create_vol.output.decode('utf-8', 'replace')[:500]}"
-            )
+        self._check(create_vol, f"docker volume create {vol} failed")
         self.volume = vol
 
         prep_argv = docker_args.prep_run_argv(self.cfg, slug, self.image_ref, self.uid, self.gid)
         prep = self._run(prep_argv, timeout=docker_cli.T_LIFECYCLE)
-        if prep.returncode != 0:
-            raise SandboxError(
-                f"prep container failed to chown the volume: "
-                f"{prep.output.decode('utf-8', 'replace')[:500]}"
-            )
+        self._check(prep, "prep container failed to chown the volume")
 
         create_argv = docker_args.worker_create_argv(
             self.cfg, slug, self.image_ref, self.uid, self.gid, objects_dir, repo_label=label
         )
         created = self._run(create_argv, timeout=docker_cli.T_LIFECYCLE)
-        if created.returncode != 0:
-            raise SandboxError(
-                f"docker create {name} failed: {created.output.decode('utf-8', 'replace')[:500]}"
-            )
+        self._check(created, f"docker create {name} failed")
         self.container = name
 
         self._start_tether()
@@ -146,10 +135,12 @@ class DockerSandbox:
             env={"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"},
         )
         captured = self._run(argv, timeout=docker_cli.T_LIFECYCLE)
-        if captured.returncode != 0:
-            raise SandboxError(
-                f"in-container init failed: {captured.output.decode('utf-8', 'replace')[:500]}"
-            )
+        self._check(captured, "in-container init failed")
+
+    def _check(self, res, what: str) -> None:
+        """Raise SandboxError with the captured output when a docker step failed."""
+        if res.returncode != 0:
+            raise SandboxError(f"{what}: {res.output.decode('utf-8', 'replace')[:500]}")
 
     def stop(self) -> None:
         if self._stopped:
@@ -168,8 +159,9 @@ class DockerSandbox:
                 pass
             try:
                 self._tether.wait(timeout=docker_cli.T_LIFECYCLE)
-            except Exception:
-                pass
+            except subprocess.TimeoutExpired:
+                self._tether.kill()
+                self._tether.wait()
         if self.volume is not None and not self.cfg.keep_volume:
             try:
                 self._run(["volume", "rm", self.volume], timeout=docker_cli.T_QUERY)

@@ -10,7 +10,6 @@ from dirtywork.procs import Captured
 from dirtywork.sandbox import SandboxError
 from dirtywork.sandbox.docker import DockerSandbox
 from dirtywork.sandbox.docker_args import DockerConfig
-from dirtywork.sandbox.docker_cli import DockerError
 
 
 class FakePopen:
