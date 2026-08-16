@@ -181,41 +181,44 @@ def export_run(cfg, *, slug, base_commit, worktree: Path, run_dir: Path, objects
 
     name = f"{docker_args.container_name(slug)}-export"
 
+    create_argv = docker_args.export_create_argv(cfg, slug, image_ref, uid, gid, objects_dir,
+                                                  repo_label=repo_label)
     try:
-        create_argv = docker_args.export_create_argv(cfg, slug, image_ref, uid, gid, objects_dir,
-                                                      repo_label=repo_label)
         created = run(create_argv, timeout=docker_cli.T_LIFECYCLE)
-        if created.returncode != 0:
-            return RunArtifacts(
-                export_status=f"export_failed: docker create {name} failed: "
-                               f"{created.output.decode('utf-8', 'replace')[:500]}"
-            )
+    except docker_cli.DockerError as e:
+        return RunArtifacts(export_status=f"export_failed: docker create {name} failed: {e}")
+    if created.returncode != 0:
+        return RunArtifacts(
+            export_status=f"export_failed: docker create {name} failed: "
+                           f"{created.output.decode('utf-8', 'replace')[:500]}"
+        )
 
-        tether = popen(["docker", "start", "-ai", name],
-                        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    tether = popen(["docker", "start", "-ai", name],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        def _cleanup(keep_volume: bool) -> None:
+    def _cleanup(keep_volume: bool) -> None:
+        try:
+            run(["rm", "-f", name], timeout=docker_cli.T_LIFECYCLE)
+        except docker_cli.DockerError:
+            pass
+        lifecycle.close_tether(tether)
+        if not keep_volume:
             try:
-                run(["rm", "-f", name], timeout=docker_cli.T_LIFECYCLE)
+                run(["volume", "rm", docker_args.volume_name(slug)], timeout=docker_cli.T_QUERY)
             except docker_cli.DockerError:
                 pass
-            lifecycle.close_tether(tether)
-            if not keep_volume:
-                try:
-                    run(["volume", "rm", docker_args.volume_name(slug)], timeout=docker_cli.T_QUERY)
-                except docker_cli.DockerError:
-                    pass
 
-        def _fail(reason: str) -> RunArtifacts:
-            _cleanup(keep_volume=True)  # export_failed always keeps the volume for retry
-            _cleanup_to_dot_git_only(worktree)
-            return RunArtifacts(
-                diff_stat=diff_stat, patch_path=patch_path,
-                worktree_bytes=worktree_bytes, worktree_files=worktree_files,
-                escaping_symlinks=escaping_symlinks, dropped_git_entries=dropped_git_entries,
-                export_status=f"export_failed: {reason}",
-            )
+    def _fail(reason: str) -> RunArtifacts:
+        _cleanup(keep_volume=True)  # export_failed always keeps the volume for retry
+        _cleanup_to_dot_git_only(worktree)
+        return RunArtifacts(
+            diff_stat=diff_stat, patch_path=patch_path,
+            worktree_bytes=worktree_bytes, worktree_files=worktree_files,
+            escaping_symlinks=escaping_symlinks, dropped_git_entries=dropped_git_entries,
+            export_status=f"export_failed: {reason}",
+        )
 
+    try:
         lifecycle.wait_ready(run, name)
 
         lifecycle.init_worker_git(run, name, slug=slug, base_commit=base_commit, restart=True)
@@ -324,7 +327,7 @@ def export_run(cfg, *, slug, base_commit, worktree: Path, run_dir: Path, objects
 
         _cleanup(keep_volume=cfg.keep_volume)
 
-    except docker_cli.DockerError as e:
+    except SandboxError as e:
         return _fail(f"docker step failed: {e}")
 
     return RunArtifacts(

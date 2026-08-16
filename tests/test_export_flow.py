@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from dirtywork.sandbox import docker_cli
 from dirtywork.procs import Captured
 from dirtywork.sandbox.docker_args import DockerConfig
 from dirtywork.sandbox.export import export_run
@@ -196,3 +197,52 @@ def test_export_run_extract_validation_failure_marks_export_failed(tmp_path, emp
     remaining = list(empty_worktree.iterdir())
     assert len(remaining) == 1 and remaining[0].name == ".git"
     assert not any(c[0][:2] == ["volume", "rm"] for c in fake.calls)
+
+
+def test_export_run_docker_error_routes_through_fail(tmp_path, empty_worktree):
+    fake = FakeDocker()
+    fake.script(["create"], _ok())
+    
+    def custom_run(argv, *, timeout, stdin=None):
+        if "add" in argv and "-A" in argv:
+            raise docker_cli.DockerError("timed out")
+        return fake.run(argv, timeout=timeout, stdin=stdin)
+    
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    cfg = DockerConfig()
+
+    artifacts = export_run(
+        cfg, slug="abc123", base_commit="deadbeef" * 5, worktree=empty_worktree,
+        run_dir=run_dir, objects_dir=Path("/repo/.git/objects"),
+        image_ref="dirtywork/worker@sha256:" + "a" * 64, uid=501, gid=20,
+        repo_label="deadbeef", run=custom_run, popen=fake.popen,
+    )
+
+    assert artifacts.export_status.startswith("export_failed: docker step failed")
+    assert any(c[0][:2] == ["rm", "-f"] and "dw-abc123-export" in c[0] for c in fake.calls)
+    remaining = list(empty_worktree.iterdir())
+    assert len(remaining) == 1 and remaining[0].name == ".git"
+
+
+def test_export_run_create_docker_error_no_cleanup_needed(tmp_path, empty_worktree):
+    fake = FakeDocker()
+    
+    def custom_run(argv, *, timeout, stdin=None):
+        if argv[0] == "create":
+            raise docker_cli.DockerError("timed out")
+        return fake.run(argv, timeout=timeout, stdin=stdin)
+    
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    cfg = DockerConfig()
+
+    artifacts = export_run(
+        cfg, slug="abc123", base_commit="deadbeef" * 5, worktree=empty_worktree,
+        run_dir=run_dir, objects_dir=Path("/repo/.git/objects"),
+        image_ref="dirtywork/worker@sha256:" + "a" * 64, uid=501, gid=20,
+        repo_label="deadbeef", run=custom_run, popen=fake.popen,
+    )
+
+    assert artifacts.export_status.startswith("export_failed: docker create")
+    assert not any(c[0][:2] == ["rm", "-f"] for c in fake.calls)

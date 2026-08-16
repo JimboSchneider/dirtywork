@@ -110,7 +110,7 @@ class FakeDocker:
         best_data = b""
         for prefix, data in self.popen_stdout.items():
             if tuple(argv[: len(prefix)]) == prefix:
-                if best_prefix is None or len(prefix) > len(prefix):
+                if best_prefix is None or len(prefix) > len(best_prefix):
                     best_prefix, best_data = prefix, data
         p = FakePopen(argv, stdin=stdin, stdout=stdout, stderr=stderr, stdout_data=best_data)
         self.popens.append(p)
