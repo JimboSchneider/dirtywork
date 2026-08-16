@@ -276,3 +276,128 @@ class DockerSandbox:
         if result.startswith("ERROR:"):
             return result
         return f"Edited {path}"
+
+    def list_dir(self, path: str = ".") -> str:
+        rel, err = _rel(path)
+        if err:
+            return err
+        # Probe for GNU find once per sandbox instance
+        if getattr(self, "_has_gnu_find", None) is None:
+            probe_argv = docker_args.exec_argv(self.container, ["/usr/bin/find", "--version"])
+            try:
+                captured = self._run(probe_argv, timeout=LIST_EXEC_TIMEOUT)
+                self._has_gnu_find = captured.returncode == 0
+            except docker_cli.DockerError:
+                self._has_gnu_find = False
+        if self._has_gnu_find:
+            cmd = ["/usr/bin/find", rel, "-mindepth", "1", "-maxdepth", "1", "-printf", "%y\t%s\t%f\n"]
+            argv = docker_args.exec_argv(self.container, cmd)
+            captured = self._run(argv, timeout=LIST_EXEC_TIMEOUT)
+            if captured.returncode != 0:
+                return f"ERROR: cannot list '{path}': {captured.output.decode('utf-8', 'replace')[:500]}"
+            rows = []
+            for line in captured.output.decode("utf-8", errors="replace").splitlines():
+                if not line:
+                    continue
+                kind, size, name = line.split("\t", 2)
+                rows.append((name, kind == "d", int(size)))
+        else:
+            cmd = ["/bin/ls", "-1Ap"]
+            argv = docker_args.exec_argv(self.container, cmd)
+            captured = self._run(argv, timeout=LIST_EXEC_TIMEOUT)
+            if captured.returncode != 0:
+                return f"ERROR: cannot list '{path}': {captured.output.decode('utf-8', 'replace')[:500]}"
+            rows = []
+            for line in captured.output.decode("utf-8", errors="replace").splitlines():
+                if not line:
+                    continue
+                name = line.rstrip("/")
+                is_dir = line.endswith("/")
+                size = self._get_file_size(path, name) if not is_dir else 0
+                rows.append((name, is_dir, size))
+        # Sort by raw name before formatting
+        rows.sort(key=lambda x: x[0])
+        formatted = []
+        for name, is_dir, size in rows:
+            if is_dir:
+                formatted.append(f"{name}/")
+            else:
+                formatted.append(f"{name}  ({size} bytes)")
+        note = ""
+        if len(formatted) > MAX_LIST_ENTRIES:
+            formatted = formatted[:MAX_LIST_ENTRIES]
+            note = f"\n[list capped at {MAX_LIST_ENTRIES} entries]"
+        return ("\n".join(formatted) or "(empty directory)") + note
+
+    def _get_file_size(self, path: str, name: str) -> int:
+        """Fallback method to get file size when GNU find is not available."""
+        if path == ".":
+            rel_path = "/" + name
+        else:
+            rel_path = posixpath.join(path, name)
+        argv = docker_args.exec_argv(
+            self.container, ["/usr/bin/stat", "-c", "%s", rel_path]
+        )
+        captured = self._run(argv, timeout=LIST_EXEC_TIMEOUT)
+        if captured.returncode == 0:
+            try:
+                return int(captured.output.decode("utf-8").strip())
+            except ValueError:
+                pass
+        return 0
+
+    def grep(self, pattern: str, path: str = ".", glob: str | None = None,
+             timeout: int = 30) -> str:
+        rel, err = _rel(path)
+        if err:
+            return err
+        # Probe for rg once per sandbox instance
+        if getattr(self, "_has_rg", None) is None:
+            probe_argv = docker_args.exec_argv(self.container, ["/usr/bin/rg", "--version"])
+            try:
+                captured = self._run(probe_argv, timeout=timeout + 10)
+                self._has_rg = captured.returncode == 0
+            except docker_cli.DockerError:
+                self._has_rg = False
+        if self._has_rg:
+            cmd = ["/usr/bin/rg", "-n", "--no-heading", "-M", "300", "-e", pattern]
+            if glob:
+                cmd += ["-g", glob]
+        else:
+            cmd = ["/usr/bin/grep", "-rn", "-e", pattern]
+            if glob:
+                cmd += [f"--include={glob}"]
+        cmd.append(rel)
+        argv = docker_args.exec_argv(self.container, cmd)
+        try:
+            captured = self._run(argv, timeout=timeout + 10)
+        except docker_cli.DockerError:
+            return f"ERROR: grep timed out after {timeout}s — narrow the pattern or path."
+        if captured.returncode not in (0, 1):
+            return f"ERROR: grep failed: {captured.output.decode('utf-8', 'replace')[:500]}"
+        text = captured.output.decode("utf-8", errors="replace")
+        if not text.strip():
+            return "No matches found."
+        # Strip leading ./ from paths
+        lines = [(l[2:] if l.startswith("./") else l) for l in text.splitlines()]
+        return _cap("\n".join(lines), note=" — narrow the pattern or path for full results")
+
+    def bash(self, command: str, timeout: int = 120) -> str:
+        reason = check_bash_command(command)
+        if reason:
+            return reason  # starts with "BLOCKED:"
+        timeout = max(1, min(int(timeout), 600))
+        argv = docker_args.exec_argv(
+            self.container,
+            ["/bin/bash", "-c", 'ulimit -f 524288; exec bash -c "$1"', "_", command],
+        )
+        try:
+            captured = self._run(argv, timeout=timeout + 10)
+        except docker_cli.DockerError:
+            return _cap(f"ERROR: command timed out after {timeout}s.", cap=MAX_BASH_CHARS)
+        out = captured.output.decode("utf-8", errors="replace").strip()
+        note = " — bash output capped" if captured.truncated else ""
+        final_text = f"exit code: {captured.returncode}\n{out}"
+        if captured.truncated:
+            final_text += "\n[output capped]"
+        return _cap(final_text, cap=MAX_BASH_CHARS, note=note)

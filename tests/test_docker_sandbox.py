@@ -8,8 +8,10 @@ import pytest
 
 from dirtywork.procs import Captured
 from dirtywork.sandbox import SandboxError
-from dirtywork.sandbox.docker import DockerSandbox
+from dirtywork.sandbox.docker import DockerSandbox, docker_cli
 from dirtywork.sandbox.docker_args import DockerConfig
+
+DockerError = docker_cli.DockerError
 
 
 class FakePopen:
@@ -456,3 +458,114 @@ def test_edit_file_non_utf8(started):
     writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
     assert len(heads) == 1
     assert len(writes) == 0
+
+
+def test_list_dir_shapes_output(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok(b"d\t96\tsrc\nf\t18\tREADME.md\n"))
+    out = sb.list_dir(".")
+    assert "src/" in out
+    assert "README.md  (18 bytes)" in out
+    assert fake.calls[-1][0] == [
+        "exec", "-w", "/work", "dw-abc123",
+        "/usr/bin/find", ".", "-mindepth", "1", "-maxdepth", "1",
+        "-printf", "%y\t%s\t%f\n",
+    ]
+
+
+def test_list_dir_caps_entries(started):
+    from dirtywork.tools import MAX_LIST_ENTRIES
+    sb, fake, run_dir = started
+    lines = "".join(f"f\t1\tfile{i}\n" for i in range(MAX_LIST_ENTRIES + 50))
+    fake.script(["exec"], _ok(lines.encode()))
+    out = sb.list_dir(".")
+    assert "capped" in out
+    assert out.count("(1 bytes)") == MAX_LIST_ENTRIES
+
+
+def test_grep_exec_argv_and_strips_leading_dot_slash(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok(b"./src/app.py:2:    return 42\n"))
+    out = sb.grep("return 42")
+    assert "src/app.py:2" in out
+    assert "./" not in out
+    assert fake.calls[-1][0] == [
+        "exec", "-w", "/work", "dw-abc123",
+        "/usr/bin/rg", "-n", "--no-heading", "-M", "300", "-e", "return 42", ".",
+    ]
+
+
+def test_grep_glob_appends_dash_g_flag(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok(b""))
+    sb.grep("foo", glob="*.py")
+    argv = fake.calls[-1][0]
+    assert "-g" in argv and argv[argv.index("-g") + 1] == "*.py"
+
+
+def test_grep_no_match(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok(b""))
+    out = sb.grep("zzz_not_present")
+    assert "No matches" in out
+
+
+def test_grep_timeout_returns_error_text(started):
+    sb, fake, run_dir = started
+
+    def raise_timeout(argv, *, timeout, stdin=None):
+        fake.calls.append((list(argv), timeout, stdin))
+        raise DockerError("docker exec ... timed out after 40s")
+
+    sb._run = raise_timeout
+    out = sb.grep("foo", timeout=30)
+    assert "timed out" in out.lower()
+
+
+def test_bash_exec_argv_and_shaping(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok(b"hi\n"))
+    out = sb.bash("echo hi")
+    assert "exit code: 0" in out
+    assert "hi" in out
+    argv, timeout, stdin = fake.calls[-1]
+    assert argv == [
+        "exec", "-w", "/work", "dw-abc123",
+        "/bin/bash", "-c", 'ulimit -f 524288; exec bash -c "$1"', "_", "echo hi",
+    ]
+    assert timeout == 130  # 120s default + 10
+
+
+def test_bash_blocked_command_never_execs(started):
+    sb, fake, run_dir = started
+    out = sb.bash("sudo ls")
+    assert out.startswith("BLOCKED:")
+    assert not fake.calls
+
+
+def test_bash_timeout_returns_text_not_raise(started):
+    sb, fake, run_dir = started
+
+    def raise_timeout(argv, *, timeout, stdin=None):
+        fake.calls.append((list(argv), timeout, stdin))
+        raise DockerError("docker exec ... timed out after 11s")
+
+    sb._run = raise_timeout
+    out = sb.bash("sleep 600", timeout=1)
+    assert "timed out after 1s" in out
+
+
+def test_bash_nonzero_exit_reported(started):
+    sb, fake, run_dir = started
+    from dirtywork.procs import Captured
+    fake.script(["exec"], Captured(returncode=3, output=b"", truncated=False, timed_out=False))
+    out = sb.bash("exit 3")
+    assert "exit code: 3" in out
+
+
+def test_bash_output_capped(started):
+    sb, fake, run_dir = started
+    from dirtywork.procs import Captured
+    fake.script(["exec"], Captured(returncode=0, output=b"x" * 100, truncated=True, timed_out=False))
+    out = sb.bash("big output")
+    assert "capped" in out
