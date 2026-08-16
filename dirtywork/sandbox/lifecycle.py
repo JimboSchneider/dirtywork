@@ -9,8 +9,10 @@ from . import docker_args
 from . import docker_cli
 
 
-def wait_ready(run, name: str, *, deadline_s: float = docker_cli.T_LIFECYCLE, poll_s: float = 0.05) -> None:
+def wait_ready(run, name: str, *, deadline_s: float | None = None, poll_s: float = 0.05) -> None:
     """Poll `docker exec <name> /bin/true` until it exits 0 or deadline_s elapses; raise SandboxError with the last error otherwise."""
+    if deadline_s is None:
+        deadline_s = docker_cli.T_LIFECYCLE
     deadline = time.monotonic() + deadline_s
     last_error = None
     while time.monotonic() < deadline:
@@ -53,8 +55,10 @@ def init_worker_git(run, name: str, *, slug: str, base_commit: str, restart: boo
         )
 
 
-def close_tether(proc, *, timeout_s: float = docker_cli.T_LIFECYCLE) -> None:
+def close_tether(proc, *, timeout_s: float | None = None) -> None:
     """Close the tether's stdin (ignore OSError), wait up to timeout_s; on subprocess.TimeoutExpired kill() then wait(). Never swallows other exceptions."""
+    if timeout_s is None:
+        timeout_s = docker_cli.T_LIFECYCLE
     try:
         if proc.stdin is not None:
             proc.stdin.close()
