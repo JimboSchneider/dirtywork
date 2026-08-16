@@ -14,6 +14,7 @@ from ..tools import MAX_BASH_CHARS, MAX_LIST_ENTRIES, MAX_READ_BYTES, MAX_WRITE_
 from . import SandboxError
 from . import docker_args
 from . import docker_cli
+from . import lifecycle
 from ..workspace import WorkspaceError
 from .watchdog import Watchdog
 
@@ -152,43 +153,10 @@ class DockerSandbox:
         )
 
     def _wait_ready(self) -> None:
-        deadline = time.monotonic() + docker_cli.T_LIFECYCLE
-        last_error = None
-        while time.monotonic() < deadline:
-            try:
-                captured = self._run(["exec", self.container, "/bin/true"],
-                                      timeout=docker_cli.T_LIFECYCLE)
-            except docker_cli.DockerError as e:
-                last_error = e
-                time.sleep(0.05)
-                continue
-            if captured.returncode == 0:
-                return
-            last_error = SandboxError(
-                f"docker exec {self.container} /bin/true returned {captured.returncode}"
-            )
-            time.sleep(0.05)
-        raise SandboxError(
-            f"container {self.container} did not become ready within "
-            f"{docker_cli.T_LIFECYCLE}s" + (f": {last_error}" if last_error else "")
-        )
+        lifecycle.wait_ready(self._run, self.container)
 
     def _init(self, *, restart: bool) -> None:
-        populate = "/usr/bin/git read-tree HEAD" if restart else "/usr/bin/git read-tree -m -u HEAD"
-        script = (
-            "set -e; "
-            "/usr/bin/git init -q; "
-            "echo /repo.git/objects > /gitdir/objects/info/alternates; "
-            f"/usr/bin/git symbolic-ref HEAD refs/heads/dirtywork/{self._slug}; "
-            f"/usr/bin/git update-ref refs/heads/dirtywork/{self._slug} {self._base_commit}; "
-            f"{populate}"
-        )
-        argv = docker_args.exec_argv(
-            self.container, ["/bin/sh", "-c", script],
-            env={"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"},
-        )
-        captured = self._run(argv, timeout=docker_cli.T_LIFECYCLE)
-        self._check(captured, "in-container init failed")
+        lifecycle.init_worker_git(self._run, self.container, slug=self._slug, base_commit=self._base_commit, restart=restart)
 
     def _check(self, res, what: str) -> None:
         """Raise SandboxError with the captured output when a docker step failed."""
@@ -209,16 +177,7 @@ class DockerSandbox:
             except docker_cli.DockerError:
                 pass
         if self._tether is not None:
-            try:
-                if self._tether.stdin is not None:
-                    self._tether.stdin.close()
-            except OSError:
-                pass
-            try:
-                self._tether.wait(timeout=docker_cli.T_LIFECYCLE)
-            except subprocess.TimeoutExpired:
-                self._tether.kill()
-                self._tether.wait()
+            lifecycle.close_tether(self._tether)
         if self.volume is not None and not self.cfg.keep_volume:
             try:
                 self._run(["volume", "rm", self.volume], timeout=docker_cli.T_QUERY)
@@ -404,15 +363,7 @@ class DockerSandbox:
         except docker_cli.DockerError:
             pass
         if self._tether is not None:
-            try:
-                if self._tether.stdin is not None:
-                    self._tether.stdin.close()
-            except OSError:
-                pass
-            try:
-                self._tether.wait(timeout=docker_cli.T_LIFECYCLE)
-            except Exception:
-                pass
+            lifecycle.close_tether(self._tether)
         self._start_tether()
         self._wait_ready()
         self._init(restart=True)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import subprocess
 import tarfile
 from pathlib import Path
 
@@ -10,79 +9,7 @@ import pytest
 from dirtywork.procs import Captured
 from dirtywork.sandbox.docker_args import DockerConfig
 from dirtywork.sandbox.export import export_run
-
-
-class FakePopen:
-    """Trimmed copy of tests/test_docker_sandbox.py's FakePopen (duplicated
-    here so this file has no cross-file import dependency): .stdin/.stdout
-    are real io.BytesIO objects; .wait()/.poll()/.kill() are scripted."""
-
-    def __init__(self, argv, *, stdin=None, stdout=None, stderr=None, stdout_data: bytes = b""):
-        self.argv = list(argv)
-        self.stdin = io.BytesIO() if stdin == subprocess.PIPE else None
-        self.stdout = io.BytesIO(stdout_data) if stdout == subprocess.PIPE else None
-        self.returncode = None
-        self.killed = False
-
-    def wait(self, timeout=None):
-        if self.returncode is None:
-            self.returncode = 0
-        return self.returncode
-
-    def kill(self):
-        self.killed = True
-        self.returncode = -9
-
-
-class FakeDocker:
-    """Trimmed copy of tests/test_docker_sandbox.py's FakeDocker: longest-
-    prefix-wins scripting for both `run()` and `popen()`'s stdout."""
-
-    def __init__(self):
-        self.responses = {}
-        self.popen_stdout = {}
-        self.calls = []
-        self.popens = []
-        self.default = Captured(returncode=0, output=b"", truncated=False, timed_out=False)
-
-    def script(self, prefix, response) -> None:
-        self.responses[tuple(prefix)] = response
-
-    def script_popen_stdout(self, prefix, data: bytes) -> None:
-        self.popen_stdout[tuple(prefix)] = data
-
-    def run(self, argv, *, timeout, stdin=None):
-        self.calls.append((list(argv), timeout, stdin))
-        best_prefix, best_response = None, None
-        for prefix, response in self.responses.items():
-            if tuple(argv[: len(prefix)]) == prefix:
-                if best_prefix is None or len(prefix) > len(best_prefix):
-                    best_prefix, best_response = prefix, response
-        if best_prefix is None:
-            return self.default
-        if isinstance(best_response, list):
-            if len(best_response) > 1:
-                return best_response.pop(0)
-            return best_response[0]
-        return best_response
-
-    def popen(self, argv, *, stdin=None, stdout=None, stderr=None):
-        best_prefix, best_data = None, b""
-        for prefix, data in self.popen_stdout.items():
-            if tuple(argv[: len(prefix)]) == prefix:
-                if best_prefix is None or len(prefix) > len(best_prefix):
-                    best_prefix, best_data = prefix, data
-        p = FakePopen(argv, stdin=stdin, stdout=stdout, stderr=stderr, stdout_data=best_data)
-        self.popens.append(p)
-        return p
-
-
-def _ok(output: bytes = b"") -> Captured:
-    return Captured(returncode=0, output=output, truncated=False, timed_out=False)
-
-
-def _fail(output: bytes = b"error") -> Captured:
-    return Captured(returncode=1, output=output, truncated=False, timed_out=False)
+from tests.docker_fakes import FakeDocker, FakePopen, _fail, _ok
 
 
 def _make_tar(entries: list) -> bytes:

@@ -1,3 +1,4 @@
+# dirtywork/sandbox/export.py
 from __future__ import annotations
 
 import os
@@ -11,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import RunArtifacts, SandboxError, docker_args, docker_cli
+from . import RunArtifacts, SandboxError, docker_args, docker_cli, lifecycle
 
 
 class ExportError(SandboxError):
@@ -179,184 +180,152 @@ def export_run(cfg, *, slug, base_commit, worktree: Path, run_dir: Path, objects
         return RunArtifacts(export_status="export_failed: worktree not empty")
 
     name = f"{docker_args.container_name(slug)}-export"
-    create_argv = docker_args.export_create_argv(cfg, slug, image_ref, uid, gid, objects_dir,
-                                                  repo_label=repo_label)
-    created = run(create_argv, timeout=docker_cli.T_LIFECYCLE)
-    if created.returncode != 0:
-        return RunArtifacts(
-            export_status=f"export_failed: docker create {name} failed: "
-                           f"{created.output.decode('utf-8', 'replace')[:500]}"
-        )
 
-    tether = popen(["docker", "start", "-ai", name],
-                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        create_argv = docker_args.export_create_argv(cfg, slug, image_ref, uid, gid, objects_dir,
+                                                      repo_label=repo_label)
+        created = run(create_argv, timeout=docker_cli.T_LIFECYCLE)
+        if created.returncode != 0:
+            return RunArtifacts(
+                export_status=f"export_failed: docker create {name} failed: "
+                               f"{created.output.decode('utf-8', 'replace')[:500]}"
+            )
 
-    def _cleanup(keep_volume: bool) -> None:
-        try:
-            run(["rm", "-f", name], timeout=docker_cli.T_LIFECYCLE)
-        except docker_cli.DockerError:
-            pass
-        try:
-            if tether.stdin is not None:
-                tether.stdin.close()
-        except OSError:
-            pass
-        try:
-            tether.wait(timeout=docker_cli.T_LIFECYCLE)
-        except Exception:
-            pass
-        if not keep_volume:
+        tether = popen(["docker", "start", "-ai", name],
+                        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        def _cleanup(keep_volume: bool) -> None:
             try:
-                run(["volume", "rm", docker_args.volume_name(slug)], timeout=docker_cli.T_QUERY)
+                run(["rm", "-f", name], timeout=docker_cli.T_LIFECYCLE)
             except docker_cli.DockerError:
                 pass
+            lifecycle.close_tether(tether)
+            if not keep_volume:
+                try:
+                    run(["volume", "rm", docker_args.volume_name(slug)], timeout=docker_cli.T_QUERY)
+                except docker_cli.DockerError:
+                    pass
 
-    def _fail(reason: str) -> RunArtifacts:
-        _cleanup(keep_volume=True)  # export_failed always keeps the volume for retry
-        _cleanup_to_dot_git_only(worktree)
-        return RunArtifacts(
-            diff_stat=diff_stat, patch_path=patch_path,
-            worktree_bytes=worktree_bytes, worktree_files=worktree_files,
-            escaping_symlinks=escaping_symlinks, dropped_git_entries=dropped_git_entries,
-            export_status=f"export_failed: {reason}",
+        def _fail(reason: str) -> RunArtifacts:
+            _cleanup(keep_volume=True)  # export_failed always keeps the volume for retry
+            _cleanup_to_dot_git_only(worktree)
+            return RunArtifacts(
+                diff_stat=diff_stat, patch_path=patch_path,
+                worktree_bytes=worktree_bytes, worktree_files=worktree_files,
+                escaping_symlinks=escaping_symlinks, dropped_git_entries=dropped_git_entries,
+                export_status=f"export_failed: {reason}",
+            )
+
+        lifecycle.wait_ready(run, name)
+
+        lifecycle.init_worker_git(run, name, slug=slug, base_commit=base_commit, restart=True)
+
+        find_argv = docker_args.exec_argv(
+            name, ["/usr/bin/find", "/work", "-mindepth", "1", "-iname", ".git"]
         )
+        find_captured = run(find_argv, timeout=docker_cli.T_EXPORT_STEP)
+        if find_captured.returncode == 0:
+            for line in find_captured.output.decode("utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                dropped_git_entries.append(line[len("/work/"):] if line.startswith("/work/") else line)
 
-    deadline = time.monotonic() + docker_cli.T_LIFECYCLE
-    ready = False
-    while time.monotonic() < deadline:
+        add_argv = docker_args.exec_argv(name, ["/usr/bin/git", "add", "-A"])
+        add_captured = run(add_argv, timeout=docker_cli.T_EXPORT_STEP)
+        if add_captured.returncode != 0:
+            return _fail(f"git add -A failed: {add_captured.output.decode('utf-8', 'replace')[:500]}")
+
+        wt_argv = docker_args.exec_argv(name, ["/usr/bin/git", "write-tree"])
+        wt_captured = run(wt_argv, timeout=docker_cli.T_EXPORT_STEP)
+        if wt_captured.returncode != 0:
+            return _fail(f"git write-tree failed: {wt_captured.output.decode('utf-8', 'replace')[:500]}")
+        tree = wt_captured.output.decode("utf-8", errors="replace").strip()
+
+        stat_argv = docker_args.exec_argv(name, ["/usr/bin/git", "diff", "--stat", base_commit, tree])
+        stat_captured = run(stat_argv, timeout=docker_cli.T_EXPORT_STEP)
+        if stat_captured.returncode != 0:
+            return _fail(
+                f"git diff --stat failed: {stat_captured.output.decode('utf-8', 'replace')[:500]}"
+            )
+        raw_stat = stat_captured.output.decode("utf-8", errors="replace")
+        diff_stat = raw_stat if len(raw_stat) <= 64_000 else raw_stat[:64_000] + "\n[diff_stat truncated at 64000 chars]"
+
+        patch_target = run_dir / "diff.patch"
+        diff_argv = ["docker"] + docker_args.exec_argv(name, ["/usr/bin/git", "diff", base_commit, tree])
+        max_patch_bytes = cfg.max_patch_mb * 1024 * 1024
+        diff_proc = popen(diff_argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        # Streamed steps cannot rely on run()'s timeout: a hung `docker exec` would
+        # block .read() forever. A kill-timer bounds each streamed step at
+        # T_EXPORT_STEP so the export fails closed like every other docker call.
+        diff_timer = threading.Timer(docker_cli.T_EXPORT_STEP, diff_proc.kill)
+        diff_timer.start()
+        fd = os.open(str(patch_target), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         try:
-            captured = run(["exec", name, "/bin/true"], timeout=docker_cli.T_LIFECYCLE)
-        except docker_cli.DockerError:
-            time.sleep(0.05)
-            continue
-        if captured.returncode == 0:
-            ready = True
-            break
-        time.sleep(0.05)
-    if not ready:
-        return _fail(f"export container {name} did not become ready")
-
-    init_script = (
-        "set -e; "
-        "/usr/bin/git init -q; "
-        "echo /repo.git/objects > /gitdir/objects/info/alternates; "
-        f"/usr/bin/git symbolic-ref HEAD refs/heads/dirtywork/{slug}; "
-        f"/usr/bin/git update-ref refs/heads/dirtywork/{slug} {base_commit}; "
-        "/usr/bin/git read-tree HEAD"
-    )
-    init_argv = docker_args.exec_argv(
-        name, ["/bin/sh", "-c", init_script],
-        env={"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"},
-    )
-    init_captured = run(init_argv, timeout=docker_cli.T_LIFECYCLE)
-    if init_captured.returncode != 0:
-        return _fail(
-            f"export container init failed: {init_captured.output.decode('utf-8', 'replace')[:500]}"
-        )
-
-    find_argv = docker_args.exec_argv(
-        name, ["/usr/bin/find", "/work", "-mindepth", "1", "-iname", ".git"]
-    )
-    find_captured = run(find_argv, timeout=docker_cli.T_EXPORT_STEP)
-    if find_captured.returncode == 0:
-        for line in find_captured.output.decode("utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            dropped_git_entries.append(line[len("/work/"):] if line.startswith("/work/") else line)
-
-    add_argv = docker_args.exec_argv(name, ["/usr/bin/git", "add", "-A"])
-    add_captured = run(add_argv, timeout=docker_cli.T_EXPORT_STEP)
-    if add_captured.returncode != 0:
-        return _fail(f"git add -A failed: {add_captured.output.decode('utf-8', 'replace')[:500]}")
-
-    wt_argv = docker_args.exec_argv(name, ["/usr/bin/git", "write-tree"])
-    wt_captured = run(wt_argv, timeout=docker_cli.T_EXPORT_STEP)
-    if wt_captured.returncode != 0:
-        return _fail(f"git write-tree failed: {wt_captured.output.decode('utf-8', 'replace')[:500]}")
-    tree = wt_captured.output.decode("utf-8", errors="replace").strip()
-
-    stat_argv = docker_args.exec_argv(name, ["/usr/bin/git", "diff", "--stat", base_commit, tree])
-    stat_captured = run(stat_argv, timeout=docker_cli.T_EXPORT_STEP)
-    if stat_captured.returncode != 0:
-        return _fail(
-            f"git diff --stat failed: {stat_captured.output.decode('utf-8', 'replace')[:500]}"
-        )
-    raw_stat = stat_captured.output.decode("utf-8", errors="replace")
-    diff_stat = raw_stat if len(raw_stat) <= 64_000 else raw_stat[:64_000] + "\n[diff_stat truncated at 64000 chars]"
-
-    patch_target = run_dir / "diff.patch"
-    diff_argv = ["docker"] + docker_args.exec_argv(name, ["/usr/bin/git", "diff", base_commit, tree])
-    max_patch_bytes = cfg.max_patch_mb * 1024 * 1024
-    diff_proc = popen(diff_argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    # Streamed steps cannot rely on run()'s timeout: a hung `docker exec` would
-    # block .read() forever. A kill-timer bounds each streamed step at
-    # T_EXPORT_STEP so the export fails closed like every other docker call.
-    diff_timer = threading.Timer(docker_cli.T_EXPORT_STEP, diff_proc.kill)
-    diff_timer.start()
-    fd = os.open(str(patch_target), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-    written = 0
-    truncated_patch = False
-    try:
-        with os.fdopen(fd, "wb") as out:
-            while True:
-                chunk = diff_proc.stdout.read(65536)
-                if not chunk:
-                    break
-                if written < max_patch_bytes:
-                    room = max_patch_bytes - written
-                    piece = chunk[:room]
-                    out.write(piece)
-                    written += len(piece)
-                    if len(chunk) > room:
+            with os.fdopen(fd, "wb") as out:
+                written = 0
+                truncated_patch = False
+                while True:
+                    chunk = diff_proc.stdout.read(65536)
+                    if not chunk:
+                        break
+                    if written < max_patch_bytes:
+                        room = max_patch_bytes - written
+                        piece = chunk[:room]
+                        out.write(piece)
+                        written += len(piece)
+                        if len(chunk) > room:
+                            truncated_patch = True
+                    else:
                         truncated_patch = True
-                else:
-                    truncated_patch = True
-            if truncated_patch:
-                out.write(f"\n[patch truncated at {cfg.max_patch_mb} MB]\n".encode("utf-8"))
-    finally:
-        diff_timer.cancel()
-        try:
-            diff_proc.wait(timeout=10)
-        except Exception:
-            diff_proc.kill()
-    if diff_proc.returncode != 0:
-        return _fail(f"git diff failed or timed out (rc {diff_proc.returncode})")
-    patch_path = str(patch_target)
+                if truncated_patch:
+                    out.write(f"\n[patch truncated at {cfg.max_patch_mb} MB]\n".encode("utf-8"))
+        finally:
+            diff_timer.cancel()
+            try:
+                diff_proc.wait(timeout=10)
+            except Exception:
+                diff_proc.kill()
+        if diff_proc.returncode != 0:
+            return _fail(f"git diff failed or timed out (rc {diff_proc.returncode})")
+        patch_path = str(patch_target)
 
-    archive_argv = ["docker"] + docker_args.exec_argv(
-        name, ["/usr/bin/git", "archive", "--format=tar", tree]
-    )
-    archive_proc = popen(archive_argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    archive_timer = threading.Timer(docker_cli.T_EXPORT_STEP, archive_proc.kill)
-    archive_timer.start()
-    try:
-        report = extract_validated(archive_proc.stdout, worktree,
-                                    max_files=cfg.max_worktree_files,
-                                    max_bytes=cfg.max_worktree_mb * 1024 * 1024)
-    except ExportError as e:
-        archive_timer.cancel()
-        archive_proc.kill()  # never wait on a process that may still be streaming
+        archive_argv = ["docker"] + docker_args.exec_argv(
+            name, ["/usr/bin/git", "archive", "--format=tar", tree]
+        )
+        archive_proc = popen(archive_argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        archive_timer = threading.Timer(docker_cli.T_EXPORT_STEP, archive_proc.kill)
+        archive_timer.start()
+        try:
+            report = extract_validated(archive_proc.stdout, worktree,
+                                        max_files=cfg.max_worktree_files,
+                                        max_bytes=cfg.max_worktree_mb * 1024 * 1024)
+        except ExportError as e:
+            archive_timer.cancel()
+            archive_proc.kill()  # never wait on a process that may still be streaming
+            try:
+                archive_proc.wait(timeout=10)
+            except Exception:
+                pass
+            return _fail(str(e))
+        finally:
+            archive_timer.cancel()
         try:
             archive_proc.wait(timeout=10)
         except Exception:
-            pass
-        return _fail(str(e))
-    finally:
-        archive_timer.cancel()
-    try:
-        archive_proc.wait(timeout=10)
-    except Exception:
-        archive_proc.kill()
-    if archive_proc.returncode != 0:
-        # the stream ended cleanly from tarfile's point of view but git archive
-        # itself failed or was killed by the timer: the tree may be incomplete
-        return _fail(f"git archive failed or timed out (rc {archive_proc.returncode})")
-    worktree_bytes = report.bytes
-    worktree_files = report.files
-    escaping_symlinks = report.escaping_symlinks
+            archive_proc.kill()
+        if archive_proc.returncode != 0:
+            # the stream ended cleanly from tarfile's point of view but git archive
+            # itself failed or was killed by the timer: the tree may be incomplete
+            return _fail(f"git archive failed or timed out (rc {archive_proc.returncode})")
+        worktree_bytes = report.bytes
+        worktree_files = report.files
+        escaping_symlinks = report.escaping_symlinks
 
-    _cleanup(keep_volume=cfg.keep_volume)
+        _cleanup(keep_volume=cfg.keep_volume)
+
+    except docker_cli.DockerError as e:
+        return _fail(f"docker step failed: {e}")
 
     return RunArtifacts(
         diff_stat=diff_stat, patch_path=patch_path,
