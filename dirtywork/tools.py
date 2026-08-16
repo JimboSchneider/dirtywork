@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .budget import BudgetExceeded, DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB, measure_worktree
 from .guardrails import GuardrailError, build_env, check_bash_command, resolve_in_worktree
+from .procs import run_capped
 
 MAX_RESULT_CHARS = 8000
 # Refuse to load a file larger than this into memory. read_file/edit_file read
@@ -258,77 +259,25 @@ MAX_BASH_CHARS = 10000
 MAX_BASH_CAPTURE_BYTES = 1024 * 1024
 
 
-def _kill_group(pid: int) -> None:
-    """SIGKILL the whole process group led by pid (a no-op if already gone).
-
-    On the clean-exit path pid is already reaped, so there is a negligible
-    PID-reuse window; it would only signal an unrelated process that had both
-    become a group leader AND reclaimed this exact pgid, which we accept.
-    """
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except OSError:
-        pass
-
-
 def bash(worktree: Path, command: str, timeout: int = 120) -> str:
     reason = check_bash_command(command)
     if reason:
         return reason  # starts with "BLOCKED:"
     timeout = max(1, min(int(timeout), 600))
-    try:
-        proc = subprocess.Popen(
-            ["bash", "-c", command],
-            cwd=str(worktree),
-            env=build_env(home=worktree),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,  # own process group so we can reap the whole tree
-        )
-    except OSError as e:
-        return f"ERROR: bash failed: {e}"
-
-    captured = bytearray()
-    truncated = False
-    lock = threading.Lock()
-
-    def _drain() -> None:
-        nonlocal truncated
-        with proc.stdout:  # type: ignore[union-attr]
-            for chunk in iter(lambda: proc.stdout.read(65536), b""):  # type: ignore[union-attr]
-                with lock:
-                    room = MAX_BASH_CAPTURE_BYTES - len(captured)
-                    if room > 0:
-                        captured.extend(chunk[:room])
-                    if len(chunk) > room:
-                        truncated = True  # keep draining so the child never blocks
-
-    reader = threading.Thread(target=_drain, daemon=True)
-    reader.start()
-
-    timed_out = False
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-    # Reap the whole group: kills the main process AND any backgrounded children
-    # still holding the stdout pipe (so the reader sees EOF and never stalls/leaks).
-    # On clean completion with no stragglers this is a harmless no-op.
-    _kill_group(proc.pid)
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        pass
-    reader.join(timeout=5)
-
-    with lock:
-        out = bytes(captured).decode("utf-8", errors="replace").strip()
-        note = " — bash output capped" if truncated else ""
-    if timed_out:
+    captured = run_capped(
+        ["bash", "-c", command],
+        cwd=str(worktree),
+        env=build_env(home=worktree),
+        timeout=timeout,
+        cap=MAX_BASH_CAPTURE_BYTES,
+    )
+    out = captured.output.decode("utf-8", errors="replace").strip()
+    note = " — bash output capped" if captured.truncated else ""
+    if captured.timed_out:
         tail = f"\n{out}" if out else ""
         return _cap(f"ERROR: command timed out after {timeout}s.{tail}",
                     cap=MAX_BASH_CHARS, note=note)
-    return _cap(f"exit code: {proc.returncode}\n{out}", cap=MAX_BASH_CHARS, note=note)
+    return _cap(f"exit code: {captured.returncode}\n{out}", cap=MAX_BASH_CHARS, note=note)
 
 
 def _param(props: dict, required: list) -> dict:
