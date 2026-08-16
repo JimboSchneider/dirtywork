@@ -420,10 +420,8 @@ def test_edit_file_multiple_matches(started):
 def test_edit_file_write_failure(started):
     """When edit_file's write exec fails, the error should be propagated."""
     sb, fake, run_dir = started
-    # Read succeeds with content containing "old"
-    fake.script(["exec"], [_ok(b"def main():\n    return old\n")])
-    # Write fails with non-zero return code
-    fake.script(["exec"], [_fail(b"write failed")])
+    # Read succeeds with content containing "old", then write fails
+    fake.script(["exec"], [_ok(b"def main():\n    return old\n"), _fail(b"write failed")])
     out = sb.edit_file("src/app.py", "old", "new")
     assert out.startswith("ERROR:")
     # Verify write was attempted (1 read + 1 write = 2 exec calls)
