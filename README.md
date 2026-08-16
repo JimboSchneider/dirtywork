@@ -103,44 +103,17 @@ The launcher is self-locating, so this works from any clone location.
 
 ## Use
 
-```
-dirtywork run --repo <path> "<task>"
-    [--model qwen/qwen3-coder-next]   # or mistralai/devstral-small-2-2512
-    [--branch-from <ref>]             # default: repo HEAD
-    [--max-turns 40]
-    [--timeout 1800]                  # whole-run wall clock, seconds
-    [--temperature <f>]               # omitted by default → server preset
-    [--base-url http://localhost:1234/v1]  # LM Studio's OpenAI-compatible endpoint
-    [--max-worktree-mb 2048]          # best-effort worktree size bound
-    [--max-worktree-files 200000]     # best-effort worktree entry-count bound
-```
+    dirtywork run --repo ~/repos/someproject "Add a unit test for X"
 
-**stdout:** on any run that gets past preflight, exactly one JSON object is
-printed to stdout (nothing else goes to stdout):
-
-```json
-{
-  "status": "completed",
-  "worktree": "/path/to/repo/.worktrees/dw-<slug>",
-  "branch": "dirtywork/<slug>",
-  "transcript": "/path/to/transcript.jsonl",
-  "turns": 7,
-  "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-  "final_message": "...",
-  "run_dir": "/home/you/.dirtywork/runs/<slug>",
-  "base_commit": "abc123def456..."
-}
-```
-
-`status` is one of: `completed`, `max_turns`, `timeout`,
-`context_exhausted`, `model_error`, `interrupted`, `budget_exceeded`. When
-the run fails before a `RunResult` exists — the LLM client raises,
-post-worktree setup fails (e.g. the transcript can't be created), or any
-other exception escapes the run (status `model_error` in every case) —
-`turns` is `null` and `usage` is `{}`, but `status`, `worktree`, `branch`,
-`transcript`, `run_dir`, and (when it was resolved before the failure)
-`base_commit` are still populated so the worktree can be located for
-salvage.
+- **Watch a run:** `tail -f` the transcript path printed on stderr
+  (`~/.dirtywork/runs/<slug>/transcript.jsonl`).
+- **Review a run:** `git -C <worktree> diff`, read the transcript (`run_end`
+  carries `diff_stat` and `untracked`), run the repo's tests — then commit
+  the branch or discard it.
+- **Discard a run:**
+  `git -C <repo> worktree remove --force <worktree> && git -C <repo> branch -D dirtywork/<slug>`
+- **All flags, stdout JSON, exit codes, transcript events:** see
+  [Machine contract](#machine-contract).
 
 ## How a run works
 
