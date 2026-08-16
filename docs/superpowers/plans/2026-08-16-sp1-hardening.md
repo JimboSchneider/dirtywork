@@ -1,7 +1,6 @@
 # SP1 Hardening Implementation Plan
 
-For agentic workers: work one task at a time, in order; do not start task N+1
-until task N's tests are green and committed.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Work one task at a time, in order; do not start task N+1 until task N's tests are green and committed. Steps are numbered lists (not `- [ ]` checkboxes) — track progress by task number. Every task's final code was applied to a scratch copy of the repo and the full suite run green (185 → 243 tests) before this plan was committed.
 
 ## Goal
 
