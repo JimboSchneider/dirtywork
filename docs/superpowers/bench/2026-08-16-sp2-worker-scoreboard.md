@@ -29,3 +29,16 @@
 | T7b impl [qwen3-coder-next] | qwen/qwen3-coder-next | max_turns | 80 | 5.2m | 3021157 | 14490 | ❌ 5I (fallback path broken, N+1 stat, no fallback tests, dup)/1M; max_turns right after green |
 | T7b impl [qwen3.6-35b-a3b] | qwen/qwen3.6-35b-a3b | completed | 16 | 3.2m | 385888 | 10855 | ❌ stopped at 16 turns, EMPTY final msg, 2 tests failing, no commit — LOSES |
 | T7b fix1 [qwen3-coder-next] | qwen/qwen3-coder-next | completed | 47 | 3.4m | 857279 | 8202 | ✅ 5/5 addressed |
+| T8 impl | qwen/qwen3-coder-next | completed | 71 | 11.8m | 2191037 | 16467 | ❌ 3I (swallowed SandboxError, dup branch, 60s test)/3M; no commit |
+| T8 fix1 | qwen/qwen3-coder-next | completed | 39 | 3.1m | 717294 | 4163 | ✅ 3/3 addressed; suite 81s→21s |
+| T9a impl | qwen/qwen3-coder-next | model_error | 15 | 1.2m | 129645 | 3515 | ✅ spec, 1I (plan-mandated fail-open)/3M; committed ✓ then fake-finish abort |
+| T9a fix1 | qwen/qwen3-coder-next | completed | 13 | 1.4m | 100684 | 2882 | ✅ 3/3 addressed |
+| T9b impl | qwen/qwen3-coder-next | completed | 71 | 5.3m | 2934644 | 11200 | ✅ clean, 3M |
+| T10 impl | qwen/qwen3-coder-next | completed | 15 | 1.7m | 160205 | 5257 | ❌ 2I (OSError unwrapped; trailing PAX global unchecked)/3M |
+| T10 fix1 | qwen/qwen3-coder-next | max_turns | 60 | 11.1m | 1791930 | 27595 | max_turns; impl done, bad test construction (my hint) |
+| T10 fix2 | qwen/qwen3-coder-next | completed | 25 | 1.3m | 300654 | 2858 | OSError wrap ✅; trailing-PAX test wrong (my construction) |
+| T11a impl | qwen/qwen3-coder-next | completed | 21 | 2.2m | 435416 | 7036 | ✅ spec, 4I (plan-mandated dup ×3, unguarded DockerError)/5M |
+| T11b impl | qwen/qwen3-coder-next | completed | 68 | 3.3m | 2080684 | 7882 | ✅ spec, 2I (plan-mandated bare except regression; docstring)/2M |
+| T10 fix3 | qwen/qwen3-coder-next | completed | 14 | 1.3m | 107919 | 1631 | ✅ 2/2 addressed (trailing PAX genuinely rejected + tested) |
+| T11a fix1 | qwen/qwen3-coder-next | max_turns | 60 | 10.9m | 2163633 | 18250 | max_turns; refactor done, dropped one test constant (40 errors) |
+| T11a fix2 | qwen/qwen3-coder-next | completed | 56 | 12.1m | 908344 | 5773 | ✅ green but import-time default → 60s test |
