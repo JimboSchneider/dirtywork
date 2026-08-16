@@ -27,6 +27,14 @@ def _ensure_owned_dir(path: Path) -> None:
         raise RunDirError(f"{path} exists and is not a directory")
     if hasattr(os, "getuid") and st.st_uid != os.getuid():
         raise RunDirError(f"{path} is not owned by the current user")
+    # A pre-existing ~/.dirtywork (or runs/) with group/other-readable perms
+    # would leak run slugs/task names via directory listing -- run dirs and
+    # transcripts are already created 0700/0600, so tighten the container too.
+    if hasattr(os, "getuid") and stat.S_IMODE(st.st_mode) & 0o077:
+        try:
+            os.chmod(path, 0o700)
+        except OSError as e:
+            raise RunDirError(f"cannot tighten permissions on {path}: {e}")
 
 
 def ensure_runs_dir(runs_dir: Path = RUNS_DIR) -> Path:
