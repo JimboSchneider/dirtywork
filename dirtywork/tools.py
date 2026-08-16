@@ -89,6 +89,18 @@ def _worktree_candidate(path_str: str, worktree: Path) -> Path:
     return candidate.parent.resolve() / candidate.name
 
 
+def _number_lines(text: str, offset: int, limit: int) -> str:
+    lines = text.splitlines()
+    window = lines[offset : offset + limit]
+    numbered = "\n".join(f"{i:6}\t{line}" for i, line in enumerate(window, offset + 1))
+    if offset + limit < len(lines):
+        numbered += (
+            f"\n[showing lines {offset + 1}-{offset + len(window)} of {len(lines)}; "
+            f"re-run with offset={offset + limit} for more]"
+        )
+    return _cap(numbered, note=" — re-run with offset/limit to see more")
+
+
 def read_file(worktree: Path, path: str, offset: int = 0, limit: int = 400) -> str:
     try:
         p = resolve_in_worktree(path, worktree)
@@ -102,15 +114,7 @@ def read_file(worktree: Path, path: str, offset: int = 0, limit: int = 400) -> s
         raw = fh.read()
     finally:
         fh.close()
-    lines = raw.decode("utf-8", errors="replace").splitlines()
-    window = lines[offset : offset + limit]
-    numbered = "\n".join(f"{i:6}\t{line}" for i, line in enumerate(window, offset + 1))
-    if offset + limit < len(lines):
-        numbered += (
-            f"\n[showing lines {offset + 1}-{offset + len(window)} of {len(lines)}; "
-            f"re-run with offset={offset + limit} for more]"
-        )
-    return _cap(numbered, note=" — re-run with offset/limit to see more")
+    return _number_lines(raw.decode("utf-8", errors="replace"), offset, limit)
 
 
 def write_file(worktree: Path, path: str, content: str) -> str:

@@ -154,6 +154,17 @@ def _fake_repo(tmp_path: Path) -> Path:
     return repo
 
 
+@pytest.fixture()
+def started(docker, tmp_path: Path):
+    sb, fake, run_dir = docker
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+    fake.calls.clear()
+    return sb, fake, run_dir
+
+
 def test_start_sets_attributes(docker, tmp_path):
     sb, fake, run_dir = docker
     repo = _fake_repo(tmp_path)
@@ -323,3 +334,84 @@ def test_start_wraps_workspace_error_as_sandboxerror(monkeypatch, tmp_path):
 
     with pytest.raises(SandboxError, match="objects dir"):
         sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+
+
+def test_read_file_exec_argv_and_shaping(started):
+    from dirtywork.tools import MAX_READ_BYTES
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok(b"line one\nline two\n"))
+    out = sb.read_file("src/app.py")
+    assert fake.calls[-1][0] == [
+        "exec", "-w", "/work", "dw-abc123",
+        "/usr/bin/head", "-c", str(MAX_READ_BYTES), "--", "src/app.py",
+    ]
+    assert "     1\tline one" in out
+    assert "     2\tline two" in out
+
+
+def test_read_file_rejects_absolute_path(started):
+    sb, fake, run_dir = started
+    out = sb.read_file("/etc/passwd")
+    assert out.startswith("ERROR:")
+    assert not fake.calls
+
+
+def test_read_file_rejects_dotdot_escape(started):
+    sb, fake, run_dir = started
+    out = sb.read_file("../../etc/passwd")
+    assert out.startswith("ERROR:")
+    assert not fake.calls
+
+
+def test_write_file_sends_content_on_stdin(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok())
+    out = sb.write_file("deep/new/file.txt", "hello")
+    assert "Wrote 5 bytes" in out
+    argv, timeout, stdin = fake.calls[-1]
+    assert argv == [
+        "exec", "-w", "/work", "-i", "dw-abc123",
+        "/bin/sh", "-c", 'mkdir -p "$(dirname -- "$1")" && cat > "$1"',
+        "_", "deep/new/file.txt",
+    ]
+    assert stdin == b"hello"
+
+
+def test_write_file_refuses_dot_git(started):
+    sb, fake, run_dir = started
+    out = sb.write_file(".git/hooks/pre-commit", "#!/bin/sh")
+    assert out.startswith("ERROR:")
+    assert not fake.calls
+
+
+def test_write_file_refuses_oversized_content(started):
+    from dirtywork.tools import MAX_WRITE_BYTES
+    sb, fake, run_dir = started
+    out = sb.write_file("big.txt", "x" * (MAX_WRITE_BYTES + 1))
+    assert out.startswith("ERROR:")
+    assert not fake.calls
+
+
+def test_edit_file_reads_then_writes(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], [_ok(b"def main():\n    return 42\n"), _ok()])
+    out = sb.edit_file("src/app.py", "return 42", "return 43")
+    assert "Edited" in out
+    heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
+    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    assert len(heads) == 1
+    assert len(writes) == 1
+
+
+def test_edit_file_no_match(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok(b"nothing matches here\n"))
+    out = sb.edit_file("src/app.py", "not here", "x")
+    assert out.startswith("ERROR:") and "0 times" in out
+
+
+def test_edit_file_multiple_matches(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok(b"aa\naa\n"))
+    out = sb.edit_file("dup.txt", "aa", "bb")
+    assert out.startswith("ERROR:") and "2 times" in out

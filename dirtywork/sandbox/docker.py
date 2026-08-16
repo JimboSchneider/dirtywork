@@ -2,14 +2,52 @@
 from __future__ import annotations
 
 import os
+import posixpath
 import subprocess
 import time
 from pathlib import Path
 
+from ..guardrails import check_bash_command
+from ..procs import Captured, run_capped
+from ..tools import MAX_BASH_CHARS, MAX_LIST_ENTRIES, MAX_READ_BYTES, MAX_WRITE_BYTES, _cap, _number_lines
 from . import SandboxError
 from . import docker_args
 from . import docker_cli
 from ..workspace import WorkspaceError
+
+# Fixed exec timeouts for tools with no user-facing timeout knob — these
+# operations should complete near-instantly; a hang means the sandbox
+# itself is broken, so DockerError is allowed to propagate as sandbox_error
+# rather than being caught and turned into text (unlike bash/grep, whose
+# Sandbox signatures accept a caller timeout and whose contract already
+# promises a graceful "timed out" text result).
+READ_EXEC_TIMEOUT = 30
+WRITE_EXEC_TIMEOUT = 30
+LIST_EXEC_TIMEOUT = 30
+
+
+def _rel(path: str, *, writing: bool = False):
+    """Host-side path normalization — an accident guard, not the security
+    boundary (the container's read-only rootfs and its own filesystem are
+    the boundary). Returns (normalized, None) or (None, error_string).
+    Rejects absolute paths, '..' escapes, and — when writing — a first path
+    component of '.git' (mirrors resolve_in_worktree's writing=True guard in
+    host mode)."""
+    normalized = posixpath.normpath(path)
+    if posixpath.isabs(normalized):
+        return None, (
+            f"ERROR: path '{path}' resolves outside the worktree "
+            f"(absolute paths are not allowed)"
+        )
+    parts = [] if normalized == "." else normalized.split("/")
+    if any(part == ".." for part in parts):
+        return None, (
+            f"ERROR: path '{path}' resolves outside the worktree "
+            f"('..' escapes are not allowed)"
+        )
+    if writing and parts and parts[0] == ".git":
+        return None, f"ERROR: writing inside .git/ is not allowed (got '{path}')"
+    return normalized, None
 
 
 class DockerSandbox:
@@ -167,3 +205,60 @@ class DockerSandbox:
                 self._run(["volume", "rm", self.volume], timeout=docker_cli.T_QUERY)
             except docker_cli.DockerError:
                 pass
+
+    def _read_raw(self, path: str):
+        rel, err = _rel(path)
+        if err:
+            return None, err
+        argv = docker_args.exec_argv(
+            self.container, ["/usr/bin/head", "-c", str(MAX_READ_BYTES), "--", rel]
+        )
+        captured = self._run(argv, timeout=READ_EXEC_TIMEOUT)
+        if captured.returncode != 0:
+            return None, (
+                f"ERROR: cannot read '{path}': "
+                f"{captured.output.decode('utf-8', 'replace')[:500]}"
+            )
+        return captured.output.decode("utf-8", errors="replace"), None
+
+    def read_file(self, path: str, offset: int = 0, limit: int = 400) -> str:
+        text, err = self._read_raw(path)
+        if err:
+            return err
+        return _number_lines(text, offset, limit)
+
+    def write_file(self, path: str, content: str) -> str:
+        encoded = content.encode("utf-8")
+        if len(encoded) > MAX_WRITE_BYTES:
+            return (
+                f"ERROR: content is {len(encoded)} bytes, over the "
+                f"{MAX_WRITE_BYTES}-byte write limit"
+            )
+        rel, err = _rel(path, writing=True)
+        if err:
+            return err
+        argv = docker_args.exec_argv(
+            self.container,
+            ["/bin/sh", "-c", 'mkdir -p "$(dirname -- "$1")" && cat > "$1"', "_", rel],
+            stdin=True,
+        )
+        captured = self._run(argv, timeout=WRITE_EXEC_TIMEOUT, stdin=encoded)
+        if captured.returncode != 0:
+            return (
+                f"ERROR: cannot write '{path}': "
+                f"{captured.output.decode('utf-8', 'replace')[:500]}"
+            )
+        return f"Wrote {len(encoded)} bytes to {path}"
+
+    def edit_file(self, path: str, old_string: str, new_string: str) -> str:
+        text, err = self._read_raw(path)
+        if err:
+            return err
+        count = text.count(old_string)
+        if count != 1:
+            return (
+                f"ERROR: old_string occurs {count} times in {path}; it must occur "
+                f"exactly once. Include more surrounding context to make it unique."
+            )
+        self.write_file(path, text.replace(old_string, new_string, 1))
+        return f"Edited {path}"
