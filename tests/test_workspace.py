@@ -10,6 +10,7 @@ from dirtywork.workspace import (
     WorkspaceError,
     create_worktree,
     ensure_worktrees_excluded,
+    host_read_tree,
     host_diff_stat,
     host_untracked,
     load_repo_context,
@@ -422,3 +423,33 @@ def test_make_slug_salt_is_8_hex_chars():
     salt = slug.rsplit("-", 1)[-1]
     assert len(salt) == 8
     int(salt, 16)  # raises ValueError if not valid hex
+
+
+def test_create_worktree_no_checkout_leaves_only_dot_git(repo: Path):
+    wt = create_worktree(repo, "nc-08141109", None, no_checkout=True)
+    entries = list(wt.iterdir())
+    assert len(entries) == 1
+    assert entries[0].name == ".git"
+    assert entries[0].is_file()  # linked worktree: .git is a file pointing at the gitdir
+
+
+def test_create_worktree_no_checkout_head_matches_repo_head(repo: Path):
+    wt = create_worktree(repo, "nc2-08141109", None, no_checkout=True)
+    wt_head = _git(wt, "rev-parse", "HEAD").strip()
+    repo_head = _git(repo, "rev-parse", "HEAD").strip()
+    assert wt_head == repo_head
+
+
+def test_host_read_tree_populates_index_not_working_tree(repo: Path):
+    wt = create_worktree(repo, "hrt-08141109", None, no_checkout=True)
+    host_read_tree(wt)
+    ls_files = _git(wt, "ls-files")
+    assert "f.txt" in ls_files
+    assert not (wt / "f.txt").exists()  # index only — no working-tree write
+
+
+def test_host_read_tree_failure_raises_workspace_error(tmp_path: Path):
+    not_a_worktree = tmp_path / "not-a-worktree"
+    not_a_worktree.mkdir()
+    with pytest.raises(WorkspaceError):
+        host_read_tree(not_a_worktree)

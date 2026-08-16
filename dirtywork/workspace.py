@@ -41,16 +41,17 @@ def make_slug(task: str, now: datetime, salt: str | None = None) -> str:
     return f"{base}-{now.strftime('%m%d%H%M%S')}-{salt}"
 
 
-def create_worktree(repo: Path, slug: str, branch_from: str | None) -> Path:
-    worktrees_dir = repo / ".worktrees"
+def create_worktree(repo: Path, slug: str, branch_from: str | None, *,
+                     no_checkout: bool = False) -> Path:
+    dot_worktrees = repo / ".worktrees"
     try:
-        wd_st = os.lstat(worktrees_dir)
+        wt_stat = os.lstat(dot_worktrees)
     except FileNotFoundError:
         pass
     else:
-        if not stat.S_ISDIR(wd_st.st_mode):
+        if not stat.S_ISDIR(wt_stat.st_mode):
             raise WorkspaceError(
-                f"{worktrees_dir} exists and is not a directory — refusing to "
+                f"{dot_worktrees} exists and is not a directory — refusing to "
                 f"create a worktree through a symlink or other non-directory here"
             )
 
@@ -61,10 +62,6 @@ def create_worktree(repo: Path, slug: str, branch_from: str | None) -> Path:
     except FileNotFoundError:
         pass
     else:
-        # A pre-existing file, directory, or symlink at the EXACT destination
-        # must abort before `git worktree add` runs: git would create through
-        # a symlink, and a later `worktree remove` would then clean an
-        # unrelated outside directory.
         raise WorkspaceError(
             f"{dest} already exists; refusing to create a worktree through a "
             f"pre-existing file, directory, or symlink at the exact destination"
@@ -74,22 +71,23 @@ def create_worktree(repo: Path, slug: str, branch_from: str | None) -> Path:
     branch = f"dirtywork/{slug}"
     existed = _git(repo, "rev-parse", "--verify", "--quiet",
                     f"refs/heads/{branch}").returncode == 0
-    res = _git(repo, "worktree", "add", "-b", branch, str(rel), ref)
+    args = ["worktree", "add"]
+    if no_checkout:
+        args.append("--no-checkout")
+    args += ["-b", branch, str(rel), ref]
+    res = _git(repo, *args)
     if res.returncode != 0:
         if not existed:
             _git(repo, "branch", "-D", branch)  # best-effort cleanup; ignore result
         raise WorkspaceError(f"git worktree add failed: {res.stderr.strip()}")
 
     worktree = repo / rel
-    # Never `.resolve()` the joined path and compare — that variant passes
-    # wrongly when a component is a symlink. Resolve each side separately.
-    expected_parent = repo.resolve() / ".worktrees"
-    if expected_parent not in worktree.resolve().parents:
+    repo_worktrees_resolved = repo.resolve() / ".worktrees"
+    if repo_worktrees_resolved not in worktree.resolve().parents:
         remove_worktree(repo, slug)
         raise WorkspaceError(
-            f"worktree resolved to {worktree.resolve()}, outside the expected "
-            f"{expected_parent} — refusing (a symlinked .worktrees or ref "
-            f"could redirect git worktree add outside the repo)"
+            f"worktree {worktree} did not land inside {repo_worktrees_resolved} "
+            f"after creation — aborting"
         )
     return worktree
 
@@ -259,3 +257,22 @@ def load_repo_context(repo: Path, base_commit: str) -> str | None:
             text = text[:MAX_CONTEXT_CHARS] + "\n[truncated at 32000 chars]"
         return text
     return None
+
+
+def host_read_tree(worktree: Path) -> None:
+    """The only host git command that runs after the worker has produced
+    anything (spec §2 step 11): index-only, against the base tree, using the
+    operator's own object store — writes no working-tree files (verified).
+    Config-neutral env so no checked-out state can influence it, even though
+    only objects/ was ever mounted into any container."""
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    res = subprocess.run(
+        ["git", "-C", str(worktree),
+         "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+         "read-tree", "HEAD"],
+        capture_output=True, text=True, env=env,
+    )
+    if res.returncode != 0:
+        raise WorkspaceError(f"git read-tree HEAD failed in {worktree}: {res.stderr.strip()}")
