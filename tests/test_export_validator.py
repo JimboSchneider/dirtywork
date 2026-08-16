@@ -245,3 +245,59 @@ def test_extract_validated_cleanup_on_failure_leaves_only_dot_git(empty_worktree
     remaining = list(empty_worktree.iterdir())
     assert len(remaining) == 1
     assert remaining[0].name == ".git"
+
+
+def test_rejects_duplicate_member_paths_and_cleans_up(empty_worktree):
+    # Create a tar that will cause FileExistsError during extraction
+    # by creating a file, then trying to extract it again in the same session
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        # First member - a regular file
+        info = tarfile.TarInfo("dup.txt")
+        info.size = 3
+        tar.addfile(info, io.BytesIO(b"one"))
+        # Second member with same name - tarfile will allow this in the archive
+        info2 = tarfile.TarInfo("dup.txt")
+        info2.size = 3
+        tar.addfile(info2, io.BytesIO(b"two"))
+    buf.seek(0)
+    # When extracting, tar.extractfile will be called twice for dup.txt
+    # The second time should cause an OSError (FileExistsError)
+    with pytest.raises(ExportError, match="export extraction failed"):
+        extract_validated(buf, empty_worktree, max_files=100, max_bytes=1_000_000)
+    remaining = list(empty_worktree.iterdir())
+    assert len(remaining) == 1
+    assert remaining[0].name == ".git"
+
+
+def test_rejects_trailing_pax_global_header(empty_worktree):
+    # Build a tar with one regular member, then add a PAX global header after
+    buf = io.BytesIO()
+    # First write a normal file using PAX format (so we have members)
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        info = tarfile.TarInfo("normal.txt")
+        data = b"hello"
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    # Now append a global header by opening again in append mode with pax_headers
+    buf.seek(0)
+    temp_buf = io.BytesIO(buf.read())
+    buf.seek(0)
+    buf.truncate()
+    with tarfile.open(fileobj=temp_buf, mode="r") as tar_in:
+        with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar_out:
+            for member in tar_in:
+                if member.isreg():
+                    tar_out.addfile(member, tar_in.extractfile(member))
+                else:
+                    tar_out.addfile(member)
+    # Now add a global header by opening in append mode with pax_headers
+    buf.seek(0, 2)  # end
+    with tarfile.open(fileobj=buf, mode="a", pax_headers={"comment": "hostile"}) as tar:
+        pass  # Just open to write a global header at end
+    buf.seek(0)
+    with pytest.raises(ExportError, match="PAX global header"):
+        extract_validated(buf, empty_worktree, max_files=100, max_bytes=1_000_000)
+    remaining = list(empty_worktree.iterdir())
+    assert len(remaining) == 1
+    assert remaining[0].name == ".git"

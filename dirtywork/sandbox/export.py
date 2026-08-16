@@ -16,6 +16,9 @@ class ExportError(SandboxError):
     catches this and turns it into RunArtifacts(export_status=...)."""
 
 
+_PAX_GLOBAL_MSG = "export archive contains a PAX global header"
+
+
 @dataclass
 class ExportReport:
     files: int
@@ -71,7 +74,7 @@ def extract_validated(stream, dest: Path, *, max_files: int, max_bytes: int) -> 
         with tarfile.open(fileobj=counting, mode="r|") as tar:
             for member in tar:
                 if tar.pax_headers:
-                    raise ExportError("export archive contains a PAX global header")
+                    raise ExportError(_PAX_GLOBAL_MSG)
 
                 files += 1
                 if files > max_files:
@@ -141,11 +144,13 @@ def extract_validated(stream, dest: Path, *, max_files: int, max_bytes: int) -> 
                         if (posixpath.isabs(link_target) or normalized == ".."
                                 or normalized.startswith("../")):
                             escaping_symlinks.append(name)
+            if tar.pax_headers:
+                raise ExportError(_PAX_GLOBAL_MSG)
     except ExportError:
         _cleanup_to_dot_git_only(dest)
         raise
-    except tarfile.TarError as e:
+    except (tarfile.TarError, OSError) as e:
         _cleanup_to_dot_git_only(dest)
-        raise ExportError(f"malformed export archive: {e}")
+        raise ExportError(f"export extraction failed: {e}")
 
     return ExportReport(files=files, bytes=total_bytes, escaping_symlinks=escaping_symlinks)
