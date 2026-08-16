@@ -13,6 +13,11 @@ from tests.docker_fakes import FakeDocker, FakePopen, _fail, _ok
 
 DockerError = docker_cli.DockerError
 
+_TOP_HEADER = b"UID  PID  PPID  C  STIME  TTY  TIME  CMD\n"
+
+_SAMPLE_ARGV = ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
+                "du -sk /work; find /work | wc -l"]
+
 
 @pytest.fixture()
 def docker(tmp_path: Path):
