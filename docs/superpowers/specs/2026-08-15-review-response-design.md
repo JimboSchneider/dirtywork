@@ -1,10 +1,10 @@
 # Review response: hardening, sandbox, extensibility
 
-**Date:** 2026-08-15 (v3, after a third external review; the sandbox's
-worktree model changed from bind mount to volume + validated export)
-**Status:** Approved direction; v3 design pending user review
-**Origin:** Three external (ChatGPT) reviews — of v0.2.0, of v1, and of v2 of
-this document. Every claim was verified against the code, and every
+**Date:** 2026-08-15 (v3.1, after a fourth external review; v3 changed the
+sandbox's worktree model from bind mount to volume + validated export)
+**Status:** Approved direction; v3.1 design pending user review
+**Origin:** Four external (ChatGPT) reviews — of v0.2.0 and of v1–v3 of this
+document. Every claim was verified against the code, and every
 mechanism marked *verified* below was demonstrated by a real experiment on
 this macOS host (Docker Desktop, daemon 29.7.2, Python 3.9.6, git 2.x).
 *Unverified* items are called out individually.
@@ -12,7 +12,8 @@ this macOS host (Docker Desktop, daemon 29.7.2, Python 3.9.6, git 2.x).
 ## Purpose
 
 Move dirtywork from "guardrailed harness for a confused model" to "sandboxed
-harness that is also safe against a malicious model or repository", without
+harness that protects host integrity and host execution against a malicious
+model or repository, with best-effort disk-exhaustion limits", without
 losing the properties that make it useful: worktree isolation, no
 auto-commit, machine-readable output, a complete JSONL transcript, and a
 Python-stdlib-only runtime. Then make it extensible enough that a new tool,
@@ -174,7 +175,14 @@ change.
 
 1. Preflight (read-only on the operator's clone): `git rev-parse
    --is-inside-work-tree`, `rev-parse HEAD`; `docker version` (10 s
-   timeout); image digest resolution/pull as above.
+   timeout); image digest resolution/pull as above. **Object-store bind
+   source:** `objects = Path(git rev-parse --git-path objects)`; require
+   `os.lstat(objects)` to be `S_ISDIR` (a symlink at the final component
+   is refused), and `objects.resolve()` to be inside
+   `Path(git rev-parse --git-common-dir).resolve()` (both fully resolved,
+   so no parent component can escape the git directory). Anything else →
+   `WorkspaceError`, exit 2. This is the only host path ever mounted into a
+   container, so it is the only path that needs this check.
 2. `ensure_worktrees_excluded` with the SP1 path check.
 3. SP1 `.worktrees` checks including the exact-destination `lstat`, then
    `git worktree add --no-checkout -b dirtywork/<slug> .worktrees/dw-<slug> <ref>`
@@ -187,8 +195,8 @@ change.
    --label dirtywork.repo=<sha256(resolved repo path)> dw-<slug>-work`,
    then a throw-away prep container
    `docker run --rm --network none --user 0:0 --cap-drop ALL --cap-add CHOWN
-   --mount type=volume,src=dw-<slug>-work,dst=/work <image>@<digest>
-   chown <uid>:<gid> /work` (verified: a fresh volume's root is
+   --mount type=volume,src=dw-<slug>-work,dst=/work --entrypoint /bin/chown
+   <image>@<digest> <uid>:<gid> /work` (verified: a fresh volume's root is
    root-owned; after this the run user can write).
 6. Start the worker container (§3) and wait until `docker exec <c> true`
    succeeds (60 s).
@@ -226,9 +234,18 @@ docker create -i --init --name dw-<slug> \
   -e GIT_DIR=/gitdir -e GIT_WORK_TREE=/work -e HOME=/home/worker -e TMPDIR=/tmp \
   -e LANG=C.UTF-8 -e GIT_AUTHOR_NAME=dirtywork -e GIT_AUTHOR_EMAIL=dirtywork@localhost \
   -e GIT_COMMITTER_NAME=dirtywork -e GIT_COMMITTER_EMAIL=dirtywork@localhost \
-  <name>@sha256:<digest> cat
+  --entrypoint /bin/cat <name>@sha256:<digest>
 ```
 
+- **Entrypoint and PATH are always explicit.** Every `docker create`/`run`
+  passes `--entrypoint` with an absolute path (`/bin/cat` for the tether,
+  `/bin/chown` for the prep container, `/bin/sh` for compound export
+  steps) and `-e PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
+  so an image `ENTRYPOINT`/`CMD` can never substitute its own program for
+  the tether, `chown`, `git`, or an export step; `docker exec` steps name
+  their binaries by absolute path too (`/usr/bin/git`, `/usr/bin/find`).
+  The image is still trusted by digest — this closes entrypoint tricks,
+  not a hostile image.
 - **Never pass `-w`/WORKDIR at container level.** Verified: on this daemon
   a container-level `-w /work` over the volume resets the volume root's
   ownership to `root:root`, persistently, and the run user can no longer
@@ -261,14 +278,21 @@ docker create -i --init --name dw-<slug> \
   `/home/worker` stay `noexec`.
 - **`--mount` only, never `-v`** (a missing source is an error, not a
   silently created directory — verified).
-- **Name collision.** If `dw-<slug>` (container) or `dw-<slug>-work`
-  (volume) exists: inspect labels. Labels match and container not running
-  → remove and proceed. Labels match and running → refuse (exit 2; another
-  live run). Labels absent or different → refuse. Never remove a container
-  or volume solely because the name matches.
+- **Name collision.** `dirtywork run` never removes anything it did not
+  create in this invocation: if `dw-<slug>` (container) or `dw-<slug>-work`
+  (volume) already exists, refuse (exit 2) with a hint naming
+  `runs clean <slug>` — slugs are salted, so a collision is either a stale
+  leftover or something else's resource, and both deserve a human. Only
+  `runs clean` (§SP3.4) removes them, and only when: the labels
+  `dirtywork.run`/`dirtywork.repo` match; `~/.dirtywork/runs/<slug>/run.json`
+  exists and is owned by the current user; and the run is definitively
+  stale (status ≠ `running`, or status `running` with a dead `host_pid`
+  and `--force`). A volume has no running state, so those three conditions
+  are the whole rule for volumes.
 - **Nothing** from `<repo>/.git` other than `objects/` is mounted (no refs,
   config, hooks, `worktrees/`), and no host path other than that directory
-  is visible inside any container.
+  is visible inside any container. The source is validated as in §2 step 1
+  before every `docker create`/`run` that mounts it.
 - **Docker control plane.** Every `docker` invocation goes through one
   `_run(argv, *, timeout, stdin=None)` with an explicit timeout: `version`
   /`inspect`/`top`/`volume *` 10 s; `create`/`start`/`exec true`/`rm -f`
@@ -364,7 +388,9 @@ boundary) and used relative to `/work`.
 ### 7. Export: worker tree → host worktree
 
 Runs after the worker container is gone, in a **fresh** container created
-like §3 but with `--pids-limit 256`, tmpfs sizes `/gitdir` `2g` (only git
+like §3 but **always `--network none`** (regardless of `--allow-network`;
+export needs no network and gets none — asserted by the exact-argv tests),
+with `--pids-limit 256`, tmpfs sizes `/gitdir` `2g` (only git
 runs here; sized for the whole tree's new objects), `/tmp` `256m`,
 `/home/worker` `64m` (sum ≈ 2.3g under `--memory 4g`), the volume mounted
 **read-only**, and no `HOME`-relative anything the worker could have
@@ -482,7 +508,9 @@ keeps today's caveats.
 - Unit: `DockerSandbox` over an injectable `_run(argv, stdin=None,
   timeout)`; tests assert the exact `docker volume create/run(prep)/create
   /start/exec/top/kill/rm/volume rm` argv (mounts, limits, env, labels,
-  names, no `-w`), the stdin write path, the reset path, the collision
+  names, no `-w`, explicit `--entrypoint`/`PATH`, export container always
+  `--network none` even with `--allow-network`, objects source validation
+  refusing a symlinked or out-of-tree `objects`), the stdin write path, the reset path, the collision
   logic, per-command timeouts and the fail-closed path, and `stop`
   idempotency. The validator gets exhaustive unit tests over hand-built
   tars (every rule above, including write-through-symlink, `.Git`,
@@ -614,8 +642,10 @@ worktree_files`. `run.json` is written at start and updated at end
 - `runs clean <slug> | --all [--keep-transcript] [--force]` — `docker rm
   -f` of the labeled container, `docker volume rm` of the labeled volume,
   `git worktree remove --force`, `git branch -D`, run dir; refuses a
-  worktree with uncommitted changes unless `--force`. Only ever removes
-  containers/volumes whose labels match.
+  worktree with uncommitted changes unless `--force`. Removes
+  containers/volumes only under the §SP2.3 collision rule (labels match,
+  `run.json` owned by the current user, run definitively stale or
+  `--force`).
 - `runs verdict <slug> accept|reject|cleanup [--note …] [--review-seconds N]`
   — appends `{verdict, note, verdict_at, review_seconds}` to `run.json`.
   `verdict_at − ended` is recorded automatically as `time_to_verdict_s`
