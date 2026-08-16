@@ -66,6 +66,7 @@ def prep_run_argv(cfg: DockerConfig, slug: str, image_ref: str, uid: int, gid: i
     the run user (a fresh Docker volume's root is root-owned — spec §2 step
     5). --user 0:0 so chown itself has permission; --cap-drop ALL plus
     --cap-add CHOWN is the minimum capability for that one syscall."""
+    # cfg is unused here and kept for call-site symmetry with the other builders (interface fixed by the plan).
     return [
         "run", "--rm", "--network", "none", "--user", "0:0",
         "--cap-drop", "ALL", "--cap-add", "CHOWN",
@@ -74,6 +75,41 @@ def prep_run_argv(cfg: DockerConfig, slug: str, image_ref: str, uid: int, gid: i
         "--entrypoint", "/bin/chown",
         image_ref,
         f"{uid}:{gid}", "/work",
+    ]
+
+
+def _label_args(slug: str, repo_label: str) -> list:
+    """Return label arguments for docker create/run."""
+    return [
+        "--label", f"dirtywork.run={slug}",
+        "--label", f"dirtywork.repo={repo_label}",
+    ]
+
+
+def _security_args(pids_limit: int) -> list:
+    """Return security-related arguments for docker create/run."""
+    return [
+        "--pids-limit", str(pids_limit),
+        "--read-only",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+    ]
+
+
+def _env_entrypoint_args() -> list:
+    """Return environment and entrypoint arguments for docker create/run."""
+    return [
+        "-e", "GIT_DIR=/gitdir",
+        "-e", "GIT_WORK_TREE=/work",
+        "-e", "HOME=/home/worker",
+        "-e", "TMPDIR=/tmp",
+        "-e", "LANG=C.UTF-8",
+        "-e", "GIT_AUTHOR_NAME=dirtywork",
+        "-e", "GIT_AUTHOR_EMAIL=dirtywork@localhost",
+        "-e", "GIT_COMMITTER_NAME=dirtywork",
+        "-e", "GIT_COMMITTER_EMAIL=dirtywork@localhost",
+        "-e", f"PATH={PATH_ENV}",
+        "--entrypoint", "/bin/cat",
     ]
 
 
@@ -87,33 +123,19 @@ def worker_create_argv(cfg: DockerConfig, slug: str, image_ref: str, uid: int, g
     name = container_name(slug)
     return [
         "create", "-i", "--init", "--name", name,
-        "--label", f"dirtywork.run={slug}",
-        "--label", f"dirtywork.repo={repo_label}",
+        *(_label_args(slug, repo_label)),
         "--network", cfg.network,
         "--memory", cfg.memory,
         "--memory-swap", cfg.memory,
         "--cpus", cfg.cpus,
-        "--pids-limit", str(cfg.pids_limit),
-        "--read-only",
-        "--cap-drop", "ALL",
-        "--security-opt", "no-new-privileges",
+        *(_security_args(cfg.pids_limit)),
         "--user", f"{uid}:{gid}",
         "--tmpfs", f"/tmp:rw,exec,size={cfg.tmp_size},mode=1777",
         "--tmpfs", f"/gitdir:rw,size={cfg.gitdir_size},mode=0700,uid={uid},gid={gid}",
         "--tmpfs", f"/home/worker:rw,size={cfg.home_size},mode=0700,uid={uid},gid={gid}",
         "--mount", f"type=volume,src={volume_name(slug)},dst=/work",
         "--mount", f"type=bind,src={objects_dir},dst=/repo.git/objects,readonly",
-        "-e", "GIT_DIR=/gitdir",
-        "-e", "GIT_WORK_TREE=/work",
-        "-e", "HOME=/home/worker",
-        "-e", "TMPDIR=/tmp",
-        "-e", "LANG=C.UTF-8",
-        "-e", "GIT_AUTHOR_NAME=dirtywork",
-        "-e", "GIT_AUTHOR_EMAIL=dirtywork@localhost",
-        "-e", "GIT_COMMITTER_NAME=dirtywork",
-        "-e", "GIT_COMMITTER_EMAIL=dirtywork@localhost",
-        "-e", f"PATH={PATH_ENV}",
-        "--entrypoint", "/bin/cat",
+        *(_env_entrypoint_args()),
         image_ref,
     ]
 
@@ -131,32 +153,18 @@ def export_create_argv(cfg: DockerConfig, slug: str, image_ref: str, uid: int, g
     name = f"{container_name(slug)}-export"
     return [
         "create", "-i", "--init", "--name", name,
-        "--label", f"dirtywork.run={slug}",
-        "--label", f"dirtywork.repo={repo_label}",
+        *(_label_args(slug, repo_label)),
         "--network", "none",
         "--memory", cfg.memory,
         "--memory-swap", cfg.memory,
         "--cpus", cfg.cpus,
-        "--pids-limit", "256",
-        "--read-only",
-        "--cap-drop", "ALL",
-        "--security-opt", "no-new-privileges",
+        *(_security_args(256)),
         "--user", f"{uid}:{gid}",
         "--tmpfs", "/tmp:rw,exec,size=256m,mode=1777",
         "--tmpfs", f"/gitdir:rw,size=2g,mode=0700,uid={uid},gid={gid}",
         "--tmpfs", f"/home/worker:rw,size=64m,mode=0700,uid={uid},gid={gid}",
         "--mount", f"type=volume,src={volume_name(slug)},dst=/work,readonly",
         "--mount", f"type=bind,src={objects_dir},dst=/repo.git/objects,readonly",
-        "-e", "GIT_DIR=/gitdir",
-        "-e", "GIT_WORK_TREE=/work",
-        "-e", "HOME=/home/worker",
-        "-e", "TMPDIR=/tmp",
-        "-e", "LANG=C.UTF-8",
-        "-e", "GIT_AUTHOR_NAME=dirtywork",
-        "-e", "GIT_AUTHOR_EMAIL=dirtywork@localhost",
-        "-e", "GIT_COMMITTER_NAME=dirtywork",
-        "-e", "GIT_COMMITTER_EMAIL=dirtywork@localhost",
-        "-e", f"PATH={PATH_ENV}",
-        "--entrypoint", "/bin/cat",
+        *(_env_entrypoint_args()),
         image_ref,
     ]
