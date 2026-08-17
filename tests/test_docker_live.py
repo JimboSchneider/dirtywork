@@ -65,11 +65,15 @@ def _assert_status(payload: dict, expected) -> None:
     )
 
 
-def _run_docker_main(monkeypatch, tmp_path, repo, responses, **extra_args):
+def _run_main(monkeypatch, tmp_path, responses, argv):
     import dirtywork.__main__ as m
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
     client = ScriptedClient(responses)
     monkeypatch.setattr(m, "LMStudioClient", lambda base_url=None: client)
+    return m.main(argv)
+
+
+def _run_docker_main(monkeypatch, tmp_path, repo, responses, **extra_args):
     argv = ["run", "--repo", str(repo), "--sandbox", "docker"]
     for k, v in extra_args.items():
         flag = "--" + k.replace("_", "-")
@@ -78,7 +82,7 @@ def _run_docker_main(monkeypatch, tmp_path, repo, responses, **extra_args):
         elif v is not False:
             argv += [flag, str(v)]
     argv.append("do the task")
-    return m.main(argv)
+    return _run_main(monkeypatch, tmp_path, responses, argv)
 
 
 @pytest.mark.docker
@@ -322,3 +326,51 @@ def test_docker_live_export_refused_into_nonempty_worktree(tmp_path):
     )
 
     assert artifacts.export_status == "export_failed: worktree not empty"
+
+
+@pytest.mark.docker
+def test_docker_live_resume_seeds_worktree_keeps_branch_and_exports(tmp_path, monkeypatch, capsys):
+    import json
+    from pathlib import Path
+
+    repo = _make_live_repo(tmp_path)
+    first_responses = [
+        _resp(tool_calls=[_call("c1", "write_file", {"path": "new.txt", "content": "from run 1\n"})]),
+        _resp(tool_calls=[_call("c2", "bash", {"command": "rm README.md"})]),
+        _resp(content="done"),
+    ]
+    _run_docker_main(monkeypatch, tmp_path, repo, first_responses)
+    first = json.loads(capsys.readouterr().out)
+    _assert_status(first, "completed")
+    worktree = Path(first["worktree"])
+    assert (worktree / "new.txt").read_text() == "from run 1\n"
+    assert not (worktree / "README.md").exists()
+
+    second_responses = [
+        _resp(tool_calls=[_call("r1", "bash", {"command":
+              "cat /work/new.txt; test -e /work/README.md && echo readme=present || echo readme=absent; "
+              "git symbolic-ref HEAD; git status --short"})]),
+        _resp(tool_calls=[_call("r2", "write_file", {"path": "second.txt", "content": "from run 2\n"})]),
+        _resp(tool_calls=[_call("r3", "finish", {"summary": "resumed"})]),
+    ]
+    rc = _run_main(monkeypatch, tmp_path, second_responses, ["resume", Path(first["run_dir"]).name])
+    second = json.loads(capsys.readouterr().out)
+    assert rc == 0, second
+    _assert_status(second, "completed")
+    assert second["resumed_from"] == Path(first["run_dir"]).name
+    assert second["worktree"] == first["worktree"] and second["branch"] == first["branch"]
+
+    events = [json.loads(l) for l in Path(second["transcript"]).read_text().splitlines()]
+    probe = next(e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash")
+    assert "from run 1" in probe                       # seeded from the host worktree
+    assert "readme=absent" in probe                    # deletions carried over
+    assert f"refs/heads/{first['branch']}" in probe    # original branch name inside the container
+    assert "?? new.txt" in probe or "A  new.txt" in probe or "new.txt" in probe
+    assert " D README.md" in probe or "D  README.md" in probe
+
+    # export after the resumed run flattened the final tree back onto the same worktree
+    assert (worktree / "new.txt").read_text() == "from run 1\n"
+    assert (worktree / "second.txt").read_text() == "from run 2\n"
+    assert not (worktree / "README.md").exists()
+    prior = json.loads((Path(first["run_dir"]) / "run.json").read_text())
+    assert prior["resumed_by"] == json.loads((Path(second["run_dir"]) / "run.json").read_text())["slug"]
