@@ -23,6 +23,12 @@ class DockerError(SandboxError):
     SandboxError) or, at preflight, into an exit-2 hint."""
 
 
+def _warn(msg: str) -> None:
+    """Non-fatal operator-facing note, distinct from DockerError (which
+    always fails the run) -- printed to stderr like main()'s `_err`."""
+    print(f"warning: {msg}", file=sys.stderr)
+
+
 def run(argv: list, *, timeout: float, stdin: bytes | None = None) -> Captured:
     """The one entry point to the docker CLI. Prefixes argv with "docker" and
     converts a timeout into a DockerError naming the command, instead of
@@ -94,7 +100,17 @@ def resolve_image(image: str, *, run=run, pinned_digest: str | None = None) -> s
     for EXECUTION, pulling if absent (the only network use at preflight).
     If pinned_digest is given, the image's registry digest (via
     image_repo_digest, which still compares against RepoDigests) must
-    match it exactly or the run refuses to start.
+    match it exactly or the run refuses to start -- UNLESS the image has no
+    RepoDigests entry at all (built or `docker load`ed locally, never
+    pushed/pulled), in which case resolve_image does not refuse: it returns
+    the Id and warns on stderr instead. PINNED_DIGEST's job is to guarantee
+    REGISTRY provenance -- that the bits behind a mutable tag are the exact
+    ones the maintainer published -- and a local build was never fetched
+    from a registry to begin with, so there is nothing for the pin to
+    verify. It is also the operator's own artefact (and the CI gate that
+    exercises this same code path builds the image locally), so refusing to
+    run it would make the pin actively hostile to that case rather than
+    protective.
 
     Returning the Id -- never a `name@sha256:...` digest reference -- is
     deliberate, not cosmetic: a RepoDigests candidate is not always
@@ -129,12 +145,16 @@ def resolve_image(image: str, *, run=run, pinned_digest: str | None = None) -> s
 
     if pinned_digest is not None:
         digest = image_repo_digest(image, run=run)
-        digest_part = digest.split("@", 1)[1] if digest else ""
-        if digest_part != pinned_digest:
-            raise DockerError(
-                f"resolved image digest {digest_part!r} for {image!r} does not match "
-                f"PINNED_DIGEST {pinned_digest!r}; refusing to run an unpinned image"
-            )
+        if digest is None:
+            _warn(f"{image} is a locally built image; PINNED_DIGEST is not enforced "
+                  f"for local builds")
+        else:
+            digest_part = digest.split("@", 1)[1]
+            if digest_part != pinned_digest:
+                raise DockerError(
+                    f"resolved image digest {digest_part!r} for {image!r} does not match "
+                    f"PINNED_DIGEST {pinned_digest!r}; refusing to run an unpinned image"
+                )
 
     return image_id
 

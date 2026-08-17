@@ -156,18 +156,25 @@ def test_resolve_image_pinned_digest_match_returns_id():
     assert ref == "sha256:" + "a" * 64
 
 
-def test_resolve_image_pinned_digest_no_repodigests_raises():
-    # A locally-built image with no RepoDigests entry can never satisfy a
-    # pinned digest -- there is nothing to compare against, so it must
-    # refuse rather than silently let an unpinned image through.
+def test_resolve_image_pinned_digest_no_repodigests_warns_and_returns_id(capsys):
+    # A locally-built/loaded image has no RepoDigests entry -- nothing to
+    # compare a registry pin against. PINNED_DIGEST protects against a WRONG
+    # IMAGE COMING FROM THE REGISTRY; a local build is the operator's own
+    # artefact (and the CI gate builds the image locally), so resolve_image
+    # must not refuse it -- it returns the Id and warns on stderr instead.
     def fake_run(argv, *, timeout, stdin=None):
         if argv == ["image", "inspect", "--format", "{{.Id}}", "dirtywork/worker:0.3"]:
             return Captured(returncode=0, output=b"sha256:" + b"a" * 64,
                              truncated=False, timed_out=False)
         return Captured(returncode=0, output=b"[]", truncated=False, timed_out=False)
 
-    with pytest.raises(DockerError, match="PINNED_DIGEST"):
-        resolve_image("dirtywork/worker:0.3", run=fake_run, pinned_digest="sha256:" + "a" * 64)
+    ref = resolve_image("dirtywork/worker:0.3", run=fake_run, pinned_digest="sha256:" + "a" * 64)
+    assert ref == "sha256:" + "a" * 64
+    err = capsys.readouterr().err
+    assert err == (
+        "warning: dirtywork/worker:0.3 is a locally built image; "
+        "PINNED_DIGEST is not enforced for local builds\n"
+    )
 
 
 def test_image_repo_digest_returns_matching_repodigests_entry():

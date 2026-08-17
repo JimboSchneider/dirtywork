@@ -9,19 +9,17 @@ rather than public issues. You should receive a response within a week.
 ## Scope worth knowing
 
 As of 0.4, **Docker mode is the default** and is a real containment
-boundary: `--network none`, `--read-only` root filesystem,
-`--cap-drop ALL`, kernel-enforced memory/CPU/process-count/per-file-size
-limits, no host path mounted in except a read-only copy of the parent
-repository's git object store, and a validated tar export as the only path
-from the worker's tree back to the host. Escapes from docker mode — a
-container breakout, a way to write outside the run's worktree or
-`~/.dirtywork/runs/<slug>/`, a way to reach the network, a way for the
-export validator to write through a symlink or a `.git`-named path — are
-in scope and taken seriously. Inside the container, `bash` enforces only
-the mode-independent policy rules (no `git push`/`sudo`/pipe-to-shell/
-system-control commands); the host-filesystem and shared-repo rules from
-`--sandbox none` below are not applied there, since the container is the
-boundary for everything else.
+boundary — see README's [Security & trust](README.md#security--trust)
+section for the full containment description (network, filesystem,
+capabilities, resource limits, the object-store mount, the validated
+export). Escapes from docker mode — a container breakout, a way to write
+outside the run's worktree or `~/.dirtywork/runs/<slug>/`, a way to reach
+the network, a way for the export validator to write through a symlink or
+a `.git`-named path — are in scope and taken seriously. Inside the
+container, `bash` enforces only the mode-independent policy rules (no
+`git push`/`sudo`/pipe-to-shell/system-control commands); the
+host-filesystem and shared-repo rules from `--sandbox none` below are not
+applied there, since the container is the boundary for everything else.
 
 **Known, accepted exposures in docker mode** (see README's Security &
 trust section for the full list): the worker can read the *entire* parent
@@ -32,12 +30,9 @@ worktree and reported; host git commands the *operator* runs afterward on
 the exported tree use the operator's own config and can trigger a
 worker-authored `.gitattributes`' configured filter.
 
-**`--sandbox none`** keeps 0.2's guardrail-only behavior and its caveats
-unchanged: file tools are path-confined (symlink-safe), but `bash` is a
-general shell gated only by a best-effort regex denylist plus a `HOME`
-redirected into the worktree — not confined. A determined or
-prompt-injected model can still read absolute host paths. Do not treat
-`--sandbox none` as a sandbox; it exists for operators who cannot or do
+**`--sandbox none`** keeps 0.2's guardrail-only behavior and its caveats —
+see README's [Safety model](README.md#safety-model) section for the full
+description. It is not a sandbox; it exists for operators who cannot or do
 not want to run Docker.
 
 Reports that DO qualify: any docker-mode escape as described above,

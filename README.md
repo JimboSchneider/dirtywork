@@ -52,7 +52,10 @@ through a validated tar export (`dirtywork/sandbox/export.py`): file/dir/
 symlink members only, path-escape and `.git`-named-entry checks, count and
 byte caps, extraction that never calls `tarfile.extract()`/`extractall()`.
 Docker missing or the daemon down is a preflight error (exit 2, with a
-hint) — there is no silent fallback to unsandboxed execution.
+hint) — there is no silent fallback to unsandboxed execution. The export
+step itself (which computes the diff and extracts the final tree, in a
+fresh container) always runs with `--network none`, even when
+`--allow-network` was passed for the worker.
 
 **What Docker mode does *not* give you:**
 
@@ -142,10 +145,8 @@ The launcher is self-locating, so this works from any clone location.
 
     dirtywork run --repo ~/repos/someproject "Add a unit test for X"
 
-> **Docker mode protects host integrity and host execution, not
-> repository-history confidentiality.** The worker can read the *entire*
-> parent object store. Do not run it on a clone whose history holds
-> secrets you would not show the worker.
+> See [Security & trust](#security--trust) — docker mode does not protect
+> repository-history confidentiality.
 
 - **Watch a run:** `tail -f` the transcript path printed on stderr.
 - **Review a run:** `git -C <worktree> diff`, read the transcript, run the
@@ -184,9 +185,10 @@ The launcher is self-locating, so this works from any clone location.
 **Docker mode (default):** the container is the real boundary —
 `--network none`, `--read-only` root filesystem, `--cap-drop ALL`,
 kernel-enforced memory/CPU/process/per-file-size limits, no host path
-mounted in except a read-only copy of the parent object store. The
-worktree reaches the host only through the validated tar export. See
-"Security & trust" above for what this does and does not cover.
+mounted in except a read-only bind mount of the parent repository's git
+object store. The worktree reaches the host only through the validated
+tar export. See "Security & trust" above for what this does and does not
+cover.
 `bash` in docker mode only enforces the mode-independent policy rules (no
 `git push`, `sudo`, piping a download into a shell, or system-control
 commands) — the host-filesystem/host-repo rules below don't apply, since
@@ -202,8 +204,10 @@ the container has no host filesystem or shared parent repo to escape into.
   `git push`, `git config`/`remote`/`worktree`/`branch -D`/… that would write
   the parent repo's shared state (including through `git -C`/`git -c`/`--flag`
   global options), `rm`/`mv`/`chmod`/`chown` on absolute or `~` paths,
-  `cd`/`pushd` escapes, downloads piped to a shell, system-control
-  commands, redirects outside the worktree.
+  `cd`/`pushd` escapes (an absolute-path `cd` that lands *inside* the
+  worktree is allowed — only paths that leave it are blocked), downloads
+  piped to a shell, system-control commands, redirects outside the
+  worktree.
 - Every denylist rejection is logged to the transcript as a
   `guardrail_block` event, so attempted escapes are visible at review time.
 - File tools refuse to operate on anything that isn't a regular file (FIFOs,
@@ -269,6 +273,14 @@ In August 2026 the project was renamed **dirtywork** — same tool, a name that 
 - **exit 2, "Docker is the default sandbox since 0.4..."** — Docker
   Desktop/dockerd isn't running or isn't reachable. Start it, or pass
   `--sandbox none` to run unsandboxed on the host.
+- **exit 2, "Build or pull the worker image..."** — the configured
+  `--image` couldn't be resolved (not pullable, or a digest mismatch
+  against `PINNED_DIGEST`). Build/pull it per `docker/README.md`, pass a
+  different `--image`, or use `--sandbox none`.
+- **exit 2, "Check that the repository's git object store is valid..."**
+  — `--repo`'s git object store failed validation (a symlinked or missing
+  `objects` directory, or one that escapes the git common dir). Verify
+  the repo with `git -C <repo> fsck`, or use `--sandbox none`.
 - **status `sandbox_error`** — a docker command failed or timed out mid-run
   (daemon hang, container killed unexpectedly twice in a row, etc.); the
   worktree may be partially or not exported. Check `run_end.error` in the
@@ -326,7 +338,11 @@ printed to stdout (nothing else goes to stdout):
   "turns": 7,
   "usage": {"prompt_tokens": 0, "completion_tokens": 0},
   "final_message": "...",
-  "run_dir": "/home/you/.dirtywork/runs/<slug>"
+  "run_dir": "/home/you/.dirtywork/runs/<slug>",
+  "base_commit": "abc123...",
+  "finalize_error": null,
+  "watchdog_violation": null,
+  "watchdog_violation_kind": null
 }
 ```
 
@@ -340,13 +356,23 @@ transcript can't be created), or any other exception escapes the run
 still populated so the worktree and run directory can be located for
 salvage.
 
+`base_commit` is present on every post-preflight payload. `finalize_error`,
+`watchdog_violation`, and `watchdog_violation_kind` are added on the normal
+end-of-run path — i.e. whenever `runner.run()` returns a result, `completed`
+or not — normally `null`; see `run_end` below for what each means. The two
+paths where `runner.run()` never returns (sandbox setup fails before it
+starts, or an exception escapes the loop and is caught in `main()`) report
+`base_commit` only, plus `export_status` too if a docker `finalize()` ran
+during that exception recovery.
+
 **Exit codes:**
 
 - `0` — `completed`.
-- `1` — run ended abnormally (`max_turns`, `timeout`, `context_exhausted`,
-  `model_error`, `interrupted`, `budget_exceeded`); the worktree and branch
-  are kept for salvage/review. `main` catches every `Exception` the run
-  raises (not just ones the runner itself converts to a status) and reports
+- `1` — any non-`completed` status (`max_turns`, `timeout`,
+  `context_exhausted`, `model_error`, `interrupted`, `budget_exceeded`,
+  `sandbox_error`, `export_failed`); the worktree and branch are kept for
+  salvage/review. `main` catches every `Exception` the run raises (not
+  just ones the runner itself converts to a status) and reports
   it as `model_error` via the same JSON contract, so a post-preflight run
   never tracebacks. (Ctrl-C is a `KeyboardInterrupt`, a `BaseException`, not caught
   here — but the run loop itself already converts in-loop Ctrl-C to status
@@ -358,28 +384,37 @@ All progress (transcript path, worktree path, `error:`-prefixed messages) is
 written to stderr; watch a live run with `tail -f` on the transcript path.
 
 **Transcript events** (JSONL, one per line): `run_start` (task, repo, model,
-config, `schema_version: 2`, plus provenance: `base_commit`, `branch`,
-`branch_from`, `base_url`, `dirtywork_version`, `temperature`, `sandbox`
-— the docker settings dict, or `"none"` — and `provider`), `assistant`
-(text + tool calls — text capped at 64 000 chars in the transcript only,
-the full text is still sent to the model), `tool_result` (truncated),
-`guardrail_block`, `sandbox_reset` (docker mode: the container was
-reset — reason), and `run_end` (status, turns, duration, cumulative usage,
-plus the run's artifacts: in host mode `diff_stat` — `git diff --stat`
-against the base commit, tracked changes only — and `untracked` — `git
-status --porcelain` `??` entries — each capped at 64 000 chars; in docker
-mode `diff_stat` (which already includes new files, since the export
-stages everything first), `untracked` (always `""`), `patch_path`,
+config, `schema_version: 2`, plus provenance: `worktree`, `base_commit`,
+`branch`, `branch_from`, `base_url`, `dirtywork_version`, `temperature`,
+`sandbox` — the docker settings dict, or `"none"` — and `provider`),
+`assistant` (text + tool calls — text capped at 64 000 chars in the
+transcript only, the full text is still sent to the model), `tool_result`
+(truncated), `guardrail_block`, `sandbox_reset` (docker mode: the container
+was reset — reason), and `run_end` (status, turns, duration, cumulative
+usage, plus the run's artifacts: in host mode `diff_stat` — `git diff
+--stat` against the base commit, tracked changes only — and `untracked` —
+`git status --porcelain` `??` entries — each capped at 64 000 chars; in
+docker mode `diff_stat` (which already includes new files, since the
+export stages everything first), `untracked` (always `""`), `patch_path`,
 `worktree_bytes`, `worktree_files`, `escaping_symlinks`,
-`dropped_git_entries`, `export_status`, and `watchdog_violation` (docker
-mode; null unless the watchdog killed the container)).
+`dropped_git_entries`, `export_status`, `watchdog_violation` (docker mode;
+null unless the watchdog killed the container), `watchdog_violation_kind`
+(set alongside `watchdog_violation`: `"budget"` for a worktree-size or
+host-disk-floor breach, `"sandbox_error"` for the watchdog's own
+worktree-sampling exec failing twice; otherwise `null`), and
+`finalize_error` (set when the finalize/export step itself raised an
+exception after the agent loop otherwise finished; `null` normally)).
 
-The docker settings dict (`run_start`'s `sandbox`, and the same two fields
-in `run.json`) includes `image` (the `--image` argument as given) and
+The docker settings dict (`run_start`'s `sandbox`, and the same fields in
+`run.json`) includes `image` (the `--image` argument as given),
 `image_digest` (the registry digest from `RepoDigests`, or `null` for a
-locally-built image that was never pushed/pulled) — provenance only. The
-container itself always runs from the image's local content-addressed Id,
-never a registry digest, so a run can never trigger a network pull.
+locally-built image that was never pushed/pulled) — provenance only — and
+`image_pinned` (`true` only when `--image` was left at its default AND
+`PINNED_DIGEST` was enforced against a pulled default image; `false` for a
+custom `--image` — never pinned — or a locally built/loaded default image,
+which only warns). The container itself always runs from the image's local
+content-addressed Id, never a registry digest, so a run can never trigger a
+network pull.
 
 ## Contributing
 

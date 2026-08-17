@@ -22,8 +22,13 @@ passes its own explicit `--entrypoint` or absolute binary path.
 
 `.github/workflows/publish-image.yml` builds and pushes this image to
 GitHub Container Registry (`ghcr.io/jimboschneider/dirtywork-worker`) on
-every GitHub release (`release: types: [published]` — the same trigger
-`publish.yml` uses for the PyPI package). It builds both `linux/amd64` and
+each **new minor** release (`vX.Y.0`; same `release: published` trigger as
+`publish.yml`, gated on the tag). Patch releases do not rebuild the image:
+the `:X.Y` tag is what `DEFAULT_IMAGE` points at and `PINNED_DIGEST` pins,
+and re-pushing it on every patch would let base-layer drift change the
+digest under a shipped pin. To publish a Dockerfile fix inside a minor, run
+the workflow by hand (`workflow_dispatch`, input: the release tag) and then
+re-pin `PINNED_DIGEST` in a follow-up. It builds both `linux/amd64` and
 `linux/arm64`, tags the push with both the release's minor version
 (`v0.4.0` → `:0.4`) and its full version (`:0.4.0`), and writes the pushed
 manifest digest to the workflow run's job summary. The one manual step it
@@ -38,14 +43,30 @@ always be pointed at a full `name@sha256:...` reference directly.
 
 ## Pin a digest (PINNED_DIGEST)
 
-`dirtywork/sandbox/docker_args.py`'s `PINNED_DIGEST` (default `None`) is
-the supply-chain guarantee for the default image: once set,
-`resolve_image()` refuses to run any resolved image whose digest doesn't
-match, regardless of what `--image` or a mutable tag currently points to.
-The pin check compares `PINNED_DIGEST` against the image's *registry*
-digest (`RepoDigests`, via `image_repo_digest()`); the container itself
-always executes the image's local content-addressed Id, never that
-registry digest, so a run can never trigger a network pull.
+`dirtywork/sandbox/docker_args.py`'s `PINNED_DIGEST` (unset only on the
+very first 0.4.0 release; pinned to a real digest from 0.4.1 onward) is a
+REGISTRY PROVENANCE guarantee for the default image: it only ever applies
+when `--image` is left at its default (`--image` is the operator's own
+choice and is never pinned — see below), and only checks digests fetched
+from a registry. Once set, `resolve_image()` refuses to run a *pulled*
+default image whose digest doesn't match, regardless of what the mutable
+`:0.4` tag currently points to. The pin check compares `PINNED_DIGEST`
+against the image's *registry* digest (`RepoDigests`, via
+`image_repo_digest()`); the container itself always executes the image's
+local content-addressed Id, never that registry digest, so a run can never
+trigger a network pull.
+
+A *locally built or loaded* default image (no `RepoDigests` entry — it was
+never pushed to or pulled from a registry, e.g. `docker build -t
+ghcr.io/jimboschneider/dirtywork-worker:0.4 docker/` run by hand, or the CI
+gate that builds this same image locally) has nothing for the pin to
+compare against. `resolve_image()` does not refuse it: it returns the
+local Id and prints a one-line warning to stderr instead
+(`image_pinned` in `run.json`/`run_start` is `false` for this case, even
+though `PINNED_DIGEST` is set — the pin was not enforced). A `--image
+<ref>` the operator supplies explicitly is never checked against
+`PINNED_DIGEST` at all, pinned or not — that pin protects the *maintained
+default image only*.
 
 0.4.0 ships with `PINNED_DIGEST = None`: there is no prior publish to pin
 against on the very first release, so `resolve_image()` performs no pin
