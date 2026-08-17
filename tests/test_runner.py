@@ -938,3 +938,64 @@ def test_finish_after_idle_turns_completes_not_stalled(parts):
     assert result.status == "completed"
     assert result.final_message == "all done"
     assert result.turns == 4
+
+
+def _no_consecutive_user_messages(requests):
+    for req in requests:
+        roles = [m["role"] for m in req]
+        assert all(not (a == "user" and b == "user") for a, b in zip(roles, roles[1:])), roles
+
+
+def test_empty_reply_on_stall_nudge_turn_sends_one_merged_user_message(parts):
+    wt, executor, transcript, tmp = parts
+    idle = _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])
+    # stall_turns=4 → the stall nudge fires when idle_turns reaches 2; make turn 2 an empty reply
+    client = FakeClient([idle, _resp(content=""), _resp(content="done")])
+    r = Runner(client, executor, transcript, model="m", stall_turns=4)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    third = client.requests[2]
+    assert third[-1]["role"] == "user"
+    assert third[-1]["content"] == NUDGES["empty"] + "\n\n" + STALL_NUDGE.format(n=2)
+    assert third[-2]["role"] == "assistant"
+    _no_consecutive_user_messages(client.requests)
+    kinds = [e["kind"] for e in _events(tmp) if e["event"] == "nudge"]
+    assert kinds == ["empty", "stall"]
+
+
+def test_malformed_entries_on_stall_nudge_turn_send_one_merged_user_message(parts):
+    wt, executor, transcript, tmp = parts
+    idle = _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])
+    bad_entry = {"choices": [{"message": {"role": "assistant", "content": None,
+                                          "tool_calls": [{"id": "", "function": {"name": "read_file"}}]}}],
+                 "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    client = FakeClient([idle, bad_entry, _resp(content="done")])
+    r = Runner(client, executor, transcript, model="m", stall_turns=4)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    third = client.requests[2]
+    assert third[-1]["role"] == "user"
+    assert "were malformed" in third[-1]["content"]
+    assert STALL_NUDGE.format(n=2) in third[-1]["content"]
+    _no_consecutive_user_messages(client.requests)
+
+
+def test_malformed_entry_abort_reports_first_threshold(parts):
+    wt, executor, transcript, tmp = parts
+    bad = {"id": "", "function": {"name": "read_file"}}
+    six_bad = {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [bad] * 6}}],
+               "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    client = FakeClient([six_bad])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+    assert result.final_message == "aborted after 3 consecutive malformed_entry failures"
+
+
+def test_runner_context_window_zero_is_not_replaced_by_table(parts):
+    wt, executor, transcript, tmp = parts
+    r = Runner(FakeClient([]), executor, transcript, model="qwen/qwen3-coder-next", context_window=0)
+    assert r.context_window == 0

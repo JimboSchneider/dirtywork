@@ -1238,7 +1238,7 @@ def test_seed_failure_raises_sandbox_error(docker, tmp_path):
                  branch="dirtywork/orig", seed_from_worktree=True)
 
 
-def test_finalize_empties_seeded_worktree_before_export(docker, tmp_path, monkeypatch):
+def test_finalize_stashes_seeded_worktree_and_removes_stash_after_ok_export(docker, tmp_path, monkeypatch):
     from dirtywork.sandbox.export import RunArtifacts
     sb, fake, run_dir = docker
     repo, worktree = _started_worktree(tmp_path)
@@ -1249,12 +1249,38 @@ def test_finalize_empties_seeded_worktree_before_export(docker, tmp_path, monkey
 
     def fake_export_run(cfg, **kw):
         seen["entries"] = sorted(p.name for p in kw["worktree"].iterdir())
+        seen["stash_has_left"] = (worktree.parent / f"{worktree.name}.pre-resume" / "left.txt").exists()
         return RunArtifacts(export_status="ok")
 
     monkeypatch.setattr("dirtywork.sandbox.docker.export.export_run", fake_export_run)
     monkeypatch.setattr("dirtywork.sandbox.docker.host_read_tree", lambda wt: None)
     sb.finalize()
-    assert seen["entries"] == [".git"]
+    assert seen["entries"] == [".git"]           # export saw an empty worktree
+    assert seen["stash_has_left"] is True         # the prior work was moved aside, not deleted
+    assert not (worktree.parent / f"{worktree.name}.pre-resume").exists()  # stash removed after ok
+
+
+def test_finalize_restores_seeded_worktree_after_failed_export(docker, tmp_path, monkeypatch):
+    from dirtywork.sandbox.export import RunArtifacts
+    sb, fake, run_dir = docker
+    repo, worktree = _started_worktree(tmp_path)
+    sb.start(worktree, repo, "new1", "deadbeef" * 5,
+             branch="dirtywork/orig", seed_from_worktree=True)
+    (worktree / "left.txt").write_text("x")
+    (worktree / "sub").mkdir()
+    (worktree / "sub" / "deep.txt").write_text("y")
+
+    def failing_export_run(cfg, **kw):
+        return RunArtifacts(export_status="export_failed: worktree too big")
+
+    monkeypatch.setattr("dirtywork.sandbox.docker.export.export_run", failing_export_run)
+    monkeypatch.setattr("dirtywork.sandbox.docker.host_read_tree", lambda wt: None)
+    artifacts = sb.finalize()
+    assert artifacts.export_status.startswith("export_failed")
+    assert (worktree / "left.txt").read_text() == "x"
+    assert (worktree / "sub" / "deep.txt").read_text() == "y"
+    assert (worktree / ".git").is_file()
+    assert not (worktree.parent / f"{worktree.name}.pre-resume").exists()
 
 
 def test_finalize_leaves_unseeded_worktree_alone(docker, tmp_path, monkeypatch):

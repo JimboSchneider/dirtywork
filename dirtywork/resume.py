@@ -10,11 +10,38 @@ from pathlib import Path
 from .rundir import read_run_json
 
 RESUME_TAIL_CHARS = 12_000
+RESUME_MARKER = "\n\n--- RESUMED RUN ---\n"
 _REQUIRED_STR_KEYS = ("slug", "repo", "worktree", "branch", "base_commit", "sandbox", "status")
 
 
 class ResumeError(Exception):
     """The prior run cannot be resumed; the message says why."""
+
+
+def worktree_belongs_to_repo(worktree: Path, repo: Path) -> bool:
+    """True only for a linked git worktree of `repo`: `.git` must be a FILE
+    (not a directory — a plain clone is not ours) whose `gitdir:` target
+    resolves inside repo/.git. A resume seeds this directory into a
+    container and, at export, moves its content aside — it must never be
+    pointed at a directory dirtywork did not create."""
+    dotgit = worktree / ".git"
+    if not dotgit.is_file() or dotgit.is_symlink():
+        return False
+    try:
+        text = dotgit.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    if not text.startswith("gitdir:"):
+        return False
+    gitdir = Path(text[len("gitdir:"):].strip())
+    if not gitdir.is_absolute():
+        gitdir = worktree / gitdir
+    try:
+        gitdir = gitdir.resolve()
+        common = (Path(repo) / ".git").resolve()
+    except OSError:
+        return False
+    return gitdir == common or common in gitdir.parents
 
 
 def resolve_run_dir(ref: str, runs_dir: Path) -> Path:
@@ -102,6 +129,9 @@ def check_resumable(prior: dict, *, alive=pid_alive) -> None:
     worktree = Path(prior["worktree"])
     if not worktree.is_dir() or not (worktree / ".git").exists():
         raise ResumeError(f"worktree {worktree} is missing; nothing to resume")
+    if not worktree_belongs_to_repo(worktree, Path(prior["repo"])):
+        raise ResumeError(f"worktree {worktree} is not a linked worktree of {prior['repo']}; "
+                          f"refusing to resume into a directory dirtywork did not create")
 
 
 def _render_event(event: dict) -> str | None:
@@ -138,9 +168,10 @@ def render_transcript_tail(transcript_path: Path, max_chars: int = RESUME_TAIL_C
 
 
 def build_resume_task(prior_task: str, prior_status: str, prior_turns, transcript_tail: str) -> str:
+    prior_task = prior_task.split(RESUME_MARKER, 1)[0]
     turns_text = str(prior_turns) if isinstance(prior_turns, int) else "unknown"
     return (
-        f"{prior_task}\n\n--- RESUMED RUN ---\n"
+        f"{prior_task}{RESUME_MARKER}"
         f"This run continues an earlier run that ended with status '{prior_status}' after "
         f"{turns_text} turns.\n"
         "The worktree already contains that run's work: inspect it with `git status` and "

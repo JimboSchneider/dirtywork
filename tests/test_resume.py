@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from dirtywork.resume import (
+    RESUME_MARKER,
     RESUME_TAIL_CHARS,
     ResumeError,
     build_resume_task,
@@ -15,16 +16,19 @@ from dirtywork.resume import (
     pid_alive,
     render_transcript_tail,
     resolve_run_dir,
+    worktree_belongs_to_repo,
 )
 from dirtywork.rundir import write_run_json
 from dirtywork.workspace import commit_exists
 
 
 def _prior(tmp_path, **over):
+    repo = tmp_path / "repo"
+    (repo / ".git" / "worktrees" / "wt").mkdir(parents=True, exist_ok=True)
     wt = tmp_path / "wt"
     wt.mkdir(exist_ok=True)
-    (wt / ".git").write_text("gitdir: x\n")
-    data = {"slug": "s1", "repo": str(tmp_path / "repo"), "worktree": str(wt),
+    (wt / ".git").write_text(f"gitdir: {repo / '.git' / 'worktrees' / 'wt'}\n")
+    data = {"slug": "s1", "repo": str(repo), "worktree": str(wt),
             "branch": "dirtywork/s1", "base_commit": "a" * 40, "sandbox": "none",
             "status": "max_turns", "host_pid": 999999, "task": "do it", "model": "m",
             "turns": 40}
@@ -157,3 +161,38 @@ def test_commit_exists(tmp_path):
                           capture_output=True, text=True, check=True).stdout.strip()
     assert commit_exists(repo, head) is True
     assert commit_exists(repo, "b" * 40) is False
+
+
+def test_check_resumable_accepts_linked_worktree(tmp_path):
+    check_resumable(_prior(tmp_path))          # happy path: no exception
+
+
+def test_check_resumable_refuses_plain_clone_and_foreign_gitdir(tmp_path):
+    prior = _prior(tmp_path)
+    wt = Path(prior["worktree"])
+    (wt / ".git").unlink()
+    (wt / ".git").mkdir()                       # a plain clone: .git is a directory
+    with pytest.raises(ResumeError, match="not a linked worktree"):
+        check_resumable(prior)
+    (wt / ".git").rmdir()
+    (wt / ".git").write_text(f"gitdir: {tmp_path / 'elsewhere' / '.git' / 'worktrees' / 'x'}\n")
+    with pytest.raises(ResumeError, match="not a linked worktree"):
+        check_resumable(prior)
+
+
+def test_worktree_belongs_to_repo_relative_gitdir(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".git" / "worktrees" / "wt").mkdir(parents=True)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".git").write_text("gitdir: ../repo/.git/worktrees/wt\n")
+    assert worktree_belongs_to_repo(wt, repo) is True
+    assert worktree_belongs_to_repo(wt, tmp_path / "other") is False
+
+
+def test_build_resume_task_does_not_stack_preambles():
+    once = build_resume_task("Fix the bug", "max_turns", 40, "run_end: max_turns")
+    twice = build_resume_task(once, "stalled", 12, "run_end: stalled")
+    assert twice.count(RESUME_MARKER) == 1
+    assert twice.startswith("Fix the bug" + RESUME_MARKER)
+    assert "after 12 turns" in twice and "after 40 turns" not in twice

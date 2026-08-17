@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import posixpath
+import shutil
 import subprocess
 import threading
 import time
@@ -262,12 +263,7 @@ class DockerSandbox:
             self.watchdog.violation = None
             self.watchdog.violation_kind = "budget"
         label = docker_args.repo_label(self._repo)
-        if self._seeded:
-            # export_run requires the host worktree to hold only the .git
-            # file; a resumed run's worktree still holds the prior export.
-            # The volume is kept on export failure exactly as for a fresh
-            # run, so the worker's final state is never lost.
-            export._cleanup_to_dot_git_only(self._worktree)
+        aside = self._stash_prior_worktree() if self._seeded else None
         artifacts = export.export_run(
             self.cfg, slug=self._slug, base_commit=self._base_commit,
             worktree=self._worktree, run_dir=self.run_dir, objects_dir=self._objects_dir,
@@ -277,13 +273,44 @@ class DockerSandbox:
         artifacts.watchdog_violation = watchdog_violation
         artifacts.watchdog_violation_kind = watchdog_violation_kind
         if artifacts.export_status.startswith("export_failed"):
-            # Leave the host worktree as it was (.git file only): read-tree
-            # after a failed export would make host `git status` claim mass
-            # deletions that never happened.
+            # Leave the host worktree as it was: on a fresh run that is the
+            # .git file only (read-tree after a failed export would make host
+            # `git status` claim mass deletions that never happened); on a
+            # resume it is the prior run's exported work, restored from the
+            # stash — the export must never destroy work that was safe on disk.
             self._export_failed = True
+            if aside is not None:
+                self._restore_prior_worktree(aside)
             return artifacts
+        if aside is not None:
+            shutil.rmtree(aside, ignore_errors=True)
         host_read_tree(self._worktree)
         return artifacts
+
+    def _stash_prior_worktree(self) -> Path:
+        """Resume: export_run requires a host worktree holding only the .git
+        file, but a resumed run's worktree still holds the prior export.
+        Move that content aside (never delete it before the export is known
+        to have succeeded) into a sibling directory the export cannot see;
+        finalize() removes the stash after a successful export or restores
+        it after a failed one."""
+        aside = self._worktree.parent / f"{self._worktree.name}.pre-resume"
+        if aside.exists():
+            shutil.rmtree(aside)
+        aside.mkdir()
+        for entry in self._worktree.iterdir():
+            if entry.name == ".git" and entry.is_file() and not entry.is_symlink():
+                continue
+            os.rename(str(entry), str(aside / entry.name))
+        return aside
+
+    def _restore_prior_worktree(self, aside: Path) -> None:
+        """Undo _stash_prior_worktree after a failed export: the worktree is
+        back to exactly the state the resume started from."""
+        export._cleanup_to_dot_git_only(self._worktree)
+        for entry in aside.iterdir():
+            os.rename(str(entry), str(self._worktree / entry.name))
+        aside.rmdir()
 
     def _seed_from_worktree(self) -> None:
         """Resume: mirror the host worktree into /work (deletions included —
@@ -302,7 +329,16 @@ class DockerSandbox:
             self.container, ["tar", "-C", "/work", "-xf", "-"], stdin=True)
         tar_in = self._popen(exec_argv, stdin=tar_out.stdout,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        timer = threading.Timer(docker_cli.T_LIFECYCLE, lambda: (tar_out.kill(), tar_in.kill()))
+        timed_out = []
+
+        def _kill_both():
+            timed_out.append(True)
+            tar_out.kill()
+            tar_in.kill()
+
+        # The seed moves the same data as the export streams, in the other
+        # direction, so it gets the export-step budget, not the lifecycle one.
+        timer = threading.Timer(docker_cli.T_EXPORT_STEP, _kill_both)
         timer.start()
         try:
             if tar_out.stdout is not None:
@@ -312,9 +348,9 @@ class DockerSandbox:
         finally:
             timer.cancel()
         if tar_out.returncode != 0 or tar_in.returncode != 0:
-            raise SandboxError(
-                f"resume seed failed: tar rc={tar_out.returncode}, "
-                f"docker exec tar rc={tar_in.returncode}")
+            why = (f"timed out after {docker_cli.T_EXPORT_STEP}s" if timed_out
+                   else f"tar rc={tar_out.returncode}, docker exec tar rc={tar_in.returncode}")
+            raise SandboxError(f"resume seed failed: {why}")
 
     def _read_raw(self, path: str, *, strict: bool = False):
         rel, err = _rel(path)

@@ -330,9 +330,6 @@ def test_docker_live_export_refused_into_nonempty_worktree(tmp_path):
 
 @pytest.mark.docker
 def test_docker_live_resume_seeds_worktree_keeps_branch_and_exports(tmp_path, monkeypatch, capsys):
-    import json
-    from pathlib import Path
-
     repo = _make_live_repo(tmp_path)
     first_responses = [
         _resp(tool_calls=[_call("c1", "write_file", {"path": "new.txt", "content": "from run 1\n"})]),

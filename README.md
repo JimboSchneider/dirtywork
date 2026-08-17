@@ -172,7 +172,9 @@ the earlier run ended and the tail of its transcript; the model is told to
 `git status`/`git diff` first and continue rather than restart. The sandbox
 mode is the original run's; `--model` and the other run flags may be
 overridden. Refused (exit 2, nothing created) when the earlier run is still
-running, its worktree is gone, or its base commit no longer exists.
+running, its worktree is gone, or its base commit no longer exists. In docker
+mode the prior work is moved aside during the final export and put back if that
+export fails, so a failed resume leaves the worktree exactly as it was.
 
 Docker-mode limit: export stores files, not the worker's in-container
 commits, so a resumed docker worker sees the earlier work as uncommitted
@@ -192,11 +194,12 @@ changes against the base commit — not as its old commit history. Host mode
    `.git/info/exclude` automatically. If the repo has a `CLAUDE.md` or
    `AGENTS.md` at its base commit, its content is injected into the
    worker's system prompt so it inherits your conventions.
-3. **The loop** — the model gets six tools (`read_file`, `write_file`,
-   `edit_file`, `list_dir`, `grep`, `bash`) via OpenAI function-calling and
-   works until it replies without calling a tool. Context is budgeted per
-   model (oldest tool results get trimmed first); three consecutive
-   malformed tool calls abort the run. The model ends a run by calling the
+3. **The loop** — the model gets seven tools (`read_file`, `write_file`,
+   `edit_file`, `list_dir`, `grep`, `bash`, `finish`) via OpenAI
+   function-calling. Context is budgeted per model (oldest tool results get
+   trimmed first); three consecutive tool failures of one kind (malformed
+   call, malformed arguments, unknown tool, bad arguments, empty reply) or
+   six in total abort the run. The model ends a run by calling the
    `finish(summary=...)` tool (a plain reply with no tool call also ends it);
    an empty, think-only, or truncated reply, or a tool call written as text,
    is sent back with a one-line nudge instead of being treated as completion.

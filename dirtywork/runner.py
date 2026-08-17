@@ -74,6 +74,11 @@ NUDGES = {
 }
 
 
+def _join_nudges(*parts) -> str:
+    """One user message per turn: merge whichever nudge texts apply."""
+    return "\n\n".join(p for p in parts if p)
+
+
 def strip_think(text) -> str:
     """Drop every think block (an unterminated opening tag drops to the end)."""
     if not isinstance(text, str):
@@ -252,7 +257,7 @@ class Runner:
         self.run_info = run_info
         self.finalize = finalize
         self.stall_turns = stall_turns
-        self.context_window = context_window if context_window else CONTEXT_WINDOWS.get(model, DEFAULT_WINDOW)
+        self.context_window = context_window if context_window is not None else CONTEXT_WINDOWS.get(model, DEFAULT_WINDOW)
         self.char_budget = int(self.context_window * BUDGET_FRACTION * CHARS_PER_TOKEN)
 
     def run(self, system_prompt: str, task: str) -> RunResult:
@@ -292,15 +297,18 @@ class Runner:
             return RunResult(status, turns, final, usage, extra=extra)
 
         def check_progress():
-            """Returns a RunResult to end the run with, or None."""
+            """(RunResult to end the run with, or None; stall-nudge text to
+            deliver, or None). The caller merges the nudge text into the one
+            user message it is about to append — history must never carry
+            two consecutive user messages (strict chat templates reject
+            non-alternating roles)."""
             verdict = progress.end_turn()
             if verdict == "stalled":
-                return finish("stalled", f"no progress in {self.stall_turns} consecutive turns")
+                return finish("stalled", f"no progress in {self.stall_turns} consecutive turns"), None
             if verdict == "nudge":
-                messages.append({"role": "user",
-                                 "content": STALL_NUDGE.format(n=self.stall_turns // 2)})
                 self.transcript.write("nudge", kind="stall", turn=turns)
-            return None
+                return None, STALL_NUDGE.format(n=self.stall_turns // 2)
+            return None, None
 
         try:
             while True:
@@ -373,19 +381,21 @@ class Runner:
                         messages.append(msg)
                         return finish("completed", content)
                     messages.append({"role": "assistant", "content": content})
-                    messages.append({"role": "user", "content": NUDGES[kind]})
                     self.transcript.write("nudge", kind=kind, turn=turns)
                     abort_reason = failures.record("empty_reply")
                     if abort_reason is not None:
                         return finish("model_error", abort_reason)
-                    stalled = check_progress()
+                    stalled, stall_text = check_progress()
                     if stalled is not None:
                         return stalled
+                    messages.append({"role": "user", "content": _join_nudges(NUDGES[kind], stall_text)})
                     continue
 
                 abort_reason = None
                 for _ in range(malformed_count):
-                    abort_reason = failures.record("malformed_entry") or abort_reason
+                    reason = failures.record("malformed_entry")
+                    if abort_reason is None:
+                        abort_reason = reason
                     result = "ERROR: malformed tool call entry (missing or invalid id/function fields)"
                     self.transcript.write("tool_result", tool="", args="", result=result)
                 if abort_reason is not None:
@@ -445,16 +455,17 @@ class Runner:
                 if pending_finish is not None:
                     return finish("completed", pending_finish)
 
-                stalled = check_progress()
+                stalled, stall_text = check_progress()
                 if stalled is not None:
                     return stalled
 
+                malformed_text = None
                 if malformed_count > 0:
-                    messages.append({
-                        "role": "user",
-                        "content": (f"{malformed_count} of your tool calls were malformed "
-                                    "(missing or invalid id/function fields) and were "
-                                    "discarded. Re-issue them as valid tool calls."),
-                    })
+                    malformed_text = (f"{malformed_count} of your tool calls were malformed "
+                                      "(missing or invalid id/function fields) and were "
+                                      "discarded. Re-issue them as valid tool calls.")
+                nudge_text = _join_nudges(malformed_text, stall_text)
+                if nudge_text:
+                    messages.append({"role": "user", "content": nudge_text})
         except KeyboardInterrupt:
             return finish("interrupted", "")
