@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import site
+import sys
 from pathlib import Path
 
 
@@ -211,11 +212,21 @@ def build_env(home: str | Path) -> dict:
 
 
 def _operator_user_site() -> str | None:
-    """The operator's per-user site-packages directory, or None when user
-    site is disabled for this interpreter (e.g. -s / PYTHONNOUSERSITE)."""
-    if not site.ENABLE_USER_SITE:
+    """The operator's per-user site-packages directory (where `pip install
+    --user` puts pytest), or None when user site was explicitly disabled
+    (`python -s` / PYTHONNOUSERSITE) or the directory does not exist.
+
+    Deliberately NOT gated on site.ENABLE_USER_SITE: that flag is False inside
+    every virtualenv — including the pipx venv dirtywork itself installs into —
+    while the *worker's* python3 is the system/default interpreter whose user
+    site is exactly what should stay reachable. Best effort: assumes the
+    interpreter running dirtywork and the worker's `python3` are the same
+    version (true for pipx with the default python and for the repo launcher);
+    otherwise the computed directory simply does not exist and nothing is added."""
+    if sys.flags.no_user_site or os.environ.get("PYTHONNOUSERSITE"):
         return None
     try:
-        return site.getusersitepackages()
+        path = site.getusersitepackages()
     except Exception:  # pragma: no cover - platform oddities; never block a run on this
         return None
+    return path if os.path.isdir(path) else None

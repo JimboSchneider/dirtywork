@@ -126,19 +126,48 @@ def test_build_env_relocates_home(tmp_path, monkeypatch):
 
 def test_build_env_exposes_operator_user_site_read_only(tmp_path, monkeypatch):
     import site
-    monkeypatch.setattr(site, "ENABLE_USER_SITE", True)
-    monkeypatch.setattr(site, "getusersitepackages", lambda: "/Users/op/Library/Python/3.9/lib/python/site-packages")
+    user_site = tmp_path / "usersite"
+    user_site.mkdir()
+    monkeypatch.setattr(site, "getusersitepackages", lambda: str(user_site))
     monkeypatch.setenv("PYTHONPATH", "/operator/secret/path")
-    env = build_env(home=tmp_path)
-    assert env["PYTHONPATH"] == "/Users/op/Library/Python/3.9/lib/python/site-packages"
-    assert env["HOME"] == str(tmp_path)          # pip --user would still write into the worktree
+    monkeypatch.delenv("PYTHONNOUSERSITE", raising=False)
+    home = tmp_path / "wt"
+    home.mkdir()
+    env = build_env(home=home)
+    assert env["PYTHONPATH"] == str(user_site)
+    assert env["HOME"] == str(home)          # pip --user would still write into the worktree
 
 
-def test_build_env_no_pythonpath_when_user_site_disabled(tmp_path, monkeypatch):
+def test_build_env_user_site_survives_venv_isolation(tmp_path, monkeypatch):
+    # Regression (0.5.0 review P1): inside a virtualenv (pipx!) site.ENABLE_USER_SITE
+    # is False, but the operator's user site must still be exposed.
     import site
+    user_site = tmp_path / "usersite"
+    user_site.mkdir()
     monkeypatch.setattr(site, "ENABLE_USER_SITE", False)
+    monkeypatch.setattr(site, "getusersitepackages", lambda: str(user_site))
+    monkeypatch.delenv("PYTHONNOUSERSITE", raising=False)
     env = build_env(home=tmp_path)
-    assert "PYTHONPATH" not in env
+    assert env["PYTHONPATH"] == str(user_site)
+
+
+def test_build_env_no_pythonpath_on_explicit_opt_out_or_missing_dir(tmp_path, monkeypatch):
+    import site
+    import sys
+    import types
+    user_site = tmp_path / "usersite"
+    user_site.mkdir()
+    monkeypatch.setattr(site, "getusersitepackages", lambda: str(user_site))
+    monkeypatch.setenv("PYTHONNOUSERSITE", "1")
+    assert "PYTHONPATH" not in build_env(home=tmp_path)
+    monkeypatch.delenv("PYTHONNOUSERSITE")
+    fake_flags = types.SimpleNamespace(**{**{k: getattr(sys.flags, k) for k in dir(sys.flags) if not k.startswith("_") and not callable(getattr(sys.flags, k))}, "no_user_site": 1})
+    monkeypatch.setattr(sys, "flags", fake_flags)
+    assert "PYTHONPATH" not in build_env(home=tmp_path)
+    monkeypatch.undo()
+    monkeypatch.setattr(site, "getusersitepackages", lambda: str(tmp_path / "does-not-exist"))
+    monkeypatch.delenv("PYTHONNOUSERSITE", raising=False)
+    assert "PYTHONPATH" not in build_env(home=tmp_path)
 
 
 def test_bash_home_is_worktree_not_operator_home(tmp_path):

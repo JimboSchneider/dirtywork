@@ -69,7 +69,7 @@ though `PINNED_DIGEST` is set — the pin was not enforced). A `--image
 `PINNED_DIGEST` at all, pinned or not — that pin protects the *maintained
 default image only*.
 
-0.4.0 ships with `PINNED_DIGEST = None`: there is no prior publish to pin
+The first release of a minor (0.4.0, 0.5.0) ships with `PINNED_DIGEST = None`: there is no prior publish to pin
 against on the very first release, so `resolve_image()` performs no pin
 check and trusts whatever `docker image inspect` currently reports for
 `ghcr.io/jimboschneider/dirtywork-worker:0.5`. The next patch release

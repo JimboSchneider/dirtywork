@@ -817,10 +817,17 @@ def test_abort_message_names_the_kind(parts):
 
 def test_progress_tracker_definitions():
     t = ProgressTracker(stall_turns=4)
-    # read-only tools never count
+    # a read-only call seen for the first time is exploration → progress
+    t.note_call("read_file", {"path": "a"}, "data")
+    assert t.end_turn() is None and t.idle_turns == 0
+    # the same read again: idle
     t.note_call("read_file", {"path": "a"}, "data")
     assert t.end_turn() is None and t.idle_turns == 1
-    # a successful write is progress
+    # a different file: progress
+    t.note_call("read_file", {"path": "b"}, "data")
+    assert t.end_turn() is None and t.idle_turns == 0
+    # a successful write is progress even when repeated
+    t.note_call("write_file", {"path": "a", "content": "x"}, "wrote 1 bytes")
     t.note_call("write_file", {"path": "a", "content": "x"}, "wrote 1 bytes")
     assert t.end_turn() is None and t.idle_turns == 0
     # an ERROR result is not progress even for write_file
@@ -837,7 +844,7 @@ def test_progress_tracker_definitions():
     assert t.end_turn() is None and t.idle_turns == 0
 
 
-def test_bash_fingerprint_ignores_digits_in_body_but_not_exit_code():
+def test_bash_fingerprint_ignores_volatile_tokens_but_not_real_changes():
     a = _bash_fingerprint("pytest", "exit code: 0\n5 passed in 24.51s")
     b = _bash_fingerprint("pytest", "exit code: 0\n5 passed in 25.02s")
     c = _bash_fingerprint("pytest", "exit code: 0\n6 passed in 24.51s")
@@ -845,10 +852,18 @@ def test_bash_fingerprint_ignores_digits_in_body_but_not_exit_code():
     e = _bash_fingerprint("pytest -q", "exit code: 0\n5 passed in 24.51s")
     f = _bash_fingerprint("test -e x", "exit code: 1\n")
     g = _bash_fingerprint("test -e x", "exit code: 0\n")
-    assert a == b == c                 # timings and counters do not matter
-    assert a != d                      # 'failed' appeared: different words
+    assert a == b                      # timing does not matter
+    assert a != c                      # a test count change is real (0.5.0 review P2)
+    assert a != d                      # 'failed' appeared
     assert a != e                      # different command
     assert f != g                      # exit status alone is real news
+    # counters / line numbers / ids in the body are progress, but timestamps and shas are not
+    assert _bash_fingerprint("cat n", "exit code: 0\ncounter=41") != _bash_fingerprint("cat n", "exit code: 0\ncounter=42")
+    assert _bash_fingerprint("grep x", "exit code: 0\nfoo.py:12: x") != _bash_fingerprint("grep x", "exit code: 0\nfoo.py:13: x")
+    assert _bash_fingerprint("date", "exit code: 0\n12:01:03") == _bash_fingerprint("date", "exit code: 0\n12:01:04")
+    assert _bash_fingerprint("date -I", "exit code: 0\n2026-08-17T12:01:03Z") == _bash_fingerprint("date -I", "exit code: 0\n2026-08-18T09:00:00Z")
+    assert _bash_fingerprint("git log -1", "exit code: 0\nabc1234 fix") == _bash_fingerprint("git log -1", "exit code: 0\ndef5678 fix")
+    assert _bash_fingerprint("time x", "exit code: 0\nreal 0.39s") == _bash_fingerprint("time x", "exit code: 0\nreal 0.41s")
 
 
 def test_progress_tracker_pytest_rerun_with_new_timing_is_idle():
@@ -890,24 +905,23 @@ def test_runner_stalled_status_after_idle_turns(parts):
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "stalled"
-    assert result.turns == 4
+    assert result.turns == 5            # turn 1 read f.txt for the first time (progress); 4 repeats
     assert result.final_message == "no progress in 4 consecutive turns"
-    # the nudge went to the model after 2 idle turns and was transcribed
-    third = client.requests[2]
-    assert third[-1]["role"] == "user" and third[-1]["content"] == STALL_NUDGE.format(n=2)
+    # the nudge went to the model after 2 idle turns (turn 3) and was transcribed
+    fourth = client.requests[3]
+    assert fourth[-1]["role"] == "user" and fourth[-1]["content"] == STALL_NUDGE.format(n=2)
     nudges = [e for e in _events(tmp) if e["event"] == "nudge"]
-    assert len(nudges) == 1 and nudges[0]["kind"] == "stall" and nudges[0]["turn"] == 2
+    assert len(nudges) == 1 and nudges[0]["kind"] == "stall" and nudges[0]["turn"] == 3
 
 
 def test_runner_empty_replies_count_as_idle_turns(parts):
     wt, executor, transcript, tmp = parts
-    # 2 empty replies (empty_reply failures) then a read → idle streak continues; stall_turns=3
-    client = FakeClient([_resp(content=""), _resp(content=""),
-                         _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])])
-    r = Runner(client, executor, transcript, model="m", stall_turns=3)
+    # two empty replies with stall_turns=2: idle 1 (nudge), idle 2 → stalled (before the 3-strike abort)
+    client = FakeClient([_resp(content=""), _resp(content=""), _resp(content="")])
+    r = Runner(client, executor, transcript, model="m", stall_turns=2)
     result = r.run("s", "t")
     transcript.close()
-    assert result.status == "stalled" and result.turns == 3
+    assert result.status == "stalled" and result.turns == 2
 
 
 def test_runner_default_stall_turns_is_twelve(parts):
@@ -974,16 +988,17 @@ def _no_consecutive_user_messages(requests):
 def test_empty_reply_on_stall_nudge_turn_sends_one_merged_user_message(parts):
     wt, executor, transcript, tmp = parts
     idle = _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])
-    # stall_turns=4 → the stall nudge fires when idle_turns reaches 2; make turn 2 an empty reply
-    client = FakeClient([idle, _resp(content=""), _resp(content="done")])
+    # stall_turns=4 → the stall nudge fires when idle_turns reaches 2: turn 1 reads f.txt (new →
+    # progress), turn 2 repeats it (idle 1), turn 3 is an empty reply (idle 2 → stall nudge)
+    client = FakeClient([idle, idle, _resp(content=""), _resp(content="done")])
     r = Runner(client, executor, transcript, model="m", stall_turns=4)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
-    third = client.requests[2]
-    assert third[-1]["role"] == "user"
-    assert third[-1]["content"] == NUDGES["empty"] + "\n\n" + STALL_NUDGE.format(n=2)
-    assert third[-2]["role"] == "assistant"
+    fourth = client.requests[3]
+    assert fourth[-1]["role"] == "user"
+    assert fourth[-1]["content"] == NUDGES["empty"] + "\n\n" + STALL_NUDGE.format(n=2)
+    assert fourth[-2]["role"] == "assistant"
     _no_consecutive_user_messages(client.requests)
     kinds = [e["kind"] for e in _events(tmp) if e["event"] == "nudge"]
     assert kinds == ["empty", "stall"]
@@ -995,15 +1010,15 @@ def test_malformed_entries_on_stall_nudge_turn_send_one_merged_user_message(part
     bad_entry = {"choices": [{"message": {"role": "assistant", "content": None,
                                           "tool_calls": [{"id": "", "function": {"name": "read_file"}}]}}],
                  "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
-    client = FakeClient([idle, bad_entry, _resp(content="done")])
+    client = FakeClient([idle, idle, bad_entry, _resp(content="done")])
     r = Runner(client, executor, transcript, model="m", stall_turns=4)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
-    third = client.requests[2]
-    assert third[-1]["role"] == "user"
-    assert "were malformed" in third[-1]["content"]
-    assert STALL_NUDGE.format(n=2) in third[-1]["content"]
+    fourth = client.requests[3]
+    assert fourth[-1]["role"] == "user"
+    assert "were malformed" in fourth[-1]["content"]
+    assert STALL_NUDGE.format(n=2) in fourth[-1]["content"]
     _no_consecutive_user_messages(client.requests)
 
 
@@ -1024,3 +1039,15 @@ def test_runner_context_window_zero_is_not_replaced_by_table(parts):
     wt, executor, transcript, tmp = parts
     r = Runner(FakeClient([]), executor, transcript, model="qwen/qwen3-coder-next", context_window=0)
     assert r.context_window == 0
+
+
+def test_runner_exploring_new_files_is_not_a_stall(parts):
+    wt, executor, transcript, tmp = parts
+    for i in range(20):
+        (wt / f"m{i}.py").write_text(f"# {i}\n")
+    reads = [_resp(tool_calls=[_call(f"c{i}", "read_file", {"path": f"m{i}.py"})]) for i in range(20)]
+    client = FakeClient(reads + [_resp(content="done")])
+    r = Runner(client, executor, transcript, model="m", max_turns=50, stall_turns=4)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed" and result.turns == 21
