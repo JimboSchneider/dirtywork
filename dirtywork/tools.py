@@ -3,15 +3,13 @@ from __future__ import annotations
 import errno
 import os
 import shutil
-import signal
 import stat
 import subprocess
-import threading
 import time
 from pathlib import Path
 
-from .budget import BudgetExceeded, DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB, measure_worktree
 from .guardrails import GuardrailError, build_env, check_bash_command, resolve_in_worktree
+from .procs import run_capped
 
 MAX_RESULT_CHARS = 8000
 # Refuse to load a file larger than this into memory. read_file/edit_file read
@@ -91,6 +89,18 @@ def _worktree_candidate(path_str: str, worktree: Path) -> Path:
     return candidate.parent.resolve() / candidate.name
 
 
+def _number_lines(text: str, offset: int, limit: int) -> str:
+    lines = text.splitlines()
+    window = lines[offset : offset + limit]
+    numbered = "\n".join(f"{i:6}\t{line}" for i, line in enumerate(window, offset + 1))
+    if offset + limit < len(lines):
+        numbered += (
+            f"\n[showing lines {offset + 1}-{offset + len(window)} of {len(lines)}; "
+            f"re-run with offset={offset + limit} for more]"
+        )
+    return _cap(numbered, note=" — re-run with offset/limit to see more")
+
+
 def read_file(worktree: Path, path: str, offset: int = 0, limit: int = 400) -> str:
     try:
         p = resolve_in_worktree(path, worktree)
@@ -104,15 +114,7 @@ def read_file(worktree: Path, path: str, offset: int = 0, limit: int = 400) -> s
         raw = fh.read()
     finally:
         fh.close()
-    lines = raw.decode("utf-8", errors="replace").splitlines()
-    window = lines[offset : offset + limit]
-    numbered = "\n".join(f"{i:6}\t{line}" for i, line in enumerate(window, offset + 1))
-    if offset + limit < len(lines):
-        numbered += (
-            f"\n[showing lines {offset + 1}-{offset + len(window)} of {len(lines)}; "
-            f"re-run with offset={offset + limit} for more]"
-        )
-    return _cap(numbered, note=" — re-run with offset/limit to see more")
+    return _number_lines(raw.decode("utf-8", errors="replace"), offset, limit)
 
 
 def write_file(worktree: Path, path: str, content: str) -> str:
@@ -258,77 +260,29 @@ MAX_BASH_CHARS = 10000
 MAX_BASH_CAPTURE_BYTES = 1024 * 1024
 
 
-def _kill_group(pid: int) -> None:
-    """SIGKILL the whole process group led by pid (a no-op if already gone).
-
-    On the clean-exit path pid is already reaped, so there is a negligible
-    PID-reuse window; it would only signal an unrelated process that had both
-    become a group leader AND reclaimed this exact pgid, which we accept.
-    """
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except OSError:
-        pass
-
-
 def bash(worktree: Path, command: str, timeout: int = 120) -> str:
     reason = check_bash_command(command, worktree)
     if reason:
         return reason  # starts with "BLOCKED:"
     timeout = max(1, min(int(timeout), 600))
-    try:
-        proc = subprocess.Popen(
-            ["bash", "-c", command],
-            cwd=str(worktree),
-            env=build_env(home=worktree),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,  # own process group so we can reap the whole tree
-        )
-    except OSError as e:
-        return f"ERROR: bash failed: {e}"
-
-    captured = bytearray()
-    truncated = False
-    lock = threading.Lock()
-
-    def _drain() -> None:
-        nonlocal truncated
-        with proc.stdout:  # type: ignore[union-attr]
-            for chunk in iter(lambda: proc.stdout.read(65536), b""):  # type: ignore[union-attr]
-                with lock:
-                    room = MAX_BASH_CAPTURE_BYTES - len(captured)
-                    if room > 0:
-                        captured.extend(chunk[:room])
-                    if len(chunk) > room:
-                        truncated = True  # keep draining so the child never blocks
-
-    reader = threading.Thread(target=_drain, daemon=True)
-    reader.start()
-
-    timed_out = False
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-    # Reap the whole group: kills the main process AND any backgrounded children
-    # still holding the stdout pipe (so the reader sees EOF and never stalls/leaks).
-    # On clean completion with no stragglers this is a harmless no-op.
-    _kill_group(proc.pid)
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        pass
-    reader.join(timeout=5)
-
-    with lock:
-        out = bytes(captured).decode("utf-8", errors="replace").strip()
-        note = " — bash output capped" if truncated else ""
-    if timed_out:
+    # Note: child stdin is /dev/null (never the operator's stdin); worker commands
+    # that read stdin receive EOF immediately instead of blocking.
+    captured = run_capped(
+        ["bash", "-c", command],
+        cwd=str(worktree),
+        env=build_env(home=worktree),
+        timeout=timeout,
+        cap=MAX_BASH_CAPTURE_BYTES,
+    )
+    out = captured.output.decode("utf-8", errors="replace").strip()
+    note = " — bash output capped" if captured.truncated else ""
+    if captured.timed_out:
         tail = f"\n{out}" if out else ""
         return _cap(f"ERROR: command timed out after {timeout}s.{tail}",
                     cap=MAX_BASH_CHARS, note=note)
-    return _cap(f"exit code: {proc.returncode}\n{out}", cap=MAX_BASH_CHARS, note=note)
+    if captured.returncode is None and not captured.timed_out:
+        return _cap(f"ERROR: bash failed: {captured.output.decode('utf-8', 'replace').strip()}", cap=MAX_BASH_CHARS, note=note)
+    return _cap(f"exit code: {captured.returncode}\n{out}", cap=MAX_BASH_CHARS, note=note)
 
 
 def _param(props: dict, required: list) -> dict:
@@ -379,7 +333,13 @@ TOOL_SCHEMAS = [
         "description": "Run a shell command in the worktree (cwd is the worktree "
                        "root). Use for builds/tests/git-status, NEVER for editing "
                        "files. 120s default timeout, 600s max. Backgrounded "
-                       "processes are terminated when the command returns.",
+                       "processes are terminated when the command returns. In "
+                       "docker mode, a stray background process or an "
+                       "out-of-memory container triggers an automatic reset: the "
+                       "working tree survives, but any git state you created "
+                       "inside the sandbox (index changes, stashes, local "
+                       "commits) does not — write_file/edit_file changes and "
+                       "anything already written to disk are unaffected.",
         "parameters": _param({
             "command": {"type": "string"},
             "timeout": {"type": "integer", "description": "Seconds, default 120, max 600"},
@@ -392,23 +352,21 @@ _TOOL_PARAMS = {s["function"]["name"]: set(s["function"]["parameters"]["properti
 
 
 class ToolExecutor:
-    """Dispatches validated tool calls. Unknown names raise KeyError."""
+    """Dispatches validated tool calls onto a Sandbox. Unknown names raise
+    KeyError. Deadline clamping for bash/grep and guardrail_block transcript
+    logging are unchanged from the pre-sandbox executor."""
 
-    def __init__(self, worktree: Path, transcript=None, *,
-                 max_worktree_mb: int = DEFAULT_MAX_WORKTREE_MB,
-                 max_worktree_files: int = DEFAULT_MAX_WORKTREE_FILES):
-        self.worktree = worktree
+    def __init__(self, sandbox, transcript=None):
+        self.sandbox = sandbox
         self.transcript = transcript
         self.deadline = None
-        self.max_worktree_bytes = max_worktree_mb * 1024 * 1024
-        self.max_worktree_files = max_worktree_files
         self._table = {
-            "read_file": read_file,
-            "write_file": write_file,
-            "edit_file": edit_file,
-            "list_dir": list_dir,
-            "grep": grep,
-            "bash": bash,
+            "read_file": sandbox.read_file,
+            "write_file": sandbox.write_file,
+            "edit_file": sandbox.edit_file,
+            "list_dir": sandbox.list_dir,
+            "grep": sandbox.grep,
+            "bash": sandbox.bash,
         }
 
     def execute(self, name: str, args: dict) -> str:
@@ -429,11 +387,7 @@ class ToolExecutor:
                 args = dict(args)
                 default = 120 if name == "bash" else 30
                 args["timeout"] = min(int(args.get("timeout", default)), max(1, int(remaining)))
-        result = fn(self.worktree, **args)
+        result = fn(**args)
         if result.startswith("BLOCKED:") and self.transcript is not None:
             self.transcript.write("guardrail_block", tool=name, args=args, reason=result)
-        report = measure_worktree(self.worktree, max_bytes=self.max_worktree_bytes,
-                                  max_files=self.max_worktree_files)
-        if report.violation:
-            raise BudgetExceeded(report.violation)
         return result

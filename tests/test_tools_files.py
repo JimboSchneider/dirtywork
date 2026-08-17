@@ -123,6 +123,15 @@ def test_read_file_refuses_fifo(wt: Path):
     assert "not a regular file" in out
 
 
+def test_number_lines_matches_read_file_shape(wt: Path):
+    from dirtywork import tools
+    text = "def main():\n    return 42\n"
+    direct = tools._number_lines(text, offset=0, limit=400)
+    via_read = tools.read_file(wt, "src/app.py")
+    assert direct.splitlines()[0] == via_read.splitlines()[0]
+    assert direct.splitlines()[1] == via_read.splitlines()[1]
+
+
 def test_edit_file_refuses_oversized(wt: Path):
     big = wt / "big.txt"
     with open(big, "wb") as f:

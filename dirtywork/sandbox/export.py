@@ -1,0 +1,355 @@
+# dirtywork/sandbox/export.py
+from __future__ import annotations
+
+import os
+import posixpath
+import shutil
+import subprocess
+import sys
+import tarfile
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from . import RunArtifacts, SandboxError, docker_args, docker_cli, lifecycle
+
+
+class ExportError(SandboxError):
+    """Raised by the export flow or the tar validator. export_run (Task 11)
+    catches this and turns it into RunArtifacts(export_status=...)."""
+
+
+_PAX_GLOBAL_MSG = "export archive contains a PAX global header"
+
+
+@dataclass
+class ExportReport:
+    files: int
+    bytes: int
+    escaping_symlinks: list
+
+
+class _CountingReader:
+    """Wraps the raw archive stream and raises ExportError as soon as more
+    than max_bytes total have been READ from it — bounds the stream itself,
+    not just the sum of each member's declared size (a hostile tar could
+    lie about sizes in the header)."""
+
+    def __init__(self, stream, max_bytes: int):
+        self._stream = stream
+        self._max_bytes = max_bytes
+        self._read = 0
+
+    def read(self, n=-1):
+        chunk = self._stream.read(n)
+        self._read += len(chunk)
+        if self._read > self._max_bytes:
+            raise ExportError(f"export archive exceeds {self._max_bytes} bytes")
+        return chunk
+
+
+def _cleanup_to_dot_git_only(dest: Path) -> None:
+    for entry in dest.iterdir():
+        if entry.name == ".git" and entry.is_file() and not entry.is_symlink():
+            continue
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            try:
+                entry.unlink()
+            except OSError:
+                pass
+
+
+def extract_validated(stream, dest: Path, *, max_files: int, max_bytes: int) -> ExportReport:
+    dest = Path(dest)
+    existing = list(dest.iterdir())
+    if len(existing) != 1 or existing[0].name != ".git" or not existing[0].is_file():
+        raise ExportError("worktree not empty")
+
+    dest_real = os.path.realpath(str(dest))
+    counting = _CountingReader(stream, max_bytes)
+    files = 0
+    total_bytes = 0
+    escaping_symlinks = []
+
+    try:
+        with tarfile.open(fileobj=counting, mode="r|") as tar:
+            for member in tar:
+                if tar.pax_headers:
+                    raise ExportError(_PAX_GLOBAL_MSG)
+
+                files += 1
+                if files > max_files:
+                    raise ExportError(f"export archive exceeds {max_files} files")
+                total_bytes += max(member.size, 0)
+                if total_bytes > max_bytes:
+                    raise ExportError(f"export archive exceeds {max_bytes} bytes")
+
+                if not (member.isreg() or member.isdir() or member.issym()):
+                    raise ExportError(
+                        f"export archive contains a disallowed member type at "
+                        f"'{member.name}' (only regular files, directories, and "
+                        f"symlinks are allowed)"
+                    )
+
+                name = member.name
+                if posixpath.isabs(name):
+                    raise ExportError(f"export archive contains an absolute path '{name}'")
+                parts = name.split("/")
+                if any(p in ("", ".", "..") for p in parts):
+                    raise ExportError(
+                        f"export archive contains an invalid path component in '{name}'"
+                    )
+                if any(p.lower() == ".git" for p in parts):
+                    raise ExportError(f"export archive contains a .git-named entry '{name}'")
+
+                target_path = dest / name
+                target_real = os.path.realpath(str(target_path))
+                if not (target_real == dest_real or target_real.startswith(dest_real + os.sep)):
+                    raise ExportError(
+                        f"export archive member '{name}' escapes the destination "
+                        f"via a symlink created by an earlier member"
+                    )
+
+                if member.isdir():
+                    os.makedirs(str(target_path), exist_ok=True)
+                    os.chmod(str(target_path), 0o755)
+                elif member.isreg():
+                    os.makedirs(str(target_path.parent), exist_ok=True)
+                    fh = tar.extractfile(member)
+                    if fh is None:
+                        raise ExportError(f"export archive member '{name}' has no content stream")
+                    fd = os.open(str(target_path),
+                                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+                    try:
+                        with os.fdopen(fd, "wb") as out:
+                            while True:
+                                chunk = fh.read(65536)
+                                if not chunk:
+                                    break
+                                out.write(chunk)
+                    finally:
+                        fh.close()
+                    mode = 0o755 if (member.mode & 0o111) else 0o644
+                    os.chmod(str(target_path), mode)
+                elif member.issym():
+                    os.makedirs(str(target_path.parent), exist_ok=True)
+                    if sys.platform == "win32":
+                        with open(target_path, "w", encoding="utf-8") as fh:
+                            fh.write(member.linkname)
+                    else:
+                        os.symlink(member.linkname, str(target_path))
+                        link_target = member.linkname
+                        normalized = posixpath.normpath(
+                            posixpath.join(posixpath.dirname(name), link_target)
+                        )
+                        if (posixpath.isabs(link_target) or normalized == ".."
+                                or normalized.startswith("../")):
+                            escaping_symlinks.append(name)
+            if tar.pax_headers:  # defense in depth: a trailing global header (tarfile itself normally refuses one)
+                raise ExportError(_PAX_GLOBAL_MSG)
+
+    except ExportError:
+        _cleanup_to_dot_git_only(dest)
+        raise
+    except (tarfile.TarError, OSError) as e:
+        _cleanup_to_dot_git_only(dest)
+        raise ExportError(f"export extraction failed: {e}")
+
+    return ExportReport(files=files, bytes=total_bytes, escaping_symlinks=escaping_symlinks)
+
+
+def export_run(cfg, *, slug, base_commit, worktree: Path, run_dir: Path, objects_dir: Path,
+               image_ref: str, uid: int, gid: int, repo_label: str, run=docker_cli.run,
+               popen=subprocess.Popen) -> RunArtifacts:
+    """Spec §7: the whole export flow, run against a FRESH container (never
+    the worker's own). Any ExportError leaves the worktree cleaned back to
+    just the .git file and the volume intact (`runs export <slug>` can
+    retry after the operator raises a limit)."""
+    diff_stat = ""
+    patch_path = None
+    dropped_git_entries: list = []
+    escaping_symlinks: list = []
+    worktree_bytes = None
+    worktree_files = None
+
+    existing = list(worktree.iterdir())
+    if len(existing) != 1 or existing[0].name != ".git" or not existing[0].is_file():
+        return RunArtifacts(export_status="export_failed: worktree not empty")
+
+    name = f"{docker_args.container_name(slug)}-export"
+
+    create_argv = docker_args.export_create_argv(cfg, slug, image_ref, uid, gid, objects_dir,
+                                                  repo_label=repo_label)
+    try:
+        created = run(create_argv, timeout=docker_cli.T_LIFECYCLE)
+    except docker_cli.DockerError as e:
+        return RunArtifacts(export_status=f"export_failed: docker create {name} failed: {e}")
+    if created.returncode != 0:
+        return RunArtifacts(
+            export_status=f"export_failed: docker create {name} failed: "
+                           f"{created.output.decode('utf-8', 'replace')[:500]}"
+        )
+
+    try:
+        tether = popen(["docker", "start", "-ai", name],
+                        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        # _cleanup/_fail don't exist yet (they close over `tether`) — this
+        # is the one export step that can fail before there is a tether to
+        # close, so it gets its own best-effort teardown: just the export
+        # container this function itself created.
+        try:
+            run(["rm", "-f", name], timeout=docker_cli.T_LIFECYCLE)
+        except docker_cli.DockerError:
+            pass
+        return RunArtifacts(export_status=f"export_failed: cannot start export tether: {e}")
+
+    def _cleanup(keep_volume: bool) -> None:
+        try:
+            run(["rm", "-f", name], timeout=docker_cli.T_LIFECYCLE)
+        except docker_cli.DockerError:
+            pass
+        lifecycle.close_tether(tether)
+        if not keep_volume:
+            try:
+                run(["volume", "rm", docker_args.volume_name(slug)], timeout=docker_cli.T_QUERY)
+            except docker_cli.DockerError:
+                pass
+
+    def _fail(reason: str) -> RunArtifacts:
+        _cleanup(keep_volume=True)  # export_failed always keeps the volume for retry
+        _cleanup_to_dot_git_only(worktree)
+        return RunArtifacts(
+            diff_stat=diff_stat, patch_path=patch_path,
+            worktree_bytes=worktree_bytes, worktree_files=worktree_files,
+            escaping_symlinks=escaping_symlinks, dropped_git_entries=dropped_git_entries,
+            export_status=f"export_failed: {reason}",
+        )
+
+    try:
+        lifecycle.wait_ready(run, name)
+
+        lifecycle.init_worker_git(run, name, slug=slug, base_commit=base_commit, restart=True)
+
+        find_argv = docker_args.exec_argv(
+            name, ["/usr/bin/find", "/work", "-mindepth", "1", "-iname", ".git"]
+        )
+        find_captured = run(find_argv, timeout=docker_cli.T_EXPORT_STEP)
+        if find_captured.returncode == 0:
+            for line in find_captured.output.decode("utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                dropped_git_entries.append(line[len("/work/"):] if line.startswith("/work/") else line)
+
+        add_argv = docker_args.exec_argv(name, ["/usr/bin/git", "add", "-A"])
+        add_captured = run(add_argv, timeout=docker_cli.T_EXPORT_STEP)
+        if add_captured.returncode != 0:
+            return _fail(f"git add -A failed: {add_captured.output.decode('utf-8', 'replace')[:500]}")
+
+        wt_argv = docker_args.exec_argv(name, ["/usr/bin/git", "write-tree"])
+        wt_captured = run(wt_argv, timeout=docker_cli.T_EXPORT_STEP)
+        if wt_captured.returncode != 0:
+            return _fail(f"git write-tree failed: {wt_captured.output.decode('utf-8', 'replace')[:500]}")
+        tree = wt_captured.output.decode("utf-8", errors="replace").strip()
+
+        stat_argv = docker_args.exec_argv(name, ["/usr/bin/git", "diff", "--stat", base_commit, tree])
+        stat_captured = run(stat_argv, timeout=docker_cli.T_EXPORT_STEP)
+        if stat_captured.returncode != 0:
+            return _fail(
+                f"git diff --stat failed: {stat_captured.output.decode('utf-8', 'replace')[:500]}"
+            )
+        raw_stat = stat_captured.output.decode("utf-8", errors="replace")
+        diff_stat = raw_stat if len(raw_stat) <= 64_000 else raw_stat[:64_000] + "\n[diff_stat truncated at 64000 chars]"
+
+        patch_target = run_dir / "diff.patch"
+        diff_argv = ["docker"] + docker_args.exec_argv(name, ["/usr/bin/git", "diff", base_commit, tree])
+        max_patch_bytes = cfg.max_patch_mb * 1024 * 1024
+        diff_proc = popen(diff_argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        # Streamed steps cannot rely on run()'s timeout: a hung `docker exec` would
+        # block .read() forever. A kill-timer bounds each streamed step at
+        # T_EXPORT_STEP so the export fails closed like every other docker call.
+        diff_timer = threading.Timer(docker_cli.T_EXPORT_STEP, diff_proc.kill)
+        diff_timer.start()
+        fd = os.open(str(patch_target), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                written = 0
+                truncated_patch = False
+                while True:
+                    chunk = diff_proc.stdout.read(65536)
+                    if not chunk:
+                        break
+                    if written < max_patch_bytes:
+                        room = max_patch_bytes - written
+                        piece = chunk[:room]
+                        out.write(piece)
+                        written += len(piece)
+                        if len(chunk) > room:
+                            truncated_patch = True
+                    else:
+                        truncated_patch = True
+                if truncated_patch:
+                    out.write(f"\n[patch truncated at {cfg.max_patch_mb} MB]\n".encode("utf-8"))
+        finally:
+            diff_timer.cancel()
+            try:
+                diff_proc.wait(timeout=10)
+            except Exception:
+                diff_proc.kill()
+        if diff_proc.returncode != 0:
+            return _fail(f"git diff failed or timed out (rc {diff_proc.returncode})")
+        patch_path = str(patch_target)
+
+        archive_argv = ["docker"] + docker_args.exec_argv(
+            name, ["/usr/bin/git", "archive", "--format=tar", tree]
+        )
+        archive_proc = popen(archive_argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        archive_timer = threading.Timer(docker_cli.T_EXPORT_STEP, archive_proc.kill)
+        archive_timer.start()
+        try:
+            report = extract_validated(archive_proc.stdout, worktree,
+                                        max_files=cfg.max_worktree_files,
+                                        max_bytes=cfg.max_worktree_mb * 1024 * 1024)
+        except ExportError as e:
+            archive_timer.cancel()
+            archive_proc.kill()  # never wait on a process that may still be streaming
+            try:
+                archive_proc.wait(timeout=10)
+            except Exception:
+                pass
+            return _fail(str(e))
+        finally:
+            archive_timer.cancel()
+        try:
+            archive_proc.wait(timeout=10)
+        except Exception:
+            archive_proc.kill()
+        if archive_proc.returncode != 0:
+            # the stream ended cleanly from tarfile's point of view but git archive
+            # itself failed or was killed by the timer: the tree may be incomplete
+            return _fail(f"git archive failed or timed out (rc {archive_proc.returncode})")
+        worktree_bytes = report.bytes
+        worktree_files = report.files
+        escaping_symlinks = report.escaping_symlinks
+
+        _cleanup(keep_volume=cfg.keep_volume)
+
+    except (SandboxError, OSError) as e:
+        # OSError alongside SandboxError: popen()/os.open()/file writes in
+        # the steps above are raw OS calls with no docker_cli wrapper to
+        # turn a failure into a DockerError — an unwrapped OSError here
+        # must still route through _fail (container removed, volume kept
+        # for retry, worktree cleaned back to .git only) rather than
+        # propagate and skip cleanup entirely.
+        return _fail(f"docker step failed: {e}")
+
+    return RunArtifacts(
+        diff_stat=diff_stat, patch_path=patch_path,
+        worktree_bytes=worktree_bytes, worktree_files=worktree_files,
+        escaping_symlinks=escaping_symlinks, dropped_git_entries=dropped_git_entries,
+        export_status="ok",
+    )

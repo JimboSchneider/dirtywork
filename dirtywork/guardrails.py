@@ -59,6 +59,31 @@ def resolve_in_worktree(path_str: str, worktree: Path, writing: bool = False) ->
 # does not close that gap; the fix is a real OS process boundary (the Docker
 # sandbox, sub-project 2), not a bigger denylist. Documented in README.md and
 # SECURITY.md.
+#
+# ONE ORDERED LIST, because the reported reason for a two-rule-match command
+# is a documented transcript field (`guardrail_block.reason`) an orchestrating
+# agent may key on — the scan ORDER IS THE CONTRACT, matching main's original
+# order exactly (see git show 23a9c22:dirtywork/guardrails.py). Each entry is
+# tagged with a scope instead of being split into separate lists, so adding
+# docker-mode filtering never reorders anything:
+#   - "always" is mode-independent POLICY (not containment): no push (leave
+#     changes uncommitted for review), no sudo, no piping a download into an
+#     interpreter, no system-control commands. These hold regardless of how
+#     the command is contained, so they apply in both modes.
+#   - "host" rules exist to protect the HOST filesystem and the host repo's
+#     shared refs/config (the git config/remote/update-ref/gc/filter-branch/
+#     reflog/worktree/branch -d|-D|-m|-M/tag -d rules, plus the
+#     rm/mv/chmod/chown/redirect/cd/pushd escape-target rules). In docker
+#     mode the container is its own filesystem with its own throwaway
+#     /gitdir (see lifecycle.init_worker_git) — there is no host filesystem
+#     or shared parent repo for a docker-mode command to reach, so these
+#     rules would just be false positives there. The real boundary in docker
+#     mode is the container itself (--network none, --read-only rootfs,
+#     --cap-drop ALL, no host path mounted in but a read-only object store
+#     copy — see SECURITY.md); check_bash_command(sandboxed=True) scans only
+#     the "always" subset (in this same original order) and skips the
+#     worktree-rewrite step (there is no worktree path for the container's
+#     commands to be rewritten against).
 _ESCAPE_TARGET = r"(?:\./)*(?:/|~|\.\.)"
 # git accepts global options (-C <path>, -c <key>=<value>, --<flag>[=value],
 # -<x>) before the subcommand. The old \bgit\s+<subcommand> rules didn't skip
@@ -66,16 +91,16 @@ _ESCAPE_TARGET = r"(?:\./)*(?:/|~|\.\.)"
 # exact same effect as the plain form but slipped past the denylist. Every
 # git-subcommand rule below is prefixed with this instead of a bare `\bgit\s+`.
 _GIT_OPTS = r"\bgit\s+(?:(?:-C\s+\S+|-c\s+\S+|--\S+|-[A-Za-z]\S*)\s+)*"
-_DENYLIST: list[tuple[str, str]] = [
-    ("sudo is not allowed", r"\bsudo\b"),
-    ("git push is not allowed — leave changes uncommitted for review",
+_RULES: list[tuple[str, str, str]] = [  # (scope, reason, pattern) — ORDER IS THE CONTRACT
+    ("always", "sudo is not allowed", r"\bsudo\b"),
+    ("always", "git push is not allowed — leave changes uncommitted for review",
      _GIT_OPTS + r"push\b"),
-    # A linked worktree SHARES refs/config/objects with the parent repo, so these
-    # git subcommands mutate the parent's state from inside the worktree.
-    # core.hooksPath in particular is a persistent host-code-execution pivot.
-    # Read-only forms (config --get/--list, remote -v, worktree list, bare reflog)
-    # are intentionally NOT matched.
-    ("git command that writes the parent repo's shared refs/config is not allowed",
+    # A linked worktree SHARES refs/config/objects with the parent repo, so
+    # these git subcommands mutate the parent's state from inside the
+    # worktree. core.hooksPath in particular is a persistent
+    # host-code-execution pivot. Read-only forms (config --get/--list,
+    # remote -v, worktree list, bare reflog) are intentionally NOT matched.
+    ("host", "git command that writes the parent repo's shared refs/config is not allowed",
      # config: allowlist the read forms (--get*/--list/-l) and block everything
      # else. Enumerating write flags is whack-a-mole (--local/--global/--system/
      # --file/--unset/… all write shared config from a linked worktree), so we
@@ -87,20 +112,20 @@ _DENYLIST: list[tuple[str, str]] = [
      r"|" + _GIT_OPTS + r"worktree\s+(add|remove|prune|move)\b"
      r"|" + _GIT_OPTS + r"branch\s+(-[dDmM]\b|--(delete|move)\b)"
      r"|" + _GIT_OPTS + r"tag\s+(-d\b|--delete\b)"),
-    ("destructive command targeting a path outside the worktree",
+    ("host", "destructive command targeting a path outside the worktree",
      r"\b(rm|mv|chmod|chown)\b[^|;&]*\s['\"]?" + _ESCAPE_TARGET),
-    ("piping a download into an interpreter is not allowed",
+    ("always", "piping a download into an interpreter is not allowed",
      r"\b(curl|wget)\b[^|;&]*\|\s*['\"]?\w*\s*"
      r"((ba|z|da)?sh|python[0-9.]*|node|ruby|perl)\b"),
-    ("system-control commands are not allowed",
+    ("always", "system-control commands are not allowed",
      r"\b(osascript|launchctl|shutdown|reboot|killall)\b"),
-    ("redirecting output outside the worktree is not allowed",
+    ("host", "redirecting output outside the worktree is not allowed",
      r">>?\s*['\"]?(?!/dev/null)" + _ESCAPE_TARGET),
-    ("changing directory out of the worktree is not allowed",
+    ("host", "changing directory out of the worktree is not allowed",
      r"\b(cd|pushd)\s+['\"]?" + _ESCAPE_TARGET),
 ]
 
-_COMPILED = [(reason, re.compile(pat, re.IGNORECASE)) for reason, pat in _DENYLIST]
+_COMPILED = [(scope, reason, re.compile(pat, re.IGNORECASE)) for scope, reason, pat in _RULES]
 
 
 _ROOT_BOUNDARY = r"""(?=[/\s'"]|$)"""  # root must end at a path/word boundary
@@ -126,16 +151,32 @@ def _rewrite_worktree_refs(command: str, worktree: Path) -> str:
     return checked
 
 
-def check_bash_command(command: str, worktree: Path | None = None) -> str | None:
+def check_bash_command(
+    command: str, worktree: Path | None = None, *, sandboxed: bool = False
+) -> str | None:
     """Return a rejection reason if the command matches the denylist, else None.
 
     When `worktree` is given, absolute references to the worktree root are
     rewritten to a relative `.` form before the denylist runs, so cd-ing or
     redirecting INTO the worktree by absolute path is allowed while escapes
-    past the root are still blocked. See the WHY comment above _DENYLIST.
+    past the root are still blocked. See the WHY comment above _RULES.
+
+    When `sandboxed=True` (docker mode), only the "always"-scoped rules are
+    checked (in the same original relative order) and the worktree rewrite
+    is skipped — the container is the boundary that makes the "host"-scoped
+    rules meaningless (there is no host filesystem or shared parent repo for
+    a docker-mode command to reach). See the WHY comment above _RULES.
+
+    Host mode (sandboxed=False, the default) scans every rule in the
+    ORIGINAL order (matching main's pre-docker-mode order exactly), because
+    `guardrail_block.reason` is a documented transcript field an
+    orchestrating agent may key on — which rule matches first for a
+    two-rule-match command must not change.
     """
-    checked = command if worktree is None else _rewrite_worktree_refs(command, worktree)
-    for reason, rx in _COMPILED:
+    checked = command if (sandboxed or worktree is None) else _rewrite_worktree_refs(command, worktree)
+    for scope, reason, rx in _COMPILED:
+        if sandboxed and scope != "always":
+            continue
         if rx.search(checked):
             return f"BLOCKED: {reason}. Rework the command to stay inside the worktree."
     return None

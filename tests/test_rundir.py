@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from dirtywork.rundir import RunDirError, create_run_dir, ensure_runs_dir
+from dirtywork.rundir import RunDirError, create_run_dir, ensure_runs_dir, read_run_json, write_run_json
 
 
 def test_ensure_runs_dir_creates_0700_dirs(tmp_path: Path):
@@ -93,3 +93,37 @@ def test_create_run_dir_refuses_existing_symlink(tmp_path: Path):
     (runs / "dup-slug").symlink_to(outside)
     with pytest.raises(RunDirError):
         create_run_dir(runs, "dup-slug")
+
+
+def test_write_run_json_creates_file_mode_0600(tmp_path: Path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    write_run_json(run_dir, {"status": "running", "slug": "x"})
+    p = run_dir / "run.json"
+    assert p.exists()
+    mode = stat.S_IMODE(os.stat(p).st_mode)
+    assert mode == 0o600
+
+
+def test_write_run_json_then_read_round_trips(tmp_path: Path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    data = {"status": "running", "slug": "x", "nested": {"a": 1}}
+    write_run_json(run_dir, data)
+    assert read_run_json(run_dir) == data
+
+
+def test_write_run_json_overwrite_is_atomic_and_leaves_no_temp_file(tmp_path: Path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    write_run_json(run_dir, {"status": "running"})
+    write_run_json(run_dir, {"status": "completed", "ended": "later"})
+    assert read_run_json(run_dir) == {"status": "completed", "ended": "later"}
+    assert not any(p.name.endswith(".tmp") for p in run_dir.iterdir())
+
+
+def test_read_run_json_missing_raises_oserror(tmp_path: Path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    with pytest.raises(OSError):
+        read_run_json(run_dir)

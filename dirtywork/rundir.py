@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import stat
 from pathlib import Path
@@ -53,3 +54,28 @@ def create_run_dir(runs_dir: Path, slug: str) -> Path:
     except OSError as e:
         raise RunDirError(f"cannot create {run_dir}: {e}")
     return run_dir
+
+
+def write_run_json(run_dir: Path, data: dict) -> None:
+    """Atomic, 0600 write: a temp file in the same directory (same
+    filesystem as the final path, so os.replace is atomic) then os.replace
+    over run.json. A concurrent reader (e.g. `dirtywork runs list`) never
+    sees a partially-written file."""
+    tmp_path = run_dir / ".run.json.tmp"
+    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+    except Exception:
+        try:
+            os.unlink(str(tmp_path))
+        except OSError:
+            pass
+        raise
+    os.replace(str(tmp_path), str(run_dir / "run.json"))
+
+
+def read_run_json(run_dir: Path) -> dict:
+    with open(run_dir / "run.json", "r", encoding="utf-8") as fh:
+        return json.load(fh)

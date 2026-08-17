@@ -15,6 +15,7 @@ from dirtywork.runner import (
     _valid_tool_call,
     trim_messages,
 )
+from dirtywork.sandbox.host import HostSandbox
 from dirtywork.tools import ToolExecutor
 from dirtywork.transcript import Transcript
 
@@ -50,7 +51,7 @@ def parts(tmp_path: Path):
     wt.mkdir()
     (wt / "f.txt").write_text("data\n")
     transcript = Transcript(tmp_path / "t.jsonl")
-    executor = ToolExecutor(wt, transcript=transcript)
+    executor = ToolExecutor(HostSandbox(wt), transcript=transcript)
     return wt, executor, transcript, tmp_path
 
 

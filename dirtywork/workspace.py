@@ -18,9 +18,9 @@ class WorkspaceError(Exception):
     """Raised when the target repo or worktree operation is unusable."""
 
 
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+def _git(repo: Path, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, env=env
     )
 
 
@@ -41,7 +41,8 @@ def make_slug(task: str, now: datetime, salt: str | None = None) -> str:
     return f"{base}-{now.strftime('%m%d%H%M%S')}-{salt}"
 
 
-def create_worktree(repo: Path, slug: str, branch_from: str | None) -> Path:
+def create_worktree(repo: Path, slug: str, branch_from: str | None, *,
+                     no_checkout: bool = False) -> Path:
     worktrees_dir = repo / ".worktrees"
     try:
         wd_st = os.lstat(worktrees_dir)
@@ -74,7 +75,11 @@ def create_worktree(repo: Path, slug: str, branch_from: str | None) -> Path:
     branch = f"dirtywork/{slug}"
     existed = _git(repo, "rev-parse", "--verify", "--quiet",
                     f"refs/heads/{branch}").returncode == 0
-    res = _git(repo, "worktree", "add", "-b", branch, str(rel), ref)
+    args = ["worktree", "add"]
+    if no_checkout:
+        args.append("--no-checkout")
+    args += ["-b", branch, str(rel), ref]
+    res = _git(repo, *args)
     if res.returncode != 0:
         if not existed:
             _git(repo, "branch", "-D", branch)  # best-effort cleanup; ignore result
@@ -259,3 +264,18 @@ def load_repo_context(repo: Path, base_commit: str) -> str | None:
             text = text[:MAX_CONTEXT_CHARS] + "\n[truncated at 32000 chars]"
         return text
     return None
+
+
+def host_read_tree(worktree: Path) -> None:
+    """The only host git command that runs after the worker has produced
+    anything (spec §2 step 11): index-only, against the base tree, using the
+    operator's own object store — writes no working-tree files (verified).
+    Config-neutral env so no checked-out state can influence it, even though
+    only objects/ was ever mounted into any container."""
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    res = _git(worktree, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+               "read-tree", "HEAD", env=env)
+    if res.returncode != 0:
+        raise WorkspaceError(f"git read-tree HEAD failed in {worktree}: {res.stderr.strip()}")
