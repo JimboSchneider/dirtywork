@@ -123,14 +123,15 @@ STALL_NUDGE = ("No progress in the last {n} turns: no file changed and no comman
 _MUTATING_TOOLS = ("write_file", "edit_file")
 # Tokens that change between otherwise-identical runs of the same command:
 # durations ("in 24.51s", "0.39s", "12 ms"), clock times / ISO timestamps,
-# and long hex or decimal ids (git shas, container ids, epoch stamps). Only
-# these are normalized away — a counter, a line number, or a test count that
+# and long hex ids (git shas, container ids — at least one a-f letter, so a
+# plain 7+ digit number such as a byte count is NOT normalized). Only these
+# are normalized away — a counter, a line number, or a test count that
 # changes IS progress and must stay visible to the stall detector.
 _VOLATILE_RE = re.compile(
     r"\d+(?:\.\d+)?\s?(?:ms|s|secs?|seconds?|min|mins?|minutes?|h|hours?)\b"
     r"|\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?"
     r"|\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?"
-    r"|\b[0-9a-f]{7,64}\b"
+    r"|\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,64}\b"
 )
 
 
@@ -165,13 +166,14 @@ class ProgressTracker:
     def note_call(self, name: str, args, result: str) -> None:
         if not isinstance(result, str) or result.startswith("ERROR"):
             return
+        if name in _MUTATING_TOOLS:
+            self._progressed = True          # a successful write/edit is always progress
+            return
         call_key = name + "\0" + (json.dumps(args, sort_keys=True, default=str) if isinstance(args, dict) else "")
         if call_key not in self._seen_calls:
             self._seen_calls.add(call_key)   # first time this exact call happened: new ground
             self._progressed = True
-        if name in _MUTATING_TOOLS:
-            self._progressed = True
-        elif name == "bash":
+        if name == "bash":
             command = args.get("command") if isinstance(args, dict) else None
             key = _bash_fingerprint(command, result)
             if key not in self._seen_bash:

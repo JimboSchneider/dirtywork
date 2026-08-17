@@ -864,6 +864,9 @@ def test_bash_fingerprint_ignores_volatile_tokens_but_not_real_changes():
     assert _bash_fingerprint("date -I", "exit code: 0\n2026-08-17T12:01:03Z") == _bash_fingerprint("date -I", "exit code: 0\n2026-08-18T09:00:00Z")
     assert _bash_fingerprint("git log -1", "exit code: 0\nabc1234 fix") == _bash_fingerprint("git log -1", "exit code: 0\ndef5678 fix")
     assert _bash_fingerprint("time x", "exit code: 0\nreal 0.39s") == _bash_fingerprint("time x", "exit code: 0\nreal 0.41s")
+    # plain decimal counts are real changes even when long (0.5.1 review); hex ids need a letter
+    assert _bash_fingerprint("wc -c f", "exit code: 0\n1234567 f") != _bash_fingerprint("wc -c f", "exit code: 0\n7654321 f")
+    assert _bash_fingerprint("git rev-parse", "exit code: 0\n3b8d019a2f20") == _bash_fingerprint("git rev-parse", "exit code: 0\ne312a5d88bd8")
 
 
 def test_progress_tracker_pytest_rerun_with_new_timing_is_idle():
