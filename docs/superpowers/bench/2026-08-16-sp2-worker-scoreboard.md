@@ -53,3 +53,8 @@
 | T14 impl | qwen/qwen3-coder-next | completed | 34 | 2.6m | 797882 | 8920 | ❌ 5I (docs consistency)/1M |
 | T15 impl | qwen/qwen3-coder-next | max_turns | 80 | 5.2m | 2618956 | 9393 | max_turns; suite written (7 live tests), 4/7 pass live — real reset race found |
 | T14 fix1 | qwen/qwen3-coder-next | completed | 36 | 3.4m | 550209 | 3167 | ✅ 4/5 addressed (5th = DEFAULT_IMAGE in T15) |
+| T15 fix1 [qwen] | qwen/qwen3-coder-next | max_turns | 60 | 4.4m | 1799294 | 12364 | max_turns; product items 1-4 done, 1 test mis-built, live items untouched → Sonnet round 2 |
+| T15 fix2 [Sonnet, escalated] | claude-sonnet (subagent) | completed | n/a | 13.5m | n/a | n/a | tests fixed; live 6/7 ×2 — residual = host denylist in docker mode (plan conflict) |
+| T15 fix3 [Sonnet, escalated] | claude-sonnet (subagent) | completed | n/a | 7.7m | n/a | n/a | ✅ all items; 1 new I (host rule-order message precedence → final wave) |
+| T16 impl | qwen/qwen3-coder-next | max_turns | 80 | 15.9m | 3314157 | 20891 | 2I (inverted assertion dropped; dup helpers)/2M; live 3/3 |
+| T16 fix1 [Sonnet, escalated] | claude-sonnet (subagent) | completed | n/a | 4.3m | n/a | n/a | ✅ 3/3 addressed; live 10/10 |
