@@ -606,6 +606,51 @@ def test_main_docker_watchdog_violation_status_from_finalize_result(tmp_path, mo
     assert run_end["watchdog_violation"] == "host free space below 2048 MB"
 
 
+def test_main_docker_watchdog_violation_sandbox_error_kind_status(tmp_path, monkeypatch, capsys):
+    # D1: a watchdog_violation whose kind is "sandbox_error" (a
+    # watchdog-thread sample() failure, spec §6's second-failure case) must
+    # override a "completed" terminal status to "sandbox_error", not the
+    # default "budget_exceeded" -- same only-replaces-'completed' rule as
+    # the plain watchdog_violation case above.
+    from dirtywork.procs import Captured
+    from dirtywork.sandbox import RunArtifacts
+    from dirtywork.sandbox.docker import DockerSandbox as RealDockerSandbox
+    m, repo = _docker_mode_scaffold(tmp_path, monkeypatch)
+    monkeypatch.setattr(m.docker_cli, "run",
+                        lambda argv, *, timeout, stdin=None: Captured(1, b"", False, False))
+
+    def finalize(self):
+        return RunArtifacts(export_status="ok",
+                             watchdog_violation="watchdog: worktree budget sample failed twice in a row",
+                             watchdog_violation_kind="sandbox_error")
+
+    FakeDockerSandbox = _fake_docker_sandbox_class(RealDockerSandbox, finalize=finalize)
+    monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
+
+    class ImmediateDoneClient:
+        def __init__(self, base_url=None):
+            pass
+
+        def list_models(self):
+            return [m.DEFAULT_MODEL]
+
+        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+            return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    monkeypatch.setattr(m, "LMStudioClient", ImmediateDoneClient)
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])
+
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "sandbox_error"
+    assert payload["watchdog_violation_kind"] == "sandbox_error"
+    run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert run_json["status"] == "sandbox_error"
+    assert run_json["watchdog_violation_kind"] == "sandbox_error"
+
+
 def test_main_docker_export_failed_status_from_finalize_exception(tmp_path, monkeypatch, capsys):
     # Fix item 6, trigger 2: finalize() itself raises. Runner.finish() (SP1)
     # catches it and puts finalize_error into result.extra instead of

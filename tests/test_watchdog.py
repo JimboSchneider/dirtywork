@@ -211,6 +211,41 @@ def test_run_loop_does_not_die_silently_when_sample_raises(tmp_path, monkeypatch
     assert wdg.violation is not None
     assert "exec failed twice" in wdg.violation
     assert kills and "exec failed twice" in kills[0]
+    # D1: a sample()-raised exception is a sandbox failure, not a budget
+    # breach -- DockerSandbox._after_bash must be able to tell them apart.
+    assert wdg.violation_kind == "sandbox_error"
+
+
+def test_violation_kind_defaults_to_budget_on_worktree_breach():
+    # D1: the disk-floor and worktree-budget breach paths never touch
+    # violation_kind explicitly -- it stays at its "budget" default so
+    # _after_bash/finalize raise BudgetExceeded / report budget_exceeded,
+    # exactly as before D1.
+    kills = []
+    wdg = Watchdog(kill=lambda r: kills.append(r), sample=lambda: (3 * 1024 * 1024, 10),
+                    storage_paths=[], min_free_mb=1, max_worktree_mb=2048,
+                    max_worktree_files=200_000)
+    wdg.check_worktree_budget_once()
+    assert kills  # sanity: the breach actually fired
+    assert wdg.violation_kind == "budget"
+
+
+def test_violation_kind_defaults_to_budget_on_disk_floor_breach(tmp_path, monkeypatch):
+    import dirtywork.sandbox.watchdog as wd
+
+    class FakeUsage:
+        free = 100 * 1024 * 1024  # below the floor
+
+    monkeypatch.setattr(wd.shutil, "disk_usage", lambda path: FakeUsage())
+    kills = []
+    wdg = wd.Watchdog(
+        kill=lambda reason: kills.append(reason), sample=lambda: (0, 0),
+        storage_paths=[tmp_path], min_free_mb=2048, max_worktree_mb=2048,
+        max_worktree_files=200_000, clock=lambda: 0.0, sleep=lambda s: None,
+    )
+    result = wdg._check_disk()
+    assert result is True
+    assert wdg.violation_kind == "budget"
 
 
 def test_disk_check_failure_counter_resets_on_success(tmp_path, monkeypatch):

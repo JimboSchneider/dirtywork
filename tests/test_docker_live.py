@@ -183,6 +183,57 @@ def test_docker_live_process_flood_triggers_reset(tmp_path, monkeypatch, capsys)
 
 
 @pytest.mark.docker
+def test_docker_live_pid_flood_past_limit_recovers_or_fails_closed(tmp_path, monkeypatch, capsys):
+    # D3 (final-rereview follow-up 1): restore live coverage of spec §6's
+    # closing claim -- "fork bombs are contained by --pids-limit and
+    # cleared by the reap/reset" -- at a flood size that actually crosses
+    # the default --pids-limit 512. test_docker_live_process_flood_triggers_reset
+    # above deliberately stays at 40 (well under the cap) to isolate plain
+    # stray-process detect-and-recover from this race; see that test's
+    # docstring for why. D1+D2 make the terminal outcome deterministic
+    # either way once the cap is actually crossed: "completed" with at
+    # least one sandbox_reset in the transcript (reap/reset recovered), or
+    # sandbox_error/budget_exceeded (the watchdog's own worktree sample
+    # failed closed -- spec §6's "second failure -> sandbox_error" -- or a
+    # genuine budget breach). Either is an acceptable terminal contract; a
+    # hang is not, and neither outcome may leave a container behind.
+    import time
+    repo = _make_live_repo(tmp_path)
+    responses = [
+        _resp(tool_calls=[_call("c1", "bash", {
+            "command": "for i in $(seq 1 600); do sleep 30 & done; echo spawned",
+            "timeout": 60,
+        })]),
+        _resp(tool_calls=[_call("c2", "bash", {"command": "echo alive"})]),
+        _resp(content="done"),
+    ]
+    start = time.monotonic()
+    _run_docker_main(monkeypatch, tmp_path, repo, responses)
+    elapsed = time.monotonic() - start
+    payload = json.loads(capsys.readouterr().out)
+
+    assert elapsed < 90, f"run took {elapsed:.1f}s -- must reach a terminal state, not hang"
+    assert payload["status"] in ("completed", "sandbox_error", "budget_exceeded")
+
+    slug = Path(payload["worktree"]).name
+    assert slug.startswith("dw-")
+    slug = slug[len("dw-"):]
+    leftover = subprocess.run(
+        ["docker", "ps", "-a", "--filter", f"label=dirtywork.run={slug}", "--format", "{{.Names}}"],
+        capture_output=True, text=True,
+    ).stdout
+    assert leftover.strip() == "", f"leftover container(s) after the run: {leftover!r}"
+
+    if payload["status"] == "completed":
+        events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
+        reset_events = [e for e in events if e["event"] == "sandbox_reset"]
+        assert reset_events  # reap/reset recovered from the flood
+        bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
+        assert len(bash_results) >= 2
+        assert "alive" in bash_results[1]  # the follow-up bash call still ran
+
+
+@pytest.mark.docker
 def test_docker_live_export_reports_nested_git_and_escaping_symlink_and_skips_ignored(
         tmp_path, monkeypatch, capsys):
     repo = _make_live_repo(tmp_path)

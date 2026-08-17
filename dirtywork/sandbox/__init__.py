@@ -18,7 +18,12 @@ class RunArtifacts:
     "ok", f"export_failed: {reason}", or "n/a" (host mode never exports).
     watchdog_violation is docker-mode only: the reason string the Watchdog
     recorded (and killed the container for) if that happened after the last
-    bash call returned -- None otherwise, and always None in host mode."""
+    bash call returned -- None otherwise, and always None in host mode.
+    watchdog_violation_kind (D1) is Watchdog.violation_kind at the moment
+    watchdog_violation was captured -- "sandbox_error" or "budget" -- and is
+    only meaningful (non-None) when watchdog_violation itself is set;
+    _final_status uses it to report "sandbox_error" instead of the default
+    "budget_exceeded" for a watchdog-thread sample failure."""
     diff_stat: str = ""
     untracked: str = ""
     patch_path: str | None = None
@@ -28,6 +33,7 @@ class RunArtifacts:
     dropped_git_entries: list = field(default_factory=list)
     export_status: str = "ok"
     watchdog_violation: str | None = None
+    watchdog_violation_kind: str | None = None
 
 
 class Sandbox(Protocol):

@@ -41,6 +41,14 @@ class Watchdog(threading.Thread):
         self.clock = clock
         self.sleep = sleep
         self.violation: str | None = None
+        # D1: what kind of violation `self.violation` is. "budget" (the
+        # default) covers both breach paths below (disk floor,
+        # check_worktree_budget_once) -- neither ever overwrites this.
+        # run()'s own exception handler is the one place that sets
+        # "sandbox_error": a sample()/`_check_disk` exception is a sandbox
+        # failure, not a budget breach, and DockerSandbox needs to tell the
+        # two apart to raise/report the correct terminal status.
+        self.violation_kind: str = "budget"
         self._bash_in_flight = False
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
@@ -115,6 +123,7 @@ class Watchdog(threading.Thread):
             # violation and kill, same as every other breach path, so
             # DockerSandbox._after_bash surfaces it on the next tool call.
             self.violation = f"watchdog: {e}"
+            self.violation_kind = "sandbox_error"
             try:
                 self.kill(self.violation)
             except Exception:

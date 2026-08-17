@@ -902,6 +902,25 @@ def test_bash_raises_budget_exceeded_when_watchdog_violation_already_set(started
         sb.bash("echo ok")
 
 
+def test_bash_raises_sandbox_error_when_violation_kind_is_sandbox_error(started):
+    # D1: a watchdog-thread sample() failure is a sandbox failure, not a
+    # budget breach -- _after_bash must raise SandboxError, not
+    # BudgetExceeded, when the consumed violation's kind says so.
+    sb, fake, run_dir = started
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+    fake.script(["exec"], _ok(b"ok\n"))
+    sb.watchdog.violation = "watchdog: worktree budget sample failed twice in a row"
+    sb.watchdog.violation_kind = "sandbox_error"
+
+    with pytest.raises(SandboxError, match="worktree budget sample failed twice"):
+        sb.bash("echo ok")
+
+    # consumed, not left for a later reader, and reset to the default kind
+    assert sb.watchdog.violation is None
+    assert sb.watchdog.violation_kind == "budget"
+
+
 def test_bash_watchdog_detects_over_cap_sample_and_raises(started):
     from dirtywork.budget import BudgetExceeded
     sb, fake, run_dir = started
@@ -938,6 +957,47 @@ def test_sample_worktree_failure_twice_raises_sandboxerror(started):
 
     with pytest.raises(SandboxError, match="sample failed twice"):
         sb.bash("echo ok")
+
+
+def test_sample_worktree_no_retry_when_reset_already_happened_this_call(started):
+    # D2: _sample_worktree is also the watchdog THREAD's own `sample`
+    # callback (Watchdog.check_worktree_budget_once(), ticking every 5s
+    # while a bash call is in flight) -- independent of _after_bash, which
+    # only calls it when no reset has happened yet this call. So the race
+    # this closes is thread-vs-thread: _reap() (main thread, end of a
+    # PREVIOUS call within the same still-in-flight watchdog window) or an
+    # earlier _sample_worktree call already reset the container and set
+    # _reset_this_call, and the watchdog thread's sample ticks again before
+    # that flag clears. The old guard (`attempt == 0 and not
+    # self._reset_this_call`) would retry immediately with no fresh reset
+    # in between, against a container that may still be mid-reset. The new
+    # rule: this attempt is itself already "post-reset" (a reset already
+    # happened this call) -- one failure is enough to raise, with no second
+    # exec and no second reset.
+    sb, fake, run_dir = started
+    fake.script(_SAMPLE_ARGV, _fail(b"exec failed: pid saturation"))  # always fails
+    sb._reset_this_call = True  # simulate: a reset already happened earlier this call
+
+    with pytest.raises(SandboxError, match="worktree budget sample failed"):
+        sb._sample_worktree()
+
+    sample_calls = [c for c in fake.calls if list(c[0]) == _SAMPLE_ARGV]
+    assert len(sample_calls) == 1  # exactly one measured attempt -- no retry
+    assert not any(c[0][0] == "kill" for c in fake.calls)  # no reset triggered by this call
+
+
+def test_sample_worktree_still_retries_once_with_reset_when_no_reset_yet_this_call(started):
+    # D2 companion: the normal (no prior reset) path is unchanged -- one
+    # failed attempt, exactly one reset, one re-measure.
+    sb, fake, run_dir = started
+    fake.script(_SAMPLE_ARGV, [_fail(b"exec failed: pid saturation"), _ok(b"1024\t/work\n5\n")])
+
+    result = sb._sample_worktree()
+
+    assert result == (1024, 5)
+    sample_calls = [c for c in fake.calls if list(c[0]) == _SAMPLE_ARGV]
+    assert len(sample_calls) == 2  # pre-reset attempt + post-reset re-measure
+    assert sum(1 for c in fake.calls if c[0][0] == "kill") == 1  # exactly one reset
 
 
 def test_finalize_stops_container_calls_export_run_and_host_read_tree(started, monkeypatch):
@@ -1041,9 +1101,31 @@ def test_finalize_consumes_watchdog_violation_and_still_exports(started, monkeyp
     artifacts = sb.finalize()
 
     assert artifacts.watchdog_violation == "host free space below 2048 MB"
+    assert artifacts.watchdog_violation_kind == "budget"  # default kind, unset by this test
     assert artifacts.export_status == "ok"  # export still ran to completion
     assert export_calls  # export_run was actually called
     assert sb.watchdog.violation is None  # consumed, not left for a later reader
+    assert sb.watchdog.violation_kind == "budget"  # kind reset to its default too
+
+
+def test_finalize_reports_watchdog_violation_kind_sandbox_error(started, monkeypatch):
+    # D1: finalize() must also consume the kind so _final_status can map a
+    # watchdog-thread sample failure to "sandbox_error" instead of the
+    # default "budget_exceeded".
+    from dirtywork.sandbox import RunArtifacts
+    sb, fake, run_dir = started
+    sb.watchdog.violation = "watchdog: worktree budget sample failed twice in a row"
+    sb.watchdog.violation_kind = "sandbox_error"
+
+    import dirtywork.sandbox.docker as docker_mod
+    monkeypatch.setattr(docker_mod.export, "export_run",
+                         lambda cfg, **kw: RunArtifacts(export_status="ok"))
+    monkeypatch.setattr(docker_mod, "host_read_tree", lambda worktree: None)
+
+    artifacts = sb.finalize()
+
+    assert artifacts.watchdog_violation == "watchdog: worktree budget sample failed twice in a row"
+    assert artifacts.watchdog_violation_kind == "sandbox_error"
 
 
 def test_finalize_reports_no_watchdog_violation_when_none_occurred(started, monkeypatch):
@@ -1058,3 +1140,4 @@ def test_finalize_reports_no_watchdog_violation_when_none_occurred(started, monk
     artifacts = sb.finalize()
 
     assert artifacts.watchdog_violation is None
+    assert artifacts.watchdog_violation_kind is None

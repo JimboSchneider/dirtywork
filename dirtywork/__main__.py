@@ -201,7 +201,13 @@ def _final_status(result) -> str:
     takes precedence over it — the budget breach is the actual cause of the
     run ending, same as a BudgetExceeded raised mid-run already is; an
     export failure downstream of that kill is a secondary symptom. Same
-    only-replaces-'completed' rule applies."""
+    only-replaces-'completed' rule applies.
+
+    D1: `watchdog_violation_kind` (RunArtifacts.watchdog_violation_kind,
+    threaded through by DockerSandbox.finalize()) picks which status the
+    violation maps to -- "sandbox_error" for a watchdog-thread sample()
+    failure (spec §6's second-failure case), "budget_exceeded" (the
+    default kind, "budget") for every other watchdog kill."""
     extra = result.extra or {}
     if extra.get("finalize_error"):
         # Only replace completed with export_failed; keep other statuses as-is
@@ -211,7 +217,8 @@ def _final_status(result) -> str:
         return result.status
     if extra.get("watchdog_violation"):
         if result.status == "completed":
-            return "budget_exceeded"
+            mapped = "sandbox_error" if extra.get("watchdog_violation_kind") == "sandbox_error" else "budget_exceeded"
+            return mapped
         return result.status
     export_status = extra.get("export_status", "")
     if isinstance(export_status, str) and export_status.startswith("export_failed"):
@@ -422,6 +429,7 @@ def main(argv: list | None = None) -> int:
                 "dropped_git_entries": artifacts.dropped_git_entries,
                 "export_status": artifacts.export_status,
                 "watchdog_violation": artifacts.watchdog_violation,
+                "watchdog_violation_kind": artifacts.watchdog_violation_kind,
             }
 
         runner = Runner(
@@ -471,6 +479,7 @@ def main(argv: list | None = None) -> int:
         patch_path=extra.get("patch_path"),
         finalize_error=finalize_error,
         watchdog_violation=extra.get("watchdog_violation"),
+        watchdog_violation_kind=extra.get("watchdog_violation_kind"),
     )
 
     print(json.dumps(_emit_result(
@@ -478,6 +487,7 @@ def main(argv: list | None = None) -> int:
         run_dir=run_dir, turns=result.turns, usage=result.usage, final_message=result.final_message,
         base_commit=base_commit, finalize_error=finalize_error,
         watchdog_violation=extra.get("watchdog_violation"),
+        watchdog_violation_kind=extra.get("watchdog_violation_kind"),
     ), indent=2))
     return 0 if final_status == "completed" else 1
 
