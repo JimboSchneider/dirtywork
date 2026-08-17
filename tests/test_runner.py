@@ -925,3 +925,16 @@ def test_runner_context_window_defaults_from_table(parts):
     wt, executor, transcript, tmp = parts
     r = Runner(FakeClient([]), executor, transcript, model="qwen/qwen3-coder-next")
     assert r.context_window == CONTEXT_WINDOWS["qwen/qwen3-coder-next"]
+
+
+def test_finish_after_idle_turns_completes_not_stalled(parts):
+    wt, executor, transcript, tmp = parts
+    idle = _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])
+    done = _resp(tool_calls=[_call("f", "finish", {"summary": "all done"})])
+    client = FakeClient([idle, idle, idle, done])
+    r = Runner(client, executor, transcript, model="m", stall_turns=4)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.final_message == "all done"
+    assert result.turns == 4

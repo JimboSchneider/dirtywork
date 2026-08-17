@@ -443,9 +443,6 @@ class Runner:
                         return finish("model_error", abort_reason)
 
                 if pending_finish is not None:
-                    stalled = check_progress()
-                    if stalled is not None:
-                        return stalled
                     return finish("completed", pending_finish)
 
                 stalled = check_progress()
