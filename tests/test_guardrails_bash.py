@@ -121,7 +121,24 @@ def test_build_env_relocates_home(tmp_path, monkeypatch):
     assert env["HOME"] != os.environ.get("HOME")
     assert "AWS_SECRET_ACCESS_KEY" not in env
     for key in env:
-        assert key in ("PATH", "HOME", "TERM", "LANG", "TMPDIR")
+        assert key in ("PATH", "HOME", "TERM", "LANG", "TMPDIR", "PYTHONPATH")
+
+
+def test_build_env_exposes_operator_user_site_read_only(tmp_path, monkeypatch):
+    import site
+    monkeypatch.setattr(site, "ENABLE_USER_SITE", True)
+    monkeypatch.setattr(site, "getusersitepackages", lambda: "/Users/op/Library/Python/3.9/lib/python/site-packages")
+    monkeypatch.setenv("PYTHONPATH", "/operator/secret/path")
+    env = build_env(home=tmp_path)
+    assert env["PYTHONPATH"] == "/Users/op/Library/Python/3.9/lib/python/site-packages"
+    assert env["HOME"] == str(tmp_path)          # pip --user would still write into the worktree
+
+
+def test_build_env_no_pythonpath_when_user_site_disabled(tmp_path, monkeypatch):
+    import site
+    monkeypatch.setattr(site, "ENABLE_USER_SITE", False)
+    env = build_env(home=tmp_path)
+    assert "PYTHONPATH" not in env
 
 
 def test_bash_home_is_worktree_not_operator_home(tmp_path):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import site
 from pathlib import Path
 
 
@@ -192,10 +193,29 @@ def build_env(home: str | Path) -> dict:
     path (``~/.ssh``, ``~/.aws``, ``~/.netrc``). Build caches that key on ``$HOME``
     land in the worktree as a result, which is the intended, more-hermetic trade.
 
+    The operator's Python user site-packages (``pip install --user`` — where
+    pytest usually lives) is put on PYTHONPATH so it stays importable under the
+    redirected HOME; writes still go to the worktree because ``pip --user`` keys
+    on HOME, not PYTHONPATH.
+
     This is NOT a sandbox: bash is a general shell and can still reference absolute
     host paths (``cat /etc/...``). See SECURITY.md for the real containment story.
     """
     keep = ("PATH", "TERM", "LANG", "TMPDIR")
     env = {k: os.environ[k] for k in keep if k in os.environ}
     env["HOME"] = str(home)
+    user_site = _operator_user_site()
+    if user_site is not None:
+        env["PYTHONPATH"] = user_site
     return env
+
+
+def _operator_user_site() -> str | None:
+    """The operator's per-user site-packages directory, or None when user
+    site is disabled for this interpreter (e.g. -s / PYTHONNOUSERSITE)."""
+    if not site.ENABLE_USER_SITE:
+        return None
+    try:
+        return site.getusersitepackages()
+    except Exception:  # pragma: no cover - platform oddities; never block a run on this
+        return None
