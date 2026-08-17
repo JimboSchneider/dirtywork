@@ -9,8 +9,7 @@ import pytest
 from dirtywork.llm import LLMTimeout
 from dirtywork.runner import (
     DEFAULT_WINDOW,
-    FAILURE_KINDS,
-    FINISH_TOOL,
+    FailureTracker,
     MAX_TOTAL_CONSECUTIVE_FAILURES,
     RunResult,
     Runner,
@@ -641,7 +640,6 @@ def test_unknown_tool_error_mentions_finish(parts):
 
 
 def test_failure_tracker_per_kind_threshold():
-    from dirtywork.runner import FailureTracker
     t = FailureTracker()
     assert t.record("unknown_tool") is None
     assert t.record("malformed_args") is None
@@ -651,7 +649,6 @@ def test_failure_tracker_per_kind_threshold():
 
 
 def test_failure_tracker_total_threshold_across_kinds():
-    from dirtywork.runner import FailureTracker
     t = FailureTracker()
     seq = ["malformed_args", "unknown_tool", "bad_args", "malformed_args", "unknown_tool"]
     for k in seq:
@@ -660,7 +657,6 @@ def test_failure_tracker_total_threshold_across_kinds():
 
 
 def test_failure_tracker_reset_clears_all():
-    from dirtywork.runner import FailureTracker
     t = FailureTracker()
     t.record("unknown_tool"); t.record("unknown_tool")
     t.reset()
@@ -669,7 +665,6 @@ def test_failure_tracker_reset_clears_all():
 
 
 def test_failure_tracker_rejects_unknown_kind():
-    from dirtywork.runner import FailureTracker
     with pytest.raises(ValueError):
         FailureTracker().record("nope")
 
