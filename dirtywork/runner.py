@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -49,6 +50,64 @@ class FailureTracker:
         for kind in self.counts:
             self.counts[kind] = 0
         self.total = 0
+
+
+# These tags are built by concatenation ON PURPOSE: several local models' chat
+# templates parse these exact tags in their own output (Qwen3-coder's tool-call
+# XML, think-tag stripping), so a worker model editing this file through its
+# tool channel could not emit them literally. Keep them concatenated.
+_THINK_OPEN = "<" + "think>"
+_THINK_CLOSE = "</" + "think>"
+_THINK_RE = re.compile(re.escape(_THINK_OPEN) + r".*?(?:" + re.escape(_THINK_CLOSE) + r"|\Z)",
+                       re.DOTALL)
+_TEXT_TOOL_MARKERS = tuple("<" + m for m in ("tool_call>", "function=", "function_call>", "|tool_call|>"))
+
+NUDGES = {
+    "truncated": ("Your reply was cut off at the token limit. Continue with smaller steps — "
+                  "emit one tool call at a time and write large files in pieces."),
+    "empty": ("Your reply contained no tool call and no answer. Continue the task with a "
+              "tool call, or call finish(summary=...) if the task is complete."),
+    "text_tool_call": ("Your reply contained a tool call written as text; the harness only "
+                       "executes tool calls made through the tools API. Re-issue it as a "
+                       "real tool call."),
+}
+
+
+def strip_think(text) -> str:
+    """Drop every think block (an unterminated opening tag drops to the end)."""
+    if not isinstance(text, str):
+        return ""
+    return _THINK_RE.sub("", text).strip()
+
+
+def _looks_like_tool_json(text: str) -> bool:
+    """A JSON object with a string "name" and an "arguments" key anywhere in
+    the text — a tool call the model wrote as prose instead of calling."""
+    if '"name"' not in text or '"arguments"' not in text:
+        return False
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    while start != -1:
+        try:
+            obj, _ = decoder.raw_decode(text[start:])
+        except ValueError:
+            obj = None
+        if isinstance(obj, dict) and isinstance(obj.get("name"), str) and "arguments" in obj:
+            return True
+        start = text.find("{", start + 1)
+    return False
+
+
+def classify_text_reply(content, finish_reason) -> str:
+    """Spec §1.2: what a reply with no tool calls means."""
+    if finish_reason == "length":
+        return "truncated"
+    text = strip_think(content)
+    if not text:
+        return "empty"
+    if any(marker in text for marker in _TEXT_TOOL_MARKERS) or _looks_like_tool_json(text):
+        return "text_tool_call"
+    return "answer"
 
 
 def _valid_tool_call(tc) -> bool:
@@ -221,8 +280,18 @@ class Runner:
                         clean_msg["tool_calls"] = tool_calls
                     messages.append(clean_msg)
                 else:
-                    messages.append(msg)
-                    return finish("completed", msg.get("content") or "")
+                    content = msg.get("content") if isinstance(msg.get("content"), str) else ""
+                    kind = classify_text_reply(msg.get("content"), finish_reason)
+                    if kind == "answer":
+                        messages.append(msg)
+                        return finish("completed", content)
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({"role": "user", "content": NUDGES[kind]})
+                    self.transcript.write("nudge", kind=kind, turn=turns)
+                    abort_reason = failures.record("empty_reply")
+                    if abort_reason is not None:
+                        return finish("model_error", abort_reason)
+                    continue
 
                 abort_reason = None
                 for _ in range(malformed_count):

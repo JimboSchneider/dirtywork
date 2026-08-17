@@ -11,10 +11,13 @@ from dirtywork.runner import (
     DEFAULT_WINDOW,
     FailureTracker,
     MAX_TOTAL_CONSECUTIVE_FAILURES,
+    NUDGES,
     RunResult,
     Runner,
     TRIM_MARKER,
     _valid_tool_call,
+    classify_text_reply,
+    strip_think,
     trim_messages,
 )
 from dirtywork.sandbox.host import HostSandbox
@@ -681,6 +684,118 @@ def test_mixed_failure_kinds_do_not_abort_at_three(parts):
     transcript.close()
     assert result.status == "completed"
     assert result.turns == 4
+
+
+# NOTE: the tags below are built by concatenation ON PURPOSE. Local models' chat
+# templates parse these exact tags in their own output (Qwen3-coder's tool-call XML
+# uses function=/parameter= XML tags; think tags are stripped by the server), so a
+# worker model editing this file through its tool channel cannot emit them literally.
+# Keep every occurrence of these tags in this file and in runner.py concatenated.
+def _tag(name: str) -> str:
+    return "<" + name + ">"
+
+
+_THINK = _tag("think")
+_THINK_END = _tag("/think")
+
+
+@pytest.mark.parametrize("content,finish_reason,expected", [
+    ("Done: all tests pass", None, "answer"),
+    ("Done", "stop", "answer"),
+    ("anything", "length", "truncated"),
+    ("", None, "empty"),
+    (None, None, "empty"),
+    ("   \n", None, "empty"),
+    (_THINK + "let me reason" + _THINK_END, None, "empty"),
+    (_THINK + "never closed the tag", None, "empty"),
+    (_THINK + "plan" + _THINK_END + "Done, wrote the file.", None, "answer"),
+    (_tag("tool_call") + '{"name":"bash"}' + _tag("/tool_call"), None, "text_tool_call"),
+    ("<" + 'function=read_file>{"path":"x"}' + _tag("/function"), None, "text_tool_call"),
+    ("<" + "|tool_call|>bash", None, "text_tool_call"),
+    (_tag("function_call") + "bash" + _tag("/function_call"), None, "text_tool_call"),
+    ('I will run {"name": "bash", "arguments": {"command": "ls"}} now', None, "text_tool_call"),
+    ('The config is {"name": "app", "version": 2}', None, "answer"),
+])
+def test_classify_text_reply(content, finish_reason, expected):
+    assert classify_text_reply(content, finish_reason) == expected
+
+
+def test_strip_think_removes_blocks():
+    assert strip_think(_THINK + "a" + _THINK_END + "x" + _THINK + "b" + _THINK_END + "y") == "xy"
+    assert strip_think(_THINK + "open") == ""
+    assert strip_think(None) == ""
+
+
+def test_empty_reply_is_nudged_not_completed(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content=""), _resp(content="done for real")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.turns == 2
+    assert result.final_message == "done for real"
+    second = client.requests[1]
+    assert second[-1]["role"] == "user" and second[-1]["content"] == NUDGES["empty"]
+    assert second[-2] == {"role": "assistant", "content": ""}
+    events = _events(tmp)
+    nudges = [e for e in events if e["event"] == "nudge"]
+    assert len(nudges) == 1
+    assert nudges[0]["kind"] == "empty" and nudges[0]["turn"] == 1
+
+
+def test_think_only_reply_is_nudged(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content=_THINK + "hmm" + _THINK_END), _resp(content="ok")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed" and result.turns == 2
+
+
+def test_text_tool_call_reply_is_nudged(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content=_tag("tool_call") + '{"name":"bash","arguments":{}}' + _tag("/tool_call")),
+                         _resp(content="ok")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed" and result.turns == 2
+    assert client.requests[1][-1]["content"] == NUDGES["text_tool_call"]
+
+
+def test_length_cutoff_without_tool_calls_is_not_completed(parts):
+    wt, executor, transcript, tmp = parts
+    cut = {"choices": [{"message": {"role": "assistant", "content": "I will now"},
+                        "finish_reason": "length"}],
+           "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    client = FakeClient([cut, _resp(content="ok")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed" and result.turns == 2
+    assert client.requests[1][-1]["content"] == NUDGES["truncated"]
+
+
+def test_three_empty_replies_abort_as_model_error(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content=""), _resp(content=""), _resp(content="")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+    assert result.final_message == "aborted after 3 consecutive empty_reply failures"
+
+
+def test_successful_call_resets_empty_reply_count(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content=""), _resp(content=""),
+                         _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})]),
+                         _resp(content=""), _resp(content=""), _resp(content="done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed" and result.turns == 6
 
 
 def test_abort_message_names_the_kind(parts):
