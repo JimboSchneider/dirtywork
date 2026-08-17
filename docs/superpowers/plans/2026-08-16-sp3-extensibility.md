@@ -18,7 +18,7 @@ Revision 1 of this plan was written against pre-SP2.5 code. SP2.5 shipped as v0.
 
 | Task | What changed in the plan | Why |
 |---|---|---|
-| **All** | Test commands are `python3 -m pytest -q`; the green baseline is **585 unit tests** (plus 12 `-m docker` live tests). Line-number references replaced by function names. | R9 |
+| **All** | Test commands are `python3 -m pytest -q`; the green baseline is **585 unit tests** (13 `docker` + 3 `live` deselected). Line-number references replaced by function names. | R9 |
 | **All** | "Six tools" → **seven** everywhere (`finish` shipped in SP2.5, `dirtywork/tools.py:TOOL_SCHEMAS`). | R2 / shipped `tools.py` |
 | **1** | `ToolSpec` gains `terminal: bool = False`. `ToolResult` gains `failure: str \| None = None` (carries the `FailureTracker` kind: `"unknown_tool"`/`"bad_args"`, `None` otherwise) so SP2.5's per-kind abort messages survive the move off `except KeyError`/`except TypeError`. `ToolRegistry` gains `spec(name)`, `canonical_args(name, args)`, `transcript_preview(name, text)`. | R2, R3; shipped `runner.FailureTracker`/`FAILURE_KINDS`, `ProgressTracker.note_call` |
 | **2** | `execute()` **drops** unknown parameters instead of rejecting them (deliberate SP1 fix, commit `23a9c22`, regression-tested by `test_executor_drops_unknown_tool_args`) — a documented, deliberate deviation from spec §1's "rejects unknown parameters". Unknown-tool text keeps the shipped wording incl. `To end the run call finish(summary=...)`. A `TypeError` raised by `spec.fn` maps to `failure="bad_args"` with today's message. Deadline-exceeded and `BLOCKED:` results carry `failure=None` (they reset the strike counter today). Per-tool `max_output_chars` is sized **above** each tool's own `_cap` plus its note text so the registry never re-truncates a shipped message. `Caps.transcript` is genuinely enforced, via `ToolRegistry.transcript_preview` (`preview` = today's 2000-char cap). `canonical_args` tests move here from `tests/test_runner.py`. | R1, R3; shipped `tools.ToolExecutor`, `tools._cap`, `MAX_BASH_CHARS` |
@@ -88,7 +88,7 @@ bench/
     node-add-cli-flag/            # NEW — Task 13
     sh-fix-script/                # NEW — Task 13
 pyproject.toml                    # MODIFIED — Task 4 (packages += "dirtywork.providers")
-README.md                         # MODIFIED — Task 8 (schema pointer), 9–15 (runs/bench), 16 (--allow-commit)
+README.md                         # MODIFIED — Task 8 (schema pointer), 16 (--allow-commit flag)
 tests/
   test_toolspec.py                # NEW — Task 1, 2
   test_builtin_tools.py           # NEW — Task 3
@@ -106,6 +106,7 @@ tests/
   test_docker_live.py             # MODIFIED — Task 6 (provider double; `-m docker`)
   test_transcript_schema.py       # NEW — Task 8
   test_runs.py                    # NEW — Task 9, 10, 11, 12
+  fake_docker.py                  # NEW — Task 9 (shared FakeCaptured double; no test_ prefix)
   test_bench.py                   # NEW — Task 13, 14, 15
   test_guardrails_bash.py         # MODIFIED — Task 16 only, and only if the guardrail changes
 ```
@@ -120,7 +121,7 @@ tests/
 
 **Interfaces:**
 - Consumes: nothing (stdlib `dataclasses`/`typing` only).
-- Produces: `MISSING` sentinel; `ParamSpec(type: str, description: str = "", default: Any = MISSING)`; `Caps(fs: str, network: bool = False, max_input_bytes: int | None = None, max_output_chars: int = 8000, timeout_default: int | None = None, timeout_max: int | None = None, transcript: str = "preview")`; `ToolSpec(name: str, description: str, params: dict, required: tuple, fn: Callable, caps: Caps, terminal: bool = False)`; `ToolResult(text: str, kind: str, failure: str | None = None)`; `ToolValidationError(Exception)`; `ToolRegistry(transcript=None)` with `.register(spec) -> None`, `.spec(name) -> ToolSpec | None` and `.schemas() -> list[dict]` (OpenAI wire shape).
+- Produces: `MISSING` sentinel; `ParamSpec(type: str, description: str = "", default: Any = MISSING)`; `Caps(fs: str, network: bool = False, max_input_bytes: int | None = None, max_output_chars: int = 8000, timeout_default: int | None = None, timeout_max: int | None = None, transcript: str = "preview")`; `ToolSpec(name: str, description: str, params: dict, required: tuple, fn: Callable, caps: Caps, terminal: bool = False)`; `ToolResult(text: str, kind: str, failure: str | None = None)`; `ToolValidationError(Exception)`; `ToolRegistry(transcript=None)` with `.register(spec) -> None`, `.spec(name) -> ToolSpec | None`, `.names() -> list[str]` and `.schemas() -> list[dict]` (OpenAI wire shape).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1322,7 +1323,7 @@ def default_registry(transcript=None) -> ToolRegistry:
 - [ ] **Step 5: Run the new test to verify it passes**
 
 Run: `python3 -m pytest tests/test_builtin_tools.py -q`
-Expected: 20 passed. If `test_schemas_match_the_frozen_v051_wire_contract` fails, the failure output shows the exact differing string — fix `builtin_tools.py`.
+Expected: 21 passed. If `test_schemas_match_the_frozen_v051_wire_contract` fails, the failure output shows the exact differing string — fix `builtin_tools.py`.
 
 - [ ] **Step 6: Remove `TOOL_SCHEMAS`/`_TOOL_PARAMS`/`ToolExecutor` from `tools.py`**
 
@@ -1587,14 +1588,14 @@ Expected: all pass, with the same number of `test_runner.py` tests as before min
 - [ ] **Step 11: Run the full suite**
 
 Run: `python3 -m pytest -q`
-Expected: 621 passed (612 after Task 2, +20 new in `test_builtin_tools.py`, −10 moved out of `test_tools_bash.py`, −1 moved out of `test_runner.py`)
+Expected: 622 passed (612 after Task 2, +21 new in `test_builtin_tools.py`, −10 moved out of `test_tools_bash.py`, −1 moved out of `test_runner.py`)
 
 - [ ] **Step 12: Commit**
 
 ```bash
 git add dirtywork/builtin_tools.py dirtywork/tools.py dirtywork/runner.py dirtywork/__main__.py \
         tests/fixtures/tool_schemas_v051.json tests/test_builtin_tools.py \
-        tests/test_tools_bash.py tests/test_runner.py tests/test_toolspec.py
+        tests/test_tools_bash.py tests/test_runner.py
 git commit -m "refactor: replace ToolExecutor/TOOL_SCHEMAS with ToolRegistry and builtin ToolSpecs"
 ```
 
@@ -1928,6 +1929,8 @@ git commit -m "feat: add Provider protocol, ToolCall/ChatResponse, get_provider"
 ```json
 {"choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": NaN, "completion_tokens": -5}}
 ```
+
+(`NaN` is deliberately non-standard JSON: stdlib `json.loads` accepts it, and real servers have emitted it.)
 
 - [ ] **Step 2: Write the shared contract suite**
 
@@ -2522,7 +2525,7 @@ class OpenAICompatClient:
 
     def __init__(self, base_url: str = DEFAULT_BASE_URL, timeout: int = 600, *,
                  http_json=http_json):
-        self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
+        self.base_url = (DEFAULT_BASE_URL if base_url is None else base_url).rstrip("/")
         self.timeout = timeout
         self._http_json = http_json
 
@@ -2559,7 +2562,7 @@ class OpenAICompatClient:
 - [ ] **Step 7: Run the new tests to verify they pass**
 
 Run: `python3 -m pytest tests/test_provider_openai.py -q`
-Expected: 30 passed (7 inherited from `ProviderContract` + 23 explicit, counting the two parametrized sets)
+Expected: 31 passed (7 inherited from `ProviderContract` + 24 explicit, counting the two parametrized sets)
 
 - [ ] **Step 8: Patch `tests/test_llm.py`**
 
@@ -2667,7 +2670,7 @@ Expected: all pass.
 - [ ] **Step 10: Run the full suite**
 
 Run: `python3 -m pytest -q`
-Expected: 667 passed (630 after Task 4, +30 provider-openai, +7 new llm tests). `tests/test_runner.py` and `tests/test_main.py` are untouched by this task: `Runner` still calls `client.chat(...)` on whatever object it was given, and `__main__` still imports `LMStudioClient` — which now resolves through the alias. (Every `test_main.py` test that patches `m.LMStudioClient.list_models` also patches `m.Runner.run` or fails before the run, so nothing drives a real `OpenAICompatClient` through the runner. `tests/test_live.py` and `tests/test_docker_live.py` are excluded by `addopts` here and are updated in Task 6.)
+Expected: 668 passed (630 after Task 4, +31 provider-openai, +7 new llm tests). `tests/test_runner.py` and `tests/test_main.py` are untouched by this task: `Runner` still calls `client.chat(...)` on whatever object it was given, and `__main__` still imports `LMStudioClient` — which now resolves through the alias. (Every `test_main.py` test that patches `m.LMStudioClient.list_models` also patches `m.Runner.run` or fails before the run, so nothing drives a real `OpenAICompatClient` through the runner. `tests/test_live.py` and `tests/test_docker_live.py` are excluded by `addopts` here and are updated in Task 6.)
 
 - [ ] **Step 11: Commit**
 
@@ -2676,6 +2679,10 @@ git add dirtywork/llm.py dirtywork/providers/openai_compat.py tests/provider_con
         tests/fixtures/providers/openai tests/test_provider_openai.py tests/test_llm.py
 git commit -m "feat: extract http_json, add provider contract suite and OpenAICompatClient"
 ```
+
+After this commit the CLI is runtime-broken until Task 6 lands (`Runner.run` still indexes the
+old dict shape); only `Runner.run`-patching doubles hide it — do not smoke-test `dirtywork run`
+between Tasks 5 and 6.
 
 ---
 
@@ -2851,11 +2858,24 @@ empty response list at its construction site:
     r = Runner(InterruptingClient([]), registry, sandbox, transcript, model="m")
 ```
 
-- [ ] **Step 2: Delete the thirteen moved tests and rebuild the six wire-dict tests**
+- [ ] **Step 2: Delete the twelve moved tests and rebuild the twelve tests that stay**
 
 Delete these test functions from `tests/test_runner.py` (their replacements already live in `tests/test_provider_openai.py`, per the table above): `test_arguments_null_treated_as_empty`, `test_valid_call_missing_type_field_canonicalized_on_resend`, `test_null_message_is_model_error`, `test_null_usage_tolerated`, `test_usage_ignores_non_finite_from_server`, `test_valid_tool_call_predicate`, `test_tool_calls_non_list_treated_as_absent`, `test_malformed_tool_call_null_entry_recovers`, `test_empty_object_tool_call_recovers`, `test_empty_id_tool_call_recovers`, `test_missing_function_name_tool_call_recovers`, `test_mixed_null_and_valid_tool_call_recovers`.
 
-Then replace these six tests, whose bodies built raw OpenAI dicts, with the versions below (same subject, same assertions, `ToolCall`-shaped inputs):
+Then replace these twelve tests, whose bodies built raw OpenAI dicts, with the versions below (same subject, same assertions, `ToolCall`-shaped inputs). Each replaces the shipped `tests/test_runner.py` test of the same name unless marked new:
+
+- `test_malformed_args_three_strikes` — replaces the shipped test at line 110
+- `test_malformed_tool_call_entry_recovers` — replaces the shipped test at line 206
+- `test_malformed_response_is_model_error` — replaces the shipped test at line 222
+- `test_plain_llm_error_escapes_the_runner` — new
+- `test_strike_counter_resets_on_success` — replaces the shipped test at line 250
+- `test_length_finish_reason_gives_helpful_hint` — replaces the shipped test at line 282
+- `test_length_cutoff_without_tool_calls_is_not_completed` — replaces the shipped test at line 774
+- `test_three_consecutive_malformed_tool_calls_aborts` — replaces the shipped test at line 480
+- `test_malformed_entries_on_stall_nudge_turn_send_one_merged_user_message` — replaces the shipped test at line 1010
+- `test_malformed_entry_abort_reports_first_threshold` — replaces the shipped test at line 1028
+- `test_mixed_failure_kinds_do_not_abort_at_three` — replaces the shipped test at line 681
+- `test_trim_counts_tool_call_arguments` — replaces the shipped test at line 156
 
 ```python
 def test_malformed_args_three_strikes(parts):
@@ -2940,6 +2960,18 @@ def test_length_finish_reason_gives_helpful_hint(parts):
     assert "cut off at the token limit" in tool_msgs[0]["content"]
 
 
+def test_length_cutoff_without_tool_calls_is_not_completed(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    cut = _resp(content="I will now", finish_reason="length",
+               usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider = FakeProvider([cut, _resp(content="ok")])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed" and result.turns == 2
+    assert provider.requests[1][-1]["content"] == NUDGES["truncated"]
+
+
 def test_three_consecutive_malformed_tool_calls_aborts(parts):
     wt, registry, sandbox, transcript, tmp = parts
     bad = _resp(tool_calls=[_bad_entry()])
@@ -2990,6 +3022,17 @@ def test_mixed_failure_kinds_do_not_abort_at_three(parts):
     transcript.close()
     assert result.status == "completed"
     assert result.turns == 4
+
+
+def test_trim_counts_tool_call_arguments():
+    msgs = [
+        {"role": "assistant", "content": None,
+         "tool_calls": [ToolCall(id="1", name="write_file", arguments=None,
+                                 error=None, raw_arguments="a" * 1000)]},
+    ]
+    # No role=="tool" messages exist to trim, so this only passes if the
+    # tool_call arguments are counted toward the budget in the first place.
+    assert trim_messages(msgs, char_budget=500) is False
 ```
 
 - [ ] **Step 3: Rewrite the four context-window tests in `tests/test_runner.py`**
@@ -3025,8 +3068,14 @@ def test_resolve_context_window_uses_the_real_openai_table():
 def test_resolve_context_window_rejects_bad_env(env):
     with pytest.raises(ValueError):
         resolve_context_window("m", None, env, FakeProvider([]))
+```
 
+Delete the shipped `test_runner_context_window_defaults_from_table` and
+`test_runner_context_window_zero_is_not_replaced_by_table` (`tests/test_runner.py:967` and
+`:1041` — both import `CONTEXT_WINDOWS` from `dirtywork.runner`, which no longer exists there),
+then append their renamed replacements:
 
+```python
 def test_runner_context_window_defaults_from_the_provider(parts):
     wt, registry, sandbox, transcript, tmp = parts
     r = Runner(FakeProvider([], context_window=65536), registry, sandbox, transcript,
@@ -3395,7 +3444,7 @@ def _preflight_llm(args):
         raise PreflightFailure(f"{e}\n{_ENDPOINT_HINTS.get(args.provider, '')}")
     if args.model not in models:
         hint = (f"Load it with: lms load {args.model}" if args.provider == "openai"
-                else f"Pick one of the models listed above with --model.")
+                else "Pick one of the models listed above with --model.")
         raise PreflightFailure(
             f"model '{args.model}' not loaded (loaded: {', '.join(models) or 'none'}). {hint}")
     return provider
@@ -3477,6 +3526,8 @@ from __future__ import annotations
 
 from dirtywork.providers.openai_compat import parse_chat_response
 
+DEFAULT_MODEL = "qwen/qwen3-coder-next"
+
 
 class DictProvider:
     """Base for a test double driven by OpenAI chat-completions bodies.
@@ -3532,12 +3583,9 @@ def patch_provider(monkeypatch, module, factory):
     provider name — the CLI test is exercising the run path, not the registry."""
     monkeypatch.setattr(module, "get_provider",
                         lambda name, base_url=None, timeout=600: factory(base_url))
-
-
-DEFAULT_MODEL = "qwen/qwen3-coder-next"
 ```
 
-Move the `DEFAULT_MODEL = "qwen/qwen3-coder-next"` assignment to the top of the module (above `DictProvider`) so `list_models` can see it; it must equal `dirtywork.__main__.DEFAULT_MODEL`, and `tests/test_main.py` already asserts through `m.DEFAULT_MODEL`, so add this test to `tests/test_providers.py`:
+`DEFAULT_MODEL` must equal `dirtywork.__main__.DEFAULT_MODEL`, and `tests/test_main.py` already asserts through `m.DEFAULT_MODEL`, so add this test to `tests/test_providers.py`:
 
 ```python
 def test_provider_double_default_model_matches_the_cli():
@@ -3710,7 +3758,7 @@ Expected: all pass.
 - [ ] **Step 12: Run the full suite**
 
 Run: `python3 -m pytest -q`
-Expected: 660 passed (667 after Task 5, −13 moved out of `test_runner.py`, +6 new: 1 runner, 1 providers, 5 CLI... adjust the number to what the suite actually reports and record it here — it must never be lower than 585 + everything added since).
+Expected: all pass. Record the actual number the suite reports here — it must never be lower than Task 5's recorded total.
 
 - [ ] **Step 13: Commit**
 
@@ -3811,6 +3859,8 @@ Written **after** the OpenAI adapter passes the contract suite, so the neutral h
 ```json
 {"content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn", "usage": {"input_tokens": NaN, "output_tokens": -5}}
 ```
+
+(`NaN` is deliberately non-standard JSON: stdlib `json.loads` accepts it, and real servers have emitted it.)
 
 - [ ] **Step 2: Write `tests/test_provider_anthropic.py`**
 
@@ -4646,6 +4696,7 @@ git commit -m "docs: document the v1/v2 transcript, run.json and stdout schema a
 **Files:**
 - Create: `dirtywork/runs.py`
 - Create: `tests/test_runs.py`
+- Create: `tests/fake_docker.py` (shared `FakeCaptured` double, no `test_` prefix: imported, never collected — same convention as `tests/provider_doubles.py`; Task 14 imports it too, per the DRY note below)
 - Modify: `dirtywork/__main__.py` (add `_add_runs_parsers(sub)`, call it from `_parse_args`, route `runs` in `main()`)
 - Modify: `tests/test_main.py` (two end-to-end dispatch tests)
 
@@ -4663,6 +4714,22 @@ Notes that shape this task (all verified against the code on this branch):
 
 - [ ] **Step 1: Write the failing tests**
 
+`tests/fake_docker.py` (no `test_` prefix — imported by `test_runs.py` and, from Task 14,
+`test_bench.py`; never collected itself, same convention as `tests/provider_doubles.py`):
+
+```python
+"""Shared FakeCaptured double for tests that stub dirtywork.sandbox.docker_cli.run."""
+from __future__ import annotations
+
+
+class FakeCaptured:
+    """Stand-in for dirtywork.procs.Captured: only returncode/output are read."""
+
+    def __init__(self, returncode, output=b""):
+        self.returncode = returncode
+        self.output = output
+```
+
 `tests/test_runs.py`:
 
 ```python
@@ -4670,13 +4737,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from dirtywork import rundir, runs
+
+from .fake_docker import FakeCaptured
 
 
 def _git(repo, *args):
@@ -4697,14 +4765,6 @@ def _write_run(runs_dir: Path, slug: str, data: dict) -> Path:
     run_dir.mkdir(parents=True)
     (run_dir / "run.json").write_text(json.dumps(data))
     return run_dir
-
-
-class _FakeCaptured:
-    """Stand-in for dirtywork.procs.Captured: only returncode/output are read."""
-
-    def __init__(self, returncode, output=b""):
-        self.returncode = returncode
-        self.output = output
 
 
 def test_cmd_list_prints_table_with_status_and_started(tmp_path, repo, monkeypatch, capsys):
@@ -4786,10 +4846,10 @@ def test_cmd_list_docker_state_columns(tmp_path, repo, monkeypatch, capsys):
 
     def fake_run(argv, timeout=None):
         if argv[:2] == ["ps", "-a"]:
-            return _FakeCaptured(0, b"dw-slug1\texited\n")
+            return FakeCaptured(0, b"dw-slug1\texited\n")
         if argv[:2] == ["volume", "ls"]:
-            return _FakeCaptured(0, b"dw-slug1-work\n")
-        return _FakeCaptured(1)
+            return FakeCaptured(0, b"dw-slug1-work\n")
+        return FakeCaptured(1)
 
     monkeypatch.setattr(runs.docker_cli, "run", fake_run)
     _write_run(tmp_path / "runs", "slug1", {
@@ -5228,7 +5288,7 @@ Expected: all green (585 baseline plus every test added by this plan so far)
 - [ ] **Step 9: Commit**
 
 ```bash
-git add dirtywork/runs.py dirtywork/__main__.py tests/test_runs.py tests/test_main.py
+git add dirtywork/runs.py dirtywork/__main__.py tests/test_runs.py tests/fake_docker.py tests/test_main.py
 git commit -m "feat: add 'dirtywork runs list' and 'dirtywork runs show'"
 ```
 
@@ -5243,7 +5303,7 @@ git commit -m "feat: add 'dirtywork runs list' and 'dirtywork runs show'"
 
 **Interfaces:**
 - Consumes: `dirtywork.sandbox.export.export_run(cfg, *, slug, base_commit, worktree, run_dir, objects_dir, image_ref, uid, gid, repo_label, run=docker_cli.run, popen=subprocess.Popen) -> RunArtifacts`; `dirtywork.sandbox.docker_cli.{run, validate_objects_dir, resolve_image, T_QUERY}`; `dirtywork.sandbox.docker_args.{DockerConfig, DEFAULT_IMAGE, repo_label, pin_for, volume_name}`; `dirtywork.resume.pid_alive`; `dirtywork.rundir.write_run_json`.
-- Produces: `dirtywork.runs.cmd_export(args) -> int`; CLI: `dirtywork runs export <slug> [--max-patch-mb 10] [--keep-volume]`.
+- Produces: `dirtywork.runs.cmd_export(args) -> int`; `dirtywork.runs._uid_gid() -> (int, int)` (Task 14's `bench.py` imports this rather than duplicating it); CLI: `dirtywork runs export <slug> [--max-patch-mb 10] [--keep-volume]`.
 
 Facts this task is built on (verified in `dirtywork/sandbox/export.py` and `dirtywork/sandbox/docker.py`):
 
@@ -5255,9 +5315,12 @@ Facts this task is built on (verified in `dirtywork/sandbox/export.py` and `dirt
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to the imports at the top of `tests/test_runs.py`:
+Add to the imports at the top of `tests/test_runs.py` (`os` is first needed by
+`test_cmd_export_live_run_rejected`'s `os.getpid()` below):
 
 ```python
+import os
+
 from dirtywork.sandbox import RunArtifacts
 ```
 
@@ -5284,7 +5347,7 @@ def _empty_worktree(repo: Path, slug: str) -> Path:
 
 
 def _export_ok(monkeypatch, artifacts):
-    monkeypatch.setattr(runs.docker_cli, "run", lambda *a, **k: _FakeCaptured(0))
+    monkeypatch.setattr(runs.docker_cli, "run", lambda *a, **k: FakeCaptured(0))
     monkeypatch.setattr(runs.docker_cli, "validate_objects_dir",
                         lambda repo: Path(repo) / ".git" / "objects")
     monkeypatch.setattr(runs.docker_cli, "resolve_image",
@@ -5324,7 +5387,7 @@ def test_cmd_export_missing_volume_exits_2(tmp_path, repo, monkeypatch, capsys):
     monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
     wt = _empty_worktree(repo, "slug1")
     _docker_run_json(tmp_path / "runs", "slug1", repo, wt)
-    monkeypatch.setattr(runs.docker_cli, "run", lambda *a, **k: _FakeCaptured(1))
+    monkeypatch.setattr(runs.docker_cli, "run", lambda *a, **k: FakeCaptured(1))
     rc = runs.cmd_export(argparse.Namespace(slug="slug1", max_patch_mb=10, keep_volume=False))
     assert rc == 2
     assert "does not exist" in capsys.readouterr().err
@@ -5563,14 +5626,14 @@ def _fake_docker_run(container_label=None, volume_label=None, rm_ok=True):
     `docker inspect --format` prints; None means 'no such object'."""
     def _run(argv, timeout=None):
         if argv[:1] == ["inspect"]:
-            return _FakeCaptured(1) if container_label is None else _FakeCaptured(
+            return FakeCaptured(1) if container_label is None else FakeCaptured(
                 0, container_label.encode())
         if argv[:2] == ["volume", "inspect"]:
-            return _FakeCaptured(1) if volume_label is None else _FakeCaptured(
+            return FakeCaptured(1) if volume_label is None else FakeCaptured(
                 0, volume_label.encode())
         if argv[:1] == ["rm"] or argv[:2] == ["volume", "rm"]:
-            return _FakeCaptured(0 if rm_ok else 1)
-        return _FakeCaptured(1)
+            return FakeCaptured(0 if rm_ok else 1)
+        return FakeCaptured(1)
     return _run
 
 
@@ -5846,7 +5909,7 @@ def _worktree_is_dirty(worktree: str) -> bool:
     return cp.returncode != 0 or bool(cp.stdout.strip())
 
 
-def _clean_worktree_and_branch(data: dict, slug: str, force: bool, log: list) -> bool:
+def _clean_worktree_and_branch(data: dict, force: bool, log: list) -> bool:
     """Returns True when the worktree was actually removed. A run whose worktree
     was taken over by a later resume (resumed_by set) keeps both the worktree and
     the branch -- they belong to the newest run in the chain."""
@@ -5945,7 +6008,7 @@ def _clean_one(slug: str, *, keep_transcript: bool, force: bool) -> list:
     if data.get("volume"):
         _clean_docker_resource("volume", data["volume"], repo, slug, log)
 
-    worktree_removed = _clean_worktree_and_branch(data, slug, force, log)
+    worktree_removed = _clean_worktree_and_branch(data, force, log)
     _clean_stashes(data, slug, worktree_removed, log)
     _clean_run_dir(run_dir, keep_transcript, log)
     return log
@@ -6454,10 +6517,10 @@ git commit -m "test: add three tiny bench fixture repos with bench.json"
 **Files:**
 - Create: `dirtywork/bench.py`
 - Modify: `dirtywork/__main__.py` (add `run_once(argv) -> dict`, `_add_bench_parsers(sub)`, the `bench` dispatch branch)
-- Modify: `tests/test_bench.py` (add the bench-module tests)
+- Modify: `tests/test_bench.py` (add the bench-module tests; imports `FakeCaptured` from `tests/fake_docker.py`, created in Task 9, rather than redefining it)
 
 **Interfaces:**
-- Consumes: `dirtywork.__main__.main` (through the new `run_once`); `dirtywork.rundir.{RUNS_DIR, read_run_json}`; `dirtywork.runner.FAILURE_KINDS`; `dirtywork.sandbox.docker_cli.{run, resolve_image, T_LIFECYCLE, T_EXPORT_STEP}`; `dirtywork.sandbox.docker_args.{DEFAULT_IMAGE, PATH_ENV, pin_for}`; the shipped `run` flags in `_add_run_flags` (`--model`, `--provider`, `--base-url`, `--sandbox`, `--keep-volume`, `--max-turns`, `--timeout`).
+- Consumes: `dirtywork.__main__.main` (through the new `run_once`); `dirtywork.rundir.{RUNS_DIR, read_run_json}`; `dirtywork.runner.FAILURE_KINDS`; `dirtywork.runs._uid_gid` (Task 10; not redefined here — see DRY note); `dirtywork.sandbox.docker_cli.{run, resolve_image, T_LIFECYCLE, T_EXPORT_STEP}`; `dirtywork.sandbox.docker_args.{DEFAULT_IMAGE, PATH_ENV, pin_for}`; the shipped `run` flags in `_add_run_flags` (`--model`, `--provider`, `--base-url`, `--sandbox`, `--keep-volume`, `--max-turns`, `--timeout`).
 - Produces: `dirtywork.__main__.run_once(argv: list) -> dict`; `dirtywork.bench.{BENCH_REPOS, BENCH_HOME, NUDGE_KINDS, available_tasks, parse_model_spec, run_one_bench_case, cmd_bench, dispatch}`; CLI: `dirtywork bench --models <spec>[,<spec>...] [--provider P] [--base-url URL] [--repeats N] [--tasks a,b] [--out FILE] [--max-turns N] [--timeout N]`.
 
 What each results row carries (ruling R7) and where every number comes from:
@@ -6490,11 +6553,7 @@ import argparse
 from dirtywork import bench
 from dirtywork.sandbox import docker_args
 
-
-class _FakeCaptured:
-    def __init__(self, returncode, output=b""):
-        self.returncode = returncode
-        self.output = output
+from .fake_docker import FakeCaptured
 
 
 def test_parse_model_spec_variants():
@@ -6569,8 +6628,8 @@ def _hash_lines(hashes, digest=None):
 def _acceptance_fake(hashes, digest=None, command_rc=0, hash_rc=0):
     def _run(argv, timeout=None):
         if "/usr/bin/sha256sum" in argv:
-            return _FakeCaptured(hash_rc, _hash_lines(hashes, digest))
-        return _FakeCaptured(command_rc)
+            return FakeCaptured(hash_rc, _hash_lines(hashes, digest))
+        return FakeCaptured(command_rc)
     return _run
 
 
@@ -6607,7 +6666,7 @@ def test_run_acceptance_gamed_when_a_harness_file_is_missing(monkeypatch):
     _patch_resolve_image(monkeypatch)
     # sha256sum exits 1 and prints nothing for a file the worker deleted
     assert bench._run_acceptance("sh-fix-script", data, "dw-x-work",
-                                 run=lambda argv, timeout=None: _FakeCaptured(1, b"")) == "gamed"
+                                 run=lambda argv, timeout=None: FakeCaptured(1, b"")) == "gamed"
 
 
 def test_run_acceptance_skipped_when_docker_is_unavailable(monkeypatch):
@@ -6643,7 +6702,7 @@ def _fake_run_environment(tmp_path, monkeypatch, *, payload, transcript_events=(
     monkeypatch.setattr(bench, "_stage_repo", lambda task: staged)
     monkeypatch.setattr(bench, "_run_acceptance", lambda *a, **k: "pass")
     monkeypatch.setattr(bench.docker_cli, "run",
-                        lambda argv, timeout=None: seen.append(argv) or _FakeCaptured(0))
+                        lambda argv, timeout=None: seen.append(argv) or FakeCaptured(0))
     return seen
 
 
@@ -6770,7 +6829,6 @@ The acceptance COMMAND always comes from /acceptance; the worker's own copy unde
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -6783,6 +6841,7 @@ from pathlib import Path
 from . import rundir
 from .__main__ import run_once
 from .runner import FAILURE_KINDS
+from .runs import _uid_gid
 from .sandbox import docker_args, docker_cli
 
 BENCH_REPOS = Path(__file__).resolve().parent.parent / "bench" / "repos"
@@ -6838,10 +6897,6 @@ def _stage_repo(task: str) -> Path:
     subprocess.run(["git", "-C", str(dest), *git_id, "commit", "-q", "-m", "bench fixture"],
                    check=True)
     return dest
-
-
-def _uid_gid():
-    return (os.getuid(), os.getgid()) if os.name == "posix" else (1000, 1000)
 
 
 def _acceptance_base_argv(volume: str, uid: int, gid: int, extra_mounts=()) -> list:
@@ -7113,7 +7168,15 @@ def run_once(argv: list) -> dict:
     preflight refusal shows up in the raised error rather than vanishing."""
     out_buf, err_buf = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
-        rc = main(argv)
+        try:
+            rc = main(argv)
+        except SystemExit as e:
+            # argparse calls sys.exit() on a bad flag (e.g. an invalid --provider
+            # choice). SystemExit is a BaseException, not an Exception, so left
+            # uncaught it would escape run_one_bench_case's `except Exception` and
+            # abort the whole bench sweep instead of recording one bench_error row.
+            raise RuntimeError(f"dirtywork exited via SystemExit({e.code}): "
+                               f"{err_buf.getvalue().strip()}") from None
     text = out_buf.getvalue()
     if not text.strip():
         raise RuntimeError(f"dirtywork produced no stdout JSON (exit {rc}): "
@@ -7164,7 +7227,7 @@ def _add_bench_parsers(sub) -> None:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `python3 -m pytest tests/test_bench.py -q`
-Expected: 17 passed
+Expected: 20 passed
 
 - [ ] **Step 6: Run the full suite**
 
@@ -7417,7 +7480,7 @@ def dispatch(args) -> int:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `python3 -m pytest tests/test_bench.py -q`
-Expected: 21 passed
+Expected: 24 passed
 
 - [ ] **Step 5: Add the `bench summarize` sub-subparser**
 
@@ -7618,9 +7681,15 @@ Rules:
 
 - [ ] **Step 4: Add the flag, the preflight refusal, and the resume inheritance**
 
-(a) In `_add_run_flags`, next to the other run-shaping flags:
-
+(a) In `_add_run_flags`, append after the last flag. Replace:
 ```python
+    p.add_argument("--keep-volume", action="store_true", default=False)
+    p.add_argument("--max-patch-mb", type=int, default=10)
+```
+with:
+```python
+    p.add_argument("--keep-volume", action="store_true", default=False)
+    p.add_argument("--max-patch-mb", type=int, default=10)
     p.add_argument("--allow-commit", action="store_true", default=None,
                    help="host mode only: tell the worker to commit its work as it goes "
                         "(resume inherits this from the run it continues)")
@@ -7645,11 +7714,19 @@ def _resolve_allow_commit(args) -> None:
     args.allow_commit = bool(args.allow_commit)
 ```
 
-(c) In `_load_resume_target`, alongside the existing prior-run defaults (`args.sandbox`, `args.model`, `args.image`):
-
+(c) In `_load_resume_target`, alongside the existing prior-run defaults (`args.sandbox`, `args.model`, `args.image`). Replace:
 ```python
+    if args.image is None:
+        args.image = prior.get("image") or DEFAULT_IMAGE
+    return prior
+```
+with:
+```python
+    if args.image is None:
+        args.image = prior.get("image") or DEFAULT_IMAGE
     if args.allow_commit is None:
         args.allow_commit = bool(prior.get("allow_commit", False))
+    return prior
 ```
 
 (d) In `main()`, call it right after the repo preflight, before the LLM preflight — so the refusal costs nothing and creates nothing:
@@ -7666,8 +7743,11 @@ def _resolve_allow_commit(args) -> None:
         "allow_commit": bool(args.allow_commit),
 ```
 
-(f) In `_execute`, pass it to the prompt builder:
-
+(f) In `_execute`, pass it to the prompt builder. Replace:
+```python
+        system_prompt = build_system_prompt(display_root, load_repo_context(ctx.repo, ctx.base_commit))
+```
+with:
 ```python
         system_prompt = build_system_prompt(display_root,
                                             load_repo_context(ctx.repo, ctx.base_commit),
@@ -7722,9 +7802,63 @@ git commit -m "feat: add --allow-commit (host mode only) so the worker can commi
 
 ---
 
+## Self-review: spec coverage (Tasks 1-8)
+
+Maps every bullet of spec §"Sub-project 3" sections 1-3 (tool registry, provider adapters,
+transcript schema versioning) to the task that implements it.
+
+| Spec item | Task(s) |
+|---|---|
+| §1 `ParamSpec`/`Caps`/`ToolSpec`/`ToolResult` dataclasses; `ToolRegistry.register`/`.spec`/`.names`/`.schemas() -> list[dict]` (OpenAI wire shape) | Task 1 |
+| §1 `ToolRegistry.execute(name, args, *, sandbox, deadline) -> ToolResult` — validates `required`/types (hand-rolled, no `jsonschema`), rejects unknown parameters, enforces `caps` (input size, output cap, timeout clamp to deadline and `timeout_max`), returns `kind="blocked"` for `BLOCKED:` results and writes the `guardrail_block` event | Task 2 |
+| §1 all tools run in the sandbox (`fn` receives it) — no host/sandbox domain flag | Task 2 (`execute` passes `sandbox` to `fn`), Task 3 (builtin `fn`s take it) |
+| §1 the six tools become `ToolSpec`s; `TOOL_SCHEMAS`, `ToolExecutor`, and the runner's ad-hoc `except TypeError` go away | Task 3 |
+| §2 `tests/provider_contract.py` shared suite (system prompt handling; a turn with parallel tool calls; a malformed tool call; tool results in order; `finish_reason` mapping; usage normalization; a `max_tokens` cut-off mid-call), run against recorded fixtures for both wire formats | Task 5 (suite + OpenAI fixtures), Task 7 (Anthropic fixtures) |
+| §2 `ToolCall`/`ChatResponse` dataclasses; `Provider` Protocol (`name`, `list_models`, `context_window`, `chat`) | Task 4 |
+| §2 the runner keeps a provider-neutral history and never sees wire shapes | Task 6 |
+| §2 `OpenAICompatClient` (rename of `LMStudioClient`, alias kept one release) absorbs `_valid_tool_call`/`_canonical_tool_call`/usage sanitizing as deserialization | Task 5 |
+| §2 `AnthropicClient`: urllib, `ANTHROPIC_API_KEY` read host-side, top-level `system`, `tool_use`/`tool_result` blocks, `/v1/models` for preflight, `input_tokens`/`output_tokens` → prompt/completion; written after the contract suite passes for the OpenAI adapter | Task 7 (after Task 5) |
+| §2 `trim_messages` operates on the neutral history | Task 6 |
+| §2 `CONTEXT_WINDOWS` becomes per-provider defaults with `--context-window` as an override | Task 6 (consumes Task 5's/Task 7's `provider.context_window`) |
+| §2 CLI `--provider openai\|anthropic` (default `openai`), `--base-url` (default per provider) | Task 6 |
+| §2 `run_start` records `provider` | Task 6 |
+| §3 `schema_version: 2` on `run_start` and in the stdout JSON | already shipped (SP2); regression-tested by Task 8 |
+| §3 `docs/transcript-schema.md` documents every event (`run_start`, `assistant`, `tool_result`, `guardrail_block`, `sandbox_reset`, `run_end`) and field | Task 8 |
+| §3 v1 = the pre-hardening shape, v2 = v1 + provenance + `sandbox` + `provider` + new statuses (`budget_exceeded`, `sandbox_error`, `export_failed`) + `run_end.diff_stat/escaping_symlinks/dropped_git_entries/worktree_bytes/worktree_files` | Task 8 |
+
+**Spec items in sections 1-3 not mapped to any task:** none.
+
+## Type consistency checklist (Tasks 1-8)
+
+Every name below is used exactly as declared, with the task that defines it and the task(s) that consume it.
+
+| Name | Defined in | Signature as used | Consumed by |
+|---|---|---|---|
+| `ParamSpec` | Task 1 (`toolspec.py`) | `ParamSpec(type: str, description: str = "", default: Any = MISSING)` | Task 3 (`builtin_tools.py` specs) |
+| `Caps` | Task 1 (`toolspec.py`) | `Caps(fs, network=False, max_input_bytes=None, max_output_chars=8000, timeout_default=None, timeout_max=None, transcript="preview")` | Task 2 (`execute` enforcement), Task 3 (builtin specs) |
+| `ToolSpec` | Task 1 (`toolspec.py`); gains `terminal: bool = False` | `ToolSpec(name, description, params, required, fn, caps, terminal=False)` | Task 2, Task 3, Task 6 (`registry.spec(name).terminal`) |
+| `ToolResult` | Task 1 (`toolspec.py`); gains `failure: str \| None = None` | `ToolResult(text, kind, failure=None)` | Task 2 (`execute` return), Task 6 (`ToolResult.failure` → `failures.record(...)`) |
+| `ToolValidationError` | Task 1 (`toolspec.py`) | `Exception` subclass | Task 2 |
+| `ToolRegistry.register`/`.spec`/`.names`/`.schemas` | Task 1 (`toolspec.py`) | `.register(spec) -> None`; `.spec(name) -> ToolSpec \| None`; `.names() -> list[str]`; `.schemas() -> list[dict]` | Task 3 (`default_registry`), Task 6 (runner) |
+| `ToolRegistry.execute`/`.canonical_args`/`.transcript_preview` | Task 2 (`toolspec.py`) | `.execute(name, args, *, sandbox, deadline) -> ToolResult`; `.canonical_args(name, args) -> dict`; `.transcript_preview(name, text) -> str` | Task 3, Task 6 (runner's `ProgressTracker`) |
+| `default_registry`/`BUILTIN_SPECS` | Task 3 (`builtin_tools.py`) | `default_registry(transcript=None) -> ToolRegistry` | Task 6 (runner), Task 8 (`test_transcript_schema.py`) |
+| `ToolCall` | Task 4 (`providers/__init__.py`) | `ToolCall(id: str, name: str, arguments: dict \| None, error: str \| None, raw_arguments: str = "")` | Task 5, Task 6, Task 7 |
+| `ChatResponse` | Task 4 (`providers/__init__.py`) | `ChatResponse(text: str, tool_calls: list, finish_reason: str \| None, usage: dict)` | Task 5, Task 6, Task 7 |
+| `Provider` (Protocol) | Task 4 (`providers/__init__.py`) | `name: str`; `list_models() -> list`; `context_window(model) -> int \| None`; `chat(model, history, tools, *, temperature, max_tokens, timeout) -> ChatResponse` | Task 5 (`OpenAICompatClient`), Task 6 (runner), Task 7 (`AnthropicClient`) |
+| `PROVIDER_NAMES`/`DEFAULT_BASE_URLS`/`get_provider` | Task 4 (`providers/__init__.py`) | `PROVIDER_NAMES = ("openai", "anthropic")`; `DEFAULT_BASE_URLS = {"openai": ..., "anthropic": ...}`; `get_provider(name: str, base_url: str \| None = None, timeout: int = 600) -> Provider` | Task 6 (CLI `--provider`/`--base-url`) |
+| `assistant_message`/`tool_message` | Task 4 (`providers/__init__.py`) | `assistant_message(text, tool_calls=None) -> dict`; `tool_message(call_id, text) -> dict` | Task 6 (runner history building) |
+| `parse_chat_response`/`OpenAICompatClient` | Task 5 (`providers/openai_compat.py`) | `parse_chat_response(body) -> ChatResponse`; `OpenAICompatClient(base_url=DEFAULT_BASE_URL, timeout=600, *, http_json=http_json)` | Task 6 (via `get_provider`), `tests/provider_doubles.py` (Task 6) |
+| `AnthropicClient` | Task 7 (`providers/anthropic.py`) | same `Provider` shape as `OpenAICompatClient` | Task 6 (via `get_provider`) |
+| `Runner` | Tasks 1-3 (ctor narrows to `client, registry, sandbox, transcript, model, ...`); redefined Task 6 | `Runner(provider, registry, sandbox, transcript, model, max_turns=40, timeout=1800, temperature=None, run_info=None, finalize=None, stall_turns=DEFAULT_STALL_TURNS, context_window=None)` | Task 6 (`__main__.py` call sites) |
+| `resolve_context_window` | shipped; extended Task 6 | `resolve_context_window(model, flag_value, env_value, provider=None) -> (int, source)` | Task 6 (`_resolve_context_window` in `__main__.py`) |
+| `RunContext.provider` | Task 6 (`__main__.py`) | new field on the existing `RunContext` dataclass | Task 6 call sites, `run.json`/stdout `provider` |
+| `run.json`/stdout `provider` | Task 6 | `"provider": ctx.provider` (was hard-coded `"openai"`) | Task 9 (`runs show` prints it), Task 14 (bench results rows) |
+
+---
+
 ## Self-review: spec coverage (Tasks 9-16)
 
-Tasks 1-8 are covered by part A's table. This one maps every bullet of spec §"Sub-project 3" sections 4 and 5, plus the SP2 pieces these tasks reuse and the one ruling-driven addition, to the task that implements it.
+Tasks 1-8 are covered by "Self-review: spec coverage (Tasks 1-8)" above. This one maps every bullet of spec §"Sub-project 3" sections 4 and 5, plus the SP2 pieces these tasks reuse and the one ruling-driven addition, to the task that implements it.
 
 | Spec item | Task(s) |
 |---|---|
@@ -7761,7 +7895,7 @@ Tasks 1-8 are covered by part A's table. This one maps every bullet of spec §"S
 
 ## Type consistency checklist (Tasks 9-16)
 
-Every name below is used exactly as declared, with the task that defines it and the task(s) that consume it. Names owned by Tasks 1-8 (registry, providers, `Runner`) are in part A's checklist.
+Every name below is used exactly as declared, with the task that defines it and the task(s) that consume it. Names owned by Tasks 1-8 (registry, providers, `Runner`) are in "Type consistency checklist (Tasks 1-8)" above.
 
 | Name | Defined in | Signature as used | Consumed by |
 |---|---|---|---|
