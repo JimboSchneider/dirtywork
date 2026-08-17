@@ -19,7 +19,7 @@ from dirtywork.sandbox.docker_args import (
 
 
 def test_default_image_and_pinned_digest():
-    assert DEFAULT_IMAGE == "dirtywork/worker:0.3"
+    assert DEFAULT_IMAGE == "dirtywork/worker:0.4"
     assert PINNED_DIGEST is None
 
 
