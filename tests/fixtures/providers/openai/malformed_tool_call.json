@@ -1,0 +1,13 @@
+{
+  "choices": [{
+    "message": {
+      "role": "assistant", "content": null,
+      "tool_calls": [
+        {"id": "call_ok", "type": "function", "function": {"name": "list_dir", "arguments": "{}"}},
+        {"id": "call_bad", "type": "function"}
+      ]
+    },
+    "finish_reason": "tool_calls"
+  }],
+  "usage": {"prompt_tokens": 10, "completion_tokens": 6}
+}

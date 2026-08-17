@@ -1,0 +1,12 @@
+{
+  "choices": [{
+    "message": {
+      "role": "assistant", "content": null,
+      "tool_calls": [
+        {"id": "call_badargs", "type": "function", "function": {"name": "write_file", "arguments": "{\"path\": \"x\", \"content\": \"abc"}}
+      ]
+    },
+    "finish_reason": "length"
+  }],
+  "usage": {"prompt_tokens": 4, "completion_tokens": 2}
+}
