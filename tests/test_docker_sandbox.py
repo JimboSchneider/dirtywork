@@ -25,7 +25,7 @@ def docker(tmp_path: Path):
     fake.script(["container", "inspect"], _fail())
     fake.script(["volume", "inspect"], _fail())
     fake.script(["image", "inspect", "--format", "{{json .RepoDigests}}"],
-                _ok(b'["dirtywork/worker@sha256:' + b"a" * 64 + b'"]'))
+                _ok(b'["ghcr.io/jimboschneider/dirtywork-worker@sha256:' + b"a" * 64 + b'"]'))
     fake.script(["volume", "create"], _ok())
     fake.script(["run"], _ok())   # prep container
     fake.script(["create"], _ok())  # worker create
@@ -69,7 +69,7 @@ def started_with_transcript(tmp_path: Path):
     fake.script(["container", "inspect"], _fail())
     fake.script(["volume", "inspect"], _fail())
     fake.script(["image", "inspect", "--format", "{{json .RepoDigests}}"],
-                _ok(b'["dirtywork/worker@sha256:' + b"a" * 64 + b'"]'))
+                _ok(b'["ghcr.io/jimboschneider/dirtywork-worker@sha256:' + b"a" * 64 + b'"]'))
     fake.script(["volume", "create"], _ok())
     fake.script(["run"], _ok())
     fake.script(["create"], _ok())
@@ -99,7 +99,7 @@ def test_start_sets_attributes(docker, tmp_path):
 
     assert sb.container == "dw-abc123"
     assert sb.volume == "dw-abc123-work"
-    assert sb.image_ref == "dirtywork/worker@sha256:" + "a" * 64
+    assert sb.image_ref == "ghcr.io/jimboschneider/dirtywork-worker@sha256:" + "a" * 64
     assert isinstance(sb.uid, int)
     assert isinstance(sb.gid, int)
 
@@ -253,7 +253,7 @@ def test_stop_keeps_volume_when_keep_volume_set(tmp_path):
     fake.script(["container", "inspect"], _fail())
     fake.script(["volume", "inspect"], _fail())
     fake.script(["image", "inspect", "--format", "{{json .RepoDigests}}"],
-                _ok(b'["dirtywork/worker@sha256:' + b"a" * 64 + b'"]'))
+                _ok(b'["ghcr.io/jimboschneider/dirtywork-worker@sha256:' + b"a" * 64 + b'"]'))
     fake.script(["volume", "create"], _ok())
     fake.script(["run"], _ok())
     fake.script(["create"], _ok())
@@ -281,7 +281,7 @@ def test_start_wraps_workspace_error_as_sandboxerror(monkeypatch, tmp_path):
     fake.script(["container", "inspect"], _fail())
     fake.script(["volume", "inspect"], _fail())
     fake.script(["image", "inspect", "--format", "{{json .RepoDigests}}"],
-                _ok(b'["dirtywork/worker@sha256:' + b"a" * 64 + b'"]'))
+                _ok(b'["ghcr.io/jimboschneider/dirtywork-worker@sha256:' + b"a" * 64 + b'"]'))
 
     # Monkeypatch validate_objects_dir to raise WorkspaceError
     def fake_validate_objects_dir(repo):
