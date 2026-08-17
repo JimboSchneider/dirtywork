@@ -21,6 +21,7 @@ TRIM_MARKER = "[result trimmed — re-run the tool if needed]"
 CHARS_PER_TOKEN = 4
 BUDGET_FRACTION = 0.75
 MAX_CONSECUTIVE_FAILURES = 3
+FINISH_TOOL = "finish"
 
 
 def _valid_tool_call(tc) -> bool:
@@ -204,6 +205,7 @@ class Runner:
                     return finish("model_error",
                                   "aborted after repeated malformed tool calls")
 
+                pending_finish = None
                 for tc in tool_calls:
                     fn_info = tc.get("function") or {}
                     name = fn_info.get("name") or ""
@@ -213,8 +215,13 @@ class Runner:
                         args = json.loads(raw_args)
                         if not isinstance(args, dict):
                             raise ValueError("arguments must be a JSON object")
-                        result = self.executor.execute(name, args)
-                        failures = 0
+                        if name == FINISH_TOOL:
+                            summary = args.get("summary")
+                            pending_finish = summary if isinstance(summary, str) else ""
+                            result = "run finished"
+                        else:
+                            result = self.executor.execute(name, args)
+                            failures = 0
                     except BudgetExceeded as e:
                         return finish("budget_exceeded", e.reason)
                     except SandboxError as e:
@@ -233,7 +240,8 @@ class Runner:
                     except KeyError:
                         failures += 1
                         available_tools = ', '.join(s['function']['name'] for s in TOOL_SCHEMAS)
-                        result = f"ERROR: unknown tool '{name}'. Available: {available_tools}."
+                        result = (f"ERROR: unknown tool '{name}'. Available: {available_tools}. "
+                                  f"To end the run call finish(summary=...).")
                     except TypeError as e:
                         failures += 1
                         result = f"ERROR: bad arguments for {name}: {e}"
@@ -245,6 +253,9 @@ class Runner:
                     if failures >= MAX_CONSECUTIVE_FAILURES:
                         return finish("model_error",
                                       "aborted after repeated malformed tool calls")
+
+                if pending_finish is not None:
+                    return finish("completed", pending_finish)
 
                 if malformed_count > 0:
                     messages.append({

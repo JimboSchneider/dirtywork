@@ -895,6 +895,7 @@ def test_build_system_prompt_includes_rules_and_context(tmp_path: Path):
     assert "edit_file" in p
     assert "REPO RULES HERE" in p
     assert "uncommitted" in p
+    assert "finish(summary=...)" in p
 
 
 def test_build_system_prompt_no_context(tmp_path: Path):

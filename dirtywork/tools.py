@@ -344,6 +344,20 @@ TOOL_SCHEMAS = [
             "command": {"type": "string"},
             "timeout": {"type": "integer", "description": "Seconds, default 120, max 600"},
         }, ["command"])}},
+    {
+        "type": "function",
+        "function": {
+            "name": "finish",
+            "description": ("End the run. Call this once the task is complete and verified "
+                            "(tests/build run, changes committed if the task asked for commits). "
+                            "summary: 2-6 sentences on what you did and anything left undone."),
+            "parameters": {
+                "type": "object",
+                "properties": {"summary": {"type": "string"}},
+                "required": ["summary"],
+            },
+        },
+    },
 ]
 
 

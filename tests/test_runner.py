@@ -577,3 +577,61 @@ def test_budget_exceeded_from_executor_ends_run(parts):
     events = _events(tmp)
     run_end = next(e for e in events if e["event"] == "run_end")
     assert run_end["status"] == "budget_exceeded"
+
+
+def test_finish_tool_ends_run_after_other_calls_in_turn(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([
+        _resp(tool_calls=[
+            _call("f1", "finish", {"summary": "wrote g.txt"}),
+            _call("w1", "write_file", {"path": "g.txt", "content": "hi\n"}),
+        ]),
+    ])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.final_message == "wrote g.txt"
+    assert result.turns == 1
+    assert (wt / "g.txt").read_text() == "hi\n"   # the later call still executed
+    events = _events(tmp)
+    finish_results = [e for e in events if e["event"] == "tool_result" and e["tool"] == "finish"]
+    assert finish_results and finish_results[0]["result"] == "run finished"
+    assert events[-1]["event"] == "run_end" and events[-1]["status"] == "completed"
+
+
+def test_finish_without_summary_still_completes_with_empty_message(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(tool_calls=[_call("f1", "finish", {})])])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.final_message == ""
+
+
+def test_finish_with_malformed_args_does_not_end_run(parts):
+    wt, executor, transcript, tmp = parts
+    bad = _resp(tool_calls=[{"id": "f1", "type": "function",
+                             "function": {"name": "finish", "arguments": "{not json"}}])
+    client = FakeClient([bad, _resp(tool_calls=[_call("f2", "finish", {"summary": "ok"})])])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.turns == 2
+    tool_msgs = [m for m in client.requests[1] if m["role"] == "tool"]
+    assert "malformed tool arguments" in tool_msgs[0]["content"]
+
+
+def test_unknown_tool_error_mentions_finish(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([
+        _resp(tool_calls=[_call("c1", "no_such_tool", {})]),
+        _resp(content="ok done"),
+    ])
+    r = Runner(client, executor, transcript, model="m")
+    r.run("s", "t")
+    transcript.close()
+    tool_msgs = [m for m in client.requests[1] if m["role"] == "tool"]
+    assert "finish(summary=...)" in tool_msgs[0]["content"]

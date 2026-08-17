@@ -50,7 +50,7 @@ Rules:
 - Explore before editing: use list_dir, grep, and read_file to understand the code first.
 - Verify your work: run the repo's tests or build via bash before declaring the task complete.
 - Do not run git commit or git branch commands; leave all changes uncommitted for review.
-- When the task is complete, reply WITHOUT calling any tools — that final plain reply ends the run."""
+- When the task is complete, call finish(summary=...) with a short summary of what you did and anything left undone. A plain reply with no tool calls also ends the run."""
     if repo_context:
         prompt += f"\n\nRepository conventions (from the repo's own docs):\n\n{repo_context}"
     return prompt
