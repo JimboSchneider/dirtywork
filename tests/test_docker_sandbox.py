@@ -617,6 +617,36 @@ def test_reset_creates_a_fresh_tether(started_with_transcript):
     assert len(fake.popens) == popens_before + 1
 
 
+def test_reset_issues_kill_then_wait_then_start_in_order(started_with_transcript):
+    # Fix item 2: reset() must wait for the container to actually stop
+    # (docker wait) before starting it again (docker start -ai) -- kill only
+    # SIGKILLs PID 1, it does not block until the container namespace is
+    # torn down, so starting immediately after kill can race a still-dying
+    # container.
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["exec"], _ok())
+    order = []
+    orig_run = fake.run
+    orig_popen = fake.popen
+
+    def spy_run(argv, *, timeout, stdin=None):
+        if argv and argv[0] in ("kill", "wait"):
+            order.append(argv[0])
+        return orig_run(argv, timeout=timeout, stdin=stdin)
+
+    def spy_popen(argv, *, stdin=None, stdout=None, stderr=None):
+        if len(argv) >= 2 and argv[0] == "docker" and argv[1] == "start":
+            order.append("start")
+        return orig_popen(argv, stdin=stdin, stdout=stdout, stderr=stderr)
+
+    sb._run = spy_run
+    sb._popen = spy_popen
+
+    sb.reset("manual order test")
+
+    assert order == ["kill", "wait", "start"]
+
+
 def test_reset_can_be_called_directly(started_with_transcript):
     import json
     sb, fake, run_dir, transcript = started_with_transcript
@@ -645,6 +675,24 @@ def test_reap_resets_when_docker_top_itself_fails(started_with_transcript):
     reset_events = [e for e in events if e["event"] == "sandbox_reset"]
     assert reset_events and reset_events[0]["reason"] == "container unreachable after bash"
     assert any(c[0][0] == "kill" for c in fake.calls)
+
+
+def test_after_bash_skips_budget_sample_when_reap_already_reset(started_with_transcript):
+    # Fix item 3: at most one reset per bash call. When _reap() resets
+    # (here: `docker top` itself fails), _after_bash must skip the worktree
+    # budget sample for this call -- the container was just rebuilt, so
+    # there is nothing meaningful to measure yet; the next bash call
+    # re-measures. Assert exactly one `kill` (the reap-triggered reset) and
+    # no `du -sk /work` exec in this call.
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], _fail(b"Error: No such container: dw-abc123"))
+    fake.script(["exec"], _ok(b"ok\n"))
+
+    sb.bash("echo ok")  # must not raise -- reap recovers via reset
+
+    kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
+    assert len(kill_calls) == 1
+    assert not any("du -sk /work" in str(arg) for c in fake.calls for arg in c[0])
 
 
 def test_reap_allows_bare_cat_tether(started):

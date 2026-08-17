@@ -55,8 +55,14 @@ def _config_bytes(repo: Path) -> bytes:
 
 
 def _refs_listing(repo: Path) -> str:
-    return subprocess.run(["git", "-C", str(repo), "for-each-ref"],
-                           capture_output=True, text=True, check=True).stdout
+    # dirtywork itself creates refs/heads/dirtywork/<slug> on the host before
+    # the run even starts (create_worktree) -- that is expected, not a
+    # sandbox breach, so it is excluded here. Any OTHER ref appearing or
+    # changing is still a real isolation failure.
+    out = subprocess.run(["git", "-C", str(repo), "for-each-ref"],
+                          capture_output=True, text=True, check=True).stdout
+    lines = [line for line in out.splitlines() if "refs/heads/dirtywork/" not in line]
+    return "\n".join(lines)
 
 
 def _object_hashes(repo: Path) -> dict:
@@ -221,8 +227,19 @@ def test_docker_live_over_budget_write_ends_run_with_budget_exceeded(tmp_path, m
     ]
     rc = _run_docker_main(monkeypatch, tmp_path, repo, responses, max_worktree_mb=1)
     payload = json.loads(capsys.readouterr().out)
+    # Fix item 4: budget_exceeded is the actual cause of the run ending, so
+    # it must survive even though finalize()'s export also fails (the same
+    # max_worktree_mb cap governs the export's extract_validated call, and
+    # the 5 MB file it wrote is over the 1 MB cap) -- export_failed must not
+    # overwrite it.
     assert payload["status"] == "budget_exceeded"
     assert rc == 1
+    run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert run_json["status"] == "budget_exceeded"
+    # export_status is not part of the stdout payload on the normal
+    # runner.run() completion path (only _fail_run's exception path adds it
+    # there) -- it is always visible in run.json, so check it there.
+    assert run_json["export_status"].startswith("export_failed")
 
 
 @pytest.mark.docker
