@@ -64,9 +64,24 @@ def _docker_preflight(repo: Path, image: str):
     """Spec §2 step 1: docker_version (daemon reachable) → resolve_image
     (digest, pulling if absent — the only network use at start) →
     validate_objects_dir (the only host path ever mounted). All read-only
-    on the operator's clone; nothing is created yet."""
-    docker_version()
-    image_ref = resolve_image(image, pinned_digest=docker_args.PINNED_DIGEST)
+    on the operator's clone; nothing is created yet.
+
+    A DockerError raised by either of the first two steps is tagged with a
+    `.preflight_step` attribute ("daemon" or "image") so main()'s exit-2
+    handler can give a hint specific to what actually failed, instead of
+    blaming an unreachable daemon for e.g. an unpullable image (Important
+    #6). `validate_objects_dir` raises WorkspaceError, handled separately
+    by its own except clause in main()."""
+    try:
+        docker_version()
+    except DockerError as e:
+        e.preflight_step = "daemon"
+        raise
+    try:
+        image_ref = resolve_image(image, pinned_digest=docker_args.PINNED_DIGEST)
+    except DockerError as e:
+        e.preflight_step = "image"
+        raise
     validate_objects_dir(repo)
     return image_ref
 
@@ -315,11 +330,20 @@ def main(argv: list | None = None) -> int:
         try:
             image_ref = _docker_preflight(repo, args.image)
         except DockerError as e:
-            _err(f"{e}\nDocker is the default sandbox since 0.4. Start Docker Desktop / "
-                 f"dockerd, or pass --sandbox none to run unsandboxed on the host.")
+            # Important #6: don't blame a running daemon for a failure that
+            # isn't the daemon's — branch the hint on which preflight step
+            # actually raised (see _docker_preflight's .preflight_step tag).
+            if getattr(e, "preflight_step", "daemon") == "daemon":
+                _err(f"{e}\nDocker is the default sandbox since 0.4. Start Docker Desktop / "
+                     f"dockerd, or pass --sandbox none to run unsandboxed on the host.")
+            else:
+                _err(f"{e}\nBuild or pull the worker image (see docker/README.md) or pass "
+                     f"--image <ref> to use a different one, or --sandbox none to run "
+                     f"unsandboxed on the host.")
             return 2
         except WorkspaceError as e:
-            _err(str(e))
+            _err(f"{e}\nCheck that the repository's git object store is valid, or pass "
+                 f"--sandbox none to run unsandboxed on the host.")
             return 2
 
     # ---- workspace ----

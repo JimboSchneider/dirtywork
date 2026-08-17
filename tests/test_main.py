@@ -31,6 +31,39 @@ def test_main_docker_preflight_failure_exits_2_with_hint(tmp_path, monkeypatch, 
     assert rc == 2
     err = capsys.readouterr().err
     assert "Docker" in err
+    assert "Start Docker Desktop" in err
+    assert "--sandbox none" in err
+
+
+def test_main_docker_preflight_image_failure_exits_2_with_image_hint(tmp_path, monkeypatch, capsys):
+    # Fix item 6: an image resolution failure (unpullable image, pinned-digest
+    # mismatch) is NOT the daemon's fault -- the exit-2 hint must not tell the
+    # operator to start Docker Desktop (it's already running; docker_version
+    # succeeded). It should point at building/pulling the image or --image.
+    import subprocess
+    import dirtywork.__main__ as m
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
+                    "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
+                   capture_output=True)
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+    monkeypatch.setattr(m, "docker_version", lambda *a, **k: "29.7.2")  # daemon IS reachable
+
+    def boom(*a, **k):
+        raise DockerError("docker pull dirtywork/worker:0.4 failed: manifest unknown")
+
+    monkeypatch.setattr(m, "resolve_image", boom)
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "manifest unknown" in err
+    assert "Start Docker Desktop" not in err
+    assert "--image" in err
     assert "--sandbox none" in err
 
 
@@ -180,7 +213,8 @@ def test_main_docker_name_collision_exits_2_and_creates_nothing(tmp_path, monkey
 
     assert rc == 2
     err = capsys.readouterr().err
-    assert "already exists" in err and "runs clean" in err
+    assert "already exists" in err
+    assert "docker rm -f" in err and "docker volume rm" in err
     assert not (tmp_path / "runs").exists() or not any((tmp_path / "runs").iterdir())
     wl = subprocess.run(["git", "-C", str(repo), "worktree", "list", "--porcelain"],
                         capture_output=True, text=True).stdout
@@ -230,6 +264,71 @@ def test_main_docker_start_failure_is_sandbox_error_exit_1(tmp_path, monkeypatch
         capture_output=True,
     )
     assert branch_check.returncode != 0
+
+
+def test_main_docker_sandbox_error_mid_run_exits_1(tmp_path, monkeypatch, capsys):
+    # Fix item 8 / release-gate coverage: stands in for the spec's Task 16
+    # case 3, "Docker daemon unavailable mid-run" -- a controller ruling
+    # noted that scenario cannot be reproduced in a unit test by actually
+    # killing the daemon, so this drives the same observable contract with a
+    # fake DockerSandbox whose bash() raises SandboxError("daemon
+    # unreachable") on the first tool call, after start() already succeeded.
+    # Runner.run()'s own `except SandboxError` (not a re-raise main() has to
+    # catch) converts this to status sandbox_error and still calls
+    # finalize() (best effort) via Runner.finish() before returning. The
+    # worktree must NOT be removed: unlike a preflight-shaped failure
+    # (_fail_setup, exercised by test_main_docker_start_failure_is_
+    # sandbox_error_exit_1 above), the run had already begun, so main()
+    # never reaches the rollback path.
+    from dirtywork.procs import Captured
+    from dirtywork.sandbox import RunArtifacts, SandboxError
+    from dirtywork.sandbox.docker import DockerSandbox as RealDockerSandbox
+    m, repo = _docker_mode_scaffold(tmp_path, monkeypatch)
+    monkeypatch.setattr(m.docker_cli, "run",
+                        lambda argv, *, timeout, stdin=None: Captured(1, b"", False, False))
+
+    finalize_calls = []
+
+    def finalize(self):
+        finalize_calls.append(1)
+        return RunArtifacts(export_status="ok")
+
+    def boom_bash(self, command, timeout=120):
+        raise SandboxError("daemon unreachable")
+
+    FakeDockerSandbox = _fake_docker_sandbox_class(RealDockerSandbox, finalize=finalize)
+    FakeDockerSandbox.bash = boom_bash
+    monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
+
+    class OneBashCallClient:
+        def __init__(self, base_url=None):
+            pass
+
+        def list_models(self):
+            return [m.DEFAULT_MODEL]
+
+        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+            return {"choices": [{"message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "c1", "type": "function",
+                                 "function": {"name": "bash",
+                                              "arguments": json.dumps({"command": "echo hi"})}}],
+            }}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    monkeypatch.setattr(m, "LMStudioClient", OneBashCallClient)
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])
+
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "sandbox_error"
+    assert "daemon unreachable" in payload["final_message"]
+    run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert run_json["status"] == "sandbox_error"
+    assert finalize_calls == [1]  # finalize attempted best-effort, per the docker error path
+
+    slug = Path(payload["run_dir"]).name
+    assert (repo / ".worktrees" / f"dw-{slug}").exists()  # NOT removed -- the run had begun
 
 
 def _fake_docker_sandbox_class(RealDockerSandbox, *, finalize):

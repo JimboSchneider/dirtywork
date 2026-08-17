@@ -181,6 +181,38 @@ def test_disk_check_fails_closed_after_repeated_stat_errors(tmp_path, monkeypatc
     assert "unmeasured" in wdg.violation
 
 
+def test_run_loop_does_not_die_silently_when_sample_raises(tmp_path, monkeypatch):
+    # Important #2: SandboxError (or any Exception) from sample()/_check_disk
+    # must not propagate out of run() and kill the thread silently — it must
+    # be converted into a recorded, killed violation so _after_bash can
+    # surface it on the runner's next tool call.
+    import dirtywork.sandbox.watchdog as wd
+
+    class FakeUsage:
+        free = 10 * 1024 * 1024 * 1024  # plenty, so disk check never fires
+
+    monkeypatch.setattr(wd.shutil, "disk_usage", lambda path: FakeUsage())
+
+    def raising_sample():
+        raise RuntimeError("exec failed twice")
+
+    kills = []
+    clock = {"t": 0.0}
+    wdg = wd.Watchdog(
+        kill=lambda reason: kills.append(reason), sample=raising_sample,
+        storage_paths=[tmp_path], min_free_mb=1, max_worktree_mb=1,
+        max_worktree_files=1, clock=lambda: clock["t"],
+        sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
+    )
+    wdg.note_bash_start()
+
+    wdg.run()  # must not raise
+
+    assert wdg.violation is not None
+    assert "exec failed twice" in wdg.violation
+    assert kills and "exec failed twice" in kills[0]
+
+
 def test_disk_check_failure_counter_resets_on_success(tmp_path, monkeypatch):
     import dirtywork.sandbox.watchdog as wd
 

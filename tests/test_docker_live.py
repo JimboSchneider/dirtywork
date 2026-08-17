@@ -152,10 +152,21 @@ def test_docker_live_backgrounded_process_is_dead_after_reap(tmp_path, monkeypat
 
 @pytest.mark.docker
 def test_docker_live_process_flood_triggers_reset(tmp_path, monkeypatch, capsys):
+    # 40 stray background processes is plenty for _reap()'s "docker top shows
+    # more than the tether" check (docker top runs on the HOST via /proc, so
+    # detection doesn't depend on process count) while staying well under the
+    # container's --pids-limit 512 default. Fix items 2+3 made the watchdog
+    # thread's own periodic worktree sample correctly fail closed
+    # (BudgetExceeded) when its own `du`/`find` exec fails twice in a row --
+    # spawning close to 512 processes (as this test originally did with 600)
+    # can starve THAT exec too and race it against _reap()'s recovery, which
+    # is a real but different failure mode from the one this test targets
+    # (plain stray-process detection-and-recovery). Keeping the flood well
+    # below the pids cap isolates the mechanism this test is actually about.
     repo = _make_live_repo(tmp_path)
     responses = [
         _resp(tool_calls=[_call("c1", "bash", {
-            "command": "for i in $(seq 1 600); do sleep 30 & done; echo spawned",
+            "command": "for i in $(seq 1 40); do sleep 30 & done; echo spawned",
             "timeout": 30,
         })]),
         _resp(tool_calls=[_call("c2", "bash", {"command": "echo alive-after-reset"})]),

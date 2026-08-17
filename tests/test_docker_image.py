@@ -8,7 +8,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCKER_DIR = REPO_ROOT / "docker"
-IMAGE_TAG = "dirtywork/worker:0.3-test"
+IMAGE_TAG = "dirtywork/worker:0.4-test"
 
 
 @pytest.mark.docker

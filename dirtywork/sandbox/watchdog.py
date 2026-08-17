@@ -96,13 +96,26 @@ class Watchdog(threading.Thread):
 
     def run(self) -> None:
         last_worktree_check = self.clock()
-        while not self._stop_event.is_set():
-            if self._check_disk():
-                return
-            with self._lock:
-                in_flight = self._bash_in_flight
-            if in_flight and self.clock() - last_worktree_check >= self.WORKTREE_POLL_INTERVAL:
-                last_worktree_check = self.clock()
-                if self.check_worktree_budget_once():
+        try:
+            while not self._stop_event.is_set():
+                if self._check_disk():
                     return
-            self.sleep(self.DISK_POLL_INTERVAL)
+                with self._lock:
+                    in_flight = self._bash_in_flight
+                if in_flight and self.clock() - last_worktree_check >= self.WORKTREE_POLL_INTERVAL:
+                    last_worktree_check = self.clock()
+                    if self.check_worktree_budget_once():
+                        return
+                self.sleep(self.DISK_POLL_INTERVAL)
+        except Exception as e:
+            # Never die silently: an uncaught exception here (e.g. sample()
+            # raising SandboxError after repeated docker exec failures) would
+            # otherwise stop the disk-floor poll for the rest of the run with
+            # nothing observable. Fail closed and visible instead — record a
+            # violation and kill, same as every other breach path, so
+            # DockerSandbox._after_bash surfaces it on the next tool call.
+            self.violation = f"watchdog: {e}"
+            try:
+                self.kill(self.violation)
+            except Exception:
+                pass

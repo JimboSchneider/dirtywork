@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import posixpath
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -83,6 +84,12 @@ class DockerSandbox:
         self._objects_dir = None
         self._export_failed = False
         self._reset_this_call = False  # Track if reset happened in current bash call
+        # Serializes reset()'s whole body (kill -> wait -> new tether -> init)
+        # and the watchdog thread's own kill path against each other: reset()
+        # can be invoked from the watchdog thread (_sample_worktree's
+        # exec-failure path) and from the main thread (_reap() after a bash
+        # call) concurrently. _reset_this_call is set/cleared under this lock.
+        self._reset_lock = threading.Lock()
 
     @staticmethod
     def check_name_collision(run, slug: str) -> None:
@@ -91,19 +98,24 @@ class DockerSandbox:
         create — a collision is either a stale leftover or something else's
         resource, and both deserve a human. Raises SandboxError. Called both
         from __main__'s pre-worktree preflight and from start() itself
-        (defense in depth against a same-slug race between the two)."""
+        (defense in depth against a same-slug race between the two).
+
+        The error names the concrete manual recipe rather than a
+        `dirtywork runs …` subcommand — that cleanup CLI is SP3, not shipped
+        in this release (Important #7)."""
         name = docker_args.container_name(slug)
+        vol = docker_args.volume_name(slug)
+        recipe = (
+            f"dirtywork will not remove a resource it did not create this run — "
+            f"if it is a stale leftover, remove it manually: "
+            f"`docker rm -f {name}`; `docker volume rm {vol}`"
+        )
         c_inspect = run(["container", "inspect", name], timeout=docker_cli.T_QUERY)
         if c_inspect.returncode == 0:
-            raise SandboxError(
-                f"container {name} already exists; run `dirtywork runs clean {slug}`"
-            )
-        vol = docker_args.volume_name(slug)
+            raise SandboxError(f"container {name} already exists; {recipe}")
         v_inspect = run(["volume", "inspect", vol], timeout=docker_cli.T_QUERY)
         if v_inspect.returncode == 0:
-            raise SandboxError(
-                f"volume {vol} already exists; run `dirtywork runs clean {slug}`"
-            )
+            raise SandboxError(f"volume {vol} already exists; {recipe}")
 
     def start(self, worktree: Path, repo: Path, slug: str, base_commit: str) -> None:
         self._worktree = worktree
@@ -404,29 +416,33 @@ class DockerSandbox:
         persist (verified). Fresh tether, ready-wait, then init's restart
         variant (index only — never touches /work, so the working tree
         survives a reset even though the worker's git metadata in /gitdir
-        does not)."""
-        try:
-            self._run(["kill", self.container], timeout=docker_cli.T_LIFECYCLE)
-        except docker_cli.DockerError:
-            pass
-        # Wait for the container to actually stop before starting again
-        try:
-            self._run(["wait", self.container], timeout=docker_cli.T_LIFECYCLE)
-        except docker_cli.DockerError:
-            # Container already stopped returns immediately with non-zero
-            pass
-        if self._tether is not None:
-            lifecycle.close_tether(self._tether)
-        self._start_tether()
-        self._wait_ready()
-        self._init(restart=True)
-        if self.transcript is not None:
+        does not). The whole body runs under `self._reset_lock` so a
+        concurrent reset() from the watchdog thread and the main thread
+        cannot interleave their docker calls or race `_start_tether`/`_init`
+        (Important #4)."""
+        with self._reset_lock:
             try:
-                self.transcript.write("sandbox_reset", reason=reason)
-            except Exception:
+                self._run(["kill", self.container], timeout=docker_cli.T_LIFECYCLE)
+            except docker_cli.DockerError:
                 pass
-        # Mark that a reset happened in this call (for _after_bash to skip budget sample)
-        self._reset_this_call = True
+            # Wait for the container to actually stop before starting again
+            try:
+                self._run(["wait", self.container], timeout=docker_cli.T_LIFECYCLE)
+            except docker_cli.DockerError:
+                # Container already stopped returns immediately with non-zero
+                pass
+            if self._tether is not None:
+                lifecycle.close_tether(self._tether)
+            self._start_tether()
+            self._wait_ready()
+            self._init(restart=True)
+            if self.transcript is not None:
+                try:
+                    self.transcript.write("sandbox_reset", reason=reason)
+                except Exception:
+                    pass
+            # Mark that a reset happened in this call (for _after_bash to skip budget sample)
+            self._reset_this_call = True
 
     def _reap(self) -> bool:
         """After every bash call (spec §6): docker top should show at most
@@ -481,10 +497,14 @@ class DockerSandbox:
         return False
 
     def _watchdog_kill(self, reason: str) -> None:
-        try:
-            self._run(["kill", self.container], timeout=docker_cli.T_LIFECYCLE)
-        except docker_cli.DockerError:
-            pass
+        # Goes through the same lock as reset() (Important #4): without it, a
+        # watchdog-thread kill fired while the main thread is mid-reset()
+        # could land between reset()'s own kill/wait/start calls.
+        with self._reset_lock:
+            try:
+                self._run(["kill", self.container], timeout=docker_cli.T_LIFECYCLE)
+            except docker_cli.DockerError:
+                pass
 
     def _sample_worktree(self) -> tuple:
         """(kbytes, entries) for /work, sampled inside the container. On
@@ -519,14 +539,22 @@ class DockerSandbox:
 
     def _after_bash(self) -> None:
         self._reap()
-        if self.watchdog is not None and not self._reset_this_call:
-            self.watchdog.check_worktree_budget_once()
+        if self.watchdog is not None:
+            # Skip only the re-SAMPLING when a reset happened this call (the
+            # container was just rebuilt, so there is nothing meaningful to
+            # measure yet) -- but ALWAYS consume a violation the watchdog
+            # thread may already have recorded (Important #3). Swallowing it
+            # here would let a run continue past a budget breach until the
+            # next bash call or export self-corrects it.
+            if not self._reset_this_call:
+                self.watchdog.check_worktree_budget_once()
             if self.watchdog.violation is not None:
                 violation = self.watchdog.violation
                 self.watchdog.violation = None
                 raise BudgetExceeded(violation)
         # Reset the flag after each bash call completes
-        self._reset_this_call = False
+        with self._reset_lock:
+            self._reset_this_call = False
 
     def bash(self, command: str, timeout: int = 120) -> str:
         reason = check_bash_command(command, sandboxed=True)

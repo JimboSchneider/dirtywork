@@ -86,9 +86,10 @@ carried, unchanged.
   run in that worktree afterward must not follow symlinks blindly.
 - Host `git status`/`diff`/`add`/`merge` that *you* run afterward use your
   own git config; a worker-authored `.gitattributes` can trigger a
-  configured filter (git-lfs and similar). Review via `runs show --diff`
-  (the container-computed patch — no host git ever touches worker content
-  for that path) or with `GIT_CONFIG_GLOBAL=/dev/null`.
+  configured filter (git-lfs and similar). Review
+  `~/.dirtywork/runs/<slug>/diff.patch` instead (the container-computed
+  patch — no host git ever touches worker content for that path) or with
+  `GIT_CONFIG_GLOBAL=/dev/null`.
 - A malicious target repo's `CLAUDE.md`/`AGENTS.md` (read from the base
   commit via git, not the filesystem — symlinks and oversized files are
   rejected) is injected into the worker's prompt; treat untrusted repos'
@@ -269,10 +270,13 @@ In August 2026 the project was renamed **dirtywork** — same tool, a name that 
 - **status `export_failed` (in `run.json`'s `export_status`, and as the
   overall `status` if the agent loop itself otherwise completed)** — the
   worker's tree could not be validated/exported (e.g. it exceeded
-  `--max-worktree-mb`/`--max-worktree-files`). The Docker volume is kept
-  (unless it was already going to be removed); re-run export after raising
-  the limit, or inspect the volume directly with `--keep-volume` on a
-  fresh run.
+  `--max-worktree-mb`/`--max-worktree-files`). The Docker volume
+  `dw-<slug>-work` is kept (unless it was already going to be removed) —
+  there is no automated recovery command in this release. Either inspect
+  it directly (`docker run --rm -v dw-<slug>-work:/work <image> ...`) to
+  salvage the tree by hand, or discard it with
+  `docker volume rm dw-<slug>-work` once you're done, and re-run the task
+  with a higher `--max-worktree-mb`/`--max-worktree-files`.
 
 ## Machine contract
 

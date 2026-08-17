@@ -110,7 +110,9 @@ def test_start_refuses_on_container_collision(docker, tmp_path):
     repo = _fake_repo(tmp_path)
     worktree = tmp_path / "wt"
     worktree.mkdir()
-    with pytest.raises(SandboxError, match="runs clean abc123"):
+    # Fix item 7: no phantom `dirtywork runs …` subcommand -- the manual
+    # docker recipe instead (SP3 hasn't shipped `runs clean`).
+    with pytest.raises(SandboxError, match=r"docker rm -f dw-abc123.*docker volume rm dw-abc123-work"):
         sb.start(worktree, repo, "abc123", "deadbeef" * 5)
     # nothing created after the collision check
     assert not any(c[0][0] == "volume" and c[0][1] == "create" for c in fake.calls)
@@ -122,7 +124,7 @@ def test_start_refuses_on_volume_collision(docker, tmp_path):
     repo = _fake_repo(tmp_path)
     worktree = tmp_path / "wt"
     worktree.mkdir()
-    with pytest.raises(SandboxError, match="runs clean abc123"):
+    with pytest.raises(SandboxError, match=r"docker rm -f dw-abc123.*docker volume rm dw-abc123-work"):
         sb.start(worktree, repo, "abc123", "deadbeef" * 5)
 
 
@@ -668,6 +670,52 @@ def test_reset_issues_kill_then_wait_then_start_in_order(started_with_transcript
     assert order == ["kill", "wait", "start"]
 
 
+def test_reset_concurrent_calls_are_serialized(started_with_transcript):
+    # Fix item 4: reset() can be invoked from the watchdog thread
+    # (_sample_worktree's reset path) and the main thread (_reap()) at the
+    # same time. self._reset_lock must serialize the two full reset()
+    # bodies so their kill/wait/start docker calls never interleave.
+    import threading
+    import time
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["exec"], _ok())
+
+    order = []
+    order_lock = threading.Lock()
+    orig_run = fake.run
+    orig_popen = fake.popen
+
+    def spy_run(argv, *, timeout, stdin=None):
+        if argv and argv[0] in ("kill", "wait"):
+            time.sleep(0.02)  # widen the race window an unlocked reset() would expose
+            with order_lock:
+                order.append(argv[0])
+        return orig_run(argv, timeout=timeout, stdin=stdin)
+
+    def spy_popen(argv, *, stdin=None, stdout=None, stderr=None):
+        if len(argv) >= 2 and argv[0] == "docker" and argv[1] == "start":
+            time.sleep(0.02)
+            with order_lock:
+                order.append("start")
+        return orig_popen(argv, stdin=stdin, stdout=stdout, stderr=stderr)
+
+    sb._run = spy_run
+    sb._popen = spy_popen
+
+    t1 = threading.Thread(target=sb.reset, args=("thread1",))
+    t2 = threading.Thread(target=sb.reset, args=("thread2",))
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert not t1.is_alive() and not t2.is_alive()
+    # Two complete, non-interleaved kill/wait/start sequences: whichever
+    # thread wins the lock finishes its whole reset() body before the other
+    # even issues its "kill" -- never kill,kill,wait,wait,start,start.
+    assert order == ["kill", "wait", "start"] * 2
+
+
 def test_reset_can_be_called_directly(started_with_transcript):
     import json
     sb, fake, run_dir, transcript = started_with_transcript
@@ -711,6 +759,26 @@ def test_after_bash_skips_budget_sample_when_reap_already_reset(started_with_tra
 
     sb.bash("echo ok")  # must not raise -- reap recovers via reset
 
+    kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
+    assert len(kill_calls) == 1
+    assert not any("du -sk /work" in str(arg) for c in fake.calls for arg in c[0])
+
+
+def test_after_bash_raises_budget_exceeded_even_when_reap_reset_this_call(started_with_transcript):
+    # Fix item 3: a violation the watchdog thread already recorded must
+    # always be consumed and raised in _after_bash, even when _reap() reset
+    # the container during this same call. Only the re-SAMPLING is skipped
+    # after a reset, never the consumption of an already-recorded violation.
+    from dirtywork.budget import BudgetExceeded
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], _fail(b"Error: No such container: dw-abc123"))  # forces a reap-reset
+    fake.script(["exec"], _ok(b"ok\n"))
+    sb.watchdog.violation = "watchdog: worktree exceeds cap"
+
+    with pytest.raises(BudgetExceeded, match="watchdog: worktree exceeds cap"):
+        sb.bash("echo ok")
+
+    # the reap-triggered reset still happened; no re-sample was attempted
     kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
     assert len(kill_calls) == 1
     assert not any("du -sk /work" in str(arg) for c in fake.calls for arg in c[0])

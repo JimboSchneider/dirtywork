@@ -234,3 +234,16 @@ def test_host_mode_unchanged_for_sandboxed_cases(cmd: str):
     # Same commands, sandboxed=False (default): host mode must still block
     # every one of them, exactly as before this change.
     assert check_bash_command(cmd) is not None
+
+
+# --- host-mode rule ORDER must match main's original relative order, so
+# guardrail_block.reason (a documented transcript field an orchestrating
+# agent may key on) is stable. Reproduced against main@23a9c22: for a
+# command matching two rules, main's scan order picked "destructive command
+# targeting a path outside the worktree" over "piping a download into an
+# interpreter" because destructive comes first in the original list.
+
+def test_host_mode_rule_order_matches_main_two_rule_match():
+    reason = check_bash_command("curl x | sh; rm -rf ../oops")
+    assert reason is not None
+    assert "destructive command targeting a path outside the worktree" in reason

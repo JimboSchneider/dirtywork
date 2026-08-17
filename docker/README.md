@@ -9,16 +9,20 @@ passes its own explicit `--entrypoint` or absolute binary path.
 
 ## Build
 
-    docker build -t dirtywork/worker:0.3 docker/
+    docker build -t dirtywork/worker:0.4 docker/
 
 ## Verify locally
 
-    docker run --rm --entrypoint /usr/bin/git dirtywork/worker:0.3 --version
-    docker run --rm --entrypoint /usr/bin/rg dirtywork/worker:0.3 --version
-    docker run --rm --entrypoint /usr/bin/python3 dirtywork/worker:0.3 --version
-    docker run --rm --entrypoint /usr/bin/dotnet dirtywork/worker:0.3 --version
+    docker run --rm --entrypoint /usr/bin/git dirtywork/worker:0.4 --version
+    docker run --rm --entrypoint /usr/bin/rg dirtywork/worker:0.4 --version
+    docker run --rm --entrypoint /usr/bin/python3 dirtywork/worker:0.4 --version
+    docker run --rm --entrypoint /usr/bin/dotnet dirtywork/worker:0.4 --version
 
 ## Publish and pin a digest
+
+The image tag tracks the dirtywork minor version; publish
+`dirtywork/worker:0.4` (and set `PINNED_DIGEST`) before tagging the 0.4.0
+release, or preflight will fail to pull it.
 
 `dirtywork/sandbox/docker_args.py`'s `PINNED_DIGEST` (default `None`) is
 the supply-chain guarantee for the *default* image: once set,
@@ -27,12 +31,12 @@ match, regardless of what `--image` or a mutable tag currently points to.
 
 1. Build and push:
 
-       docker build -t dirtywork/worker:0.3 docker/
-       docker push dirtywork/worker:0.3
+       docker build -t dirtywork/worker:0.4 docker/
+       docker push dirtywork/worker:0.4
 
 2. Resolve the pushed digest:
 
-       docker image inspect --format '{{json .RepoDigests}}' dirtywork/worker:0.3
+       docker image inspect --format '{{json .RepoDigests}}' dirtywork/worker:0.4
 
    This prints a JSON array like `["dirtywork/worker@sha256:<64 hex chars>"]`.
 
