@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from dirtywork.procs import Captured
+from dirtywork.resume import stash_dir_for
 from dirtywork.sandbox import SandboxError
 from dirtywork.sandbox.docker import DockerSandbox, docker_cli
 from dirtywork.sandbox.docker_args import DockerConfig
@@ -1176,3 +1177,161 @@ def test_finalize_reports_no_watchdog_violation_when_none_occurred(started, monk
 
     assert artifacts.watchdog_violation is None
     assert artifacts.watchdog_violation_kind is None
+
+
+def _started_worktree(tmp_path):
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / ".git").write_text("gitdir: /somewhere\n")
+    return repo, worktree
+
+
+def _init_script(fake) -> str:
+    inits = [c for c in fake.calls if "/usr/bin/git init" in " ".join(c[0])]
+    assert inits, "no in-container git init call recorded"
+    return " ".join(inits[0][0])
+
+
+def test_start_default_branch_is_dirtywork_slug(docker, tmp_path):
+    sb, fake, run_dir = docker
+    repo, worktree = _started_worktree(tmp_path)
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+    script = _init_script(fake)
+    assert "refs/heads/dirtywork/abc123" in script
+    assert "read-tree -m -u HEAD" in script
+    assert not [p for p in fake.popens if p.argv[:1] == ["tar"]]
+
+
+def test_start_seed_from_worktree_uses_restart_init_and_tar_pipeline(docker, tmp_path):
+    sb, fake, run_dir = docker
+    repo, worktree = _started_worktree(tmp_path)
+    sb.start(worktree, repo, "new1", "deadbeef" * 5,
+             branch="dirtywork/orig", seed_from_worktree=True)
+    script = _init_script(fake)
+    assert "refs/heads/dirtywork/orig" in script
+    assert "read-tree HEAD" in script and "read-tree -m -u HEAD" not in script
+    tar_out = [p for p in fake.popens if p.argv[:1] == ["tar"]]
+    tar_in = [p for p in fake.popens if p.argv[:2] == ["docker", "exec"] and "-xf" in p.argv]
+    assert len(tar_out) == 1
+    assert tar_out[0].argv == ["tar", "-C", str(worktree), "--exclude=./.git", "-cf", "-", "."]
+    assert tar_out[0].env is not None and tar_out[0].env.get("COPYFILE_DISABLE") == "1"
+    assert len(tar_in) == 1
+    assert "-i" in tar_in[0].argv and "dw-new1" in tar_in[0].argv
+    assert tar_in[0].argv[-5:] == ["tar", "-C", "/work", "-xf", "-"]
+    assert sb.container == "dw-new1" and sb.volume == "dw-new1-work"
+
+
+def test_seed_failure_raises_sandbox_error(docker, tmp_path):
+    sb, fake, run_dir = docker
+    repo, worktree = _started_worktree(tmp_path)
+    real_popen = fake.popen
+
+    def failing_popen(argv, **kw):
+        p = real_popen(argv, **kw)
+        if argv[:2] == ["docker", "exec"] and "-xf" in argv:
+            p.returncode = 1          # FakePopen.wait() keeps a preset returncode
+        return p
+
+    sb._popen = failing_popen
+    with pytest.raises(SandboxError, match="resume seed failed"):
+        sb.start(worktree, repo, "new1", "deadbeef" * 5,
+                 branch="dirtywork/orig", seed_from_worktree=True)
+
+
+def test_finalize_stashes_seeded_worktree_and_removes_stash_after_ok_export(docker, tmp_path, monkeypatch):
+    from dirtywork.sandbox.export import RunArtifacts
+    sb, fake, run_dir = docker
+    repo, worktree = _started_worktree(tmp_path)
+    sb.start(worktree, repo, "new1", "deadbeef" * 5,
+             branch="dirtywork/orig", seed_from_worktree=True)
+    (worktree / "left.txt").write_text("x")
+    seen = {}
+
+    def fake_export_run(cfg, **kw):
+        seen["entries"] = sorted(p.name for p in kw["worktree"].iterdir())
+        seen["stash_has_left"] = stash_dir_for(worktree, "new1") / "left.txt"
+        seen["stash_has_left"] = seen["stash_has_left"].exists()
+        return RunArtifacts(export_status="ok")
+
+    monkeypatch.setattr("dirtywork.sandbox.docker.export.export_run", fake_export_run)
+    monkeypatch.setattr("dirtywork.sandbox.docker.host_read_tree", lambda wt: None)
+    sb.finalize()
+    assert seen["entries"] == [".git"]           # export saw an empty worktree
+    assert seen["stash_has_left"] is True         # the prior work was moved aside, not deleted
+    assert not stash_dir_for(worktree, "new1").exists()  # stash removed after ok
+
+
+def test_finalize_restores_seeded_worktree_after_failed_export(docker, tmp_path, monkeypatch):
+    from dirtywork.sandbox.export import RunArtifacts
+    sb, fake, run_dir = docker
+    repo, worktree = _started_worktree(tmp_path)
+    sb.start(worktree, repo, "new1", "deadbeef" * 5,
+             branch="dirtywork/orig", seed_from_worktree=True)
+    (worktree / "left.txt").write_text("x")
+    (worktree / "sub").mkdir()
+    (worktree / "sub" / "deep.txt").write_text("y")
+
+    def failing_export_run(cfg, **kw):
+        return RunArtifacts(export_status="export_failed: worktree too big")
+
+    monkeypatch.setattr("dirtywork.sandbox.docker.export.export_run", failing_export_run)
+    monkeypatch.setattr("dirtywork.sandbox.docker.host_read_tree", lambda wt: None)
+    artifacts = sb.finalize()
+    assert artifacts.export_status.startswith("export_failed")
+    assert (worktree / "left.txt").read_text() == "x"
+    assert (worktree / "sub" / "deep.txt").read_text() == "y"
+    assert (worktree / ".git").is_file()
+    assert not stash_dir_for(worktree, "new1").exists()
+
+
+def test_finalize_leaves_unseeded_worktree_alone(docker, tmp_path, monkeypatch):
+    from dirtywork.sandbox.export import RunArtifacts
+    sb, fake, run_dir = docker
+    repo, worktree = _started_worktree(tmp_path)
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+    (worktree / "left.txt").write_text("x")   # export_run itself would refuse; here it is faked
+    seen = {}
+
+    def fake_export_run(cfg, **kw):
+        seen["entries"] = sorted(p.name for p in kw["worktree"].iterdir())
+        return RunArtifacts(export_status="ok")
+
+    monkeypatch.setattr("dirtywork.sandbox.docker.export.export_run", fake_export_run)
+    monkeypatch.setattr("dirtywork.sandbox.docker.host_read_tree", lambda wt: None)
+    sb.finalize()
+    assert seen["entries"] == [".git", "left.txt"]
+
+
+def test_stash_never_clears_a_foreign_stash(docker, tmp_path, monkeypatch):
+    from dirtywork.sandbox.export import RunArtifacts
+    sb, fake, run_dir = docker
+    repo, worktree = _started_worktree(tmp_path)
+    leftover = worktree.parent / f"{worktree.name}.pre-resume-older"
+    leftover.mkdir()
+    (leftover / "precious.txt").write_text("from an interrupted resume")
+    sb.start(worktree, repo, "new1", "deadbeef" * 5,
+             branch="dirtywork/orig", seed_from_worktree=True)
+    monkeypatch.setattr("dirtywork.sandbox.docker.export.export_run",
+                        lambda cfg, **kw: RunArtifacts(export_status="ok"))
+    monkeypatch.setattr("dirtywork.sandbox.docker.host_read_tree", lambda wt: None)
+    sb.finalize()
+    assert (leftover / "precious.txt").read_text() == "from an interrupted resume"
+    assert not stash_dir_for(worktree, "new1").exists()
+
+
+def test_finalize_restores_stash_when_export_raises(docker, tmp_path, monkeypatch):
+    sb, fake, run_dir = docker
+    repo, worktree = _started_worktree(tmp_path)
+    sb.start(worktree, repo, "new1", "deadbeef" * 5,
+             branch="dirtywork/orig", seed_from_worktree=True)
+    (worktree / "left.txt").write_text("x")
+
+    def exploding_export_run(cfg, **kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("dirtywork.sandbox.docker.export.export_run", exploding_export_run)
+    with pytest.raises(RuntimeError, match="boom"):
+        sb.finalize()
+    assert (worktree / "left.txt").read_text() == "x"
+    assert not stash_dir_for(worktree, "new1").exists()

@@ -56,7 +56,7 @@ def test_bash_env_is_minimal(wt: Path, monkeypatch):
 
 def test_schemas_shape():
     names = {s["function"]["name"] for s in TOOL_SCHEMAS}
-    assert names == {"read_file", "write_file", "edit_file", "list_dir", "grep", "bash"}
+    assert names == {"read_file", "write_file", "edit_file", "list_dir", "grep", "bash", "finish"}
     for s in TOOL_SCHEMAS:
         assert s["type"] == "function"
         assert "parameters" in s["function"]

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import posixpath
+import shutil
 import subprocess
 import threading
 import time
@@ -21,6 +22,7 @@ from .watchdog import Watchdog
 
 from . import export
 from ..workspace import host_read_tree
+from ..resume import stash_dir_for
 
 # Fixed exec timeouts for tools with no user-facing timeout knob — these
 # operations should complete near-instantly; a hang means the sandbox
@@ -87,6 +89,8 @@ class DockerSandbox:
         self._repo = None
         self._worktree = None
         self._base_commit = None
+        self._branch = None
+        self._seeded = False
         self._stopped = False
         self.watchdog = None
         self._objects_dir = None
@@ -125,11 +129,13 @@ class DockerSandbox:
         if v_inspect.returncode == 0:
             raise SandboxError(f"volume {vol} already exists; {recipe}")
 
-    def start(self, worktree: Path, repo: Path, slug: str, base_commit: str) -> None:
+    def start(self, worktree: Path, repo: Path, slug: str, base_commit: str, *, branch: str | None = None, seed_from_worktree: bool = False) -> None:
         self._worktree = worktree
         self._repo = repo
         self._slug = slug
         self._base_commit = base_commit
+        self._branch = branch or f"dirtywork/{slug}"
+        self._seeded = seed_from_worktree
         name = docker_args.container_name(slug)
         vol = docker_args.volume_name(slug)
 
@@ -170,7 +176,9 @@ class DockerSandbox:
 
         self._start_tether()
         self._wait_ready()
-        self._init(restart=False)
+        self._init(restart=seed_from_worktree)
+        if seed_from_worktree:
+            self._seed_from_worktree()
         self.watchdog = Watchdog(
             kill=self._watchdog_kill,
             sample=self._sample_worktree,
@@ -194,7 +202,7 @@ class DockerSandbox:
         lifecycle.wait_ready(self._run, self.container)
 
     def _init(self, *, restart: bool) -> None:
-        lifecycle.init_worker_git(self._run, self.container, slug=self._slug, base_commit=self._base_commit, restart=restart)
+        lifecycle.init_worker_git(self._run, self.container, branch=self._branch, base_commit=self._base_commit, restart=restart)
 
     def _check(self, res, what: str) -> None:
         """Raise SandboxError with the captured output when a docker step failed."""
@@ -256,22 +264,103 @@ class DockerSandbox:
             self.watchdog.violation = None
             self.watchdog.violation_kind = "budget"
         label = docker_args.repo_label(self._repo)
-        artifacts = export.export_run(
-            self.cfg, slug=self._slug, base_commit=self._base_commit,
-            worktree=self._worktree, run_dir=self.run_dir, objects_dir=self._objects_dir,
-            image_ref=self.image_ref, uid=self.uid, gid=self.gid, repo_label=label,
-            run=self._run, popen=self._popen,
-        )
+        aside = self._stash_prior_worktree() if self._seeded else None
+        try:
+            artifacts = export.export_run(
+                self.cfg, slug=self._slug, base_commit=self._base_commit,
+                worktree=self._worktree, run_dir=self.run_dir, objects_dir=self._objects_dir,
+                image_ref=self.image_ref, uid=self.uid, gid=self.gid, repo_label=label,
+                run=self._run, popen=self._popen,
+            )
+        except BaseException:
+            # export_run converts its own failures to export_failed; anything
+            # that still escapes (a bug, Ctrl-C) must not leave the prior work
+            # stranded in the stash.
+            if aside is not None:
+                self._restore_prior_worktree(aside)
+            raise
         artifacts.watchdog_violation = watchdog_violation
         artifacts.watchdog_violation_kind = watchdog_violation_kind
         if artifacts.export_status.startswith("export_failed"):
-            # Leave the host worktree as it was (.git file only): read-tree
-            # after a failed export would make host `git status` claim mass
-            # deletions that never happened.
+            # Leave the host worktree as it was: on a fresh run that is the
+            # .git file only (read-tree after a failed export would make host
+            # `git status` claim mass deletions that never happened); on a
+            # resume it is the prior run's exported work, restored from the
+            # stash — the export must never destroy work that was safe on disk.
             self._export_failed = True
+            if aside is not None:
+                self._restore_prior_worktree(aside)
             return artifacts
+        if aside is not None:
+            shutil.rmtree(aside, ignore_errors=True)
         host_read_tree(self._worktree)
         return artifacts
+
+    def _stash_prior_worktree(self) -> Path:
+        """Resume: export_run requires a host worktree holding only the .git
+        file, but a resumed run's worktree still holds the prior export.
+        Move that content aside (never delete it before the export is known
+        to have succeeded) into a sibling directory the export cannot see;
+        finalize() removes the stash after a successful export or restores
+        it after a failed one. The stash is unique to this run's slug and is
+        never pre-cleared: a stash left by an interrupted earlier resume is
+        someone's only copy of their work, and check_resumable refuses to
+        start a resume while one exists."""
+        aside = stash_dir_for(self._worktree, self._slug)
+        aside.mkdir()  # exists → FileExistsError: never reuse or clear a stash
+        for entry in self._worktree.iterdir():
+            if entry.name == ".git" and entry.is_file() and not entry.is_symlink():
+                continue
+            os.rename(str(entry), str(aside / entry.name))
+        return aside
+
+    def _restore_prior_worktree(self, aside: Path) -> None:
+        """Undo _stash_prior_worktree after a failed export: the worktree is
+        back to exactly the state the resume started from."""
+        export._cleanup_to_dot_git_only(self._worktree)
+        for entry in aside.iterdir():
+            os.rename(str(entry), str(self._worktree / entry.name))
+        aside.rmdir()
+
+    def _seed_from_worktree(self) -> None:
+        """Resume: mirror the host worktree into /work (deletions included —
+        the index was populated with `read-tree HEAD` and no files, so
+        whatever the tar carries is exactly what the worker sees). The
+        operator's own worktree is the trusted direction; .git (the gitdir
+        pointer file) is excluded; COPYFILE_DISABLE stops macOS tar from
+        adding ._ AppleDouble entries."""
+        env = dict(os.environ)
+        env["COPYFILE_DISABLE"] = "1"
+        tar_out = self._popen(
+            ["tar", "-C", str(self._worktree), "--exclude=./.git", "-cf", "-", "."],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
+        )
+        exec_argv = ["docker"] + docker_args.exec_argv(
+            self.container, ["tar", "-C", "/work", "-xf", "-"], stdin=True)
+        tar_in = self._popen(exec_argv, stdin=tar_out.stdout,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        timed_out = []
+
+        def _kill_both():
+            timed_out.append(True)
+            tar_out.kill()
+            tar_in.kill()
+
+        # The seed moves the same data as the export streams, in the other
+        # direction, so it gets the export-step budget, not the lifecycle one.
+        timer = threading.Timer(docker_cli.T_EXPORT_STEP, _kill_both)
+        timer.start()
+        try:
+            if tar_out.stdout is not None:
+                tar_out.stdout.close()  # the child owns the pipe now; lets SIGPIPE reach tar
+            tar_in.wait()
+            tar_out.wait()
+        finally:
+            timer.cancel()
+        if tar_out.returncode != 0 or tar_in.returncode != 0:
+            why = (f"timed out after {docker_cli.T_EXPORT_STEP}s" if timed_out
+                   else f"tar rc={tar_out.returncode}, docker exec tar rc={tar_in.returncode}")
+            raise SandboxError(f"resume seed failed: {why}")
 
     def _read_raw(self, path: str, *, strict: bool = False):
         rel, err = _rel(path)

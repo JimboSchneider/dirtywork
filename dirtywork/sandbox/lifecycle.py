@@ -33,15 +33,15 @@ def wait_ready(run, name: str, *, deadline_s: float | None = None, poll_s: float
     )
 
 
-def init_worker_git(run, name: str, *, slug: str, base_commit: str, restart: bool) -> None:
-    """Run the in-container git init script (git init -q --template= ; alternates; symbolic-ref; update-ref; read-tree HEAD [-m -u unless restart]) with GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; raise SandboxError('in-container init failed: <output[:500]>') on non-zero exit."""
+def init_worker_git(run, name: str, *, branch: str, base_commit: str, restart: bool) -> None:
+    """Run the in-container git init script (git init -q --template= ; alternates; symbolic-ref; update-ref; read-tree HEAD [-m -u unless restart]) with GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; raise SandboxError('in-container init failed: <output[:500]>') on non-zero exit. `branch` is the full branch name (dirtywork/<slug>) — a resumed run keeps the original run's branch while its container/volume carry the new slug."""
     populate = "/usr/bin/git read-tree HEAD" if restart else "/usr/bin/git read-tree -m -u HEAD"
     script = (
         "set -e; "
         "/usr/bin/git init -q --template= ; "
         "echo /repo.git/objects > /gitdir/objects/info/alternates; "
-        f"/usr/bin/git symbolic-ref HEAD refs/heads/dirtywork/{slug}; "
-        f"/usr/bin/git update-ref refs/heads/dirtywork/{slug} {base_commit}; "
+        f"/usr/bin/git symbolic-ref HEAD refs/heads/{branch}; "
+        f"/usr/bin/git update-ref refs/heads/{branch} {base_commit}; "
         f"{populate}"
     )
     argv = docker_args.exec_argv(

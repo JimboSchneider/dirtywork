@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from . import __version__
 from .budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB
 from .llm import LLMError, LMStudioClient
 from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json, write_run_json
-from .runner import Runner
+from .runner import DEFAULT_STALL_TURNS, Runner, resolve_context_window
 from .sandbox import SandboxError, docker_args, docker_cli
 from .sandbox.docker import DockerSandbox
 from .sandbox.docker_args import DEFAULT_IMAGE, DockerConfig
@@ -20,8 +21,10 @@ from .sandbox.docker_cli import DockerError, docker_version, resolve_image, vali
 from .sandbox.host import HostSandbox
 from .tools import ToolExecutor
 from .transcript import Transcript
+from .resume import ResumeError, build_resume_task, check_resumable, load_prior_run, render_transcript_tail, resolve_run_dir
 from .workspace import (
     WorkspaceError,
+    commit_exists,
     create_worktree,
     ensure_worktrees_excluded,
     load_repo_context,
@@ -50,7 +53,7 @@ Rules:
 - Explore before editing: use list_dir, grep, and read_file to understand the code first.
 - Verify your work: run the repo's tests or build via bash before declaring the task complete.
 - Do not run git commit or git branch commands; leave all changes uncommitted for review.
-- When the task is complete, reply WITHOUT calling any tools — that final plain reply ends the run."""
+- When the task is complete, call finish(summary=...) with a short summary of what you did and anything left undone. A plain reply with no tool calls also ends the run."""
     if repo_context:
         prompt += f"\n\nRepository conventions (from the repo's own docs):\n\n{repo_context}"
     return prompt
@@ -58,6 +61,98 @@ Rules:
 
 def _err(msg: str) -> None:
     print(f"error: {msg}", file=sys.stderr)
+
+
+class PreflightFailure(Exception):
+    """A preflight-stage refusal: main() prints the message and exits 2
+    having created nothing."""
+
+
+@dataclass
+class RunContext:
+    repo: Path
+    slug: str
+    branch: str
+    worktree: Path
+    base_commit: str
+    task: str
+    sandbox_mode: str
+    image_ref: str | None
+    image_digest: str | None
+    image_pinned: bool
+    context_window: int
+    branch_from: str | None = None
+    resumed_from: str | None = None
+    prior_run_dir: Path | None = None
+    seed_from_worktree: bool = False
+    owns_worktree: bool = True   # False on resume: a setup failure must not remove prior work
+
+
+def _positive_int(text: str) -> int:
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return value
+
+
+def _non_negative_int(text: str) -> int:
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return value
+
+
+def _preflight_llm(args) -> LMStudioClient:
+    client = LMStudioClient(base_url=args.base_url)
+    try:
+        models = client.list_models()
+    except LLMError as e:
+        raise PreflightFailure(f"{e}\nIs LM Studio running? Try: lms ps")
+    if args.model not in models:
+        raise PreflightFailure(
+            f"model '{args.model}' not loaded (loaded: {', '.join(models) or 'none'}). "
+            f"Load it with: lms load {args.model}")
+    return client
+
+
+def _resolve_context_window(args) -> int:
+    try:
+        window, source = resolve_context_window(
+            args.model, args.context_window, os.environ.get("DIRTYWORK_CONTEXT_WINDOW"))
+    except ValueError as e:
+        raise PreflightFailure(str(e))
+    if source == "default":
+        print(f"warning: no known context window for '{args.model}'; assuming {window} tokens "
+              f"(set --context-window or DIRTYWORK_CONTEXT_WINDOW)", file=sys.stderr)
+    return window
+
+
+def _workspace_new(args, repo: Path, context_window: int) -> RunContext:
+    image_ref, image_digest, image_pinned = None, None, False
+    if args.sandbox == "docker":
+        image_ref, image_digest, image_pinned = _docker_preflight_or_fail(repo, args.image)
+    slug = make_slug(args.task, datetime.now())
+    branch = f"dirtywork/{slug}"
+    if args.sandbox == "docker":
+        # Spec §3 name collision: refuse (exit 2) BEFORE creating anything —
+        # DockerSandbox.start() re-checks as defense in depth, but by then the
+        # worktree and run dir exist, and "exit 2 creates nothing" must hold.
+        try:
+            DockerSandbox.check_name_collision(docker_cli.run, slug)
+        except SandboxError as e:
+            raise PreflightFailure(str(e))
+    try:
+        ensure_worktrees_excluded(repo)
+        worktree = create_worktree(repo, slug, args.branch_from,
+                                    no_checkout=(args.sandbox == "docker"))
+    except WorkspaceError as e:
+        raise PreflightFailure(str(e))
+    return RunContext(
+        repo=repo, slug=slug, branch=branch, worktree=worktree,
+        base_commit=worktree_base_commit(worktree), task=args.task,
+        sandbox_mode=args.sandbox, image_ref=image_ref, image_digest=image_digest,
+        image_pinned=image_pinned, context_window=context_window, branch_from=args.branch_from,
+    )
 
 
 def _docker_preflight(repo: Path, image: str) -> tuple[str, str | None, bool]:
@@ -107,14 +202,32 @@ def _docker_preflight(repo: Path, image: str) -> tuple[str, str | None, bool]:
     return image_ref, image_digest, image_pinned
 
 
-def _build_sandbox(args, *, run_dir: Path, worktree: Path, repo: Path, slug: str,
-                    base_commit: str, transcript, image_ref, image_digest, image_pinned):
+def _docker_preflight_or_fail(repo: Path, image: str):
+    """_docker_preflight with main()'s exit-2 hint texts attached (Important #6)."""
+    try:
+        return _docker_preflight(repo, image)
+    except DockerError as e:
+        if getattr(e, "preflight_step", "daemon") == "daemon":
+            raise PreflightFailure(
+                f"{e}\nDocker is the default sandbox since 0.4. Start Docker Desktop / "
+                f"dockerd, or pass --sandbox none to run unsandboxed on the host.")
+        raise PreflightFailure(
+            f"{e}\nBuild or pull the worker image (see docker/README.md) or pass "
+            f"--image <ref> to use a different one, or --sandbox none to run "
+            f"unsandboxed on the host.")
+    except WorkspaceError as e:
+        raise PreflightFailure(
+            f"{e}\nCheck that the repository's git object store is valid, or pass "
+            f"--sandbox none to run unsandboxed on the host.")
+
+
+def _build_sandbox(args, ctx: RunContext, *, run_dir: Path, transcript):
     """Construct and start the backend named by --sandbox, returning
     (sandbox, sandbox_info) for Runner's run_info. A docker-mode failure
     during start() is cleaned up here (best-effort stop(), so a half-created
     container/volume is not left running) before the exception propagates —
     callers only need to decide what to report, not what to tear down."""
-    if args.sandbox == "docker":
+    if ctx.sandbox_mode == "docker":
         cfg = DockerConfig(
             image=args.image,
             network="bridge" if args.allow_network else "none",
@@ -128,9 +241,9 @@ def _build_sandbox(args, *, run_dir: Path, worktree: Path, repo: Path, slug: str
             max_patch_mb=args.max_patch_mb,
             keep_volume=args.keep_volume,
         )
-        sandbox = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, image_ref=image_ref)
+        sandbox = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, image_ref=ctx.image_ref)
         try:
-            sandbox.start(worktree, repo, slug, base_commit)
+            sandbox.start(ctx.worktree, ctx.repo, ctx.slug, ctx.base_commit, branch=ctx.branch, seed_from_worktree=ctx.seed_from_worktree)
         except Exception:
             try:
                 sandbox.stop()
@@ -139,8 +252,8 @@ def _build_sandbox(args, *, run_dir: Path, worktree: Path, repo: Path, slug: str
             raise
         sandbox.watchdog.start()  # only place a real Watchdog thread is started
         sandbox_info = {
-            "backend": "docker", "image": args.image, "image_digest": image_digest,
-            "image_pinned": image_pinned,
+            "backend": "docker", "image": args.image, "image_digest": ctx.image_digest,
+            "image_pinned": ctx.image_pinned,
             "network": cfg.network, "memory": cfg.memory, "cpus": cfg.cpus,
             "pids_limit": cfg.pids_limit, "tmp_size": cfg.tmp_size,
             "gitdir_size": cfg.gitdir_size, "max_worktree_mb": cfg.max_worktree_mb,
@@ -148,42 +261,48 @@ def _build_sandbox(args, *, run_dir: Path, worktree: Path, repo: Path, slug: str
             "user": f"{sandbox.uid}:{sandbox.gid}",
         }
     else:
-        sandbox = HostSandbox(worktree, max_worktree_mb=args.max_worktree_mb,
+        sandbox = HostSandbox(ctx.worktree, max_worktree_mb=args.max_worktree_mb,
                                max_worktree_files=args.max_worktree_files)
-        sandbox.start(worktree, repo, slug, base_commit)
+        sandbox.start(ctx.worktree, ctx.repo, ctx.slug, ctx.base_commit, branch=ctx.branch, seed_from_worktree=ctx.seed_from_worktree)
         sandbox_info = "none"
     return sandbox, sandbox_info
 
 
-def _write_run_json_start(run_dir: Path, *, slug: str, repo: Path, worktree: Path,
-                           branch: str, base_commit: str, args, image_digest,
-                           image_pinned) -> None:
+def _write_run_json_start(run_dir: Path, ctx: RunContext, args) -> None:
+    is_docker = ctx.sandbox_mode == "docker"
     write_run_json(run_dir, {
         "schema_version": 2,
         "status": "running",
-        "slug": slug,
-        "repo": str(repo),
-        "worktree": str(worktree),
-        "branch": branch,
-        "base_commit": base_commit,
-        "container": docker_args.container_name(slug) if args.sandbox == "docker" else None,
-        "volume": docker_args.volume_name(slug) if args.sandbox == "docker" else None,
-        "image": args.image if args.sandbox == "docker" else None,
-        "image_digest": image_digest,
-        "image_pinned": image_pinned,
+        "slug": ctx.slug,
+        "repo": str(ctx.repo),
+        "worktree": str(ctx.worktree),
+        "branch": ctx.branch,
+        "base_commit": ctx.base_commit,
+        "task": ctx.task,
+        "model": args.model,
+        "context_window": ctx.context_window,
+        "resumed_from": ctx.resumed_from,
+        "container": docker_args.container_name(ctx.slug) if is_docker else None,
+        "volume": docker_args.volume_name(ctx.slug) if is_docker else None,
+        "image": args.image if is_docker else None,
+        "image_digest": ctx.image_digest,
+        "image_pinned": ctx.image_pinned,
         "host_pid": os.getpid(),
         "started": datetime.now(timezone.utc).isoformat(),
-        "sandbox": args.sandbox,
+        "sandbox": ctx.sandbox_mode,
     })
 
 
-def _update_run_json(run_dir: Path, **fields) -> None:
+def _update_run_json(run_dir: Path, *, mark_ended: bool = True, **fields) -> None:
     """Best-effort merge-update of run.json (step 11); never raises — a
     failure here must not break the stdout JSON contract of exactly one
     object per run."""
     try:
         existing = read_run_json(run_dir)
-        existing.update(ended=datetime.now(timezone.utc).isoformat(), **fields)
+        updates = dict(fields)
+        if mark_ended:
+            updates["ended"] = datetime.now(timezone.utc).isoformat()
+        existing.update(updates)
         write_run_json(run_dir, existing)
     except Exception:
         pass
@@ -254,8 +373,7 @@ def _final_status(result) -> str:
     return result.status
 
 
-def _fail_setup(e: Exception, *, repo: Path, slug: str, run_dir: Path, transcript,
-                 worktree: Path, branch: str, transcript_path: Path, base_commit: str) -> int:
+def _fail_setup(e: Exception, ctx: RunContext, *, run_dir, transcript, transcript_path) -> int:
     """A SandboxError/WorkspaceError raised while building the sandbox,
     before runner.run() ever started: nothing has run yet, so this is a
     preflight-shaped failure — roll the worktree back (binding adjustment
@@ -266,19 +384,20 @@ def _fail_setup(e: Exception, *, repo: Path, slug: str, run_dir: Path, transcrip
             transcript.write("run_end", status="sandbox_error", error=message)
         except Exception:
             pass
-    remove_worktree(repo, slug)
+    if ctx.owns_worktree:
+        remove_worktree(ctx.repo, ctx.slug)
     _err(message)
     _update_run_json(run_dir, status="sandbox_error")
     print(json.dumps(_emit_result(
-        status="sandbox_error", worktree=worktree, branch=branch, transcript_path=transcript_path,
-        run_dir=run_dir, turns=None, usage={}, final_message=message, base_commit=base_commit,
+        status="sandbox_error", worktree=ctx.worktree, branch=ctx.branch, transcript_path=transcript_path,
+        run_dir=run_dir, turns=None, usage={}, final_message=message, base_commit=ctx.base_commit,
+        resumed_from=ctx.resumed_from,
     ), indent=2))
     return 1
 
 
-def _fail_run(e: Exception, *, sandbox, sandbox_started: bool, is_docker: bool, transcript,
-              run_dir: Path, worktree: Path, branch: str, transcript_path: Path,
-              base_commit: str) -> int:
+def _fail_run(e: Exception, ctx: RunContext, *, sandbox, sandbox_started: bool, transcript,
+              run_dir: Path, transcript_path: Path) -> int:
     """An exception the runner did not itself convert to a terminal status
     (e.g. an LLMError that escapes runner.run()'s own try/except). The
     sandbox has already started here, so — unlike _fail_setup — there may be
@@ -292,7 +411,7 @@ def _fail_run(e: Exception, *, sandbox, sandbox_started: bool, is_docker: bool, 
         fail_status, message = "model_error", f"unexpected error: {e!r}"
 
     export_status = None
-    if sandbox_started and is_docker:
+    if sandbox_started and ctx.sandbox_mode == "docker":
         try:
             artifacts = sandbox.finalize()
             export_status = artifacts.export_status
@@ -308,124 +427,79 @@ def _fail_run(e: Exception, *, sandbox, sandbox_started: bool, is_docker: bool, 
     _err(message)
 
     run_json_fields = {"status": fail_status}
-    extra_fields = {"base_commit": base_commit}
+    extra_fields = {"base_commit": ctx.base_commit, "resumed_from": ctx.resumed_from}
     if export_status is not None:
         run_json_fields["export_status"] = export_status
         extra_fields["export_status"] = export_status
     _update_run_json(run_dir, **run_json_fields)
 
     print(json.dumps(_emit_result(
-        status=fail_status, worktree=worktree, branch=branch, transcript_path=transcript_path,
+        status=fail_status, worktree=ctx.worktree, branch=ctx.branch, transcript_path=transcript_path,
         run_dir=run_dir, turns=None, usage={}, final_message=message, **extra_fields,
     ), indent=2))
     return 1
 
 
-def _parse_args(argv):
-    parser = argparse.ArgumentParser(prog="dirtywork")
-    sub = parser.add_subparsers(dest="cmd", required=True)
-    run_p = sub.add_parser("run", help="run one task in an isolated worktree")
-    run_p.add_argument("task")
-    run_p.add_argument("--repo", required=True, type=Path)
-    run_p.add_argument("--model", default=DEFAULT_MODEL)
-    run_p.add_argument("--branch-from", default=None)
-    run_p.add_argument("--max-turns", type=int, default=40)
-    run_p.add_argument("--timeout", type=int, default=1800)
-    run_p.add_argument("--temperature", type=float, default=None)
-    run_p.add_argument("--base-url", default="http://localhost:1234/v1")
-    run_p.add_argument("--max-worktree-mb", type=int, default=DEFAULT_MAX_WORKTREE_MB)
-    run_p.add_argument("--max-worktree-files", type=int, default=DEFAULT_MAX_WORKTREE_FILES)
-    run_p.add_argument("--sandbox", choices=["docker", "none"], default="docker")
-    run_p.add_argument("--image", default=DEFAULT_IMAGE)
-    run_p.add_argument("--allow-network", action="store_true", default=False)
-    run_p.add_argument("--memory", default="4g")
-    run_p.add_argument("--cpus", default="2")
-    run_p.add_argument("--tmp-size", default="1g")
-    run_p.add_argument("--gitdir-size", default="512m")
-    run_p.add_argument("--min-free-mb", type=int, default=2048)
-    run_p.add_argument("--keep-volume", action="store_true", default=False)
-    run_p.add_argument("--max-patch-mb", type=int, default=10)
-    return parser.parse_args(argv)
-
-
-def main(argv: list | None = None) -> int:
-    args = _parse_args(argv)
-    repo = args.repo.expanduser().resolve()
-
-    # ---- preflight (exit 2, create nothing) ----
-    client = LMStudioClient(base_url=args.base_url)
+def _load_resume_target(args) -> dict:
+    """Spec §5 lookup + refusals; also applies the prior run's defaults to
+    args (sandbox mode always; model/image unless given on the command line)."""
+    run_dir = resolve_run_dir(args.run, RUNS_DIR)
     try:
-        preflight_repo(repo)
-        models = client.list_models()
-    except WorkspaceError as e:
-        _err(str(e))
-        return 2
-    except LLMError as e:
-        _err(f"{e}\nIs LM Studio running? Try: lms ps")
-        return 2
-    if args.model not in models:
-        _err(f"model '{args.model}' not loaded (loaded: {', '.join(models) or 'none'}). "
-             f"Load it with: lms load {args.model}")
-        return 2
+        prior = load_prior_run(run_dir)
+        check_resumable(prior)
+    except ResumeError as e:
+        raise PreflightFailure(str(e))
+    prior["run_dir"] = str(run_dir)
+    args.sandbox = prior["sandbox"]
+    if args.model is None:
+        args.model = prior["model"]
+    if args.image is None:
+        args.image = prior.get("image") or DEFAULT_IMAGE
+    return prior
 
-    image_ref = None
-    image_digest = None
-    image_pinned = False
-    if args.sandbox == "docker":
-        try:
-            image_ref, image_digest, image_pinned = _docker_preflight(repo, args.image)
-        except DockerError as e:
-            # Important #6: don't blame a running daemon for a failure that
-            # isn't the daemon's — branch the hint on which preflight step
-            # actually raised (see _docker_preflight's .preflight_step tag).
-            if getattr(e, "preflight_step", "daemon") == "daemon":
-                _err(f"{e}\nDocker is the default sandbox since 0.4. Start Docker Desktop / "
-                     f"dockerd, or pass --sandbox none to run unsandboxed on the host.")
-            else:
-                _err(f"{e}\nBuild or pull the worker image (see docker/README.md) or pass "
-                     f"--image <ref> to use a different one, or --sandbox none to run "
-                     f"unsandboxed on the host.")
-            return 2
-        except WorkspaceError as e:
-            _err(f"{e}\nCheck that the repository's git object store is valid, or pass "
-                 f"--sandbox none to run unsandboxed on the host.")
-            return 2
 
-    # ---- workspace ----
-    slug = make_slug(args.task, datetime.now())
-    branch = f"dirtywork/{slug}"
+def _workspace_resume(args, prior: dict, context_window: int) -> RunContext:
+    repo = Path(prior["repo"]).expanduser().resolve()
+    if not commit_exists(repo, prior["base_commit"]):
+        raise PreflightFailure(f"base commit {prior['base_commit']} no longer exists in {repo}")
+    image_ref, image_digest, image_pinned = None, None, False
     if args.sandbox == "docker":
-        # Spec §3 name collision: refuse (exit 2) BEFORE creating anything —
-        # DockerSandbox.start() re-checks as defense in depth, but by then the
-        # worktree and run dir exist, and "exit 2 creates nothing" must hold.
+        image_ref, image_digest, image_pinned = _docker_preflight_or_fail(repo, args.image)
+    slug = make_slug(prior["task"], datetime.now())
+    if args.sandbox == "docker":
         try:
             DockerSandbox.check_name_collision(docker_cli.run, slug)
         except SandboxError as e:
-            _err(str(e))
-            return 2
-    try:
-        ensure_worktrees_excluded(repo)
-        worktree = create_worktree(repo, slug, args.branch_from,
-                                    no_checkout=(args.sandbox == "docker"))
-    except WorkspaceError as e:
-        _err(str(e))
-        return 2
-    base_commit = worktree_base_commit(worktree)
+            raise PreflightFailure(str(e))
+    tail = render_transcript_tail(Path(prior["run_dir"]) / "transcript.jsonl")
+    task = build_resume_task(prior["task"], prior["status"], prior.get("turns"), tail)
+    return RunContext(
+        repo=repo, slug=slug, branch=prior["branch"], worktree=Path(prior["worktree"]),
+        base_commit=prior["base_commit"], task=task, sandbox_mode=args.sandbox,
+        image_ref=image_ref, image_digest=image_digest, image_pinned=image_pinned,
+        context_window=context_window, resumed_from=prior["slug"],
+        prior_run_dir=Path(prior["run_dir"]), seed_from_worktree=(args.sandbox == "docker"),
+        owns_worktree=False,
+    )
 
+
+def _execute(ctx: RunContext, args, client) -> int:
     try:
         runs_dir = ensure_runs_dir(RUNS_DIR)
-        run_dir = create_run_dir(runs_dir, slug)
+        run_dir = create_run_dir(runs_dir, ctx.slug)
     except RunDirError as e:
-        remove_worktree(repo, slug)  # SP1 rule: never orphan the worktree on a preflight-style failure
+        # SP1 rule: never orphan the worktree on a preflight-style failure
+        if ctx.owns_worktree:
+            remove_worktree(ctx.repo, ctx.slug)
         _err(str(e))
         return 2
     transcript_path = run_dir / "transcript.jsonl"
     print(f"transcript: {transcript_path}", file=sys.stderr)
-    print(f"worktree:   {worktree}", file=sys.stderr)
+    print(f"worktree:   {ctx.worktree}", file=sys.stderr)
 
-    _write_run_json_start(run_dir, slug=slug, repo=repo, worktree=worktree, branch=branch,
-                           base_commit=base_commit, args=args, image_digest=image_digest,
-                           image_pinned=image_pinned)
+    _write_run_json_start(run_dir, ctx, args)
+    if ctx.prior_run_dir is not None:
+        _update_run_json(ctx.prior_run_dir, mark_ended=False, resumed_by=ctx.slug)
 
     # ---- run ----
     # Everything from here on is wrapped in one boundary so the machine
@@ -437,9 +511,7 @@ def main(argv: list | None = None) -> int:
     try:
         transcript = Transcript(transcript_path)  # constructed BEFORE the sandbox so sandbox_reset events reach it
         sandbox, sandbox_info = _build_sandbox(
-            args, run_dir=run_dir, worktree=worktree, repo=repo, slug=slug,
-            base_commit=base_commit, transcript=transcript, image_ref=image_ref,
-            image_digest=image_digest, image_pinned=image_pinned,
+            args, ctx=ctx, run_dir=run_dir, transcript=transcript
         )
         sandbox_started = True
 
@@ -464,25 +536,25 @@ def main(argv: list | None = None) -> int:
             client, executor, transcript, model=args.model,
             max_turns=args.max_turns, timeout=args.timeout, temperature=args.temperature,
             run_info={
-                "repo": str(repo), "worktree": str(worktree), "branch": branch,
-                "branch_from": args.branch_from, "base_commit": base_commit,
+                "repo": str(ctx.repo), "worktree": str(ctx.worktree), "branch": ctx.branch,
+                "branch_from": ctx.branch_from, "base_commit": ctx.base_commit,
                 "base_url": args.base_url, "dirtywork_version": __version__,
                 "temperature": args.temperature, "sandbox": sandbox_info, "provider": "openai",
+                "resumed_from": ctx.resumed_from,
             },
             finalize=finalize,
+            stall_turns=args.stall_turns, context_window=ctx.context_window,
         )
-        display_root = DOCKER_WORKDIR if args.sandbox == "docker" else str(worktree)
-        system_prompt = build_system_prompt(display_root, load_repo_context(repo, base_commit))
-        result = runner.run(system_prompt, args.task)
+        display_root = DOCKER_WORKDIR if ctx.sandbox_mode == "docker" else str(ctx.worktree)
+        system_prompt = build_system_prompt(display_root, load_repo_context(ctx.repo, ctx.base_commit))
+        result = runner.run(system_prompt, ctx.task)
     except Exception as e:
         if not sandbox_started and isinstance(e, (SandboxError, WorkspaceError)):
-            return _fail_setup(e, repo=repo, slug=slug, run_dir=run_dir, transcript=transcript,
-                                worktree=worktree, branch=branch, transcript_path=transcript_path,
-                                base_commit=base_commit)
-        return _fail_run(e, sandbox=sandbox, sandbox_started=sandbox_started,
-                          is_docker=(args.sandbox == "docker"), transcript=transcript,
-                          run_dir=run_dir, worktree=worktree, branch=branch,
-                          transcript_path=transcript_path, base_commit=base_commit)
+            return _fail_setup(e, ctx=ctx, run_dir=run_dir, transcript=transcript,
+                                transcript_path=transcript_path)
+        return _fail_run(e, ctx=ctx, sandbox=sandbox, sandbox_started=sandbox_started,
+                          transcript=transcript, run_dir=run_dir,
+                          transcript_path=transcript_path)
     finally:
         if sandbox is not None:
             try:
@@ -508,16 +580,73 @@ def main(argv: list | None = None) -> int:
         finalize_error=finalize_error,
         watchdog_violation=extra.get("watchdog_violation"),
         watchdog_violation_kind=extra.get("watchdog_violation_kind"),
+        turns=result.turns,
     )
 
     print(json.dumps(_emit_result(
-        status=final_status, worktree=worktree, branch=branch, transcript_path=transcript_path,
+        status=final_status, worktree=ctx.worktree, branch=ctx.branch, transcript_path=transcript_path,
         run_dir=run_dir, turns=result.turns, usage=result.usage, final_message=result.final_message,
-        base_commit=base_commit, finalize_error=finalize_error,
+        base_commit=ctx.base_commit, finalize_error=finalize_error,
         watchdog_violation=extra.get("watchdog_violation"),
         watchdog_violation_kind=extra.get("watchdog_violation_kind"),
+        resumed_from=ctx.resumed_from,
     ), indent=2))
     return 0 if final_status == "completed" else 1
+
+
+def _add_run_flags(p, *, resume: bool) -> None:
+    p.add_argument("--model", default=None if resume else DEFAULT_MODEL)
+    p.add_argument("--max-turns", type=int, default=40)
+    p.add_argument("--timeout", type=int, default=1800)
+    p.add_argument("--temperature", type=float, default=None)
+    p.add_argument("--base-url", default="http://localhost:1234/v1")
+    p.add_argument("--stall-turns", type=_non_negative_int, default=DEFAULT_STALL_TURNS,
+                   help="end the run as 'stalled' after N turns without progress (0 disables)")
+    p.add_argument("--context-window", type=_positive_int, default=None,
+                   help="model context window in tokens (default: built-in table, else 32768)")
+    p.add_argument("--max-worktree-mb", type=int, default=DEFAULT_MAX_WORKTREE_MB)
+    p.add_argument("--max-worktree-files", type=int, default=DEFAULT_MAX_WORKTREE_FILES)
+    p.add_argument("--image", default=None if resume else DEFAULT_IMAGE)
+    p.add_argument("--allow-network", action="store_true", default=False)
+    p.add_argument("--memory", default="4g")
+    p.add_argument("--cpus", default="2")
+    p.add_argument("--tmp-size", default="1g")
+    p.add_argument("--gitdir-size", default="512m")
+    p.add_argument("--min-free-mb", type=int, default=2048)
+    p.add_argument("--keep-volume", action="store_true", default=False)
+    p.add_argument("--max-patch-mb", type=int, default=10)
+
+
+def _parse_args(argv):
+    parser = argparse.ArgumentParser(prog="dirtywork")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    run_p = sub.add_parser("run", help="run one task in an isolated worktree")
+    run_p.add_argument("task")
+    run_p.add_argument("--repo", required=True, type=Path)
+    run_p.add_argument("--branch-from", default=None)
+    run_p.add_argument("--sandbox", choices=["docker", "none"], default="docker")
+    _add_run_flags(run_p, resume=False)
+    resume_p = sub.add_parser("resume", help="continue an earlier run on its worktree")
+    resume_p.add_argument("run", help="run slug (under ~/.dirtywork/runs) or a run directory path")
+    _add_run_flags(resume_p, resume=True)
+    return parser.parse_args(argv)
+
+
+def main(argv: list | None = None) -> int:
+    args = _parse_args(argv)
+    try:
+        prior = _load_resume_target(args) if args.cmd == "resume" else None
+        repo = Path(prior["repo"]) if prior else args.repo
+        repo = repo.expanduser().resolve()
+        preflight_repo(repo)
+        client = _preflight_llm(args)
+        context_window = _resolve_context_window(args)
+        ctx = (_workspace_resume(args, prior, context_window) if prior
+               else _workspace_new(args, repo, context_window))
+    except (PreflightFailure, WorkspaceError) as e:
+        _err(str(e))
+        return 2
+    return _execute(ctx, args, client)
 
 
 if __name__ == "__main__":

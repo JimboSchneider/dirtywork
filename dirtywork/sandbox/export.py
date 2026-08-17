@@ -232,7 +232,7 @@ def export_run(cfg, *, slug, base_commit, worktree: Path, run_dir: Path, objects
     try:
         lifecycle.wait_ready(run, name)
 
-        lifecycle.init_worker_git(run, name, slug=slug, base_commit=base_commit, restart=True)
+        lifecycle.init_worker_git(run, name, branch=f"dirtywork/{slug}", base_commit=base_commit, restart=True)
 
         find_argv = docker_args.exec_argv(
             name, ["/usr/bin/find", "/work", "-mindepth", "1", "-iname", ".git"]

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -21,6 +23,167 @@ TRIM_MARKER = "[result trimmed — re-run the tool if needed]"
 CHARS_PER_TOKEN = 4
 BUDGET_FRACTION = 0.75
 MAX_CONSECUTIVE_FAILURES = 3
+FINISH_TOOL = "finish"
+FAILURE_KINDS = ("malformed_entry", "malformed_args", "unknown_tool", "bad_args", "empty_reply")
+MAX_TOTAL_CONSECUTIVE_FAILURES = 6
+
+
+class FailureTracker:
+    """Consecutive model failures, counted per kind and in total. Any
+    successful tool execution resets everything (spec §2)."""
+
+    def __init__(self):
+        self.counts = {kind: 0 for kind in FAILURE_KINDS}
+        self.total = 0
+
+    def record(self, kind: str) -> str | None:
+        if kind not in self.counts:
+            raise ValueError(f"unknown failure kind {kind!r}")
+        self.counts[kind] += 1
+        self.total += 1
+        if self.counts[kind] >= MAX_CONSECUTIVE_FAILURES:
+            return f"aborted after {MAX_CONSECUTIVE_FAILURES} consecutive {kind} failures"
+        if self.total >= MAX_TOTAL_CONSECUTIVE_FAILURES:
+            return f"aborted after {MAX_TOTAL_CONSECUTIVE_FAILURES} consecutive tool failures"
+        return None
+
+    def reset(self) -> None:
+        for kind in self.counts:
+            self.counts[kind] = 0
+        self.total = 0
+
+
+# These tags are built by concatenation ON PURPOSE: several local models' chat
+# templates parse these exact tags in their own output (Qwen3-coder's tool-call
+# XML, think-tag stripping), so a worker model editing this file through its
+# tool channel could not emit them literally. Keep them concatenated.
+_THINK_OPEN = "<" + "think>"
+_THINK_CLOSE = "</" + "think>"
+_THINK_RE = re.compile(re.escape(_THINK_OPEN) + r".*?(?:" + re.escape(_THINK_CLOSE) + r"|\Z)",
+                       re.DOTALL)
+_TEXT_TOOL_MARKERS = tuple("<" + m for m in ("tool_call>", "function=", "function_call>", "|tool_call|>"))
+
+NUDGES = {
+    "truncated": ("Your reply was cut off at the token limit. Continue with smaller steps — "
+                  "emit one tool call at a time and write large files in pieces."),
+    "empty": ("Your reply contained no tool call and no answer. Continue the task with a "
+              "tool call, or call finish(summary=...) if the task is complete."),
+    "text_tool_call": ("Your reply contained a tool call written as text; the harness only "
+                       "executes tool calls made through the tools API. Re-issue it as a "
+                       "real tool call."),
+}
+
+
+def _join_nudges(*parts) -> str:
+    """One user message per turn: merge whichever nudge texts apply."""
+    return "\n\n".join(p for p in parts if p)
+
+
+def strip_think(text) -> str:
+    """Drop every think block (an unterminated opening tag drops to the end)."""
+    if not isinstance(text, str):
+        return ""
+    return _THINK_RE.sub("", text).strip()
+
+
+def _looks_like_tool_json(text: str) -> bool:
+    """A JSON object with a string "name" and an "arguments" key anywhere in
+    the text — a tool call the model wrote as prose instead of calling."""
+    if '"name"' not in text or '"arguments"' not in text:
+        return False
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    while start != -1:
+        try:
+            obj, _ = decoder.raw_decode(text[start:])
+        except ValueError:
+            obj = None
+        if isinstance(obj, dict) and isinstance(obj.get("name"), str) and "arguments" in obj:
+            return True
+        start = text.find("{", start + 1)
+    return False
+
+
+def classify_text_reply(content, finish_reason) -> str:
+    """Spec §1.2: what a reply with no tool calls means."""
+    if finish_reason == "length":
+        return "truncated"
+    text = strip_think(content)
+    if not text:
+        return "empty"
+    if any(marker in text for marker in _TEXT_TOOL_MARKERS) or _looks_like_tool_json(text):
+        return "text_tool_call"
+    return "answer"
+
+
+DEFAULT_STALL_TURNS = 12
+STALL_NUDGE = ("No progress in the last {n} turns: no file changed and no command produced "
+               "new output. If the task is complete, commit (if asked) and call "
+               "finish(summary=...); otherwise change your approach.")
+_MUTATING_TOOLS = ("write_file", "edit_file")
+
+
+class ProgressTracker:
+    """Spec §3: a turn made progress if a write/edit succeeded or a bash call
+    produced a (command, output) pair not seen before in this run. Nudge once
+    per idle streak at stall_turns // 2; report 'stalled' at stall_turns.
+    stall_turns <= 0 disables detection."""
+
+    def __init__(self, stall_turns: int):
+        self.stall_turns = stall_turns
+        self.idle_turns = 0
+        self._progressed = False
+        self._nudged = False
+        self._seen_bash = set()
+
+    def note_call(self, name: str, args, result: str) -> None:
+        if not isinstance(result, str) or result.startswith("ERROR"):
+            return
+        if name in _MUTATING_TOOLS:
+            self._progressed = True
+        elif name == "bash":
+            command = args.get("command") if isinstance(args, dict) else None
+            key = hashlib.sha256(
+                (str(command) + "\0" + result).encode("utf-8", "replace")).hexdigest()
+            if key not in self._seen_bash:
+                self._seen_bash.add(key)
+                self._progressed = True
+
+    def end_turn(self) -> str | None:
+        progressed, self._progressed = self._progressed, False
+        if self.stall_turns <= 0:
+            return None
+        if progressed:
+            self.idle_turns = 0
+            self._nudged = False
+            return None
+        self.idle_turns += 1
+        if self.idle_turns >= self.stall_turns:
+            return "stalled"
+        if self.stall_turns >= 2 and self.idle_turns == self.stall_turns // 2 and not self._nudged:
+            self._nudged = True
+            return "nudge"
+        return None
+
+
+def resolve_context_window(model: str, flag_value, env_value) -> tuple[int, str]:
+    """Spec §4 precedence: --context-window > DIRTYWORK_CONTEXT_WINDOW > table > default.
+    Returns (tokens, source) with source in flag|env|table|default. Raises
+    ValueError for an env value that is not a positive integer."""
+    if flag_value is not None:
+        return int(flag_value), "flag"
+    if env_value not in (None, ""):
+        try:
+            value = int(env_value)
+        except (TypeError, ValueError):
+            value = 0
+        if value <= 0:
+            raise ValueError(
+                f"DIRTYWORK_CONTEXT_WINDOW must be a positive integer, got {env_value!r}")
+        return value, "env"
+    if model in CONTEXT_WINDOWS:
+        return CONTEXT_WINDOWS[model], "table"
+    return DEFAULT_WINDOW, "default"
 
 
 def _valid_tool_call(tc) -> bool:
@@ -81,7 +244,9 @@ class Runner:
                  max_turns: int = 40, timeout: int = 1800,
                  temperature: float | None = None,
                  run_info: dict | None = None,
-                 finalize: Callable[[], dict] | None = None):
+                 finalize: Callable[[], dict] | None = None,
+                 stall_turns: int = DEFAULT_STALL_TURNS,
+                 context_window: int | None = None):
         self.client = client
         self.executor = executor
         self.transcript = transcript
@@ -91,8 +256,9 @@ class Runner:
         self.temperature = temperature
         self.run_info = run_info
         self.finalize = finalize
-        window = CONTEXT_WINDOWS.get(model, DEFAULT_WINDOW)
-        self.char_budget = int(window * BUDGET_FRACTION * CHARS_PER_TOKEN)
+        self.stall_turns = stall_turns
+        self.context_window = context_window if context_window is not None else CONTEXT_WINDOWS.get(model, DEFAULT_WINDOW)
+        self.char_budget = int(self.context_window * BUDGET_FRACTION * CHARS_PER_TOKEN)
 
     def run(self, system_prompt: str, task: str) -> RunResult:
         from .tools import TOOL_SCHEMAS
@@ -103,10 +269,12 @@ class Runner:
         ]
         self.transcript.write("run_start", task=task, model=self.model,
                               max_turns=self.max_turns, timeout=self.timeout,
+                              context_window=self.context_window,
                               schema_version=2, **(self.run_info or {}))
         usage = {"prompt_tokens": 0, "completion_tokens": 0}
         turns = 0
-        failures = 0
+        failures = FailureTracker()
+        progress = ProgressTracker(self.stall_turns)
         start = time.monotonic()
         deadline = start + self.timeout
         self.executor.deadline = deadline
@@ -127,6 +295,20 @@ class Runner:
                                   duration_s=round(time.monotonic() - start, 1),
                                   usage=usage, **extra)
             return RunResult(status, turns, final, usage, extra=extra)
+
+        def check_progress():
+            """(RunResult to end the run with, or None; stall-nudge text to
+            deliver, or None). The caller merges the nudge text into the one
+            user message it is about to append — history must never carry
+            two consecutive user messages (strict chat templates reject
+            non-alternating roles)."""
+            verdict = progress.end_turn()
+            if verdict == "stalled":
+                return finish("stalled", f"no progress in {self.stall_turns} consecutive turns"), None
+            if verdict == "nudge":
+                self.transcript.write("nudge", kind="stall", turn=turns)
+                return None, STALL_NUDGE.format(n=self.stall_turns // 2)
+            return None, None
 
         try:
             while True:
@@ -193,34 +375,57 @@ class Runner:
                         clean_msg["tool_calls"] = tool_calls
                     messages.append(clean_msg)
                 else:
-                    messages.append(msg)
-                    return finish("completed", msg.get("content") or "")
+                    content = msg.get("content") if isinstance(msg.get("content"), str) else ""
+                    kind = classify_text_reply(msg.get("content"), finish_reason)
+                    if kind == "answer":
+                        messages.append(msg)
+                        return finish("completed", content)
+                    messages.append({"role": "assistant", "content": content})
+                    self.transcript.write("nudge", kind=kind, turn=turns)
+                    abort_reason = failures.record("empty_reply")
+                    if abort_reason is not None:
+                        return finish("model_error", abort_reason)
+                    stalled, stall_text = check_progress()
+                    if stalled is not None:
+                        return stalled
+                    messages.append({"role": "user", "content": _join_nudges(NUDGES[kind], stall_text)})
+                    continue
 
+                abort_reason = None
                 for _ in range(malformed_count):
-                    failures += 1
+                    reason = failures.record("malformed_entry")
+                    if abort_reason is None:
+                        abort_reason = reason
                     result = "ERROR: malformed tool call entry (missing or invalid id/function fields)"
                     self.transcript.write("tool_result", tool="", args="", result=result)
-                if malformed_count > 0 and failures >= MAX_CONSECUTIVE_FAILURES:
-                    return finish("model_error",
-                                  "aborted after repeated malformed tool calls")
+                if abort_reason is not None:
+                    return finish("model_error", abort_reason)
 
+                pending_finish = None
                 for tc in tool_calls:
                     fn_info = tc.get("function") or {}
                     name = fn_info.get("name") or ""
                     raw_args = fn_info.get("arguments") or "{}"
                     call_id = tc.get("id", "")
+                    abort_reason = None
+                    args = None
                     try:
                         args = json.loads(raw_args)
                         if not isinstance(args, dict):
                             raise ValueError("arguments must be a JSON object")
-                        result = self.executor.execute(name, args)
-                        failures = 0
+                        if name == FINISH_TOOL:
+                            summary = args.get("summary")
+                            pending_finish = summary if isinstance(summary, str) else ""
+                            result = "run finished"
+                        else:
+                            result = self.executor.execute(name, args)
+                            failures.reset()
                     except BudgetExceeded as e:
                         return finish("budget_exceeded", e.reason)
                     except SandboxError as e:
                         return finish("sandbox_error", str(e))
                     except (json.JSONDecodeError, ValueError) as e:
-                        failures += 1
+                        abort_reason = failures.record("malformed_args")
                         if finish_reason == "length":
                             result = (
                                 "ERROR: your reply was cut off at the token limit before "
@@ -231,27 +436,36 @@ class Runner:
                         else:
                             result = f"ERROR: malformed tool arguments: {e}"
                     except KeyError:
-                        failures += 1
+                        abort_reason = failures.record("unknown_tool")
                         available_tools = ', '.join(s['function']['name'] for s in TOOL_SCHEMAS)
-                        result = f"ERROR: unknown tool '{name}'. Available: {available_tools}."
+                        result = (f"ERROR: unknown tool '{name}'. Available: {available_tools}. "
+                                  f"To end the run call finish(summary=...).")
                     except TypeError as e:
-                        failures += 1
+                        abort_reason = failures.record("bad_args")
                         result = f"ERROR: bad arguments for {name}: {e}"
+                    progress.note_call(name, args if isinstance(args, dict) else {}, result)
                     self.transcript.write("tool_result", tool=name,
                                           args=raw_args[:500],
                                           result=result[:2000])
                     messages.append({"role": "tool", "tool_call_id": call_id,
                                      "content": result})
-                    if failures >= MAX_CONSECUTIVE_FAILURES:
-                        return finish("model_error",
-                                      "aborted after repeated malformed tool calls")
+                    if abort_reason is not None:
+                        return finish("model_error", abort_reason)
 
+                if pending_finish is not None:
+                    return finish("completed", pending_finish)
+
+                stalled, stall_text = check_progress()
+                if stalled is not None:
+                    return stalled
+
+                malformed_text = None
                 if malformed_count > 0:
-                    messages.append({
-                        "role": "user",
-                        "content": (f"{malformed_count} of your tool calls were malformed "
-                                    "(missing or invalid id/function fields) and were "
-                                    "discarded. Re-issue them as valid tool calls."),
-                    })
+                    malformed_text = (f"{malformed_count} of your tool calls were malformed "
+                                      "(missing or invalid id/function fields) and were "
+                                      "discarded. Re-issue them as valid tool calls.")
+                nudge_text = _join_nudges(malformed_text, stall_text)
+                if nudge_text:
+                    messages.append({"role": "user", "content": nudge_text})
         except KeyboardInterrupt:
             return finish("interrupted", "")

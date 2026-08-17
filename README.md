@@ -158,6 +158,32 @@ The launcher is self-locating, so this works from any clone location.
 - **All flags, stdout JSON, exit codes, transcript events:** see
   [Machine contract](#machine-contract).
 
+### Resuming a run
+
+A run that ended early (`max_turns`, `stalled`, `timeout`, `interrupted`, a
+crash) keeps its worktree. Continue it on the same worktree and branch:
+
+    dirtywork resume <slug>          # slug from the run's stdout JSON / ~/.dirtywork/runs
+    dirtywork resume ~/.dirtywork/runs/<slug> --max-turns 60
+
+A resume is a new run (new slug, transcript, run dir, and — in docker mode —
+container and volume) whose task is the original task plus a summary of how
+the earlier run ended and the tail of its transcript; the model is told to
+`git status`/`git diff` first and continue rather than restart. The sandbox
+mode is the original run's; `--model` and the other run flags may be
+overridden. Refused (exit 2, nothing created) when the earlier run is still
+running, its worktree is gone, or its base commit no longer exists. In docker
+mode the prior work is moved aside during the final export and put back if that
+export fails, so a failed resume leaves the worktree exactly as it was. If a docker
+resume is killed mid-export, that stash (`<worktree>.pre-resume-<slug>`, next to the
+worktree) still holds the pre-resume content; `resume` refuses to run again until you
+move it back or delete it, and never deletes a stash it did not create.
+
+Docker-mode limit: export stores files, not the worker's in-container
+commits, so a resumed docker worker sees the earlier work as uncommitted
+changes against the base commit — not as its old commit history. Host mode
+(`--sandbox none`) keeps the real commits.
+
 ## How a run works
 
 1. **Preflight** — LM Studio reachable, model loaded, repo valid. Any
@@ -171,11 +197,15 @@ The launcher is self-locating, so this works from any clone location.
    `.git/info/exclude` automatically. If the repo has a `CLAUDE.md` or
    `AGENTS.md` at its base commit, its content is injected into the
    worker's system prompt so it inherits your conventions.
-3. **The loop** — the model gets six tools (`read_file`, `write_file`,
-   `edit_file`, `list_dir`, `grep`, `bash`) via OpenAI function-calling and
-   works until it replies without calling a tool. Context is budgeted per
-   model (oldest tool results get trimmed first); three consecutive
-   malformed tool calls abort the run.
+3. **The loop** — the model gets seven tools (`read_file`, `write_file`,
+   `edit_file`, `list_dir`, `grep`, `bash`, `finish`) via OpenAI
+   function-calling. Context is budgeted per model (oldest tool results get
+   trimmed first); three consecutive tool failures of one kind (malformed
+   call, malformed arguments, unknown tool, bad arguments, empty reply) or
+   six in total abort the run. The model ends a run by calling the
+   `finish(summary=...)` tool (a plain reply with no tool call also ends it);
+   an empty, think-only, or truncated reply, or a tool call written as text,
+   is sent back with a one-line nudge instead of being treated as completion.
 4. **No auto-commit** — changes stay uncommitted in the worktree; the
    transcript lands at `~/.dirtywork/runs/<slug>/transcript.jsonl`
    (outside the worktree, so it can never pollute the diff).
@@ -264,6 +294,10 @@ In August 2026 the project was renamed **dirtywork** — same tool, a name that 
 - **status `max_turns` / `timeout`** — the worktree is kept; read the
   transcript to see where it stalled, salvage what's useful, or re-run with
   higher limits.
+- **status `stalled`** — N turns (`--stall-turns`) passed with no file change
+  and no new command output; the worktree is kept. Usually the work is
+  done but the model never called `finish` — inspect the worktree, or
+  `dirtywork resume <slug>`.
 - **status `context_exhausted`** — the task needed more context than the
   model's window; split the task or use the larger-context model.
 - **status `budget_exceeded`** — the worktree grew past
@@ -308,6 +342,8 @@ dirtywork run --repo <path> "<task>"
     [--model qwen/qwen3-coder-next]   # or mistralai/devstral-small-2-2512
     [--branch-from <ref>]             # default: repo HEAD
     [--max-turns 40]
+    [--stall-turns 12]                # end as `stalled` after N no-progress turns; 0 disables
+    [--context-window <tokens>]       # default: built-in table, else 32768 (+ stderr warning)
     [--timeout 1800]                  # whole-run wall clock, seconds
     [--temperature <f>]               # omitted by default → server preset
     [--base-url http://localhost:1234/v1]  # LM Studio's OpenAI-compatible endpoint
@@ -325,6 +361,19 @@ dirtywork run --repo <path> "<task>"
     [--max-patch-mb 10]               # docker mode only; diff.patch cap
 ```
 
+```
+dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch-from/--sandbox/<task>;
+    [--model <m>]                     # defaults to the earlier run's model; --image defaults to its image
+```
+
+- `--stall-turns N` (default 12) — end the run with status `stalled` after N
+  consecutive turns that changed no file and produced no new command output;
+  the model gets one nudge halfway. `0` disables.
+- `--context-window TOKENS` — the model's context window, used to size the
+  transcript trimming budget. Precedence: flag, then `DIRTYWORK_CONTEXT_WINDOW`,
+  then a built-in table for the known LM Studio models, then 32768 (with a
+  warning on stderr).
+
 **stdout:** on any run that gets past preflight, exactly one JSON object is
 printed to stdout (nothing else goes to stdout):
 
@@ -340,13 +389,14 @@ printed to stdout (nothing else goes to stdout):
   "final_message": "...",
   "run_dir": "/home/you/.dirtywork/runs/<slug>",
   "base_commit": "abc123...",
+  "resumed_from": null,
   "finalize_error": null,
   "watchdog_violation": null,
   "watchdog_violation_kind": null
 }
 ```
 
-`status` is one of: `completed`, `max_turns`, `timeout`,
+`status` is one of: `completed`, `max_turns`, `timeout`, `stalled`,
 `context_exhausted`, `model_error`, `interrupted`, `budget_exceeded`,
 `sandbox_error`, `export_failed`. When the run fails before a `RunResult`
 exists — the LLM client raises, post-worktree setup fails (e.g. the
@@ -356,19 +406,20 @@ transcript can't be created), or any other exception escapes the run
 still populated so the worktree and run directory can be located for
 salvage.
 
-`base_commit` is present on every post-preflight payload. `finalize_error`,
-`watchdog_violation`, and `watchdog_violation_kind` are added on the normal
+`base_commit` is present on every post-preflight payload. `resumed_from` is
+the slug of the run this one continued, or `null` if this was a fresh run.
+`finalize_error`, `watchdog_violation`, and `watchdog_violation_kind` are added on the normal
 end-of-run path — i.e. whenever `runner.run()` returns a result, `completed`
 or not — normally `null`; see `run_end` below for what each means. The two
 paths where `runner.run()` never returns (sandbox setup fails before it
 starts, or an exception escapes the loop and is caught in `main()`) report
-`base_commit` only, plus `export_status` too if a docker `finalize()` ran
+`base_commit` and `resumed_from` only, plus `export_status` too if a docker `finalize()` ran
 during that exception recovery.
 
 **Exit codes:**
 
 - `0` — `completed`.
-- `1` — any non-`completed` status (`max_turns`, `timeout`,
+- `1` — any non-`completed` status (`max_turns`, `timeout`, `stalled`,
   `context_exhausted`, `model_error`, `interrupted`, `budget_exceeded`,
   `sandbox_error`, `export_failed`); the worktree and branch are kept for
   salvage/review. `main` catches every `Exception` the run raises (not
@@ -386,11 +437,14 @@ written to stderr; watch a live run with `tail -f` on the transcript path.
 **Transcript events** (JSONL, one per line): `run_start` (task, repo, model,
 config, `schema_version: 2`, plus provenance: `worktree`, `base_commit`,
 `branch`, `branch_from`, `base_url`, `dirtywork_version`, `temperature`,
-`sandbox` — the docker settings dict, or `"none"` — and `provider`),
+`sandbox` — the docker settings dict, or `"none"` — and `provider`,
+`context_window`, `resumed_from`),
 `assistant` (text + tool calls — text capped at 64 000 chars in the
 transcript only, the full text is still sent to the model), `tool_result`
-(truncated), `guardrail_block`, `sandbox_reset` (docker mode: the container
-was reset — reason), and `run_end` (status, turns, duration, cumulative
+(truncated), `guardrail_block`, `nudge` (`{"event": "nudge", "kind":
+"truncated|empty|text_tool_call|stall", "turn": N}`), `sandbox_reset`
+(docker mode: the container was reset — reason), and `run_end` (status, turns,
+duration, cumulative
 usage, plus the run's artifacts: in host mode `diff_stat` — `git diff
 --stat` against the base commit, tracked changes only — and `untracked` —
 `git status --porcelain` `??` entries — each capped at 64 000 chars; in
@@ -404,6 +458,7 @@ host-disk-floor breach, `"sandbox_error"` for the watchdog's own
 worktree-sampling exec failing twice; otherwise `null`), and
 `finalize_error` (set when the finalize/export step itself raised an
 exception after the agent loop otherwise finished; `null` normally)).
+A `finish(summary=...)` call appears in the transcript as an ordinary tool call in its `assistant` event followed by a `tool_result` event whose `result` is `run finished`; the summary becomes the run's `final_message`.
 
 The docker settings dict (`run_start`'s `sandbox`, and the same fields in
 `run.json`) includes `image` (the `--image` argument as given),
@@ -412,7 +467,10 @@ locally-built image that was never pushed/pulled) — provenance only — and
 `image_pinned` (`true` only when `--image` was left at its default AND
 `PINNED_DIGEST` was enforced against a pulled default image; `false` for a
 custom `--image` — never pinned — or a locally built/loaded default image,
-which only warns). The container itself always runs from the image's local
+which only warns). `run.json` also records the run's key fields: `task`,
+`model`, `context_window`, `resumed_from`, and `turns` (at the end); when a
+run is resumed, the earlier run's `resumed_by` field records the slug of the new run that continued it.
+The container itself always runs from the image's local
 content-addressed Id, never a registry digest, so a run can never trigger a
 network pull.
 

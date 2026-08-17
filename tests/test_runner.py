@@ -8,11 +8,21 @@ import pytest
 
 from dirtywork.llm import LLMTimeout
 from dirtywork.runner import (
+    CONTEXT_WINDOWS,
+    DEFAULT_STALL_TURNS,
     DEFAULT_WINDOW,
-    TRIM_MARKER,
+    FailureTracker,
+    MAX_TOTAL_CONSECUTIVE_FAILURES,
+    NUDGES,
+    ProgressTracker,
     RunResult,
     Runner,
+    STALL_NUDGE,
+    TRIM_MARKER,
     _valid_tool_call,
+    classify_text_reply,
+    resolve_context_window,
+    strip_think,
     trim_messages,
 )
 from dirtywork.sandbox.host import HostSandbox
@@ -577,3 +587,415 @@ def test_budget_exceeded_from_executor_ends_run(parts):
     events = _events(tmp)
     run_end = next(e for e in events if e["event"] == "run_end")
     assert run_end["status"] == "budget_exceeded"
+
+
+def test_finish_tool_ends_run_after_other_calls_in_turn(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([
+        _resp(tool_calls=[
+            _call("f1", "finish", {"summary": "wrote g.txt"}),
+            _call("w1", "write_file", {"path": "g.txt", "content": "hi\n"}),
+        ]),
+    ])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.final_message == "wrote g.txt"
+    assert result.turns == 1
+    assert (wt / "g.txt").read_text() == "hi\n"   # the later call still executed
+    events = _events(tmp)
+    finish_results = [e for e in events if e["event"] == "tool_result" and e["tool"] == "finish"]
+    assert finish_results and finish_results[0]["result"] == "run finished"
+    assert events[-1]["event"] == "run_end" and events[-1]["status"] == "completed"
+
+
+def test_finish_without_summary_still_completes_with_empty_message(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(tool_calls=[_call("f1", "finish", {})])])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.final_message == ""
+
+
+def test_finish_with_malformed_args_does_not_end_run(parts):
+    wt, executor, transcript, tmp = parts
+    bad = _resp(tool_calls=[{"id": "f1", "type": "function",
+                             "function": {"name": "finish", "arguments": "{not json"}}])
+    client = FakeClient([bad, _resp(tool_calls=[_call("f2", "finish", {"summary": "ok"})])])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.turns == 2
+    tool_msgs = [m for m in client.requests[1] if m["role"] == "tool"]
+    assert "malformed tool arguments" in tool_msgs[0]["content"]
+
+
+def test_unknown_tool_error_mentions_finish(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([
+        _resp(tool_calls=[_call("c1", "no_such_tool", {})]),
+        _resp(content="ok done"),
+    ])
+    r = Runner(client, executor, transcript, model="m")
+    r.run("s", "t")
+    transcript.close()
+    tool_msgs = [m for m in client.requests[1] if m["role"] == "tool"]
+    assert "finish(summary=...)" in tool_msgs[0]["content"]
+
+
+def test_failure_tracker_per_kind_threshold():
+    t = FailureTracker()
+    assert t.record("unknown_tool") is None
+    assert t.record("malformed_args") is None
+    assert t.record("unknown_tool") is None
+    reason = t.record("unknown_tool")
+    assert reason == "aborted after 3 consecutive unknown_tool failures"
+
+
+def test_failure_tracker_total_threshold_across_kinds():
+    t = FailureTracker()
+    seq = ["malformed_args", "unknown_tool", "bad_args", "malformed_args", "unknown_tool"]
+    for k in seq:
+        assert t.record(k) is None
+    assert t.record("bad_args") == f"aborted after {MAX_TOTAL_CONSECUTIVE_FAILURES} consecutive tool failures"
+
+
+def test_failure_tracker_reset_clears_all():
+    t = FailureTracker()
+    t.record("unknown_tool"); t.record("unknown_tool")
+    t.reset()
+    assert t.record("unknown_tool") is None
+    assert t.record("unknown_tool") is None
+
+
+def test_failure_tracker_rejects_unknown_kind():
+    with pytest.raises(ValueError):
+        FailureTracker().record("nope")
+
+
+def test_mixed_failure_kinds_do_not_abort_at_three(parts):
+    wt, executor, transcript, tmp = parts
+    bad_args = _resp(tool_calls=[{"id": "x", "type": "function",
+                                  "function": {"name": "read_file", "arguments": "{not json"}}])
+    unknown = _resp(tool_calls=[_call("u", "no_such_tool", {})])
+    wrong_type = _resp(tool_calls=[_call("t", "read_file", {})])   # missing required arg → TypeError → bad_args
+    client = FakeClient([bad_args, unknown, wrong_type, _resp(content="ok done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.turns == 4
+
+
+# NOTE: the tags below are built by concatenation ON PURPOSE. Local models' chat
+# templates parse these exact tags in their own output (Qwen3-coder's tool-call XML
+# uses function=/parameter= XML tags; think tags are stripped by the server), so a
+# worker model editing this file through its tool channel cannot emit them literally.
+# Keep every occurrence of these tags in this file and in runner.py concatenated.
+def _tag(name: str) -> str:
+    return "<" + name + ">"
+
+
+_THINK = _tag("think")
+_THINK_END = _tag("/think")
+
+
+@pytest.mark.parametrize("content,finish_reason,expected", [
+    ("Done: all tests pass", None, "answer"),
+    ("Done", "stop", "answer"),
+    ("anything", "length", "truncated"),
+    ("", None, "empty"),
+    (None, None, "empty"),
+    ("   \n", None, "empty"),
+    (_THINK + "let me reason" + _THINK_END, None, "empty"),
+    (_THINK + "never closed the tag", None, "empty"),
+    (_THINK + "plan" + _THINK_END + "Done, wrote the file.", None, "answer"),
+    (_tag("tool_call") + '{"name":"bash"}' + _tag("/tool_call"), None, "text_tool_call"),
+    ("<" + 'function=read_file>{"path":"x"}' + _tag("/function"), None, "text_tool_call"),
+    ("<" + "|tool_call|>bash", None, "text_tool_call"),
+    (_tag("function_call") + "bash" + _tag("/function_call"), None, "text_tool_call"),
+    ('I will run {"name": "bash", "arguments": {"command": "ls"}} now', None, "text_tool_call"),
+    ('The config is {"name": "app", "version": 2}', None, "answer"),
+])
+def test_classify_text_reply(content, finish_reason, expected):
+    assert classify_text_reply(content, finish_reason) == expected
+
+
+def test_strip_think_removes_blocks():
+    assert strip_think(_THINK + "a" + _THINK_END + "x" + _THINK + "b" + _THINK_END + "y") == "xy"
+    assert strip_think(_THINK + "open") == ""
+    assert strip_think(None) == ""
+
+
+def test_empty_reply_is_nudged_not_completed(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content=""), _resp(content="done for real")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.turns == 2
+    assert result.final_message == "done for real"
+    second = client.requests[1]
+    assert second[-1]["role"] == "user" and second[-1]["content"] == NUDGES["empty"]
+    assert second[-2] == {"role": "assistant", "content": ""}
+    events = _events(tmp)
+    nudges = [e for e in events if e["event"] == "nudge"]
+    assert len(nudges) == 1
+    assert nudges[0]["kind"] == "empty" and nudges[0]["turn"] == 1
+
+
+def test_think_only_reply_is_nudged(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content=_THINK + "hmm" + _THINK_END), _resp(content="ok")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed" and result.turns == 2
+
+
+def test_text_tool_call_reply_is_nudged(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content=_tag("tool_call") + '{"name":"bash","arguments":{}}' + _tag("/tool_call")),
+                         _resp(content="ok")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed" and result.turns == 2
+    assert client.requests[1][-1]["content"] == NUDGES["text_tool_call"]
+
+
+def test_length_cutoff_without_tool_calls_is_not_completed(parts):
+    wt, executor, transcript, tmp = parts
+    cut = {"choices": [{"message": {"role": "assistant", "content": "I will now"},
+                        "finish_reason": "length"}],
+           "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    client = FakeClient([cut, _resp(content="ok")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed" and result.turns == 2
+    assert client.requests[1][-1]["content"] == NUDGES["truncated"]
+
+
+def test_three_empty_replies_abort_as_model_error(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content=""), _resp(content=""), _resp(content="")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+    assert result.final_message == "aborted after 3 consecutive empty_reply failures"
+
+
+def test_successful_call_resets_empty_reply_count(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content=""), _resp(content=""),
+                         _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})]),
+                         _resp(content=""), _resp(content=""), _resp(content="done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed" and result.turns == 6
+
+
+def test_abort_message_names_the_kind(parts):
+    wt, executor, transcript, tmp = parts
+    unknown = _resp(tool_calls=[_call("u", "no_such_tool", {})])
+    client = FakeClient([unknown, unknown, unknown])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+    assert result.final_message == "aborted after 3 consecutive unknown_tool failures"
+
+
+def test_progress_tracker_definitions():
+    t = ProgressTracker(stall_turns=4)
+    # read-only tools never count
+    t.note_call("read_file", {"path": "a"}, "data")
+    assert t.end_turn() is None and t.idle_turns == 1
+    # a successful write is progress
+    t.note_call("write_file", {"path": "a", "content": "x"}, "wrote 1 bytes")
+    assert t.end_turn() is None and t.idle_turns == 0
+    # an ERROR result is not progress even for write_file
+    t.note_call("edit_file", {"path": "a"}, "ERROR: old_string not found")
+    assert t.end_turn() is None and t.idle_turns == 1
+    # first time a bash (command, output) pair is seen: progress
+    t.note_call("bash", {"command": "pytest"}, "exit code: 1\n1 failed")
+    assert t.end_turn() is None and t.idle_turns == 0
+    # identical command with identical output: idle
+    t.note_call("bash", {"command": "pytest"}, "exit code: 1\n1 failed")
+    assert t.end_turn() is None and t.idle_turns == 1
+    # same command, new output: progress
+    t.note_call("bash", {"command": "pytest"}, "exit code: 0\n5 passed")
+    assert t.end_turn() is None and t.idle_turns == 0
+
+
+def test_progress_tracker_nudge_then_stalled():
+    t = ProgressTracker(stall_turns=4)
+    assert t.end_turn() is None          # idle 1
+    assert t.end_turn() == "nudge"       # idle 2 == 4 // 2
+    assert t.end_turn() is None          # idle 3
+    assert t.end_turn() == "stalled"     # idle 4
+
+
+def test_progress_tracker_nudges_once_per_idle_streak():
+    t = ProgressTracker(stall_turns=4)
+    t.end_turn(); assert t.end_turn() == "nudge"
+    t.note_call("write_file", {"path": "a", "content": "x"}, "ok"); assert t.end_turn() is None
+    t.end_turn(); assert t.end_turn() == "nudge"   # a new streak nudges again
+
+
+def test_progress_tracker_disabled_when_zero():
+    t = ProgressTracker(stall_turns=0)
+    for _ in range(50):
+        assert t.end_turn() is None
+
+
+def test_runner_stalled_status_after_idle_turns(parts):
+    wt, executor, transcript, tmp = parts
+    loop = _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])
+    client = FakeClient([loop] * 10)
+    r = Runner(client, executor, transcript, model="m", max_turns=50, stall_turns=4)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "stalled"
+    assert result.turns == 4
+    assert result.final_message == "no progress in 4 consecutive turns"
+    # the nudge went to the model after 2 idle turns and was transcribed
+    third = client.requests[2]
+    assert third[-1]["role"] == "user" and third[-1]["content"] == STALL_NUDGE.format(n=2)
+    nudges = [e for e in _events(tmp) if e["event"] == "nudge"]
+    assert len(nudges) == 1 and nudges[0]["kind"] == "stall" and nudges[0]["turn"] == 2
+
+
+def test_runner_empty_replies_count_as_idle_turns(parts):
+    wt, executor, transcript, tmp = parts
+    # 2 empty replies (empty_reply failures) then a read → idle streak continues; stall_turns=3
+    client = FakeClient([_resp(content=""), _resp(content=""),
+                         _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])])
+    r = Runner(client, executor, transcript, model="m", stall_turns=3)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "stalled" and result.turns == 3
+
+
+def test_runner_default_stall_turns_is_twelve(parts):
+    wt, executor, transcript, tmp = parts
+    r = Runner(FakeClient([]), executor, transcript, model="m")
+    assert r.stall_turns == DEFAULT_STALL_TURNS == 12
+
+
+@pytest.mark.parametrize("model,flag,env,expected", [
+    ("qwen/qwen3-coder-next", None, None, (65536, "table")),
+    ("unknown/model", None, None, (DEFAULT_WINDOW, "default")),
+    ("qwen/qwen3-coder-next", 8000, None, (8000, "flag")),
+    ("qwen/qwen3-coder-next", None, "9000", (9000, "env")),
+    ("unknown/model", 8000, "9000", (8000, "flag")),
+    ("unknown/model", None, "", (DEFAULT_WINDOW, "default")),
+])
+def test_resolve_context_window(model, flag, env, expected):
+    assert resolve_context_window(model, flag, env) == expected
+
+
+@pytest.mark.parametrize("env", ["abc", "0", "-5", "1.5"])
+def test_resolve_context_window_rejects_bad_env(env):
+    with pytest.raises(ValueError):
+        resolve_context_window("m", None, env)
+
+
+def test_runner_context_window_param_sets_budget_and_run_start(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content="done")])
+    r = Runner(client, executor, transcript, model="unknown/model", context_window=1000)
+    assert r.context_window == 1000
+    assert r.char_budget == int(1000 * 0.75 * 4)
+    r.run("s", "t")
+    transcript.close()
+    start = next(e for e in _events(tmp) if e["event"] == "run_start")
+    assert start["context_window"] == 1000
+
+
+def test_runner_context_window_defaults_from_table(parts):
+    wt, executor, transcript, tmp = parts
+    r = Runner(FakeClient([]), executor, transcript, model="qwen/qwen3-coder-next")
+    assert r.context_window == CONTEXT_WINDOWS["qwen/qwen3-coder-next"]
+
+
+def test_finish_after_idle_turns_completes_not_stalled(parts):
+    wt, executor, transcript, tmp = parts
+    idle = _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])
+    done = _resp(tool_calls=[_call("f", "finish", {"summary": "all done"})])
+    client = FakeClient([idle, idle, idle, done])
+    r = Runner(client, executor, transcript, model="m", stall_turns=4)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.final_message == "all done"
+    assert result.turns == 4
+
+
+def _no_consecutive_user_messages(requests):
+    for req in requests:
+        roles = [m["role"] for m in req]
+        assert all(not (a == "user" and b == "user") for a, b in zip(roles, roles[1:])), roles
+
+
+def test_empty_reply_on_stall_nudge_turn_sends_one_merged_user_message(parts):
+    wt, executor, transcript, tmp = parts
+    idle = _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])
+    # stall_turns=4 → the stall nudge fires when idle_turns reaches 2; make turn 2 an empty reply
+    client = FakeClient([idle, _resp(content=""), _resp(content="done")])
+    r = Runner(client, executor, transcript, model="m", stall_turns=4)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    third = client.requests[2]
+    assert third[-1]["role"] == "user"
+    assert third[-1]["content"] == NUDGES["empty"] + "\n\n" + STALL_NUDGE.format(n=2)
+    assert third[-2]["role"] == "assistant"
+    _no_consecutive_user_messages(client.requests)
+    kinds = [e["kind"] for e in _events(tmp) if e["event"] == "nudge"]
+    assert kinds == ["empty", "stall"]
+
+
+def test_malformed_entries_on_stall_nudge_turn_send_one_merged_user_message(parts):
+    wt, executor, transcript, tmp = parts
+    idle = _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])
+    bad_entry = {"choices": [{"message": {"role": "assistant", "content": None,
+                                          "tool_calls": [{"id": "", "function": {"name": "read_file"}}]}}],
+                 "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    client = FakeClient([idle, bad_entry, _resp(content="done")])
+    r = Runner(client, executor, transcript, model="m", stall_turns=4)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    third = client.requests[2]
+    assert third[-1]["role"] == "user"
+    assert "were malformed" in third[-1]["content"]
+    assert STALL_NUDGE.format(n=2) in third[-1]["content"]
+    _no_consecutive_user_messages(client.requests)
+
+
+def test_malformed_entry_abort_reports_first_threshold(parts):
+    wt, executor, transcript, tmp = parts
+    bad = {"id": "", "function": {"name": "read_file"}}
+    six_bad = {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [bad] * 6}}],
+               "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    client = FakeClient([six_bad])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+    assert result.final_message == "aborted after 3 consecutive malformed_entry failures"
+
+
+def test_runner_context_window_zero_is_not_replaced_by_table(parts):
+    wt, executor, transcript, tmp = parts
+    r = Runner(FakeClient([]), executor, transcript, model="qwen/qwen3-coder-next", context_window=0)
+    assert r.context_window == 0

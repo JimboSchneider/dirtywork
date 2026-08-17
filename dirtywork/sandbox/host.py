@@ -26,7 +26,7 @@ class HostSandbox:
         self.max_worktree_files = max_worktree_files
         self.base_commit: str | None = None
 
-    def start(self, worktree: Path, repo: Path, slug: str, base_commit: str) -> None:
+    def start(self, worktree: Path, repo: Path, slug: str, base_commit: str, *, branch: str | None = None, seed_from_worktree: bool = False) -> None:
         self.worktree = worktree  # host mode: no container to create
         self.base_commit = base_commit
         self.repo = repo

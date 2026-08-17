@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -109,7 +111,7 @@ def test_main_docker_mode_happy_path_with_fake_sandbox(tmp_path, monkeypatch, ca
             self.image_ref = image_ref
             self.watchdog = FakeWatchdog()
 
-        def start(self, worktree, repo, slug, base_commit):
+        def start(self, worktree, repo, slug, base_commit, **kwargs):
             pass
 
         def stop(self):
@@ -240,7 +242,7 @@ def test_main_docker_build_sandbox_passes_preflight_image_ref(tmp_path, monkeypa
             self.uid, self.gid = 501, 20
             self.watchdog = FakeWatchdog()
 
-        def start(self, worktree, repo, slug, base_commit):
+        def start(self, worktree, repo, slug, base_commit, **kwargs):
             pass
 
         def stop(self):
@@ -315,7 +317,7 @@ def _install_immediate_done_docker_fakes(m, monkeypatch, *, constructed_with=Non
             self.uid, self.gid = 501, 20
             self.watchdog = FakeWatchdog()
 
-        def start(self, worktree, repo, slug, base_commit):
+        def start(self, worktree, repo, slug, base_commit, **kwargs):
             pass
 
         def stop(self):
@@ -456,7 +458,7 @@ def test_main_docker_start_failure_is_sandbox_error_exit_1(tmp_path, monkeypatch
             self.uid, self.gid = 501, 20
             self.stopped = False
 
-        def start(self, worktree, repo, slug, base_commit):
+        def start(self, worktree, repo, slug, base_commit, **kwargs):
             raise SandboxError("in-container git init failed: rc 128")
 
         def stop(self):
@@ -572,7 +574,7 @@ def _fake_docker_sandbox_class(RealDockerSandbox, *, finalize):
 
             self.watchdog = FakeWatchdog()
 
-        def start(self, worktree, repo, slug, base_commit):
+        def start(self, worktree, repo, slug, base_commit, **kwargs):
             pass
 
         def stop(self):
@@ -895,6 +897,7 @@ def test_build_system_prompt_includes_rules_and_context(tmp_path: Path):
     assert "edit_file" in p
     assert "REPO RULES HERE" in p
     assert "uncommitted" in p
+    assert "finish(summary=...)" in p
 
 
 def test_build_system_prompt_no_context(tmp_path: Path):
@@ -1257,3 +1260,308 @@ def test_stdout_json_has_run_dir_and_base_commit(tmp_path, monkeypatch, capsys):
     # existing contract fields must still be present and unrenamed
     for key in ("status", "worktree", "branch", "transcript", "turns", "usage", "final_message"):
         assert key in payload
+
+
+def _host_repo(tmp_path):
+    import subprocess
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "--allow-empty", "-m", "i"], capture_output=True)
+    return repo
+
+
+class _ScriptedClient:
+    """LMStudioClient stand-in driven by a list of chat responses; the last
+    response repeats so a run can never underflow."""
+    instances = []
+
+    def __init__(self, base_url=None, responses=None):
+        self.responses = list(responses or [
+            {"choices": [{"message": {"role": "assistant", "content": "done"}}],
+             "usage": {"prompt_tokens": 1, "completion_tokens": 1}}])
+        _ScriptedClient.instances.append(self)
+
+    def list_models(self):
+        import dirtywork.__main__ as m
+        return [m.DEFAULT_MODEL, "other/model"]
+
+    def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+        if len(self.responses) > 1:
+            return self.responses.pop(0)
+        return self.responses[0]
+
+
+def _install_host_harness(monkeypatch, tmp_path, responses=None):
+    import dirtywork.__main__ as m
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(m, "LMStudioClient",
+                        lambda base_url=None: _ScriptedClient(base_url, responses))
+    return m
+
+
+def _read_only_run_json(tmp_path):
+    return json.loads(next((tmp_path / "runs").rglob("run.json")).read_text())
+
+
+def test_run_json_records_task_model_context_window_and_turns(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--context-window", "5000",
+                 "--stall-turns", "7", "some task"])
+    assert rc == 0
+    data = _read_only_run_json(tmp_path)
+    assert data["task"] == "some task"
+    assert data["model"] == m.DEFAULT_MODEL
+    assert data["context_window"] == 5000
+    assert data["turns"] == 1
+    assert data["resumed_from"] is None
+    start = next(e for e in (json.loads(l) for l in Path(
+        next((tmp_path / "runs").rglob("transcript.jsonl"))).read_text().splitlines())
+        if e["event"] == "run_start")
+    assert start["context_window"] == 5000 and start["resumed_from"] is None
+    out = json.loads(capsys.readouterr().out)
+    assert out["resumed_from"] is None
+
+
+def test_context_window_env_and_unknown_model_warning(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    monkeypatch.setenv("DIRTYWORK_CONTEXT_WINDOW", "4096")
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--model", "other/model", "t"])
+    assert rc == 0
+    assert _read_only_run_json(tmp_path)["context_window"] == 4096
+    assert "warning: no known context window" not in capsys.readouterr().err
+    monkeypatch.delenv("DIRTYWORK_CONTEXT_WINDOW")
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs2")
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--model", "other/model", "t"])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "warning: no known context window for 'other/model'; assuming 32768 tokens" in err
+
+
+def test_bad_context_window_env_exits_2(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    monkeypatch.setenv("DIRTYWORK_CONTEXT_WINDOW", "lots")
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "t"])
+    assert rc == 2
+    assert "DIRTYWORK_CONTEXT_WINDOW" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()
+
+
+def test_bad_stall_turns_flag_exits_2(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    with pytest.raises(SystemExit) as ei:
+        m.main(["run", "--repo", str(repo), "--sandbox", "none", "--stall-turns", "-1", "t"])
+    assert ei.value.code == 2
+
+
+def _first_run(monkeypatch, tmp_path, responses):
+    m = _install_host_harness(monkeypatch, tmp_path, responses)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1", "add a file"])
+    return m, repo, rc
+
+
+def _resume_responses():
+    return [{"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "b1", "type": "function", "function": {"name": "bash",
+                 "arguments": json.dumps({"command": "git status --short; cat new.txt"})}}]}}],
+             "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+            {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "f1", "type": "function", "function": {"name": "finish",
+                 "arguments": json.dumps({"summary": "resumed and verified"})}}]}}],
+             "usage": {"prompt_tokens": 1, "completion_tokens": 1}}]
+
+
+def test_resume_host_mode_reuses_worktree_and_links_runs(tmp_path, monkeypatch, capsys):
+    write_then_loop = [
+        {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "w1", "type": "function", "function": {"name": "write_file",
+             "arguments": json.dumps({"path": "new.txt", "content": "from run 1\n"})}}]}}],
+         "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+    ]
+    m, repo, rc = _first_run(monkeypatch, tmp_path, write_then_loop)
+    assert rc == 1                                    # max_turns after 1 turn
+    first = json.loads(capsys.readouterr().out)
+    assert first["status"] == "max_turns"
+    first_run_dir = Path(first["run_dir"])
+
+    monkeypatch.setattr(m, "LMStudioClient",
+                        lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
+    rc = m.main(["resume", first_run_dir.name])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0, out
+    assert out["status"] == "completed"
+    assert out["final_message"] == "resumed and verified"
+    assert out["worktree"] == first["worktree"] and out["branch"] == first["branch"]
+    assert out["resumed_from"] == first_run_dir.name
+    assert out["run_dir"] != first["run_dir"]
+
+    second = json.loads((Path(out["run_dir"]) / "run.json").read_text())
+    assert second["resumed_from"] == first_run_dir.name
+    assert second["task"].startswith("add a file\n\n--- RESUMED RUN ---")
+    assert "ended with status 'max_turns' after 1 turns" in second["task"]
+    assert second["model"] == m.DEFAULT_MODEL
+    prior = json.loads((first_run_dir / "run.json").read_text())
+    assert prior["resumed_by"] == second["slug"]
+    assert prior["status"] == "max_turns"             # untouched
+
+    events = [json.loads(l) for l in Path(out["transcript"]).read_text().splitlines()]
+    start = next(e for e in events if e["event"] == "run_start")
+    assert start["resumed_from"] == first_run_dir.name
+    bash_result = next(e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash")
+    assert "from run 1" in bash_result                 # prior work is in the worktree
+    # the prior transcript tail reached the model
+    assert "tool_result write_file" in start["task"]
+    # only one worktree exists
+    assert len(list((repo / ".worktrees").iterdir())) == 1
+
+
+def test_resume_refuses_running_run_with_live_pid(tmp_path, monkeypatch, capsys):
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    run_dir = Path(first["run_dir"])
+    data = json.loads((run_dir / "run.json").read_text())
+    data["status"] = "running"; data["host_pid"] = os.getpid()
+    (run_dir / "run.json").write_text(json.dumps(data))
+    rc = m.main(["resume", run_dir.name])
+    assert rc == 2
+    assert "still in progress" in capsys.readouterr().err
+    assert len(list((tmp_path / "runs").iterdir())) == 1   # nothing created
+
+
+def test_resume_refuses_missing_worktree(tmp_path, monkeypatch, capsys):
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    shutil.rmtree(first["worktree"])
+    rc = m.main(["resume", Path(first["run_dir"]).name])
+    assert rc == 2
+    assert "worktree" in capsys.readouterr().err
+
+
+def test_resume_rejects_sandbox_flag_and_unknown_run(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    with pytest.raises(SystemExit):
+        m.main(["resume", "--sandbox", "none", "abc"])
+    rc = m.main(["resume", "no-such-run"])
+    assert rc == 2
+    assert "run.json" in capsys.readouterr().err
+
+
+def test_resume_uses_prior_model_unless_overridden(tmp_path, monkeypatch, capsys):
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    monkeypatch.setattr(m, "LMStudioClient",
+                        lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
+    rc = m.main(["resume", "--model", "other/model", Path(first["run_dir"]).name])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert json.loads((Path(out["run_dir"]) / "run.json").read_text())["model"] == "other/model"
+
+
+def test_resume_setup_failure_keeps_worktree(tmp_path, monkeypatch, capsys):
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    from dirtywork.sandbox import SandboxError
+
+    class ExplodingHost:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self, *a, **k):
+            raise SandboxError("boom at start")
+
+    monkeypatch.setattr(m, "HostSandbox", ExplodingHost)
+    rc = m.main(["resume", Path(first["run_dir"]).name])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["status"] == "sandbox_error"
+    assert Path(first["worktree"]).is_dir()            # prior work preserved
+
+
+def _install_docker_fake(monkeypatch, tmp_path, start_calls: list):
+    """Docker-mode harness (same shape as test_main_docker_mode_happy_path_with_fake_sandbox):
+    daemon/image/objects preflight faked, collision check sees no objects, and
+    a fake DockerSandbox that records start() kwargs."""
+    import dirtywork.__main__ as m
+    from dirtywork.procs import Captured
+    from dirtywork.sandbox import RunArtifacts
+    from dirtywork.sandbox.docker import DockerSandbox as RealDockerSandbox
+    monkeypatch.setattr(m, "docker_version", lambda *a, **k: "29.7.2")
+    monkeypatch.setattr(m, "resolve_image", lambda *a, **k: "dirtywork/worker@sha256:" + "a" * 64)
+    monkeypatch.setattr(m, "validate_objects_dir", lambda repo: repo / ".git" / "objects")
+    monkeypatch.setattr(m.docker_cli, "run",
+                        lambda argv, *, timeout, stdin=None: Captured(1, b"", False, False))
+
+    class FakeWatchdog:
+        def start(self):
+            pass
+
+    class FakeDockerSandbox:
+        check_name_collision = staticmethod(RealDockerSandbox.check_name_collision)
+
+        def __init__(self, cfg, *, run_dir, transcript=None, image_ref=None):
+            self.cfg = cfg
+            self.run_dir = run_dir
+            self.uid = 501
+            self.gid = 20
+            self.image_ref = image_ref
+            self.watchdog = FakeWatchdog()
+
+        def start(self, worktree, repo, slug, base_commit, **kwargs):
+            start_calls.append({"slug": slug, "base_commit": base_commit, **kwargs})
+
+        def stop(self):
+            pass
+
+        def read_file(self, path, offset=0, limit=400):
+            return ""
+
+        def write_file(self, path, content):
+            return "ok"
+
+        def edit_file(self, path, old_string, new_string):
+            return "ok"
+
+        def list_dir(self, path="."):
+            return ""
+
+        def grep(self, pattern, path=".", glob=None, timeout=30):
+            return ""
+
+        def bash(self, command, timeout=120):
+            return "exit code: 0\n"
+
+        def finalize(self):
+            return RunArtifacts(export_status="ok", diff_stat="")
+
+    monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
+    return m
+
+
+def test_resume_docker_mode_seeds_and_keeps_branch(tmp_path, monkeypatch, capsys):
+    start_calls = []
+    m = _install_host_harness(monkeypatch, tmp_path)      # RUNS_DIR + scripted LLM ("done")
+    _install_docker_fake(monkeypatch, tmp_path, start_calls)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "some task"])   # docker is the default sandbox
+    first = json.loads(capsys.readouterr().out)
+    assert rc == 0, first
+    assert start_calls[0]["seed_from_worktree"] is False
+    assert start_calls[0]["branch"] == first["branch"]
+
+    rc = m.main(["resume", Path(first["run_dir"]).name])
+    second = json.loads(capsys.readouterr().out)
+    assert rc == 0, second
+    assert len(start_calls) == 2
+    assert start_calls[1]["seed_from_worktree"] is True
+    assert start_calls[1]["branch"] == first["branch"]
+    assert start_calls[1]["slug"] != start_calls[0]["slug"]
+    second_json = json.loads((Path(second["run_dir"]) / "run.json").read_text())
+    first_json = json.loads((Path(first["run_dir"]) / "run.json").read_text())
+    assert second_json["sandbox"] == "docker"
+    assert second_json["image"] == first_json["image"]
+    assert second_json["container"] != first_json["container"]
