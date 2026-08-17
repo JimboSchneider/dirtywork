@@ -186,6 +186,10 @@ kernel-enforced memory/CPU/process/per-file-size limits, no host path
 mounted in except a read-only copy of the parent object store. The
 worktree reaches the host only through the validated tar export. See
 "Security & trust" above for what this does and does not cover.
+`bash` in docker mode only enforces the mode-independent policy rules (no
+`git push`, `sudo`, piping a download into a shell, or system-control
+commands) — the host-filesystem/host-repo rules below don't apply, since
+the container has no host filesystem or shared parent repo to escape into.
 
 **`--sandbox none` (host mode, pre-0.4 behavior):** guardrails block
 **accidents, not adversaries** — the post-run review is the real gate:

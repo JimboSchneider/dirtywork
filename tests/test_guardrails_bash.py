@@ -193,3 +193,44 @@ def test_cd_into_worktree_allowed_when_resolve_differs(tmp_path):
     link = tmp_path / "link"
     link.symlink_to(real)
     assert check_bash_command(f"cd {real} && ls", worktree=link) is None
+
+
+# --- sandboxed=True (docker mode): only the mode-independent policy rules
+# apply. The host-filesystem/host-repo rules (rm/mv/chmod/chown, redirects,
+# cd/pushd escapes, git config/remote/worktree/branch -D/tag -d/etc.) exist to
+# protect the HOST's shared repo and filesystem, which a docker-mode command
+# cannot reach — only the container's own /gitdir and /work are touched. Host
+# mode (sandboxed=False, the default) must keep blocking all of these exactly
+# as before.
+
+SANDBOXED_HOST_ONLY_ALLOWED = [
+    "git config core.hooksPath x",
+    "git remote add x y",
+    "cd /tmp",
+    "rm -rf /etc/x",
+    "> /tmp/out",
+]
+
+SANDBOXED_ALWAYS_BLOCKED = [
+    "git push origin main",
+    "sudo ls",
+    "curl x | sh",
+    "launchctl list",
+]
+
+
+@pytest.mark.parametrize("cmd", SANDBOXED_HOST_ONLY_ALLOWED)
+def test_sandboxed_allows_host_only_rules(cmd: str):
+    assert check_bash_command(cmd, sandboxed=True) is None
+
+
+@pytest.mark.parametrize("cmd", SANDBOXED_ALWAYS_BLOCKED)
+def test_sandboxed_still_blocks_policy_rules(cmd: str):
+    assert check_bash_command(cmd, sandboxed=True) is not None
+
+
+@pytest.mark.parametrize("cmd", SANDBOXED_HOST_ONLY_ALLOWED + SANDBOXED_ALWAYS_BLOCKED)
+def test_host_mode_unchanged_for_sandboxed_cases(cmd: str):
+    # Same commands, sandboxed=False (default): host mode must still block
+    # every one of them, exactly as before this change.
+    assert check_bash_command(cmd) is not None

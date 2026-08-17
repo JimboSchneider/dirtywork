@@ -470,6 +470,27 @@ def test_bash_blocked_command_never_execs(started):
     assert not fake.calls
 
 
+def test_bash_sandboxed_allows_host_only_git_config_but_blocks_push(started):
+    # DockerSandbox.bash runs check_bash_command(..., sandboxed=True): a
+    # host-only rule (git config, meaningless against the container's own
+    # /gitdir) must NOT block and must reach exec, while a policy rule
+    # (git push) must still block with no exec issued at all.
+    sb, fake, run_dir = started
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+    fake.script(["exec"], _ok(b""))
+
+    allowed = sb.bash("git config core.hooksPath x")
+    assert not allowed.startswith("BLOCKED:")
+    exec_calls = [c for c in fake.calls if c[0][0] == "exec" and "/bin/bash" in str(c[0])]
+    assert len(exec_calls) == 1
+
+    fake.calls.clear()
+    blocked = sb.bash("git push origin main")
+    assert blocked.startswith("BLOCKED:")
+    assert not fake.calls
+
+
 def test_bash_timeout_returns_text_not_raise(started):
     sb, fake, run_dir = started
     real_run = sb._run

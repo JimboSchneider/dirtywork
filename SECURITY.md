@@ -17,7 +17,11 @@ from the worker's tree back to the host. Escapes from docker mode — a
 container breakout, a way to write outside the run's worktree or
 `~/.dirtywork/runs/<slug>/`, a way to reach the network, a way for the
 export validator to write through a symlink or a `.git`-named path — are
-in scope and taken seriously.
+in scope and taken seriously. Inside the container, `bash` enforces only
+the mode-independent policy rules (no `git push`/`sudo`/pipe-to-shell/
+system-control commands); the host-filesystem and shared-repo rules from
+`--sandbox none` below are not applied there, since the container is the
+boundary for everything else.
 
 **Known, accepted exposures in docker mode** (see README's Security &
 trust section for the full list): the worker can read the *entire* parent
