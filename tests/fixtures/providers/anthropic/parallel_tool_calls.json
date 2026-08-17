@@ -1,0 +1,8 @@
+{
+  "content": [
+    {"type": "tool_use", "id": "call_1", "name": "read_file", "input": {"path": "a.txt"}},
+    {"type": "tool_use", "id": "call_2", "name": "read_file", "input": {"path": "b.txt"}}
+  ],
+  "stop_reason": "tool_use",
+  "usage": {"input_tokens": 12, "output_tokens": 8}
+}

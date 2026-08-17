@@ -70,3 +70,27 @@ def test_tool_message():
 def test_get_provider_unknown_raises():
     with pytest.raises(ValueError, match="unknown provider 'bogus'"):
         get_provider("bogus")
+
+
+def test_get_provider_anthropic_returns_anthropic_client(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    provider = get_provider("anthropic", "http://fake", timeout=10)
+    assert provider.name == "anthropic"
+    assert provider.base_url == "http://fake"
+
+
+def test_get_provider_openai_returns_openai_client():
+    provider = get_provider("openai")
+    assert provider.name == "openai"
+    assert provider.base_url == DEFAULT_BASE_URLS["openai"]
+
+
+def test_get_provider_defaults_base_url_per_provider(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    assert get_provider("anthropic").base_url == DEFAULT_BASE_URLS["anthropic"]
+
+
+def test_every_provider_name_is_constructible(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    for name in PROVIDER_NAMES:
+        assert get_provider(name).name == name
