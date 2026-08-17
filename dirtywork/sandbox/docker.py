@@ -82,6 +82,7 @@ class DockerSandbox:
         self.watchdog = None
         self._objects_dir = None
         self._export_failed = False
+        self._reset_this_call = False  # Track if reset happened in current bash call
 
     @staticmethod
     def check_name_collision(run, slug: str) -> None:
@@ -408,6 +409,12 @@ class DockerSandbox:
             self._run(["kill", self.container], timeout=docker_cli.T_LIFECYCLE)
         except docker_cli.DockerError:
             pass
+        # Wait for the container to actually stop before starting again
+        try:
+            self._run(["wait", self.container], timeout=docker_cli.T_LIFECYCLE)
+        except docker_cli.DockerError:
+            # Container already stopped returns immediately with non-zero
+            pass
         if self._tether is not None:
             lifecycle.close_tether(self._tether)
         self._start_tether()
@@ -418,8 +425,10 @@ class DockerSandbox:
                 self.transcript.write("sandbox_reset", reason=reason)
             except Exception:
                 pass
+        # Mark that a reset happened in this call (for _after_bash to skip budget sample)
+        self._reset_this_call = True
 
-    def _reap(self) -> None:
+    def _reap(self) -> bool:
         """After every bash call (spec §6): docker top should show at most
         the lifetime tether (bare "cat", or "/sbin/docker-init -- cat" while
         tini is still attached). Any other row means a backgrounded process
@@ -427,7 +436,12 @@ class DockerSandbox:
         nonzero `docker top` itself (the container is stopped, killed, or
         otherwise unreachable — e.g. `docker kill` fired while a `docker
         exec` was in flight) is ALSO a reset trigger: whatever state the
-        container is in, a fresh one via reset() is the safe recovery."""
+        container is in, a fresh one via reset() is the safe recovery.
+        
+        Returns True if a reset was performed, False otherwise."""
+        # Don't perform multiple resets in one call
+        if self._reset_this_call:
+            return False
         try:
             top = self._run(["top", self.container], timeout=docker_cli.T_QUERY)
             unreachable = top.returncode != 0
@@ -435,7 +449,7 @@ class DockerSandbox:
             unreachable = True
         if unreachable:
             self.reset("container unreachable after bash")
-            return
+            return True
         lines = top.output.decode("utf-8", errors="replace").splitlines()
         if lines:
             header_cols = lines[0].split()
@@ -452,7 +466,7 @@ class DockerSandbox:
                         or cmd.endswith("docker-init -- /bin/cat"):
                     continue
                 self.reset("stray process after bash")
-                return
+                return True
         try:
             oom = self._run(
                 ["inspect", "--format", "{{.State.OOMKilled}}", self.container],
@@ -460,9 +474,11 @@ class DockerSandbox:
             )
         except docker_cli.DockerError:
             # If inspect fails, don't reset - it would be recursive
-            return
+            return False
         if oom.returncode == 0 and oom.output.decode("utf-8", errors="replace").strip() == "true":
             self.reset("oom")
+            return True
+        return False
 
     def _watchdog_kill(self, reason: str) -> None:
         try:
@@ -474,7 +490,11 @@ class DockerSandbox:
         """(kbytes, entries) for /work, sampled inside the container. On
         exec failure, resets once and retries; a second failure raises
         SandboxError (spec §6: "If the exec itself fails ... → reset, then
-        re-measure; a second failure → sandbox_error")."""
+        re-measure; a second failure → sandbox_error").
+        
+        Returns (kbytes, entries) on success or raises SandboxError after
+        two failures. If a reset was performed during sampling, the caller
+        should skip budget checks for this call (container was rebuilt)."""
         for attempt in range(2):
             argv = docker_args.exec_argv(
                 self.container, ["/bin/sh", "-c", "du -sk /work; find /work | wc -l"]
@@ -492,18 +512,21 @@ class DockerSandbox:
                     pass
                 else:
                     return kbytes, entries
-            if attempt == 0:
+            if attempt == 0 and not self._reset_this_call:
+                # Only reset once per bash call
                 self.reset("budget sample failed")
         raise SandboxError("worktree budget sample failed twice in a row")
 
     def _after_bash(self) -> None:
         self._reap()
-        if self.watchdog is not None:
+        if self.watchdog is not None and not self._reset_this_call:
             self.watchdog.check_worktree_budget_once()
             if self.watchdog.violation is not None:
                 violation = self.watchdog.violation
                 self.watchdog.violation = None
                 raise BudgetExceeded(violation)
+        # Reset the flag after each bash call completes
+        self._reset_this_call = False
 
     def bash(self, command: str, timeout: int = 120) -> str:
         reason = check_bash_command(command)

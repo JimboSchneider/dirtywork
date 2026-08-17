@@ -418,6 +418,53 @@ def test_main_docker_export_failed_status_from_finalize_exception(tmp_path, monk
     assert run_json["finalize_error"]
 
 
+def test_main_docker_export_failed_with_budget_exceeded_status(tmp_path, monkeypatch, capsys):
+    # Fix item 4: export_failed should only replace 'completed', not other statuses
+    # When status is budget_exceeded and export_status starts with "export_failed",
+    # the final status should stay "budget_exceeded" (the actual cause)
+    from dirtywork.procs import Captured
+    from dirtywork.sandbox import RunArtifacts
+    from dirtywork.sandbox.docker import DockerSandbox as RealDockerSandbox
+    m, repo = _docker_mode_scaffold(tmp_path, monkeypatch)
+    
+    # Mock run to succeed
+    def mock_run(argv, *, timeout, stdin=None):
+        return Captured(0, b"", False, False)
+    monkeypatch.setattr(m.docker_cli, "run", mock_run)
+
+    def finalize(self):
+        return RunArtifacts(export_status="export_failed: x")
+
+    FakeDockerSandbox = _fake_docker_sandbox_class(RealDockerSandbox, finalize=finalize)
+    monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
+
+    class BudgetExceededClient:
+        def __init__(self, base_url=None):
+            pass
+
+        def list_models(self):
+            return [m.DEFAULT_MODEL]
+
+        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+            # Return a result with budget_exceeded status
+            return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 1}}
+
+    monkeypatch.setattr(m, "LMStudioClient", BudgetExceededClient)
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])
+
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    # Status should stay budget_exceeded, not be replaced by export_failed
+    assert payload["status"] == "budget_exceeded"
+    # But export_status should still be visible
+    assert payload["export_status"].startswith("export_failed")
+    run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert run_json["status"] == "budget_exceeded"
+    assert run_json["export_status"].startswith("export_failed")
+
+
 def test_build_system_prompt_includes_rules_and_context(tmp_path: Path):
     p = build_system_prompt(tmp_path, "REPO RULES HERE")
     assert str(tmp_path) in p

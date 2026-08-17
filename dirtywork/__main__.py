@@ -176,13 +176,23 @@ def _final_status(result) -> str:
     (Runner.finish() catching an exception out of `finalize()`) and an
     export_status the sandbox itself reported as failed both mean the
     worker's changes never safely reached the host — either way the run did
-    not deliver what its own status claims, so this overrides it."""
+    not deliver what its own status claims. However, export_failed should
+    only replace 'completed'; other statuses (budget_exceeded, timeout, etc.)
+    are the actual cause of the run ending and should be preserved."""
     extra = result.extra or {}
     if extra.get("finalize_error"):
-        return "export_failed"
+        # Only replace completed with export_failed; keep other statuses as-is
+        if result.status == "completed":
+            return "export_failed"
+        # For non-completed statuses, keep the original status
+        return result.status
     export_status = extra.get("export_status", "")
     if isinstance(export_status, str) and export_status.startswith("export_failed"):
-        return "export_failed"
+        # Only replace completed with export_failed; keep other statuses as-is
+        if result.status == "completed":
+            return "export_failed"
+        # For non-completed statuses, keep the original status
+        return result.status
     return result.status
 
 
