@@ -19,7 +19,7 @@ from .sandbox.docker import DockerSandbox
 from .sandbox.docker_args import DEFAULT_IMAGE, DockerConfig
 from .sandbox.docker_cli import DockerError, docker_version, resolve_image, validate_objects_dir
 from .sandbox.host import HostSandbox
-from .tools import ToolExecutor
+from .builtin_tools import default_registry
 from .transcript import Transcript
 from .resume import ResumeError, build_resume_task, check_resumable, load_prior_run, render_transcript_tail, resolve_run_dir
 from .workspace import (
@@ -515,7 +515,7 @@ def _execute(ctx: RunContext, args, client) -> int:
         )
         sandbox_started = True
 
-        executor = ToolExecutor(sandbox, transcript=transcript)
+        registry = default_registry(transcript=transcript)
 
         def finalize():
             artifacts = sandbox.finalize()
@@ -533,7 +533,7 @@ def _execute(ctx: RunContext, args, client) -> int:
             }
 
         runner = Runner(
-            client, executor, transcript, model=args.model,
+            client, registry, sandbox, transcript, model=args.model,
             max_turns=args.max_turns, timeout=args.timeout, temperature=args.temperature,
             run_info={
                 "repo": str(ctx.repo), "worktree": str(ctx.worktree), "branch": ctx.branch,

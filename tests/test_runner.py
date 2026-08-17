@@ -27,7 +27,7 @@ from dirtywork.runner import (
     trim_messages,
 )
 from dirtywork.sandbox.host import HostSandbox
-from dirtywork.tools import ToolExecutor
+from dirtywork.builtin_tools import default_registry
 from dirtywork.transcript import Transcript
 
 
@@ -62,8 +62,9 @@ def parts(tmp_path: Path):
     wt.mkdir()
     (wt / "f.txt").write_text("data\n")
     transcript = Transcript(tmp_path / "t.jsonl")
-    executor = ToolExecutor(HostSandbox(wt), transcript=transcript)
-    return wt, executor, transcript, tmp_path
+    registry = default_registry(transcript=transcript)
+    sandbox = HostSandbox(wt)
+    return wt, registry, sandbox, transcript, tmp_path
 
 
 def _events(tmp_path: Path):
@@ -71,12 +72,12 @@ def _events(tmp_path: Path):
 
 
 def test_two_turn_run(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([
         _resp(tool_calls=[_call("c1", "read_file", {"path": "f.txt"})]),
         _resp(content="Done: file says data"),
     ])
-    r = Runner(client, executor, transcript, model="qwen/qwen3-coder-next")
+    r = Runner(client, registry, sandbox, transcript, model="qwen/qwen3-coder-next")
     result = r.run("sysprompt", "read the file")
     transcript.close()
 
@@ -97,10 +98,10 @@ def test_two_turn_run(parts):
 
 
 def test_max_turns(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     loop_resp = _resp(tool_calls=[_call("c", "list_dir", {"path": "."})])
     client = FakeClient([loop_resp] * 3)
-    r = Runner(client, executor, transcript, model="m", max_turns=3)
+    r = Runner(client, registry, sandbox, transcript, model="m", max_turns=3)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "max_turns"
@@ -108,23 +109,23 @@ def test_max_turns(parts):
 
 
 def test_malformed_args_three_strikes(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     bad = _resp(tool_calls=[{"id": "x", "type": "function",
                              "function": {"name": "read_file", "arguments": "{not json"}}])
     client = FakeClient([bad, bad, bad])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "model_error"
 
 
 def test_unknown_tool_counts_as_strike_but_recovers(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([
         _resp(tool_calls=[_call("c1", "no_such_tool", {})]),
         _resp(content="ok done"),
     ])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -165,10 +166,10 @@ def test_trim_counts_tool_call_arguments():
 
 
 def test_arguments_null_treated_as_empty(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     call = {"id": "c1", "type": "function", "function": {"name": "list_dir", "arguments": None}}
     client = FakeClient([_resp(tool_calls=[call]), _resp(content="done")])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -189,10 +190,10 @@ def test_valid_call_missing_type_field_canonicalized_on_resend(parts):
     # No malformed siblings -- this is the previously-verbatim path. The call is
     # otherwise valid (non-empty id, function.name) but omits "type" entirely,
     # which a strict server still requires on resend.
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     call = {"id": "c1", "function": {"name": "list_dir", "arguments": json.dumps({"path": "."})}}
     client = FakeClient([_resp(tool_calls=[call]), _resp(content="done")])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -206,10 +207,10 @@ def test_valid_call_missing_type_field_canonicalized_on_resend(parts):
 def test_malformed_tool_call_entry_recovers(parts):
     # Missing "function" entirely is structurally invalid (not just an unknown
     # tool name) and now routes through the malformed-tool-call recovery path.
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     bad = {"id": "c1", "type": "function"}
     client = FakeClient([_resp(tool_calls=[bad]), _resp(content="ok done")])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -220,27 +221,27 @@ def test_malformed_tool_call_entry_recovers(parts):
 
 
 def test_malformed_response_is_model_error(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([{"choices": []}])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "model_error"
 
 
 def test_null_message_is_model_error(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([{"choices": [{"message": None}]}])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "model_error"
 
 
 def test_null_usage_tolerated(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([{"choices": [{"message": {"role": "assistant", "content": "hi"}}], "usage": None}])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -248,21 +249,21 @@ def test_null_usage_tolerated(parts):
 
 
 def test_strike_counter_resets_on_success(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     bad = _resp(tool_calls=[{"id": "x", "type": "function",
                              "function": {"name": "read_file", "arguments": "{not json"}}])
     good = _resp(tool_calls=[_call("g", "list_dir", {"path": "."})])
     client = FakeClient([bad, bad, good, bad, bad, _resp(content="done")])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
 
 
 def test_timeout_status(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([_resp(content="never reached")])
-    r = Runner(client, executor, transcript, model="m", timeout=-1)
+    r = Runner(client, registry, sandbox, transcript, model="m", timeout=-1)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "timeout"
@@ -270,9 +271,9 @@ def test_timeout_status(parts):
 
 
 def test_context_exhausted_status(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     r.char_budget = 10
     result = r.run("s" * 100, "t")
     transcript.close()
@@ -280,7 +281,7 @@ def test_context_exhausted_status(parts):
 
 
 def test_length_finish_reason_gives_helpful_hint(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     truncated = {
         "choices": [{
             "message": {
@@ -296,7 +297,7 @@ def test_length_finish_reason_gives_helpful_hint(parts):
         "usage": {"prompt_tokens": 1, "completion_tokens": 1},
     }
     client = FakeClient([truncated, _resp(content="done")])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -305,9 +306,9 @@ def test_length_finish_reason_gives_helpful_hint(parts):
 
 
 def test_run_start_includes_run_info(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([_resp(content="done")])
-    r = Runner(client, executor, transcript, model="m", run_info={"repo": "/r"})
+    r = Runner(client, registry, sandbox, transcript, model="m", run_info={"repo": "/r"})
     result = r.run("s", "t")
     transcript.close()
     events = _events(tmp)
@@ -316,9 +317,9 @@ def test_run_start_includes_run_info(parts):
 
 
 def test_chat_receives_bounded_timeout(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([_resp(content="done")])
-    r = Runner(client, executor, transcript, model="m", timeout=30)
+    r = Runner(client, registry, sandbox, transcript, model="m", timeout=30)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -327,38 +328,38 @@ def test_chat_receives_bounded_timeout(parts):
 
 
 def test_llm_timeout_near_deadline_gives_timeout_status(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
 
     class SlowTimeoutClient:
         def chat(self, *a, **k):
             time.sleep(0.3)
             raise LLMTimeout("request timed out")
 
-    r = Runner(SlowTimeoutClient(), executor, transcript, model="m", timeout=0.2)
+    r = Runner(SlowTimeoutClient(), registry, sandbox, transcript, model="m", timeout=0.2)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "timeout"
 
 
 def test_llm_timeout_far_from_deadline_gives_model_error(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
 
     class ImmediateTimeoutClient:
         def chat(self, *a, **k):
             raise LLMTimeout("request timed out")
 
-    r = Runner(ImmediateTimeoutClient(), executor, transcript, model="m", timeout=1800)
+    r = Runner(ImmediateTimeoutClient(), registry, sandbox, transcript, model="m", timeout=1800)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "model_error"
 
 
 def test_malformed_tool_call_null_entry_recovers(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     bad = {"choices": [{"message": {"role": "assistant", "content": None,
                                      "tool_calls": [None]}}]}
     client = FakeClient([bad, _resp(content="ok done")])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -376,12 +377,12 @@ def test_malformed_tool_call_null_entry_recovers(parts):
 
 
 def test_mixed_null_and_valid_tool_call_recovers(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     valid_call = _call("c1", "list_dir", {"path": "."})
     bad = {"choices": [{"message": {"role": "assistant", "content": None,
                                      "tool_calls": [None, valid_call]}}]}
     client = FakeClient([bad, _resp(content="ok done")])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -407,9 +408,9 @@ def test_mixed_null_and_valid_tool_call_recovers(parts):
 
 def test_empty_object_tool_call_recovers(parts):
     # {} is dict-shaped but has no id/function — must not pass the validity filter.
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([_resp(tool_calls=[{}]), _resp(content="ok done")])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -422,11 +423,11 @@ def test_empty_object_tool_call_recovers(parts):
 
 def test_empty_id_tool_call_recovers(parts):
     # Valid function, but an empty string id can't be matched to a tool result.
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     bad = {"id": "", "type": "function",
            "function": {"name": "list_dir", "arguments": json.dumps({"path": "."})}}
     client = FakeClient([_resp(tool_calls=[bad]), _resp(content="ok done")])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -439,10 +440,10 @@ def test_empty_id_tool_call_recovers(parts):
 
 def test_missing_function_name_tool_call_recovers(parts):
     # Non-empty id, but the function object has no name field.
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     bad = {"id": "c1", "type": "function", "function": {"arguments": "{}"}}
     client = FakeClient([_resp(tool_calls=[bad]), _resp(content="ok done")])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -466,11 +467,11 @@ def test_valid_tool_call_predicate():
 
 
 def test_tool_calls_non_list_treated_as_absent(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     resp = {"choices": [{"message": {"role": "assistant", "content": "done",
                                       "tool_calls": "notalist"}}]}
     client = FakeClient([resp])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -478,22 +479,22 @@ def test_tool_calls_non_list_treated_as_absent(parts):
 
 
 def test_three_consecutive_malformed_tool_calls_aborts(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     bad = {"choices": [{"message": {"role": "assistant", "content": None,
                                      "tool_calls": [None]}}]}
     client = FakeClient([bad, bad, bad])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "model_error"
 
 
 def test_interrupted_status(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     class InterruptingClient:
         def chat(self, *a, **k):
             raise KeyboardInterrupt
-    r = Runner(InterruptingClient(), executor, transcript, model="m")
+    r = Runner(InterruptingClient(), registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "interrupted"
@@ -502,11 +503,11 @@ def test_interrupted_status(parts):
 
 
 def test_usage_ignores_non_finite_from_server(parts):
-    wt, executor, transcript, tmp_path = parts
+    wt, registry, sandbox, transcript, tmp_path = parts
     client = FakeClient([_resp(content="done",
                                usage={"prompt_tokens": float("nan"),
                                       "completion_tokens": float("inf")})])
-    r = Runner(client, executor, transcript, "qwen/qwen3-coder-next")
+    r = Runner(client, registry, sandbox, transcript, "qwen/qwen3-coder-next")
     result = r.run("sys", "task")
     assert result.usage == {"prompt_tokens": 0, "completion_tokens": 0}
     json.dumps(result.usage, allow_nan=False)  # stdout contract stays valid JSON
@@ -516,9 +517,9 @@ def test_usage_ignores_non_finite_from_server(parts):
 
 
 def test_finalize_merges_into_run_end_and_result_extra(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([_resp(content="done")])
-    r = Runner(client, executor, transcript, model="m",
+    r = Runner(client, registry, sandbox, transcript, model="m",
               finalize=lambda: {"diff_stat": " 1 file changed"})
     result = r.run("s", "t")
     transcript.close()
@@ -529,13 +530,13 @@ def test_finalize_merges_into_run_end_and_result_extra(parts):
 
 
 def test_finalize_exception_recorded_status_preserved(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([_resp(content="done")])
 
     def boom():
         raise RuntimeError("disk gone")
 
-    r = Runner(client, executor, transcript, model="m", finalize=boom)
+    r = Runner(client, registry, sandbox, transcript, model="m", finalize=boom)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -545,7 +546,7 @@ def test_finalize_exception_recorded_status_preserved(parts):
 
 
 def test_assistant_text_capped_in_transcript_full_text_resent(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     # Over MAX_ASSISTANT_TEXT_CHARS (64_000) but comfortably under the
     # default model's char_budget (~98_304 for the fallback DEFAULT_WINDOW),
     # so trim_messages doesn't ALSO trigger context_exhausted — this test is
@@ -555,7 +556,7 @@ def test_assistant_text_capped_in_transcript_full_text_resent(parts):
         _resp(tool_calls=[_call("c1", "list_dir", {"path": "."})], content=huge_text),
         _resp(content="done"),
     ])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -571,16 +572,16 @@ def test_assistant_text_capped_in_transcript_full_text_resent(parts):
     assert assistant_msg["content"] == huge_text
 
 
-def test_budget_exceeded_from_executor_ends_run(parts):
-    wt, executor, transcript, tmp = parts
+def test_budget_exceeded_from_sandbox_ends_run(parts):
+    wt, registry, sandbox, transcript, tmp = parts
     from dirtywork.budget import BudgetExceeded
 
-    class BudgetBustingExecutor:
-        def execute(self, name, args):
+    class BudgetBustingSandbox:
+        def write_file(self, path, content):
             raise BudgetExceeded("worktree exceeds 2048 MB")
 
     client = FakeClient([_resp(tool_calls=[_call("c1", "write_file", {"path": "x", "content": "y"})])])
-    r = Runner(client, BudgetBustingExecutor(), transcript, model="m")
+    r = Runner(client, registry, BudgetBustingSandbox(), transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "budget_exceeded"
@@ -591,14 +592,14 @@ def test_budget_exceeded_from_executor_ends_run(parts):
 
 
 def test_finish_tool_ends_run_after_other_calls_in_turn(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([
         _resp(tool_calls=[
             _call("f1", "finish", {"summary": "wrote g.txt"}),
             _call("w1", "write_file", {"path": "g.txt", "content": "hi\n"}),
         ]),
     ])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -612,9 +613,9 @@ def test_finish_tool_ends_run_after_other_calls_in_turn(parts):
 
 
 def test_finish_without_summary_still_completes_with_empty_message(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([_resp(tool_calls=[_call("f1", "finish", {})])])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -622,11 +623,11 @@ def test_finish_without_summary_still_completes_with_empty_message(parts):
 
 
 def test_finish_with_malformed_args_does_not_end_run(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     bad = _resp(tool_calls=[{"id": "f1", "type": "function",
                              "function": {"name": "finish", "arguments": "{not json"}}])
     client = FakeClient([bad, _resp(tool_calls=[_call("f2", "finish", {"summary": "ok"})])])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -636,12 +637,12 @@ def test_finish_with_malformed_args_does_not_end_run(parts):
 
 
 def test_unknown_tool_error_mentions_finish(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([
         _resp(tool_calls=[_call("c1", "no_such_tool", {})]),
         _resp(content="ok done"),
     ])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     r.run("s", "t")
     transcript.close()
     tool_msgs = [m for m in client.requests[1] if m["role"] == "tool"]
@@ -679,13 +680,13 @@ def test_failure_tracker_rejects_unknown_kind():
 
 
 def test_mixed_failure_kinds_do_not_abort_at_three(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     bad_args = _resp(tool_calls=[{"id": "x", "type": "function",
                                   "function": {"name": "read_file", "arguments": "{not json"}}])
     unknown = _resp(tool_calls=[_call("u", "no_such_tool", {})])
-    wrong_type = _resp(tool_calls=[_call("t", "read_file", {})])   # missing required arg → TypeError → bad_args
+    wrong_type = _resp(tool_calls=[_call("t", "read_file", {})])   # missing required arg → registry validation → bad_args
     client = FakeClient([bad_args, unknown, wrong_type, _resp(content="ok done")])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -733,9 +734,9 @@ def test_strip_think_removes_blocks():
 
 
 def test_empty_reply_is_nudged_not_completed(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([_resp(content=""), _resp(content="done for real")])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -751,19 +752,19 @@ def test_empty_reply_is_nudged_not_completed(parts):
 
 
 def test_think_only_reply_is_nudged(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([_resp(content=_THINK + "hmm" + _THINK_END), _resp(content="ok")])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed" and result.turns == 2
 
 
 def test_text_tool_call_reply_is_nudged(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([_resp(content=_tag("tool_call") + '{"name":"bash","arguments":{}}' + _tag("/tool_call")),
                          _resp(content="ok")])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed" and result.turns == 2
@@ -771,12 +772,12 @@ def test_text_tool_call_reply_is_nudged(parts):
 
 
 def test_length_cutoff_without_tool_calls_is_not_completed(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     cut = {"choices": [{"message": {"role": "assistant", "content": "I will now"},
                         "finish_reason": "length"}],
            "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
     client = FakeClient([cut, _resp(content="ok")])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed" and result.turns == 2
@@ -784,9 +785,9 @@ def test_length_cutoff_without_tool_calls_is_not_completed(parts):
 
 
 def test_three_empty_replies_abort_as_model_error(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([_resp(content=""), _resp(content=""), _resp(content="")])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "model_error"
@@ -794,21 +795,21 @@ def test_three_empty_replies_abort_as_model_error(parts):
 
 
 def test_successful_call_resets_empty_reply_count(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([_resp(content=""), _resp(content=""),
                          _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})]),
                          _resp(content=""), _resp(content=""), _resp(content="done")])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed" and result.turns == 6
 
 
 def test_abort_message_names_the_kind(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     unknown = _resp(tool_calls=[_call("u", "no_such_tool", {})])
     client = FakeClient([unknown, unknown, unknown])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "model_error"
@@ -901,10 +902,10 @@ def test_progress_tracker_disabled_when_zero():
 
 
 def test_runner_stalled_status_after_idle_turns(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     loop = _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])
     client = FakeClient([loop] * 10)
-    r = Runner(client, executor, transcript, model="m", max_turns=50, stall_turns=4)
+    r = Runner(client, registry, sandbox, transcript, model="m", max_turns=50, stall_turns=4)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "stalled"
@@ -918,18 +919,18 @@ def test_runner_stalled_status_after_idle_turns(parts):
 
 
 def test_runner_empty_replies_count_as_idle_turns(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     # two empty replies with stall_turns=2: idle 1 (nudge), idle 2 → stalled (before the 3-strike abort)
     client = FakeClient([_resp(content=""), _resp(content=""), _resp(content="")])
-    r = Runner(client, executor, transcript, model="m", stall_turns=2)
+    r = Runner(client, registry, sandbox, transcript, model="m", stall_turns=2)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "stalled" and result.turns == 2
 
 
 def test_runner_default_stall_turns_is_twelve(parts):
-    wt, executor, transcript, tmp = parts
-    r = Runner(FakeClient([]), executor, transcript, model="m")
+    wt, registry, sandbox, transcript, tmp = parts
+    r = Runner(FakeClient([]), registry, sandbox, transcript, model="m")
     assert r.stall_turns == DEFAULT_STALL_TURNS == 12
 
 
@@ -952,9 +953,9 @@ def test_resolve_context_window_rejects_bad_env(env):
 
 
 def test_runner_context_window_param_sets_budget_and_run_start(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     client = FakeClient([_resp(content="done")])
-    r = Runner(client, executor, transcript, model="unknown/model", context_window=1000)
+    r = Runner(client, registry, sandbox, transcript, model="unknown/model", context_window=1000)
     assert r.context_window == 1000
     assert r.char_budget == int(1000 * 0.75 * 4)
     r.run("s", "t")
@@ -964,17 +965,17 @@ def test_runner_context_window_param_sets_budget_and_run_start(parts):
 
 
 def test_runner_context_window_defaults_from_table(parts):
-    wt, executor, transcript, tmp = parts
-    r = Runner(FakeClient([]), executor, transcript, model="qwen/qwen3-coder-next")
+    wt, registry, sandbox, transcript, tmp = parts
+    r = Runner(FakeClient([]), registry, sandbox, transcript, model="qwen/qwen3-coder-next")
     assert r.context_window == CONTEXT_WINDOWS["qwen/qwen3-coder-next"]
 
 
 def test_finish_after_idle_turns_completes_not_stalled(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     idle = _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])
     done = _resp(tool_calls=[_call("f", "finish", {"summary": "all done"})])
     client = FakeClient([idle, idle, idle, done])
-    r = Runner(client, executor, transcript, model="m", stall_turns=4)
+    r = Runner(client, registry, sandbox, transcript, model="m", stall_turns=4)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -989,12 +990,12 @@ def _no_consecutive_user_messages(requests):
 
 
 def test_empty_reply_on_stall_nudge_turn_sends_one_merged_user_message(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     idle = _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])
     # stall_turns=4 → the stall nudge fires when idle_turns reaches 2: turn 1 reads f.txt (new →
     # progress), turn 2 repeats it (idle 1), turn 3 is an empty reply (idle 2 → stall nudge)
     client = FakeClient([idle, idle, _resp(content=""), _resp(content="done")])
-    r = Runner(client, executor, transcript, model="m", stall_turns=4)
+    r = Runner(client, registry, sandbox, transcript, model="m", stall_turns=4)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -1008,13 +1009,13 @@ def test_empty_reply_on_stall_nudge_turn_sends_one_merged_user_message(parts):
 
 
 def test_malformed_entries_on_stall_nudge_turn_send_one_merged_user_message(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     idle = _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])
     bad_entry = {"choices": [{"message": {"role": "assistant", "content": None,
                                           "tool_calls": [{"id": "", "function": {"name": "read_file"}}]}}],
                  "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
     client = FakeClient([idle, idle, bad_entry, _resp(content="done")])
-    r = Runner(client, executor, transcript, model="m", stall_turns=4)
+    r = Runner(client, registry, sandbox, transcript, model="m", stall_turns=4)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -1026,12 +1027,12 @@ def test_malformed_entries_on_stall_nudge_turn_send_one_merged_user_message(part
 
 
 def test_malformed_entry_abort_reports_first_threshold(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     bad = {"id": "", "function": {"name": "read_file"}}
     six_bad = {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [bad] * 6}}],
                "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
     client = FakeClient([six_bad])
-    r = Runner(client, executor, transcript, model="m")
+    r = Runner(client, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "model_error"
@@ -1039,25 +1040,25 @@ def test_malformed_entry_abort_reports_first_threshold(parts):
 
 
 def test_runner_context_window_zero_is_not_replaced_by_table(parts):
-    wt, executor, transcript, tmp = parts
-    r = Runner(FakeClient([]), executor, transcript, model="qwen/qwen3-coder-next", context_window=0)
+    wt, registry, sandbox, transcript, tmp = parts
+    r = Runner(FakeClient([]), registry, sandbox, transcript, model="qwen/qwen3-coder-next", context_window=0)
     assert r.context_window == 0
 
 
 def test_runner_exploring_new_files_is_not_a_stall(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     for i in range(20):
         (wt / f"m{i}.py").write_text(f"# {i}\n")
     reads = [_resp(tool_calls=[_call(f"c{i}", "read_file", {"path": f"m{i}.py"})]) for i in range(20)]
     client = FakeClient(reads + [_resp(content="done")])
-    r = Runner(client, executor, transcript, model="m", max_turns=50, stall_turns=4)
+    r = Runner(client, registry, sandbox, transcript, model="m", max_turns=50, stall_turns=4)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed" and result.turns == 21
 
 
 def test_runner_argument_noise_does_not_count_as_progress(parts):
-    wt, executor, transcript, tmp = parts
+    wt, registry, sandbox, transcript, tmp = parts
     # the same read spelled four ways: foo / ./foo / with an ignored key / with an explicit default
     variants = [
         _call("c1", "read_file", {"path": "f.txt"}),
@@ -1067,20 +1068,8 @@ def test_runner_argument_noise_does_not_count_as_progress(parts):
         _call("c5", "read_file", {"path": "f.txt/"}),
     ]
     client = FakeClient([_resp(tool_calls=[v]) for v in variants] + [_resp(content="done")])
-    r = Runner(client, executor, transcript, model="m", stall_turns=4)
+    r = Runner(client, registry, sandbox, transcript, model="m", stall_turns=4)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "stalled"          # 1 progress + 4 idle repeats
     assert result.turns == 5
-
-
-def test_canonical_args_normalizes_effective_arguments(parts):
-    wt, executor, transcript, tmp = parts
-    a = executor.canonical_args("read_file", {"path": "./f.txt", "description": "x"})
-    b = executor.canonical_args("read_file", {"path": "f.txt", "offset": 0, "limit": 400})
-    assert a == b == {"path": "f.txt", "offset": 0, "limit": 400}
-    assert executor.canonical_args("bash", {"command": " ls \n", "timeout": 5}) == {"command": "ls"}
-    assert executor.canonical_args("bash", {"command": "ls"}) == {"command": "ls"}
-    assert executor.canonical_args("list_dir", {}) == {"path": "."}
-    assert executor.canonical_args("no_such_tool", {"x": 1}) == {"x": 1}
-    assert executor.canonical_args("read_file", "not a dict") == {}

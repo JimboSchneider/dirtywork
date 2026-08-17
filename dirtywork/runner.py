@@ -14,6 +14,11 @@ from .sandbox import SandboxError
 
 MAX_ASSISTANT_TEXT_CHARS = 64_000
 
+# The terminal tool's NAME. The runner branches on ToolSpec.terminal, not on
+# this constant; it is kept because the system prompt, the docs and the bench
+# scoreboard all refer to the tool by name.
+FINISH_TOOL = "finish"
+
 CONTEXT_WINDOWS = {
     "qwen/qwen3-coder-next": 65536,
     "mistralai/devstral-small-2-2512": 32768,
@@ -23,7 +28,6 @@ TRIM_MARKER = "[result trimmed — re-run the tool if needed]"
 CHARS_PER_TOKEN = 4
 BUDGET_FRACTION = 0.75
 MAX_CONSECUTIVE_FAILURES = 3
-FINISH_TOOL = "finish"
 FAILURE_KINDS = ("malformed_entry", "malformed_args", "unknown_tool", "bad_args", "empty_reply")
 MAX_TOTAL_CONSECUTIVE_FAILURES = 6
 
@@ -271,7 +275,7 @@ class RunResult:
 
 
 class Runner:
-    def __init__(self, client, executor, transcript, model,
+    def __init__(self, client, registry, sandbox, transcript, model,
                  max_turns: int = 40, timeout: int = 1800,
                  temperature: float | None = None,
                  run_info: dict | None = None,
@@ -279,7 +283,8 @@ class Runner:
                  stall_turns: int = DEFAULT_STALL_TURNS,
                  context_window: int | None = None):
         self.client = client
-        self.executor = executor
+        self.registry = registry
+        self.sandbox = sandbox
         self.transcript = transcript
         self.model = model
         self.max_turns = max_turns
@@ -292,8 +297,6 @@ class Runner:
         self.char_budget = int(self.context_window * BUDGET_FRACTION * CHARS_PER_TOKEN)
 
     def run(self, system_prompt: str, task: str) -> RunResult:
-        from .tools import TOOL_SCHEMAS
-
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": task},
@@ -308,7 +311,7 @@ class Runner:
         progress = ProgressTracker(self.stall_turns)
         start = time.monotonic()
         deadline = start + self.timeout
-        self.executor.deadline = deadline
+
 
         def finish(status: str, final: str) -> RunResult:
             extra: dict = {}
@@ -352,7 +355,7 @@ class Runner:
                     return finish("context_exhausted", "")
 
                 try:
-                    resp = self.client.chat(self.model, messages, tools=TOOL_SCHEMAS,
+                    resp = self.client.chat(self.model, messages, tools=self.registry.schemas(),
                                             temperature=self.temperature,
                                             timeout=max(1.0, remaining))
                 except LLMTimeout:
@@ -444,13 +447,22 @@ class Runner:
                         args = json.loads(raw_args)
                         if not isinstance(args, dict):
                             raise ValueError("arguments must be a JSON object")
-                        if name == FINISH_TOOL:
+                        spec = self.registry.spec(name)
+                        if spec is not None and spec.terminal:
                             summary = args.get("summary")
                             pending_finish = summary if isinstance(summary, str) else ""
                             result = "run finished"
                         else:
-                            result = self.executor.execute(name, args)
-                            failures.reset()
+                            tool_result = self.registry.execute(
+                                name, args, sandbox=self.sandbox, deadline=deadline)
+                            result = tool_result.text
+                            if tool_result.failure is not None:
+                                abort_reason = failures.record(tool_result.failure)
+                            else:
+                                # A blocked command and a deadline refusal both
+                                # reset the counter, exactly as ToolExecutor's
+                                # non-raising return did.
+                                failures.reset()
                     except BudgetExceeded as e:
                         return finish("budget_exceeded", e.reason)
                     except SandboxError as e:
@@ -466,18 +478,10 @@ class Runner:
                             )
                         else:
                             result = f"ERROR: malformed tool arguments: {e}"
-                    except KeyError:
-                        abort_reason = failures.record("unknown_tool")
-                        available_tools = ', '.join(s['function']['name'] for s in TOOL_SCHEMAS)
-                        result = (f"ERROR: unknown tool '{name}'. Available: {available_tools}. "
-                                  f"To end the run call finish(summary=...).")
-                    except TypeError as e:
-                        abort_reason = failures.record("bad_args")
-                        result = f"ERROR: bad arguments for {name}: {e}"
-                    progress.note_call(name, self.executor.canonical_args(name, args), result)
+                    progress.note_call(name, self.registry.canonical_args(name, args), result)
                     self.transcript.write("tool_result", tool=name,
                                           args=raw_args[:500],
-                                          result=result[:2000])
+                                          result=self.registry.transcript_preview(name, result))
                     messages.append({"role": "tool", "tool_call_id": call_id,
                                      "content": result})
                     if abort_reason is not None:
