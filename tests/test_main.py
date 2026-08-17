@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -1365,7 +1367,6 @@ def _first_run(monkeypatch, tmp_path, responses):
 
 
 def _resume_responses():
-    import json
     return [{"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
                 {"id": "b1", "type": "function", "function": {"name": "bash",
                  "arguments": json.dumps({"command": "git status --short; cat new.txt"})}}]}}],
@@ -1377,9 +1378,7 @@ def _resume_responses():
 
 
 def test_resume_host_mode_reuses_worktree_and_links_runs(tmp_path, monkeypatch, capsys):
-    import json
     from pathlib import Path
-    
     write_then_loop = [
         {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
             {"id": "w1", "type": "function", "function": {"name": "write_file",
@@ -1424,10 +1423,7 @@ def test_resume_host_mode_reuses_worktree_and_links_runs(tmp_path, monkeypatch, 
 
 
 def test_resume_refuses_running_run_with_live_pid(tmp_path, monkeypatch, capsys):
-    import json
     from pathlib import Path
-    import os
-    
     m, repo, rc = _first_run(monkeypatch, tmp_path, None)
     first = json.loads(capsys.readouterr().out)
     run_dir = Path(first["run_dir"])
@@ -1441,10 +1437,7 @@ def test_resume_refuses_running_run_with_live_pid(tmp_path, monkeypatch, capsys)
 
 
 def test_resume_refuses_missing_worktree(tmp_path, monkeypatch, capsys):
-    import json
     from pathlib import Path
-    import shutil
-    
     m, repo, rc = _first_run(monkeypatch, tmp_path, None)
     first = json.loads(capsys.readouterr().out)
     shutil.rmtree(first["worktree"])
@@ -1454,7 +1447,6 @@ def test_resume_refuses_missing_worktree(tmp_path, monkeypatch, capsys):
 
 
 def test_resume_rejects_sandbox_flag_and_unknown_run(tmp_path, monkeypatch, capsys):
-    import pytest
     m = _install_host_harness(monkeypatch, tmp_path)
     with pytest.raises(SystemExit):
         m.main(["resume", "--sandbox", "none", "abc"])
@@ -1464,9 +1456,7 @@ def test_resume_rejects_sandbox_flag_and_unknown_run(tmp_path, monkeypatch, caps
 
 
 def test_resume_uses_prior_model_unless_overridden(tmp_path, monkeypatch, capsys):
-    import json
     from pathlib import Path
-    
     m, repo, rc = _first_run(monkeypatch, tmp_path, None)
     first = json.loads(capsys.readouterr().out)
     monkeypatch.setattr(m, "LMStudioClient",
@@ -1478,9 +1468,7 @@ def test_resume_uses_prior_model_unless_overridden(tmp_path, monkeypatch, capsys
 
 
 def test_resume_setup_failure_keeps_worktree(tmp_path, monkeypatch, capsys):
-    import json
     from pathlib import Path
-    
     m, repo, rc = _first_run(monkeypatch, tmp_path, None)
     first = json.loads(capsys.readouterr().out)
     from dirtywork.sandbox import SandboxError
@@ -1546,10 +1534,10 @@ def _install_docker_fake(monkeypatch, tmp_path, start_calls: list):
         def list_dir(self, path="."):
             return ""
 
-        def grep(self, pattern, path=".", glob=None):
+        def grep(self, pattern, path=".", glob=None, timeout=30):
             return ""
 
-        def bash(self, command, timeout=None):
+        def bash(self, command, timeout=120):
             return "exit code: 0\n"
 
         def finalize(self):
@@ -1560,9 +1548,7 @@ def _install_docker_fake(monkeypatch, tmp_path, start_calls: list):
 
 
 def test_resume_docker_mode_seeds_and_keeps_branch(tmp_path, monkeypatch, capsys):
-    import json
     from pathlib import Path
-    
     start_calls = []
     m = _install_host_harness(monkeypatch, tmp_path)      # RUNS_DIR + scripted LLM ("done")
     _install_docker_fake(monkeypatch, tmp_path, start_calls)
