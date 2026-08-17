@@ -87,6 +87,8 @@ class DockerSandbox:
         self._repo = None
         self._worktree = None
         self._base_commit = None
+        self._branch = None
+        self._seeded = False
         self._stopped = False
         self.watchdog = None
         self._objects_dir = None
@@ -125,11 +127,13 @@ class DockerSandbox:
         if v_inspect.returncode == 0:
             raise SandboxError(f"volume {vol} already exists; {recipe}")
 
-    def start(self, worktree: Path, repo: Path, slug: str, base_commit: str) -> None:
+    def start(self, worktree: Path, repo: Path, slug: str, base_commit: str, *, branch: str | None = None, seed_from_worktree: bool = False) -> None:
         self._worktree = worktree
         self._repo = repo
         self._slug = slug
         self._base_commit = base_commit
+        self._branch = branch or f"dirtywork/{slug}"
+        self._seeded = seed_from_worktree
         name = docker_args.container_name(slug)
         vol = docker_args.volume_name(slug)
 
@@ -170,7 +174,9 @@ class DockerSandbox:
 
         self._start_tether()
         self._wait_ready()
-        self._init(restart=False)
+        self._init(restart=seed_from_worktree)
+        if seed_from_worktree:
+            self._seed_from_worktree()
         self.watchdog = Watchdog(
             kill=self._watchdog_kill,
             sample=self._sample_worktree,
@@ -194,7 +200,7 @@ class DockerSandbox:
         lifecycle.wait_ready(self._run, self.container)
 
     def _init(self, *, restart: bool) -> None:
-        lifecycle.init_worker_git(self._run, self.container, slug=self._slug, base_commit=self._base_commit, restart=restart)
+        lifecycle.init_worker_git(self._run, self.container, branch=self._branch, base_commit=self._base_commit, restart=restart)
 
     def _check(self, res, what: str) -> None:
         """Raise SandboxError with the captured output when a docker step failed."""
@@ -256,6 +262,12 @@ class DockerSandbox:
             self.watchdog.violation = None
             self.watchdog.violation_kind = "budget"
         label = docker_args.repo_label(self._repo)
+        if self._seeded:
+            # export_run requires the host worktree to hold only the .git
+            # file; a resumed run's worktree still holds the prior export.
+            # The volume is kept on export failure exactly as for a fresh
+            # run, so the worker's final state is never lost.
+            export._cleanup_to_dot_git_only(self._worktree)
         artifacts = export.export_run(
             self.cfg, slug=self._slug, base_commit=self._base_commit,
             worktree=self._worktree, run_dir=self.run_dir, objects_dir=self._objects_dir,
@@ -272,6 +284,37 @@ class DockerSandbox:
             return artifacts
         host_read_tree(self._worktree)
         return artifacts
+
+    def _seed_from_worktree(self) -> None:
+        """Resume: mirror the host worktree into /work (deletions included —
+        the index was populated with `read-tree HEAD` and no files, so
+        whatever the tar carries is exactly what the worker sees). The
+        operator's own worktree is the trusted direction; .git (the gitdir
+        pointer file) is excluded; COPYFILE_DISABLE stops macOS tar from
+        adding ._ AppleDouble entries."""
+        env = dict(os.environ)
+        env["COPYFILE_DISABLE"] = "1"
+        tar_out = self._popen(
+            ["tar", "-C", str(self._worktree), "--exclude=./.git", "-cf", "-", "."],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
+        )
+        exec_argv = ["docker"] + docker_args.exec_argv(
+            self.container, ["tar", "-C", "/work", "-xf", "-"], stdin=True)
+        tar_in = self._popen(exec_argv, stdin=tar_out.stdout,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        timer = threading.Timer(docker_cli.T_LIFECYCLE, lambda: (tar_out.kill(), tar_in.kill()))
+        timer.start()
+        try:
+            if tar_out.stdout is not None:
+                tar_out.stdout.close()  # the child owns the pipe now; lets SIGPIPE reach tar
+            tar_in.wait()
+            tar_out.wait()
+        finally:
+            timer.cancel()
+        if tar_out.returncode != 0 or tar_in.returncode != 0:
+            raise SandboxError(
+                f"resume seed failed: tar rc={tar_out.returncode}, "
+                f"docker exec tar rc={tar_in.returncode}")
 
     def _read_raw(self, path: str, *, strict: bool = False):
         rel, err = _rel(path)

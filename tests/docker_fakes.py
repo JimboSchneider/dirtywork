@@ -18,12 +18,13 @@ class FakePopen:
     to look like a clean-running process unless a test overrides
     .returncode directly."""
 
-    def __init__(self, argv, *, stdin=None, stdout=None, stderr=None, stdout_data: bytes = b""):
+    def __init__(self, argv, *, stdin=None, stdout=None, stderr=None, stdout_data: bytes = b"", env=None):
         self.argv = list(argv)
         self.stdin = io.BytesIO() if stdin == subprocess.PIPE else None
         self.stdout = io.BytesIO(stdout_data) if stdout == subprocess.PIPE else None
         self.returncode = None
         self.killed = False
+        self.env = env
 
     def wait(self, timeout=None):
         if self.returncode is None:
@@ -105,14 +106,14 @@ class FakeDocker:
             return best_response[0]
         return best_response
 
-    def popen(self, argv, *, stdin=None, stdout=None, stderr=None):
+    def popen(self, argv, *, stdin=None, stdout=None, stderr=None, env=None):
         best_prefix = None
         best_data = b""
         for prefix, data in self.popen_stdout.items():
             if tuple(argv[: len(prefix)]) == prefix:
                 if best_prefix is None or len(prefix) > len(best_prefix):
                     best_prefix, best_data = prefix, data
-        p = FakePopen(argv, stdin=stdin, stdout=stdout, stderr=stderr, stdout_data=best_data)
+        p = FakePopen(argv, stdin=stdin, stdout=stdout, stderr=stderr, stdout_data=best_data, env=env)
         self.popens.append(p)
         return p
 
