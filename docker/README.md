@@ -42,6 +42,10 @@ always be pointed at a full `name@sha256:...` reference directly.
 the supply-chain guarantee for the default image: once set,
 `resolve_image()` refuses to run any resolved image whose digest doesn't
 match, regardless of what `--image` or a mutable tag currently points to.
+The pin check compares `PINNED_DIGEST` against the image's *registry*
+digest (`RepoDigests`, via `image_repo_digest()`); the container itself
+always executes the image's local content-addressed Id, never that
+registry digest, so a run can never trigger a network pull.
 
 0.4.0 ships with `PINNED_DIGEST = None`: there is no prior publish to pin
 against on the very first release, so `resolve_image()` performs no pin

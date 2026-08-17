@@ -172,11 +172,19 @@ def test_main_docker_mode_happy_path_with_fake_sandbox(tmp_path, monkeypatch, ca
     run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
     assert run_json["status"] == "completed"
     assert run_json["export_status"] == "ok"
+    # image_digest is provenance (the registry digest from RepoDigests, or
+    # None for a locally-built/never-pulled image) -- distinct from the
+    # image_ref (Id) actually used to run the container. The fake
+    # docker_cli.run above returns rc=1 for every call, so
+    # image_repo_digest() can't inspect RepoDigests and falls back to None.
+    assert run_json["image_digest"] is None
 
     transcript_files = list((tmp_path / "runs").rglob("transcript.jsonl"))
     events = [json.loads(l) for l in transcript_files[0].read_text().splitlines()]
     run_start = next(e for e in events if e["event"] == "run_start")
     assert run_start["sandbox"]["backend"] == "docker"
+    assert run_start["sandbox"]["image"] == m.DEFAULT_IMAGE
+    assert run_start["sandbox"]["image_digest"] is None
     run_end = next(e for e in events if e["event"] == "run_end")
     assert run_end["export_status"] == "ok"
     assert run_end["diff_stat"] == "1 file changed"
@@ -203,11 +211,14 @@ def _docker_mode_scaffold(tmp_path, monkeypatch):
 
 
 def test_main_docker_build_sandbox_passes_preflight_image_ref(tmp_path, monkeypatch, capsys):
-    # Fix item 2: _docker_preflight already resolved the tag to a digest
-    # (recorded in run.json's image_digest before anything is created) --
-    # _build_sandbox must hand that exact same value to DockerSandbox's
-    # constructor, so start() doesn't spend a second `docker image
-    # inspect`/`pull` round trip resolving it again.
+    # Fix item 2: _docker_preflight already resolved the image to its local
+    # Id (for EXECUTION) before anything is created -- _build_sandbox must
+    # hand that exact same value to DockerSandbox's constructor, so start()
+    # doesn't spend a second `docker image inspect`/`pull` round trip
+    # resolving it again. image_digest (run.json, PROVENANCE only) is a
+    # separate value from image_repo_digest() -- None here since the fake
+    # docker_cli.run below returns rc=1 for every call, so RepoDigests can't
+    # be inspected.
     from dirtywork.procs import Captured
     from dirtywork.sandbox import RunArtifacts
     from dirtywork.sandbox.docker import DockerSandbox as RealDockerSandbox
@@ -276,9 +287,9 @@ def test_main_docker_build_sandbox_passes_preflight_image_ref(tmp_path, monkeypa
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
-    preflight_digest = "dirtywork/worker@sha256:" + "a" * 64
-    assert run_json["image_digest"] == preflight_digest
-    assert constructed_with == [preflight_digest]  # the exact value _build_sandbox passed in
+    preflight_image_ref = "dirtywork/worker@sha256:" + "a" * 64  # whatever resolve_image returned
+    assert constructed_with == [preflight_image_ref]  # the exact value _build_sandbox passed in
+    assert run_json["image_digest"] is None  # provenance, resolved separately from image_ref
 
 
 def test_main_docker_name_collision_exits_2_and_creates_nothing(tmp_path, monkeypatch, capsys):

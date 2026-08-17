@@ -368,6 +368,13 @@ stages everything first), `untracked` (always `""`), `patch_path`,
 `dropped_git_entries`, `export_status`, and `watchdog_violation` (docker
 mode; null unless the watchdog killed the container)).
 
+The docker settings dict (`run_start`'s `sandbox`, and the same two fields
+in `run.json`) includes `image` (the `--image` argument as given) and
+`image_digest` (the registry digest from `RepoDigests`, or `null` for a
+locally-built image that was never pushed/pulled) — provenance only. The
+container itself always runs from the image's local content-addressed Id,
+never a registry digest, so a run can never trigger a network pull.
+
 ## Contributing
 
 Issues and PRs welcome. Ground rules:
