@@ -8,12 +8,15 @@ import pytest
 
 from dirtywork.llm import LLMTimeout
 from dirtywork.runner import (
+    DEFAULT_STALL_TURNS,
     DEFAULT_WINDOW,
     FailureTracker,
     MAX_TOTAL_CONSECUTIVE_FAILURES,
     NUDGES,
+    ProgressTracker,
     RunResult,
     Runner,
+    STALL_NUDGE,
     TRIM_MARKER,
     _valid_tool_call,
     classify_text_reply,
@@ -807,3 +810,80 @@ def test_abort_message_names_the_kind(parts):
     transcript.close()
     assert result.status == "model_error"
     assert result.final_message == "aborted after 3 consecutive unknown_tool failures"
+
+
+def test_progress_tracker_definitions():
+    t = ProgressTracker(stall_turns=4)
+    # read-only tools never count
+    t.note_call("read_file", {"path": "a"}, "data")
+    assert t.end_turn() is None and t.idle_turns == 1
+    # a successful write is progress
+    t.note_call("write_file", {"path": "a", "content": "x"}, "wrote 1 bytes")
+    assert t.end_turn() is None and t.idle_turns == 0
+    # an ERROR result is not progress even for write_file
+    t.note_call("edit_file", {"path": "a"}, "ERROR: old_string not found")
+    assert t.end_turn() is None and t.idle_turns == 1
+    # first time a bash (command, output) pair is seen: progress
+    t.note_call("bash", {"command": "pytest"}, "exit code: 1\n1 failed")
+    assert t.end_turn() is None and t.idle_turns == 0
+    # identical command with identical output: idle
+    t.note_call("bash", {"command": "pytest"}, "exit code: 1\n1 failed")
+    assert t.end_turn() is None and t.idle_turns == 1
+    # same command, new output: progress
+    t.note_call("bash", {"command": "pytest"}, "exit code: 0\n5 passed")
+    assert t.end_turn() is None and t.idle_turns == 0
+
+
+def test_progress_tracker_nudge_then_stalled():
+    t = ProgressTracker(stall_turns=4)
+    assert t.end_turn() is None          # idle 1
+    assert t.end_turn() == "nudge"       # idle 2 == 4 // 2
+    assert t.end_turn() is None          # idle 3
+    assert t.end_turn() == "stalled"     # idle 4
+
+
+def test_progress_tracker_nudges_once_per_idle_streak():
+    t = ProgressTracker(stall_turns=4)
+    t.end_turn(); assert t.end_turn() == "nudge"
+    t.note_call("write_file", {"path": "a", "content": "x"}, "ok"); assert t.end_turn() is None
+    t.end_turn(); assert t.end_turn() == "nudge"   # a new streak nudges again
+
+
+def test_progress_tracker_disabled_when_zero():
+    t = ProgressTracker(stall_turns=0)
+    for _ in range(50):
+        assert t.end_turn() is None
+
+
+def test_runner_stalled_status_after_idle_turns(parts):
+    wt, executor, transcript, tmp = parts
+    loop = _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])
+    client = FakeClient([loop] * 10)
+    r = Runner(client, executor, transcript, model="m", max_turns=50, stall_turns=4)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "stalled"
+    assert result.turns == 4
+    assert result.final_message == "no progress in 4 consecutive turns"
+    # the nudge went to the model after 2 idle turns and was transcribed
+    third = client.requests[2]
+    assert third[-1]["role"] == "user" and third[-1]["content"] == STALL_NUDGE.format(n=2)
+    nudges = [e for e in _events(tmp) if e["event"] == "nudge"]
+    assert len(nudges) == 1 and nudges[0]["kind"] == "stall" and nudges[0]["turn"] == 2
+
+
+def test_runner_empty_replies_count_as_idle_turns(parts):
+    wt, executor, transcript, tmp = parts
+    # 2 empty replies (empty_reply failures) then a read → idle streak continues; stall_turns=3
+    client = FakeClient([_resp(content=""), _resp(content=""),
+                         _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])])
+    r = Runner(client, executor, transcript, model="m", stall_turns=3)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "stalled" and result.turns == 3
+
+
+def test_runner_default_stall_turns_is_twelve(parts):
+    wt, executor, transcript, tmp = parts
+    r = Runner(FakeClient([]), executor, transcript, model="m")
+    assert r.stall_turns == DEFAULT_STALL_TURNS == 12

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -110,6 +111,56 @@ def classify_text_reply(content, finish_reason) -> str:
     return "answer"
 
 
+DEFAULT_STALL_TURNS = 12
+STALL_NUDGE = ("No progress in the last {n} turns: no file changed and no command produced "
+               "new output. If the task is complete, commit (if asked) and call "
+               "finish(summary=...); otherwise change your approach.")
+_MUTATING_TOOLS = ("write_file", "edit_file")
+
+
+class ProgressTracker:
+    """Spec §3: a turn made progress if a write/edit succeeded or a bash call
+    produced a (command, output) pair not seen before in this run. Nudge once
+    per idle streak at stall_turns // 2; report 'stalled' at stall_turns.
+    stall_turns <= 0 disables detection."""
+
+    def __init__(self, stall_turns: int):
+        self.stall_turns = stall_turns
+        self.idle_turns = 0
+        self._progressed = False
+        self._nudged = False
+        self._seen_bash = set()
+
+    def note_call(self, name: str, args, result: str) -> None:
+        if not isinstance(result, str) or result.startswith("ERROR"):
+            return
+        if name in _MUTATING_TOOLS:
+            self._progressed = True
+        elif name == "bash":
+            command = args.get("command") if isinstance(args, dict) else None
+            key = hashlib.sha256(
+                (str(command) + "\0" + result).encode("utf-8", "replace")).hexdigest()
+            if key not in self._seen_bash:
+                self._seen_bash.add(key)
+                self._progressed = True
+
+    def end_turn(self) -> str | None:
+        progressed, self._progressed = self._progressed, False
+        if self.stall_turns <= 0:
+            return None
+        if progressed:
+            self.idle_turns = 0
+            self._nudged = False
+            return None
+        self.idle_turns += 1
+        if self.idle_turns >= self.stall_turns:
+            return "stalled"
+        if self.stall_turns >= 2 and self.idle_turns == self.stall_turns // 2 and not self._nudged:
+            self._nudged = True
+            return "nudge"
+        return None
+
+
 def _valid_tool_call(tc) -> bool:
     """Structurally valid OpenAI tool call: non-empty string id, function object
     with non-empty string name, arguments absent/None or a string."""
@@ -168,7 +219,8 @@ class Runner:
                  max_turns: int = 40, timeout: int = 1800,
                  temperature: float | None = None,
                  run_info: dict | None = None,
-                 finalize: Callable[[], dict] | None = None):
+                 finalize: Callable[[], dict] | None = None,
+                 stall_turns: int = DEFAULT_STALL_TURNS):
         self.client = client
         self.executor = executor
         self.transcript = transcript
@@ -178,6 +230,7 @@ class Runner:
         self.temperature = temperature
         self.run_info = run_info
         self.finalize = finalize
+        self.stall_turns = stall_turns
         window = CONTEXT_WINDOWS.get(model, DEFAULT_WINDOW)
         self.char_budget = int(window * BUDGET_FRACTION * CHARS_PER_TOKEN)
 
@@ -194,6 +247,7 @@ class Runner:
         usage = {"prompt_tokens": 0, "completion_tokens": 0}
         turns = 0
         failures = FailureTracker()
+        progress = ProgressTracker(self.stall_turns)
         start = time.monotonic()
         deadline = start + self.timeout
         self.executor.deadline = deadline
@@ -214,6 +268,17 @@ class Runner:
                                   duration_s=round(time.monotonic() - start, 1),
                                   usage=usage, **extra)
             return RunResult(status, turns, final, usage, extra=extra)
+
+        def check_progress():
+            """Returns a RunResult to end the run with, or None."""
+            verdict = progress.end_turn()
+            if verdict == "stalled":
+                return finish("stalled", f"no progress in {self.stall_turns} consecutive turns")
+            if verdict == "nudge":
+                messages.append({"role": "user",
+                                 "content": STALL_NUDGE.format(n=self.stall_turns // 2)})
+                self.transcript.write("nudge", kind="stall", turn=turns)
+            return None
 
         try:
             while True:
@@ -291,6 +356,9 @@ class Runner:
                     abort_reason = failures.record("empty_reply")
                     if abort_reason is not None:
                         return finish("model_error", abort_reason)
+                    stalled = check_progress()
+                    if stalled is not None:
+                        return stalled
                     continue
 
                 abort_reason = None
@@ -308,6 +376,7 @@ class Runner:
                     raw_args = fn_info.get("arguments") or "{}"
                     call_id = tc.get("id", "")
                     abort_reason = None
+                    args = None
                     try:
                         args = json.loads(raw_args)
                         if not isinstance(args, dict):
@@ -342,6 +411,7 @@ class Runner:
                     except TypeError as e:
                         abort_reason = failures.record("bad_args")
                         result = f"ERROR: bad arguments for {name}: {e}"
+                    progress.note_call(name, args if isinstance(args, dict) else {}, result)
                     self.transcript.write("tool_result", tool=name,
                                           args=raw_args[:500],
                                           result=result[:2000])
@@ -351,7 +421,14 @@ class Runner:
                         return finish("model_error", abort_reason)
 
                 if pending_finish is not None:
+                    stalled = check_progress()
+                    if stalled is not None:
+                        return stalled
                     return finish("completed", pending_finish)
+
+                stalled = check_progress()
+                if stalled is not None:
+                    return stalled
 
                 if malformed_count > 0:
                     messages.append({
