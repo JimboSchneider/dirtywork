@@ -60,11 +60,34 @@ def _split_image_ref(image: str) -> tuple[str, str | None]:
     return base, None
 
 
+def _resolve_by_id(image: str, name: str, run) -> str:
+    """Resolve `image` to `<name>@<Id>` via the local image store's own
+    content ID -- always locally addressable, since it never depends on a
+    registry-issued digest."""
+    id_captured = run(["image", "inspect", "--format", "{{.Id}}", image], timeout=T_QUERY)
+    if id_captured.returncode != 0:
+        raise DockerError(
+            f"cannot resolve a digest for {image}: "
+            f"{id_captured.output.decode('utf-8', 'replace')[:500]}"
+        )
+    image_id = id_captured.output.decode("utf-8", "replace").strip()
+    return f"{name}@{image_id}"
+
+
 def resolve_image(image: str, *, run=run, pinned_digest: str | None = None) -> str:
     """Resolve image to <name>@sha256:<digest>, pulling if absent (the only
     network use at preflight). Falls back to .Id for locally-built images
     with no RepoDigests. If pinned_digest is given, the resolved digest must
-    match it exactly or the run refuses to start."""
+    match it exactly or the run refuses to start.
+
+    A RepoDigests candidate is not always locally addressable: images
+    loaded via `docker buildx build --load` can carry a RepoDigests entry
+    pointing at a registry manifest that was never pulled into the local
+    store. `docker run` (or the `image inspect` below) on a digest ref that
+    isn't local would trigger a network pull, which is forbidden after
+    preflight -- so once a RepoDigests candidate passes the pinned-digest
+    check, it is verified locally addressable and, if not, replaced with
+    the .Id fallback exactly like the no-RepoDigests path."""
     name, _tag = _split_image_ref(image)
 
     captured = run(["image", "inspect", "--format", "{{json .RepoDigests}}", image], timeout=T_QUERY)
@@ -94,15 +117,9 @@ def resolve_image(image: str, *, run=run, pinned_digest: str | None = None) -> s
                 ref = d
                 break
 
+    from_repodigests = ref is not None
     if ref is None:
-        id_captured = run(["image", "inspect", "--format", "{{.Id}}", image], timeout=T_QUERY)
-        if id_captured.returncode != 0:
-            raise DockerError(
-                f"cannot resolve a digest for {image}: "
-                f"{id_captured.output.decode('utf-8', 'replace')[:500]}"
-            )
-        image_id = id_captured.output.decode("utf-8", "replace").strip()
-        ref = f"{name}@{image_id}"
+        ref = _resolve_by_id(image, name, run)
 
     if pinned_digest is not None:
         digest_part = ref.split("@", 1)[1] if "@" in ref else ""
@@ -111,6 +128,12 @@ def resolve_image(image: str, *, run=run, pinned_digest: str | None = None) -> s
                 f"resolved image digest {digest_part!r} for {image!r} does not match "
                 f"PINNED_DIGEST {pinned_digest!r}; refusing to run an unpinned image"
             )
+
+    if from_repodigests:
+        addressable = run(["image", "inspect", "--format", "{{.Id}}", ref], timeout=T_QUERY)
+        if addressable.returncode != 0:
+            ref = _resolve_by_id(image, name, run)
+
     return ref
 
 

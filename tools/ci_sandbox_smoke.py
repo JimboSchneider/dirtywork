@@ -94,6 +94,7 @@ def main() -> int:
         # can be printed before start() runs.
         objects_dir = docker_cli.validate_objects_dir(repo)
         image_ref = docker_cli.resolve_image(cfg.image, pinned_digest=docker_args.PINNED_DIGEST)
+        print("resolved image ref:", image_ref)
         label = docker_args.repo_label(repo)
         create_argv = docker_args.worker_create_argv(
             cfg, "smoke", image_ref, uid, gid, objects_dir, repo_label=label,

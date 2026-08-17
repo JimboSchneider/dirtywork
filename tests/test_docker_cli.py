@@ -64,17 +64,55 @@ def test_docker_version_raises_on_nonzero(monkeypatch):
 
 def test_resolve_image_uses_repodigests_when_present():
     calls = []
+    candidate = "dirtywork/worker@sha256:" + "a" * 64
 
     def fake_run(argv, *, timeout, stdin=None):
         calls.append(argv)
-        digests = ["dirtywork/worker@sha256:" + "a" * 64]
-        return Captured(returncode=0, output=json.dumps(digests).encode(),
-                         truncated=False, timed_out=False)
+        if argv == ["image", "inspect", "--format", "{{json .RepoDigests}}",
+                     "dirtywork/worker:0.3"]:
+            digests = [candidate]
+            return Captured(returncode=0, output=json.dumps(digests).encode(),
+                             truncated=False, timed_out=False)
+        if argv == ["image", "inspect", "--format", "{{.Id}}", candidate]:
+            # the RepoDigests ref is locally addressable -- unchanged behaviour
+            return Captured(returncode=0, output=b"sha256:" + b"a" * 64,
+                             truncated=False, timed_out=False)
+        raise AssertionError(f"unexpected argv {argv}")
 
     ref = resolve_image("dirtywork/worker:0.3", run=fake_run)
-    assert ref == "dirtywork/worker@sha256:" + "a" * 64
-    assert calls == [["image", "inspect", "--format", "{{json .RepoDigests}}",
-                       "dirtywork/worker:0.3"]]
+    assert ref == candidate
+    assert calls == [
+        ["image", "inspect", "--format", "{{json .RepoDigests}}", "dirtywork/worker:0.3"],
+        ["image", "inspect", "--format", "{{.Id}}", candidate],
+    ]
+    assert not any(c[0] == "pull" for c in calls)
+
+
+def test_resolve_image_falls_back_to_id_when_repodigest_not_locally_addressable():
+    # Buildx-loaded images can carry a RepoDigests entry that the local
+    # image store cannot resolve by digest (docker run on it would try to
+    # pull from the registry, which preflight forbids) -- fall back to .Id.
+    calls = []
+    candidate = "dirtywork/worker@sha256:" + "a" * 64
+
+    def fake_run(argv, *, timeout, stdin=None):
+        calls.append(argv)
+        if argv == ["image", "inspect", "--format", "{{json .RepoDigests}}",
+                     "dirtywork/worker:0.3"]:
+            digests = [candidate]
+            return Captured(returncode=0, output=json.dumps(digests).encode(),
+                             truncated=False, timed_out=False)
+        if argv == ["image", "inspect", "--format", "{{.Id}}", candidate]:
+            return Captured(returncode=1, output=b"no such image: " + candidate.encode(),
+                             truncated=False, timed_out=False)
+        if argv == ["image", "inspect", "--format", "{{.Id}}", "dirtywork/worker:0.3"]:
+            return Captured(returncode=0, output=b"sha256:" + b"d" * 64,
+                             truncated=False, timed_out=False)
+        raise AssertionError(f"unexpected argv {argv}")
+
+    ref = resolve_image("dirtywork/worker:0.3", run=fake_run)
+    assert ref == "dirtywork/worker@sha256:" + "d" * 64
+    assert not any(c[0] == "pull" for c in calls)
 
 
 def test_resolve_image_pulls_when_absent_then_resolves():
