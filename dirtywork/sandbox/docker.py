@@ -63,7 +63,7 @@ class DockerSandbox:
     only tests marked `docker` (Tasks 13, 15, 16) pass real callables."""
 
     def __init__(self, cfg: docker_args.DockerConfig, *, run_dir: Path, transcript=None,
-                 run=docker_cli.run, popen=subprocess.Popen):
+                 image_ref: str | None = None, run=docker_cli.run, popen=subprocess.Popen):
         self.cfg = cfg
         self.run_dir = run_dir
         self.transcript = transcript
@@ -71,7 +71,15 @@ class DockerSandbox:
         self._popen = popen
         self.container = None
         self.volume = None
-        self.image_ref = None
+        # When the caller already resolved a digest (main()'s docker
+        # preflight does, so it can record it in run.json before anything
+        # is created), start() must use it verbatim rather than resolving
+        # again — resolving twice means two `docker image inspect`/`pull`
+        # round trips for one run, and a chance the two resolutions
+        # disagree if the tag moved in between. None here (the default, and
+        # what every other caller — tests included — gets) preserves the
+        # old behavior: start() resolves it itself.
+        self.image_ref = image_ref
         self.uid = None
         self.gid = None
         self._tether = None
@@ -135,8 +143,9 @@ class DockerSandbox:
             self._objects_dir = objects_dir
         except WorkspaceError as e:
             raise SandboxError(str(e)) from e
-        self.image_ref = docker_cli.resolve_image(
-            self.cfg.image, run=self._run, pinned_digest=docker_args.PINNED_DIGEST)
+        if self.image_ref is None:
+            self.image_ref = docker_cli.resolve_image(
+                self.cfg.image, run=self._run, pinned_digest=docker_args.PINNED_DIGEST)
         label = docker_args.repo_label(repo)
 
         create_vol = self._run(
@@ -225,8 +234,20 @@ class DockerSandbox:
         touch anything the worker produced. `RunArtifacts.untracked` stays ""
         in docker mode: the export's `git add -A` before `write-tree` already
         folds new files into `diff_stat`/`diff.patch`, so there is nothing
-        separate to report."""
+        separate to report.
+
+        `_stop_container()` (called first, below) already stops and joins
+        the watchdog thread — a disk-floor or fail-closed kill can fire
+        after the model's last tool call, with nothing left to consume
+        `self.watchdog.violation` (`_after_bash` only runs on a bash call).
+        Read and clear it here, right after the thread is guaranteed dead,
+        so a violation that landed while idle still surfaces instead of
+        being silently reported `completed`. The export still runs — the
+        volume is intact and the work is worth salvaging regardless."""
         self._stop_container()
+        watchdog_violation = self.watchdog.violation if self.watchdog is not None else None
+        if self.watchdog is not None:
+            self.watchdog.violation = None
         label = docker_args.repo_label(self._repo)
         artifacts = export.export_run(
             self.cfg, slug=self._slug, base_commit=self._base_commit,
@@ -234,6 +255,7 @@ class DockerSandbox:
             image_ref=self.image_ref, uid=self.uid, gid=self.gid, repo_label=label,
             run=self._run, popen=self._popen,
         )
+        artifacts.watchdog_violation = watchdog_violation
         if artifacts.export_status.startswith("export_failed"):
             # Leave the host worktree as it was (.git file only): read-tree
             # after a failed export would make host `git status` claim mass

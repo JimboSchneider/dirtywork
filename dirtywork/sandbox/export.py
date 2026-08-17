@@ -193,8 +193,19 @@ def export_run(cfg, *, slug, base_commit, worktree: Path, run_dir: Path, objects
                            f"{created.output.decode('utf-8', 'replace')[:500]}"
         )
 
-    tether = popen(["docker", "start", "-ai", name],
-                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        tether = popen(["docker", "start", "-ai", name],
+                        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        # _cleanup/_fail don't exist yet (they close over `tether`) — this
+        # is the one export step that can fail before there is a tether to
+        # close, so it gets its own best-effort teardown: just the export
+        # container this function itself created.
+        try:
+            run(["rm", "-f", name], timeout=docker_cli.T_LIFECYCLE)
+        except docker_cli.DockerError:
+            pass
+        return RunArtifacts(export_status=f"export_failed: cannot start export tether: {e}")
 
     def _cleanup(keep_volume: bool) -> None:
         try:
@@ -327,7 +338,13 @@ def export_run(cfg, *, slug, base_commit, worktree: Path, run_dir: Path, objects
 
         _cleanup(keep_volume=cfg.keep_volume)
 
-    except SandboxError as e:
+    except (SandboxError, OSError) as e:
+        # OSError alongside SandboxError: popen()/os.open()/file writes in
+        # the steps above are raw OS calls with no docker_cli wrapper to
+        # turn a failure into a DockerError — an unwrapped OSError here
+        # must still route through _fail (container removed, volume kept
+        # for retry, worktree cleaned back to .git only) rather than
+        # propagate and skip cleanup entirely.
         return _fail(f"docker step failed: {e}")
 
     return RunArtifacts(

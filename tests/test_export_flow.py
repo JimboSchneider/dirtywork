@@ -225,6 +225,73 @@ def test_export_run_docker_error_routes_through_fail(tmp_path, empty_worktree):
     assert len(remaining) == 1 and remaining[0].name == ".git"
 
 
+def test_export_run_tether_oserror_is_cleaned_up(tmp_path, empty_worktree):
+    # Fix item 4a: the tether `popen(["docker", "start", "-ai", name], ...)`
+    # runs before `_cleanup`/`_fail` exist (they close over `tether`) -- an
+    # OSError there (docker binary missing, fork failure, ...) needs its own
+    # best-effort teardown: just `rm -f` the export container this call
+    # itself created, no volume rm (nothing about the volume changed).
+    fake = FakeDocker()
+    fake.script(["create"], _ok())
+
+    def boom_popen(argv, *, stdin=None, stdout=None, stderr=None):
+        if argv[:3] == ["docker", "start", "-ai"]:
+            raise OSError("fork failed")
+        return fake.popen(argv, stdin=stdin, stdout=stdout, stderr=stderr)
+
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    cfg = DockerConfig()
+
+    artifacts = export_run(
+        cfg, slug="abc123", base_commit="deadbeef" * 5, worktree=empty_worktree,
+        run_dir=run_dir, objects_dir=Path("/repo/.git/objects"),
+        image_ref="dirtywork/worker@sha256:" + "a" * 64, uid=501, gid=20,
+        repo_label="deadbeef", run=fake.run, popen=boom_popen,
+    )
+
+    assert artifacts.export_status.startswith("export_failed")
+    assert "cannot start export tether" in artifacts.export_status
+    assert any(c[0][:2] == ["rm", "-f"] and "dw-abc123-export" in c[0] for c in fake.calls)
+    assert not any(c[0][:2] == ["volume", "rm"] for c in fake.calls)
+
+
+def test_export_run_diff_step_oserror_routes_through_fail(tmp_path, empty_worktree):
+    # Fix item 4b: an OSError raised by a raw OS call further into the
+    # export (popen() for the streamed `git diff`, os.open() for the patch
+    # file, ...) used to propagate past the `except SandboxError` guard
+    # entirely, skipping cleanup. It must route through _fail like a
+    # SandboxError does: export container removed, volume KEPT (retryable),
+    # worktree cleaned back to .git only.
+    fake = FakeDocker()
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "write-tree"],
+                _ok(b"treehash\n"))
+
+    def boom_popen(argv, *, stdin=None, stdout=None, stderr=None):
+        if "diff" in argv and "--stat" not in argv:
+            raise OSError("cannot fork for git diff")
+        return fake.popen(argv, stdin=stdin, stdout=stdout, stderr=stderr)
+
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    cfg = DockerConfig()
+
+    artifacts = export_run(
+        cfg, slug="abc123", base_commit="deadbeef" * 5, worktree=empty_worktree,
+        run_dir=run_dir, objects_dir=Path("/repo/.git/objects"),
+        image_ref="dirtywork/worker@sha256:" + "a" * 64, uid=501, gid=20,
+        repo_label="deadbeef", run=fake.run, popen=boom_popen,
+    )
+
+    assert artifacts.export_status.startswith("export_failed: docker step failed")
+    assert any(c[0][:2] == ["rm", "-f"] and "dw-abc123-export" in c[0] for c in fake.calls)
+    assert not any(c[0][:2] == ["volume", "rm"] for c in fake.calls)
+    remaining = list(empty_worktree.iterdir())
+    assert len(remaining) == 1 and remaining[0].name == ".git"
+
+
 def test_export_run_create_docker_error_no_cleanup_needed(tmp_path, empty_worktree):
     fake = FakeDocker()
     

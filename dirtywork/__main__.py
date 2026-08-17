@@ -107,7 +107,7 @@ def _build_sandbox(args, *, run_dir: Path, worktree: Path, repo: Path, slug: str
             max_patch_mb=args.max_patch_mb,
             keep_volume=args.keep_volume,
         )
-        sandbox = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript)
+        sandbox = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, image_ref=image_ref)
         try:
             sandbox.start(worktree, repo, slug, base_commit)
         except Exception:
@@ -193,13 +193,25 @@ def _final_status(result) -> str:
     worker's changes never safely reached the host — either way the run did
     not deliver what its own status claims. However, export_failed should
     only replace 'completed'; other statuses (budget_exceeded, timeout, etc.)
-    are the actual cause of the run ending and should be preserved."""
+    are the actual cause of the run ending and should be preserved.
+
+    A `watchdog_violation` (Fix item 1: a disk-floor or fail-closed kill
+    that fired after the model's last tool call, with no bash call left to
+    surface it via BudgetExceeded) is checked before export_status and
+    takes precedence over it — the budget breach is the actual cause of the
+    run ending, same as a BudgetExceeded raised mid-run already is; an
+    export failure downstream of that kill is a secondary symptom. Same
+    only-replaces-'completed' rule applies."""
     extra = result.extra or {}
     if extra.get("finalize_error"):
         # Only replace completed with export_failed; keep other statuses as-is
         if result.status == "completed":
             return "export_failed"
         # For non-completed statuses, keep the original status
+        return result.status
+    if extra.get("watchdog_violation"):
+        if result.status == "completed":
+            return "budget_exceeded"
         return result.status
     export_status = extra.get("export_status", "")
     if isinstance(export_status, str) and export_status.startswith("export_failed"):
@@ -409,6 +421,7 @@ def main(argv: list | None = None) -> int:
                 "escaping_symlinks": artifacts.escaping_symlinks,
                 "dropped_git_entries": artifacts.dropped_git_entries,
                 "export_status": artifacts.export_status,
+                "watchdog_violation": artifacts.watchdog_violation,
             }
 
         runner = Runner(
@@ -457,12 +470,14 @@ def main(argv: list | None = None) -> int:
         export_status=extra.get("export_status", "n/a"),
         patch_path=extra.get("patch_path"),
         finalize_error=finalize_error,
+        watchdog_violation=extra.get("watchdog_violation"),
     )
 
     print(json.dumps(_emit_result(
         status=final_status, worktree=worktree, branch=branch, transcript_path=transcript_path,
         run_dir=run_dir, turns=result.turns, usage=result.usage, final_message=result.final_message,
         base_commit=base_commit, finalize_error=finalize_error,
+        watchdog_violation=extra.get("watchdog_violation"),
     ), indent=2))
     return 0 if final_status == "completed" else 1
 

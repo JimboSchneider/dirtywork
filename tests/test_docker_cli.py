@@ -9,6 +9,7 @@ from dirtywork.procs import Captured
 from dirtywork.sandbox.docker_cli import (
     DockerError,
     T_QUERY,
+    _split_image_ref,
     docker_storage_paths,
     docker_version,
     resolve_image,
@@ -137,6 +138,46 @@ def test_resolve_image_pinned_digest_match_passes():
 
     ref = resolve_image("dirtywork/worker:0.3", run=fake_run, pinned_digest="sha256:" + "a" * 64)
     assert ref == "dirtywork/worker@sha256:" + "a" * 64
+
+
+def test_split_image_ref_registry_with_tag():
+    assert _split_image_ref("ghcr.io/jimboschneider/dirtywork-worker:0.4") == (
+        "ghcr.io/jimboschneider/dirtywork-worker", "0.4")
+
+
+def test_split_image_ref_localhost_port_with_tag():
+    # Fix item 3: a ':' before the last '/' is a registry host:port, not a
+    # tag separator -- the old `image.split("@")[0].split(":")[0]` broke
+    # this, returning "localhost" as the name.
+    assert _split_image_ref("localhost:5000/foo:tag") == ("localhost:5000/foo", "tag")
+
+
+def test_split_image_ref_bare_name_no_tag():
+    assert _split_image_ref("foo") == ("foo", None)
+
+
+def test_split_image_ref_digest_only():
+    assert _split_image_ref("foo@sha256:" + "a" * 64) == ("foo", None)
+
+
+def test_split_image_ref_registry_port_no_tag():
+    assert _split_image_ref("registry:5000/ns/img") == ("registry:5000/ns/img", None)
+
+
+def test_resolve_image_registry_port_matches_repodigests():
+    # End-to-end through resolve_image (not just _split_image_ref): the name
+    # used to match RepoDigests entries must be the full "host:port/path",
+    # not truncated at the port's ':'.
+    calls = []
+
+    def fake_run(argv, *, timeout, stdin=None):
+        calls.append(argv)
+        digests = ["localhost:5000/foo@sha256:" + "e" * 64]
+        return Captured(returncode=0, output=json.dumps(digests).encode(),
+                         truncated=False, timed_out=False)
+
+    ref = resolve_image("localhost:5000/foo:tag", run=fake_run)
+    assert ref == "localhost:5000/foo@sha256:" + "e" * 64
 
 
 def test_docker_storage_paths_linux(monkeypatch):

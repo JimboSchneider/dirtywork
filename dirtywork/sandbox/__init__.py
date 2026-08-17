@@ -15,7 +15,10 @@ class SandboxError(Exception):
 @dataclass
 class RunArtifacts:
     """What a Sandbox reports at the end of a run. export_status is one of
-    "ok", f"export_failed: {reason}", or "n/a" (host mode never exports)."""
+    "ok", f"export_failed: {reason}", or "n/a" (host mode never exports).
+    watchdog_violation is docker-mode only: the reason string the Watchdog
+    recorded (and killed the container for) if that happened after the last
+    bash call returned -- None otherwise, and always None in host mode."""
     diff_stat: str = ""
     untracked: str = ""
     patch_path: str | None = None
@@ -24,6 +27,7 @@ class RunArtifacts:
     escaping_symlinks: list = field(default_factory=list)
     dropped_git_entries: list = field(default_factory=list)
     export_status: str = "ok"
+    watchdog_violation: str | None = None
 
 
 class Sandbox(Protocol):

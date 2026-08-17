@@ -104,6 +104,47 @@ def test_start_sets_attributes(docker, tmp_path):
     assert isinstance(sb.gid, int)
 
 
+def test_start_uses_provided_image_ref_without_resolving_again(tmp_path):
+    # Fix item 2: __main__'s docker preflight already resolved the tag to a
+    # digest (and recorded it in run.json) before the sandbox is even
+    # constructed -- start() must use that digest verbatim, not spend a
+    # second `docker image inspect`/`pull` round trip re-resolving it.
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    preresolved = "dirtywork/worker@sha256:" + "d" * 64
+    sb = DockerSandbox(cfg, run_dir=run_dir, image_ref=preresolved, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+
+    assert sb.image_ref == preresolved
+    assert not any(c[0][:2] == ["image", "inspect"] for c in fake.calls)
+    assert not any(c[0][0] == "pull" for c in fake.calls)
+
+
+def test_start_resolves_image_when_no_image_ref_given(docker, tmp_path):
+    # The fallback path (image_ref=None, the constructor default): every
+    # other caller, including these tests, still gets the old behavior.
+    sb, fake, run_dir = docker
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+
+    assert any(c[0][:2] == ["image", "inspect"] for c in fake.calls)
+
+
 def test_start_refuses_on_container_collision(docker, tmp_path):
     sb, fake, run_dir = docker
     fake.script(["container", "inspect"], _ok())  # already exists
@@ -974,3 +1015,46 @@ def test_finalize_skips_host_read_tree_when_export_failed(started, monkeypatch):
     assert artifacts.export_status == "export_failed: boom"
     assert not host_read_tree_called  # host_read_tree should NOT be called on export failure
     assert sb._export_failed is True
+
+
+def test_finalize_consumes_watchdog_violation_and_still_exports(started, monkeypatch):
+    # Fix item 1: a disk-floor (or fail-closed) kill that fires after the
+    # model's last tool call has no bash call left to surface it via
+    # _after_bash's BudgetExceeded raise -- finalize() must consume the
+    # violation itself (so the run isn't reported "completed") while still
+    # running the export (the volume is intact and the work is worth
+    # salvaging).
+    from dirtywork.sandbox import RunArtifacts
+    sb, fake, run_dir = started
+    sb.watchdog.violation = "host free space below 2048 MB"
+
+    export_calls = []
+
+    def fake_export_run(cfg, **kwargs):
+        export_calls.append(kwargs)
+        return RunArtifacts(export_status="ok", diff_stat="stat")
+
+    import dirtywork.sandbox.docker as docker_mod
+    monkeypatch.setattr(docker_mod.export, "export_run", fake_export_run)
+    monkeypatch.setattr(docker_mod, "host_read_tree", lambda worktree: None)
+
+    artifacts = sb.finalize()
+
+    assert artifacts.watchdog_violation == "host free space below 2048 MB"
+    assert artifacts.export_status == "ok"  # export still ran to completion
+    assert export_calls  # export_run was actually called
+    assert sb.watchdog.violation is None  # consumed, not left for a later reader
+
+
+def test_finalize_reports_no_watchdog_violation_when_none_occurred(started, monkeypatch):
+    from dirtywork.sandbox import RunArtifacts
+    sb, fake, run_dir = started
+
+    import dirtywork.sandbox.docker as docker_mod
+    monkeypatch.setattr(docker_mod.export, "export_run",
+                         lambda cfg, **kw: RunArtifacts(export_status="ok"))
+    monkeypatch.setattr(docker_mod, "host_read_tree", lambda worktree: None)
+
+    artifacts = sb.finalize()
+
+    assert artifacts.watchdog_violation is None

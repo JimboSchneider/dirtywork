@@ -365,7 +365,8 @@ status --porcelain` `??` entries — each capped at 64 000 chars; in docker
 mode `diff_stat` (which already includes new files, since the export
 stages everything first), `untracked` (always `""`), `patch_path`,
 `worktree_bytes`, `worktree_files`, `escaping_symlinks`,
-`dropped_git_entries`, and `export_status`).
+`dropped_git_entries`, `export_status`, and `watchdog_violation` (docker
+mode; null unless the watchdog killed the container)).
 
 ## Contributing
 

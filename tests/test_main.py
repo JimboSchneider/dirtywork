@@ -101,11 +101,12 @@ def test_main_docker_mode_happy_path_with_fake_sandbox(tmp_path, monkeypatch, ca
         # collision-check logic in a test double.
         check_name_collision = staticmethod(RealDockerSandbox.check_name_collision)
 
-        def __init__(self, cfg, *, run_dir, transcript=None):
+        def __init__(self, cfg, *, run_dir, transcript=None, image_ref=None):
             self.cfg = cfg
             self.run_dir = run_dir
             self.uid = 501
             self.gid = 20
+            self.image_ref = image_ref
             self.watchdog = FakeWatchdog()
 
         def start(self, worktree, repo, slug, base_commit):
@@ -201,6 +202,85 @@ def _docker_mode_scaffold(tmp_path, monkeypatch):
     return m, repo
 
 
+def test_main_docker_build_sandbox_passes_preflight_image_ref(tmp_path, monkeypatch, capsys):
+    # Fix item 2: _docker_preflight already resolved the tag to a digest
+    # (recorded in run.json's image_digest before anything is created) --
+    # _build_sandbox must hand that exact same value to DockerSandbox's
+    # constructor, so start() doesn't spend a second `docker image
+    # inspect`/`pull` round trip resolving it again.
+    from dirtywork.procs import Captured
+    from dirtywork.sandbox import RunArtifacts
+    from dirtywork.sandbox.docker import DockerSandbox as RealDockerSandbox
+    m, repo = _docker_mode_scaffold(tmp_path, monkeypatch)
+    monkeypatch.setattr(m.docker_cli, "run",
+                        lambda argv, *, timeout, stdin=None: Captured(1, b"", False, False))
+
+    constructed_with = []
+
+    class FakeWatchdog:
+        def start(self):
+            pass
+
+    class FakeDockerSandbox:
+        check_name_collision = staticmethod(RealDockerSandbox.check_name_collision)
+
+        def __init__(self, cfg, *, run_dir, transcript=None, image_ref=None):
+            constructed_with.append(image_ref)
+            self.uid, self.gid = 501, 20
+            self.watchdog = FakeWatchdog()
+
+        def start(self, worktree, repo, slug, base_commit):
+            pass
+
+        def stop(self):
+            pass
+
+        def read_file(self, path, offset=0, limit=400):
+            return ""
+
+        def write_file(self, path, content):
+            return ""
+
+        def edit_file(self, path, old_string, new_string):
+            return ""
+
+        def list_dir(self, path="."):
+            return ""
+
+        def grep(self, pattern, path=".", glob=None, timeout=30):
+            return ""
+
+        def bash(self, command, timeout=120):
+            return ""
+
+        def finalize(self):
+            return RunArtifacts(export_status="ok")
+
+    monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
+
+    class ImmediateDoneClient:
+        def __init__(self, base_url=None):
+            pass
+
+        def list_models(self):
+            return [m.DEFAULT_MODEL]
+
+        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+            return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    monkeypatch.setattr(m, "LMStudioClient", ImmediateDoneClient)
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    preflight_digest = "dirtywork/worker@sha256:" + "a" * 64
+    assert run_json["image_digest"] == preflight_digest
+    assert constructed_with == [preflight_digest]  # the exact value _build_sandbox passed in
+
+
 def test_main_docker_name_collision_exits_2_and_creates_nothing(tmp_path, monkeypatch, capsys):
     import subprocess
     from dirtywork.procs import Captured
@@ -233,7 +313,7 @@ def test_main_docker_start_failure_is_sandbox_error_exit_1(tmp_path, monkeypatch
     class BoomSandbox:
         check_name_collision = staticmethod(RealDockerSandbox.check_name_collision)
 
-        def __init__(self, cfg, *, run_dir, transcript=None):
+        def __init__(self, cfg, *, run_dir, transcript=None, image_ref=None):
             self.uid, self.gid = 501, 20
             self.stopped = False
 
@@ -340,10 +420,11 @@ def _fake_docker_sandbox_class(RealDockerSandbox, *, finalize):
     class FakeDockerSandbox:
         check_name_collision = staticmethod(RealDockerSandbox.check_name_collision)
 
-        def __init__(self, cfg, *, run_dir, transcript=None):
+        def __init__(self, cfg, *, run_dir, transcript=None, image_ref=None):
             self.cfg = cfg
             self.uid, self.gid = 501, 20
             self.volume = "dw-fake-work"
+            self.image_ref = image_ref
             self.stopped = False
 
             class FakeWatchdog:
@@ -473,6 +554,56 @@ def test_main_docker_export_failed_status_from_finalize_result(tmp_path, monkeyp
     run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
     assert run_json["status"] == "export_failed"
     assert run_json["export_status"] == "export_failed: boom"
+
+
+def test_main_docker_watchdog_violation_status_from_finalize_result(tmp_path, monkeypatch, capsys):
+    # Fix item 1: finalize() (called inside Runner.finish() after a normal
+    # "completed" run) reports a watchdog_violation -- a disk-floor or
+    # fail-closed kill that fired while the model was idle, after its last
+    # tool call, so there was no bash call left to surface it via
+    # _after_bash's BudgetExceeded raise. _final_status() must override the
+    # terminal status to "budget_exceeded", not let it report "completed".
+    from dirtywork.procs import Captured
+    from dirtywork.sandbox import RunArtifacts
+    from dirtywork.sandbox.docker import DockerSandbox as RealDockerSandbox
+    m, repo = _docker_mode_scaffold(tmp_path, monkeypatch)
+    monkeypatch.setattr(m.docker_cli, "run",
+                        lambda argv, *, timeout, stdin=None: Captured(1, b"", False, False))
+
+    def finalize(self):
+        return RunArtifacts(export_status="ok",
+                             watchdog_violation="host free space below 2048 MB")
+
+    FakeDockerSandbox = _fake_docker_sandbox_class(RealDockerSandbox, finalize=finalize)
+    monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
+
+    class ImmediateDoneClient:
+        def __init__(self, base_url=None):
+            pass
+
+        def list_models(self):
+            return [m.DEFAULT_MODEL]
+
+        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+            return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    monkeypatch.setattr(m, "LMStudioClient", ImmediateDoneClient)
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])
+
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "budget_exceeded"
+    assert payload["watchdog_violation"] == "host free space below 2048 MB"
+    run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert run_json["status"] == "budget_exceeded"
+    assert run_json["watchdog_violation"] == "host free space below 2048 MB"
+
+    transcript_files = list((tmp_path / "runs").rglob("transcript.jsonl"))
+    events = [json.loads(l) for l in transcript_files[0].read_text().splitlines()]
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end["watchdog_violation"] == "host free space below 2048 MB"
 
 
 def test_main_docker_export_failed_status_from_finalize_exception(tmp_path, monkeypatch, capsys):

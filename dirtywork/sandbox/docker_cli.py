@@ -44,12 +44,28 @@ def docker_version(*, run=run) -> str:
     return captured.output.decode("utf-8", "replace").strip()
 
 
+def _split_image_ref(image: str) -> tuple[str, str | None]:
+    """Split a (possibly digest-qualified) image reference into (name, tag).
+
+    A `:` is only a tag separator when it comes after the last `/` — a `:`
+    before the last `/` is a registry host:port, not a tag (e.g.
+    `localhost:5000/foo:tag` is name `localhost:5000/foo`, tag `tag`;
+    `registry:5000/ns/img` has no tag at all). Any `@sha256:...` digest
+    suffix is stripped first and ignored here."""
+    base = image.split("@", 1)[0]
+    last_slash = base.rfind("/")
+    last_colon = base.rfind(":")
+    if last_colon > last_slash:
+        return base[:last_colon], base[last_colon + 1:]
+    return base, None
+
+
 def resolve_image(image: str, *, run=run, pinned_digest: str | None = None) -> str:
     """Resolve image to <name>@sha256:<digest>, pulling if absent (the only
     network use at preflight). Falls back to .Id for locally-built images
     with no RepoDigests. If pinned_digest is given, the resolved digest must
     match it exactly or the run refuses to start."""
-    name = image.split("@")[0].split(":")[0]
+    name, _tag = _split_image_ref(image)
 
     captured = run(["image", "inspect", "--format", "{{json .RepoDigests}}", image], timeout=T_QUERY)
     if captured.returncode != 0:
