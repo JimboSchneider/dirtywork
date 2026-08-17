@@ -31,6 +31,11 @@ from dirtywork.builtin_tools import default_registry
 from dirtywork.transcript import Transcript
 
 
+# These aliases were removed in the migration but tests still use them.
+_THINK = "<" + "think>"
+_THINK_END = "</" + "think>"
+
+
 def _resp(content=None, tool_calls=None, usage=None, finish_reason=None):
     return ChatResponse(text=content or "",
                         tool_calls=list(tool_calls or []),

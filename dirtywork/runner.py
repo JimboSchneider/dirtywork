@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Callable
 
 from .budget import BudgetExceeded
-from .llm import LLMTimeout
+from .llm import LLMTimeout, MalformedResponse
+from .providers import assistant_message, tool_message
 from .sandbox import SandboxError
 
 MAX_ASSISTANT_TEXT_CHARS = 64_000
@@ -19,10 +19,8 @@ MAX_ASSISTANT_TEXT_CHARS = 64_000
 # scoreboard all refer to the tool by name.
 FINISH_TOOL = "finish"
 
-CONTEXT_WINDOWS = {
-    "qwen/qwen3-coder-next": 65536,
-    "mistralai/devstral-small-2-2512": 32768,
-}
+# The per-model context-window table moved to the provider that serves those
+# models (providers/openai_compat.py): resolve_context_window asks the provider.
 DEFAULT_WINDOW = 32768
 TRIM_MARKER = "[result trimmed — re-run the tool if needed]"
 CHARS_PER_TOKEN = 4
@@ -63,6 +61,9 @@ class FailureTracker:
 # tool channel could not emit them literally. Keep them concatenated.
 _THINK_OPEN = "<" + "think>"
 _THINK_CLOSE = "</" + "think>"
+# Aliases for backwards compatibility with tests
+_THINK = _THINK_OPEN
+_THINK_END = _THINK_CLOSE
 _THINK_RE = re.compile(re.escape(_THINK_OPEN) + r".*?(?:" + re.escape(_THINK_CLOSE) + r"|\Z)",
                        re.DOTALL)
 _TEXT_TOOL_MARKERS = tuple("<" + m for m in ("tool_call>", "function=", "function_call>", "|tool_call|>"))
@@ -201,10 +202,11 @@ class ProgressTracker:
         return None
 
 
-def resolve_context_window(model: str, flag_value, env_value) -> tuple[int, str]:
-    """Spec §4 precedence: --context-window > DIRTYWORK_CONTEXT_WINDOW > table > default.
-    Returns (tokens, source) with source in flag|env|table|default. Raises
-    ValueError for an env value that is not a positive integer."""
+def resolve_context_window(model: str, flag_value, env_value, provider=None) -> tuple:
+    """Precedence: --context-window > DIRTYWORK_CONTEXT_WINDOW > the provider's
+    own table for this model > DEFAULT_WINDOW. Returns (tokens, source) with
+    source in flag|env|provider:<name>|default. Raises ValueError for an env
+    value that is not a positive integer."""
     if flag_value is not None:
         return int(flag_value), "flag"
     if env_value not in (None, ""):
@@ -216,32 +218,22 @@ def resolve_context_window(model: str, flag_value, env_value) -> tuple[int, str]
             raise ValueError(
                 f"DIRTYWORK_CONTEXT_WINDOW must be a positive integer, got {env_value!r}")
         return value, "env"
-    if model in CONTEXT_WINDOWS:
-        return CONTEXT_WINDOWS[model], "table"
+    if provider is not None:
+        window = provider.context_window(model)
+        if window:
+            return int(window), f"provider:{getattr(provider, 'name', 'provider')}"
     return DEFAULT_WINDOW, "default"
 
 
-def _valid_tool_call(tc) -> bool:
-    """Structurally valid OpenAI tool call: non-empty string id, function object
-    with non-empty string name, arguments absent/None or a string."""
-    if not isinstance(tc, dict):
-        return False
-    if not isinstance(tc.get("id"), str) or not tc["id"]:
-        return False
-    fn = tc.get("function")
-    if not isinstance(fn, dict):
-        return False
-    if not isinstance(fn.get("name"), str) or not fn["name"]:
-        return False
-    args = fn.get("arguments")
-    return args is None or isinstance(args, str)
-
-
-def _canonical_tool_call(tc: dict) -> dict:
-    """Rebuild an accepted call in canonical OpenAI wire shape."""
-    fn = tc["function"]
-    return {"id": tc["id"], "type": "function",
-            "function": {"name": fn["name"], "arguments": fn.get("arguments") or "{}"}}
+def _tool_call_arg_chars(tc) -> int:
+    if tc.raw_arguments:
+        return len(tc.raw_arguments)
+    if tc.arguments is None:
+        return 0
+    try:
+        return len(json.dumps(tc.arguments))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _total_chars(messages: list) -> int:
@@ -249,9 +241,7 @@ def _total_chars(messages: list) -> int:
     for m in messages:
         total += len(m.get("content") or "")
         for tc in m.get("tool_calls") or []:
-            if not isinstance(tc, dict):
-                continue
-            total += len((tc.get("function") or {}).get("arguments") or "")
+            total += _tool_call_arg_chars(tc)
     return total
 
 
@@ -275,14 +265,14 @@ class RunResult:
 
 
 class Runner:
-    def __init__(self, client, registry, sandbox, transcript, model,
+    def __init__(self, provider, registry, sandbox, transcript, model,
                  max_turns: int = 40, timeout: int = 1800,
                  temperature: float | None = None,
                  run_info: dict | None = None,
                  finalize: Callable[[], dict] | None = None,
                  stall_turns: int = DEFAULT_STALL_TURNS,
                  context_window: int | None = None):
-        self.client = client
+        self.provider = provider
         self.registry = registry
         self.sandbox = sandbox
         self.transcript = transcript
@@ -293,7 +283,10 @@ class Runner:
         self.run_info = run_info
         self.finalize = finalize
         self.stall_turns = stall_turns
-        self.context_window = context_window if context_window is not None else CONTEXT_WINDOWS.get(model, DEFAULT_WINDOW)
+        # An explicit 0 is honoured (it is how a test forces context_exhausted);
+        # only None means "ask the provider".
+        self.context_window = (context_window if context_window is not None
+                               else (provider.context_window(model) or DEFAULT_WINDOW))
         self.char_budget = int(self.context_window * BUDGET_FRACTION * CHARS_PER_TOKEN)
 
     def run(self, system_prompt: str, task: str) -> RunResult:
@@ -354,39 +347,33 @@ class Runner:
                     return finish("context_exhausted", "")
 
                 try:
-                    resp = self.client.chat(self.model, messages, tools=self.registry.schemas(),
-                                            temperature=self.temperature,
-                                            timeout=max(1.0, remaining))
+                    resp = self.provider.chat(self.model, messages, self.registry.schemas(),
+                                              temperature=self.temperature,
+                                              timeout=max(1.0, remaining))
                 except LLMTimeout:
                     if time.monotonic() >= deadline - 0.5:
                         return finish("timeout", "")
                     else:
                         return finish("model_error",
                                       "model request timed out before the run deadline")
+                except MalformedResponse as e:
+                    # A body we cannot read is a model failure, not a transport
+                    # failure: end through finish() so finalize() runs and a
+                    # run_end event is written. A plain LLMError deliberately
+                    # escapes to __main__._fail_run instead.
+                    return finish("model_error", str(e))
                 turns += 1
-                try:
-                    msg = resp["choices"][0]["message"]
-                    if not isinstance(msg, dict):
-                        raise TypeError("message is not an object")
-                except (KeyError, IndexError, TypeError):
-                    return finish("model_error",
-                                  "malformed response from server (no choices[0].message)")
-                finish_reason = resp["choices"][0].get("finish_reason")
-                resp_usage = resp.get("usage") or {}
+                finish_reason = resp.finish_reason
+                # The adapter already sanitized usage (finite, non-negative).
                 for k in usage:
-                    # usage is server-controlled: NaN/Infinity would survive
-                    # json.loads and later emit invalid JSON on our stdout/transcript
-                    # contract. Accept only finite, non-negative numbers.
-                    v = resp_usage.get(k, 0)
-                    if isinstance(v, (int, float)) and not isinstance(v, bool) \
-                            and math.isfinite(v) and v >= 0:
-                        usage[k] += int(v)
-                raw = msg.get("tool_calls") or []
-                if not isinstance(raw, list):
-                    raw = []
-                tool_calls = [_canonical_tool_call(tc) for tc in raw if _valid_tool_call(tc)]
-                malformed_count = len(raw) - len(tool_calls)
-                transcript_text = msg.get("content")
+                    usage[k] += resp.usage.get(k, 0)
+                # An entry the provider could not address (no id) cannot be
+                # answered with a tool result: that is a malformed *entry*. One
+                # with an id but undecodable arguments is answerable.
+                malformed_count = sum(1 for tc in resp.tool_calls
+                                      if tc.error is not None and not tc.id)
+                tool_calls = [tc for tc in resp.tool_calls if tc.id]
+                transcript_text = resp.text
                 if isinstance(transcript_text, str) and len(transcript_text) > MAX_ASSISTANT_TEXT_CHARS:
                     transcript_text = (
                         transcript_text[:MAX_ASSISTANT_TEXT_CHARS]
@@ -395,34 +382,8 @@ class Runner:
                     )
                 self.transcript.write(
                     "assistant", text=transcript_text,
-                    tool_calls=[{"name": (tc.get("function") or {}).get("name"),
-                                 "arguments": ((tc.get("function") or {}).get("arguments") or "")[:2000]}
+                    tool_calls=[{"name": tc.name, "arguments": (tc.raw_arguments or "")[:2000]}
                                 for tc in tool_calls])
-                if raw:
-                    # Rebuild in canonical wire shape (id, type: "function", function
-                    # with a string arguments) so the history we send back stays
-                    # protocol-valid for strict OpenAI-compatible servers, on every
-                    # path that resends tool calls -- not just when malformed.
-                    clean_msg = {"role": "assistant", "content": msg.get("content") or ""}
-                    if tool_calls:
-                        clean_msg["tool_calls"] = tool_calls
-                    messages.append(clean_msg)
-                else:
-                    content = msg.get("content") if isinstance(msg.get("content"), str) else ""
-                    kind = classify_text_reply(msg.get("content"), finish_reason)
-                    if kind == "answer":
-                        messages.append(msg)
-                        return finish("completed", content)
-                    messages.append({"role": "assistant", "content": content})
-                    self.transcript.write("nudge", kind=kind, turn=turns)
-                    abort_reason = failures.record("empty_reply")
-                    if abort_reason is not None:
-                        return finish("model_error", abort_reason)
-                    stalled, stall_text = check_progress()
-                    if stalled is not None:
-                        return stalled
-                    messages.append({"role": "user", "content": _join_nudges(NUDGES[kind], stall_text)})
-                    continue
 
                 abort_reason = None
                 for _ in range(malformed_count):
@@ -434,39 +395,26 @@ class Runner:
                 if abort_reason is not None:
                     return finish("model_error", abort_reason)
 
+                # Append assistant message to history
+                if resp.tool_calls:
+                    # The adapter re-serializes these into whatever wire shape
+                    # its protocol needs; the runner keeps neutral objects.
+                    messages.append(assistant_message(resp.text, tool_calls))
+                else:
+                    content = resp.text
+                    kind = classify_text_reply(content, finish_reason)
+                    if kind == "answer":
+                        messages.append(assistant_message(content, None))
+                        return finish("completed", content)
+                    messages.append(assistant_message(content, None))
+
                 pending_finish = None
                 for tc in tool_calls:
-                    fn_info = tc.get("function") or {}
-                    name = fn_info.get("name") or ""
-                    raw_args = fn_info.get("arguments") or "{}"
-                    call_id = tc.get("id", "")
+                    name = tc.name
+                    raw_args = tc.raw_arguments or "{}"
+                    args = tc.arguments
                     abort_reason = None
-                    args = None
-                    try:
-                        args = json.loads(raw_args)
-                        if not isinstance(args, dict):
-                            raise ValueError("arguments must be a JSON object")
-                        spec = self.registry.spec(name)
-                        if spec is not None and spec.terminal:
-                            summary = args.get("summary")
-                            pending_finish = summary if isinstance(summary, str) else ""
-                            result = "run finished"
-                        else:
-                            tool_result = self.registry.execute(
-                                name, args, sandbox=self.sandbox, deadline=deadline)
-                            result = tool_result.text
-                            if tool_result.failure is not None:
-                                abort_reason = failures.record(tool_result.failure)
-                            else:
-                                # A blocked command and a deadline refusal both
-                                # reset the counter, exactly as ToolExecutor's
-                                # non-raising return did.
-                                failures.reset()
-                    except BudgetExceeded as e:
-                        return finish("budget_exceeded", e.reason)
-                    except SandboxError as e:
-                        return finish("sandbox_error", str(e))
-                    except (json.JSONDecodeError, ValueError) as e:
+                    if tc.error is not None:
                         abort_reason = failures.record("malformed_args")
                         if finish_reason == "length":
                             result = (
@@ -476,13 +424,31 @@ class Runner:
                                 "edit_file calls."
                             )
                         else:
-                            result = f"ERROR: malformed tool arguments: {e}"
+                            result = f"ERROR: {tc.error}"
+                    else:
+                        try:
+                            spec = self.registry.spec(name)
+                            if spec is not None and spec.terminal:
+                                summary = args.get("summary")
+                                pending_finish = summary if isinstance(summary, str) else ""
+                                result = "run finished"
+                            else:
+                                tool_result = self.registry.execute(
+                                    name, args, sandbox=self.sandbox, deadline=deadline)
+                                result = tool_result.text
+                                if tool_result.failure is not None:
+                                    abort_reason = failures.record(tool_result.failure)
+                                else:
+                                    failures.reset()
+                        except BudgetExceeded as e:
+                            return finish("budget_exceeded", e.reason)
+                        except SandboxError as e:
+                            return finish("sandbox_error", str(e))
                     progress.note_call(name, self.registry.canonical_args(name, args), result)
                     self.transcript.write("tool_result", tool=name,
                                           args=raw_args[:500],
                                           result=self.registry.transcript_preview(name, result))
-                    messages.append({"role": "tool", "tool_call_id": call_id,
-                                     "content": result})
+                    messages.append(tool_message(tc.id, result))
                     if abort_reason is not None:
                         return finish("model_error", abort_reason)
 
