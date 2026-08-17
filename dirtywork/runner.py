@@ -121,6 +121,19 @@ STALL_NUDGE = ("No progress in the last {n} turns: no file changed and no comman
                "new output. If the task is complete, commit (if asked) and call "
                "finish(summary=...); otherwise change your approach.")
 _MUTATING_TOOLS = ("write_file", "edit_file")
+_DIGITS_RE = re.compile(r"\d+")
+
+
+def _bash_fingerprint(command, result: str) -> str:
+    """Identity of a bash call for progress purposes. The first result line
+    ('exit code: N') is kept verbatim — a changed exit status is real news —
+    but digits are stripped from the rest, so re-running the same command
+    whose output differs only in timings/counters ('5 passed in 24.51s' vs
+    '5 passed in 25.02s') is not progress. Words still count: '1 failed' →
+    'passed' is a different fingerprint."""
+    head, sep, body = result.partition("\n")
+    normalized = head + sep + _DIGITS_RE.sub("", body)
+    return hashlib.sha256((str(command) + "\0" + normalized).encode("utf-8", "replace")).hexdigest()
 
 
 class ProgressTracker:
@@ -143,8 +156,7 @@ class ProgressTracker:
             self._progressed = True
         elif name == "bash":
             command = args.get("command") if isinstance(args, dict) else None
-            key = hashlib.sha256(
-                (str(command) + "\0" + result).encode("utf-8", "replace")).hexdigest()
+            key = _bash_fingerprint(command, result)
             if key not in self._seen_bash:
                 self._seen_bash.add(key)
                 self._progressed = True
