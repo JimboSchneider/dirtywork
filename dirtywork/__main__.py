@@ -12,9 +12,8 @@ from pathlib import Path
 from . import __version__
 from .budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB
 from .llm import LLMError, LMStudioClient
-from .runner import DEFAULT_STALL_TURNS, resolve_context_window
 from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json, write_run_json
-from .runner import Runner
+from .runner import DEFAULT_STALL_TURNS, Runner, resolve_context_window
 from .sandbox import SandboxError, docker_args, docker_cli
 from .sandbox.docker import DockerSandbox
 from .sandbox.docker_args import DEFAULT_IMAGE, DockerConfig
@@ -226,7 +225,7 @@ def _build_sandbox(args, ctx: RunContext, *, run_dir: Path, transcript):
     during start() is cleaned up here (best-effort stop(), so a half-created
     container/volume is not left running) before the exception propagates —
     callers only need to decide what to report, not what to tear down."""
-    if args.sandbox == "docker":
+    if ctx.sandbox_mode == "docker":
         cfg = DockerConfig(
             image=args.image,
             network="bridge" if args.allow_network else "none",
@@ -467,8 +466,8 @@ def _parse_args(argv):
 
 
 def _execute(ctx: RunContext, args, client) -> int:
-    runs_dir = ensure_runs_dir(RUNS_DIR)
     try:
+        runs_dir = ensure_runs_dir(RUNS_DIR)
         run_dir = create_run_dir(runs_dir, ctx.slug)
     except RunDirError as e:
         # SP1 rule: never orphan the worktree on a preflight-style failure
@@ -623,15 +622,7 @@ def main(argv: list | None = None) -> int:
     except (PreflightFailure, WorkspaceError) as e:
         _err(str(e))
         return 2
-    try:
-        return _execute(ctx, args, client)
-    except RunDirError as e:
-        # Worktree was created by _workspace_new but run_dir creation failed.
-        # Clean up: remove worktree if we own it, then exit 2.
-        if ctx.owns_worktree:
-            remove_worktree(ctx.repo, ctx.slug)
-        _err(str(e))
-        return 2
+    return _execute(ctx, args, client)
 
 
 if __name__ == "__main__":
