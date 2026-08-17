@@ -312,7 +312,6 @@ class Runner:
         start = time.monotonic()
         deadline = start + self.timeout
 
-
         def finish(status: str, final: str) -> RunResult:
             extra: dict = {}
             finalize_error = None

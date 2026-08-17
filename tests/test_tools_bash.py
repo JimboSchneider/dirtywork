@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
 
-from dirtywork.sandbox.host import HostSandbox
 from dirtywork.tools import bash, grep
 
 
@@ -70,18 +70,17 @@ def test_bash_runaway_output_times_out_without_ooming(wt: Path):
 
 
 def test_bash_backgrounded_child_does_not_stall(wt: Path):
-    start = pytest.importorskip("time").monotonic()
+    start = time.monotonic()
     out = bash(wt, "sleep 30 & echo hi", timeout=10)
     assert "hi" in out
     # Before the process-group fix, the reader thread stalled ~5s on the
     # backgrounded sleep still holding the stdout pipe.
-    assert pytest.importorskip("time").monotonic() - start < 3.0
+    assert time.monotonic() - start < 3.0
 
 
 def test_bash_timeout_reaps_process_tree(wt: Path):
     out = bash(wt, "(sleep 2 && touch survived.txt) & wait", timeout=1)
     assert "timed out" in out.lower()
-    import time
     time.sleep(2.5)  # past when the sleep would fire if it had survived the kill
     assert not (wt / "survived.txt").exists()  # killpg reaped the whole group
 
