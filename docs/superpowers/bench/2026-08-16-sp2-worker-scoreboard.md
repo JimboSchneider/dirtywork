@@ -42,3 +42,14 @@
 | T10 fix3 | qwen/qwen3-coder-next | completed | 14 | 1.3m | 107919 | 1631 | ✅ 2/2 addressed (trailing PAX genuinely rejected + tested) |
 | T11a fix1 | qwen/qwen3-coder-next | max_turns | 60 | 10.9m | 2163633 | 18250 | max_turns; refactor done, dropped one test constant (40 errors) |
 | T11a fix2 | qwen/qwen3-coder-next | completed | 56 | 12.1m | 908344 | 5773 | ✅ green but import-time default → 60s test |
+| T11b fix1 | qwen/qwen3-coder-next | max_turns | 60 | 1.4m | 1260224 | 3672 | max_turns, no edits; ctrl applied docstring; ✅ 2/2 addressed |
+| T11a fix3 (final) | qwen/qwen3-coder-next | completed | 15 | 0.9m | 71823 | 1698 | rounds 1-3: helpers ✅; NEW Critical (try before _fail), SandboxError uncaught, test missing |
+| T12 impl | qwen/qwen3-coder-next | completed | 54 | 7.2m | 2363552 | 12978 | ❌ 8I/9M (Opus review; integration gaps) |
+| T11a fix4 | qwen/qwen3-coder-next | completed | 39 | 6.0m | 906845 | 8190 | ✅ 3/3 addressed (Critical closed) |
+| T13 impl | qwen/qwen3-coder-next | completed | 23 | 3.2m | 206401 | 5164 | ✅ clean, 1M (⚠️ dotnet arm64 build claim) |
+| T13 fix1 | qwen/qwen3-coder-next | completed | 19 | 2.8m | 103093 | 1876 | ✅ image builds on arm64 (verified by controller build) |
+| T12 fix1 [qwen] | qwen/qwen3-coder-next | max_turns | 60 | 7.7m | 2021803 | 17410 | max_turns; broken WIP (10F/44E) — escalated to Sonnet |
+| T12 fix1 [Sonnet, escalated] | claude-sonnet (subagent) | completed | n/a | 13.4m | n/a | n/a | ✅ 9/9 addressed (Opus re-review) |
+| T14 impl | qwen/qwen3-coder-next | completed | 34 | 2.6m | 797882 | 8920 | ❌ 5I (docs consistency)/1M |
+| T15 impl | qwen/qwen3-coder-next | max_turns | 80 | 5.2m | 2618956 | 9393 | max_turns; suite written (7 live tests), 4/7 pass live — real reset race found |
+| T14 fix1 | qwen/qwen3-coder-next | completed | 36 | 3.4m | 550209 | 3167 | ✅ 4/5 addressed (5th = DEFAULT_IMAGE in T15) |
