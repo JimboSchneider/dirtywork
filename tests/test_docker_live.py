@@ -10,18 +10,7 @@ from pathlib import Path
 import pytest
 
 from dirtywork.__main__ import DEFAULT_MODEL
-
-
-def _resp(content=None, tool_calls=None):
-    msg = {"role": "assistant", "content": content}
-    if tool_calls:
-        msg["tool_calls"] = tool_calls
-    return {"choices": [{"message": msg}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
-
-
-def _call(call_id, name, args: dict):
-    return {"id": call_id, "type": "function",
-            "function": {"name": name, "arguments": json.dumps(args)}}
+from tests.docker_live_helpers import _call, _make_live_repo, _resp
 
 
 class ScriptedClient:
@@ -36,18 +25,6 @@ class ScriptedClient:
 
     def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
         return self.responses.pop(0)
-
-
-def _make_live_repo(tmp_path: Path) -> Path:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "-C", str(repo), "init", "-b", "main"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
-    (repo / "README.md").write_text("# demo\n")
-    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-m", "init"], check=True, capture_output=True)
-    return repo
 
 
 def _config_bytes(repo: Path) -> bytes:

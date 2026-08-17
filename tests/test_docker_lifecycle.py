@@ -13,18 +13,7 @@ from pathlib import Path
 import pytest
 
 from dirtywork.__main__ import DEFAULT_MODEL
-
-
-def _resp(content=None, tool_calls=None):
-    msg = {"role": "assistant", "content": content}
-    if tool_calls:
-        msg["tool_calls"] = tool_calls
-    return {"choices": [{"message": msg}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
-
-
-def _call(call_id, name, args: dict):
-    return {"id": call_id, "type": "function",
-            "function": {"name": name, "arguments": json.dumps(args)}}
+from tests.docker_live_helpers import _call, _make_live_repo as _make_repo, _resp
 
 
 class _ScriptedHandler(http.server.BaseHTTPRequestHandler):
@@ -69,18 +58,6 @@ def _start_fake_llm_server(model: str, responses: list):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, thread
-
-
-def _make_repo(tmp_path: Path) -> Path:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "-C", str(repo), "init", "-b", "main"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
-    (repo / "README.md").write_text("# demo\n")
-    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-m", "init"], check=True, capture_output=True)
-    return repo
 
 
 def _spawn_env(tmp_home: Path) -> dict:
@@ -277,12 +254,11 @@ def test_docker_lifecycle_container_killed_during_exec_run_continues_after_reset
         bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
         assert "recovered" in bash_results[-1]
 
-        # Debug: print volume status
-        volumes = _docker_volume_ls(f"label=dirtywork.run={slug}")
-        print(f"Volumes for {slug}: '{volumes}'")
-        
-        # The volume is deleted after successful export (unless keep_volume=True).
-        # This test focuses on the container kill and reset, not volume retention.
+        # Completed run with keep_volume=False (default) and no export
+        # failure removes its volume (docker.py's _stop_volume) -- absence
+        # here proves housekeeping/export ran cleanly even after the
+        # mid-run container kill and reset.
+        assert f"dw-{slug}-work" not in _docker_volume_ls(f"label=dirtywork.run={slug}")
         assert _no_leaked_docker_children(slug)
     finally:
         server.shutdown()
