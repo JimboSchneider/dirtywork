@@ -22,6 +22,7 @@ from .watchdog import Watchdog
 
 from . import export
 from ..workspace import host_read_tree
+from ..resume import stash_dir_for
 
 # Fixed exec timeouts for tools with no user-facing timeout knob — these
 # operations should complete near-instantly; a hang means the sandbox
@@ -264,12 +265,20 @@ class DockerSandbox:
             self.watchdog.violation_kind = "budget"
         label = docker_args.repo_label(self._repo)
         aside = self._stash_prior_worktree() if self._seeded else None
-        artifacts = export.export_run(
-            self.cfg, slug=self._slug, base_commit=self._base_commit,
-            worktree=self._worktree, run_dir=self.run_dir, objects_dir=self._objects_dir,
-            image_ref=self.image_ref, uid=self.uid, gid=self.gid, repo_label=label,
-            run=self._run, popen=self._popen,
-        )
+        try:
+            artifacts = export.export_run(
+                self.cfg, slug=self._slug, base_commit=self._base_commit,
+                worktree=self._worktree, run_dir=self.run_dir, objects_dir=self._objects_dir,
+                image_ref=self.image_ref, uid=self.uid, gid=self.gid, repo_label=label,
+                run=self._run, popen=self._popen,
+            )
+        except BaseException:
+            # export_run converts its own failures to export_failed; anything
+            # that still escapes (a bug, Ctrl-C) must not leave the prior work
+            # stranded in the stash.
+            if aside is not None:
+                self._restore_prior_worktree(aside)
+            raise
         artifacts.watchdog_violation = watchdog_violation
         artifacts.watchdog_violation_kind = watchdog_violation_kind
         if artifacts.export_status.startswith("export_failed"):
@@ -293,11 +302,12 @@ class DockerSandbox:
         Move that content aside (never delete it before the export is known
         to have succeeded) into a sibling directory the export cannot see;
         finalize() removes the stash after a successful export or restores
-        it after a failed one."""
-        aside = self._worktree.parent / f"{self._worktree.name}.pre-resume"
-        if aside.exists():
-            shutil.rmtree(aside)
-        aside.mkdir()
+        it after a failed one. The stash is unique to this run's slug and is
+        never pre-cleared: a stash left by an interrupted earlier resume is
+        someone's only copy of their work, and check_resumable refuses to
+        start a resume while one exists."""
+        aside = stash_dir_for(self._worktree, self._slug)
+        aside.mkdir()  # exists → FileExistsError: never reuse or clear a stash
         for entry in self._worktree.iterdir():
             if entry.name == ".git" and entry.is_file() and not entry.is_symlink():
                 continue

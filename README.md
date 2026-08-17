@@ -174,7 +174,10 @@ mode is the original run's; `--model` and the other run flags may be
 overridden. Refused (exit 2, nothing created) when the earlier run is still
 running, its worktree is gone, or its base commit no longer exists. In docker
 mode the prior work is moved aside during the final export and put back if that
-export fails, so a failed resume leaves the worktree exactly as it was.
+export fails, so a failed resume leaves the worktree exactly as it was. If a docker
+resume is killed mid-export, that stash (`<worktree>.pre-resume-<slug>`, next to the
+worktree) still holds the pre-resume content; `resume` refuses to run again until you
+move it back or delete it, and never deletes a stash it did not create.
 
 Docker-mode limit: export stores files, not the worker's in-container
 commits, so a resumed docker worker sees the earlier work as uncommitted

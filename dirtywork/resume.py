@@ -11,7 +11,20 @@ from .rundir import read_run_json
 
 RESUME_TAIL_CHARS = 12_000
 RESUME_MARKER = "\n\n--- RESUMED RUN ---\n"
+PRE_RESUME_SUFFIX = ".pre-resume"
 _REQUIRED_STR_KEYS = ("slug", "repo", "worktree", "branch", "base_commit", "sandbox", "status")
+
+
+def stash_dir_for(worktree: Path, slug: str) -> Path:
+    """Where a docker resume parks the prior worktree content while its own
+    export runs: a sibling of the worktree (under .worktrees/), unique per
+    resumed run so no run can ever touch another run's stash."""
+    return worktree.parent / f"{worktree.name}{PRE_RESUME_SUFFIX}-{slug}"
+
+
+def find_stashes(worktree: Path) -> list:
+    """Every pre-resume stash left beside `worktree` (any slug), sorted."""
+    return sorted(worktree.parent.glob(f"{worktree.name}{PRE_RESUME_SUFFIX}-*"))
 
 
 class ResumeError(Exception):
@@ -132,6 +145,14 @@ def check_resumable(prior: dict, *, alive=pid_alive) -> None:
     if not worktree_belongs_to_repo(worktree, Path(prior["repo"])):
         raise ResumeError(f"worktree {worktree} is not a linked worktree of {prior['repo']}; "
                           f"refusing to resume into a directory dirtywork did not create")
+    stashes = find_stashes(worktree)
+    if stashes:
+        listing = ", ".join(str(p) for p in stashes)
+        raise ResumeError(
+            f"an earlier resume of this run was interrupted and left its pre-resume stash at "
+            f"{listing}; that stash holds the worktree content from before that resume. Move "
+            f"its contents back into {worktree} (or delete the stash if you no longer need it) "
+            f"before resuming again")
 
 
 def _render_event(event: dict) -> str | None:

@@ -12,10 +12,12 @@ from dirtywork.resume import (
     ResumeError,
     build_resume_task,
     check_resumable,
+    find_stashes,
     load_prior_run,
     pid_alive,
     render_transcript_tail,
     resolve_run_dir,
+    stash_dir_for,
     worktree_belongs_to_repo,
 )
 from dirtywork.rundir import write_run_json
@@ -196,3 +198,27 @@ def test_build_resume_task_does_not_stack_preambles():
     assert twice.count(RESUME_MARKER) == 1
     assert twice.startswith("Fix the bug" + RESUME_MARKER)
     assert "after 12 turns" in twice and "after 40 turns" not in twice
+
+
+def test_check_resumable_refuses_while_a_stash_exists(tmp_path):
+    prior = _prior(tmp_path)
+    wt = Path(prior["worktree"])
+    stash = stash_dir_for(wt, "older-run")
+    stash.mkdir()
+    (stash / "precious.txt").write_text("x")
+    with pytest.raises(ResumeError, match="pre-resume stash"):
+        check_resumable(prior)
+    assert (stash / "precious.txt").exists()      # refusing never touches it
+    stash.rename(wt / "restored-by-operator")     # operator moves it back → resume allowed again
+    check_resumable(prior)
+
+
+def test_stash_helpers(tmp_path):
+    wt = tmp_path / "dw-abc"
+    wt.mkdir()
+    assert stash_dir_for(wt, "s1") == tmp_path / "dw-abc.pre-resume-s1"
+    assert find_stashes(wt) == []
+    (tmp_path / "dw-abc.pre-resume-s1").mkdir()
+    (tmp_path / "dw-abc.pre-resume-s0").mkdir()
+    (tmp_path / "dw-abcd.pre-resume-s9").mkdir()   # a different worktree's stash
+    assert find_stashes(wt) == [tmp_path / "dw-abc.pre-resume-s0", tmp_path / "dw-abc.pre-resume-s1"]
