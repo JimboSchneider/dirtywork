@@ -8,6 +8,7 @@ import pytest
 
 from dirtywork.llm import LLMTimeout
 from dirtywork.runner import (
+    CONTEXT_WINDOWS,
     DEFAULT_STALL_TURNS,
     DEFAULT_WINDOW,
     FailureTracker,
@@ -20,6 +21,7 @@ from dirtywork.runner import (
     TRIM_MARKER,
     _valid_tool_call,
     classify_text_reply,
+    resolve_context_window,
     strip_think,
     trim_messages,
 )
@@ -887,3 +889,39 @@ def test_runner_default_stall_turns_is_twelve(parts):
     wt, executor, transcript, tmp = parts
     r = Runner(FakeClient([]), executor, transcript, model="m")
     assert r.stall_turns == DEFAULT_STALL_TURNS == 12
+
+
+@pytest.mark.parametrize("model,flag,env,expected", [
+    ("qwen/qwen3-coder-next", None, None, (65536, "table")),
+    ("unknown/model", None, None, (DEFAULT_WINDOW, "default")),
+    ("qwen/qwen3-coder-next", 8000, None, (8000, "flag")),
+    ("qwen/qwen3-coder-next", None, "9000", (9000, "env")),
+    ("unknown/model", 8000, "9000", (8000, "flag")),
+    ("unknown/model", None, "", (DEFAULT_WINDOW, "default")),
+])
+def test_resolve_context_window(model, flag, env, expected):
+    assert resolve_context_window(model, flag, env) == expected
+
+
+@pytest.mark.parametrize("env", ["abc", "0", "-5", "1.5"])
+def test_resolve_context_window_rejects_bad_env(env):
+    with pytest.raises(ValueError):
+        resolve_context_window("m", None, env)
+
+
+def test_runner_context_window_param_sets_budget_and_run_start(parts):
+    wt, executor, transcript, tmp = parts
+    client = FakeClient([_resp(content="done")])
+    r = Runner(client, executor, transcript, model="unknown/model", context_window=1000)
+    assert r.context_window == 1000
+    assert r.char_budget == int(1000 * 0.75 * 4)
+    r.run("s", "t")
+    transcript.close()
+    start = next(e for e in _events(tmp) if e["event"] == "run_start")
+    assert start["context_window"] == 1000
+
+
+def test_runner_context_window_defaults_from_table(parts):
+    wt, executor, transcript, tmp = parts
+    r = Runner(FakeClient([]), executor, transcript, model="qwen/qwen3-coder-next")
+    assert r.context_window == CONTEXT_WINDOWS["qwen/qwen3-coder-next"]

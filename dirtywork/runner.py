@@ -161,6 +161,26 @@ class ProgressTracker:
         return None
 
 
+def resolve_context_window(model: str, flag_value, env_value) -> tuple[int, str]:
+    """Spec §4 precedence: --context-window > DIRTYWORK_CONTEXT_WINDOW > table > default.
+    Returns (tokens, source) with source in flag|env|table|default. Raises
+    ValueError for an env value that is not a positive integer."""
+    if flag_value is not None:
+        return int(flag_value), "flag"
+    if env_value not in (None, ""):
+        try:
+            value = int(env_value)
+        except (TypeError, ValueError):
+            value = 0
+        if value <= 0:
+            raise ValueError(
+                f"DIRTYWORK_CONTEXT_WINDOW must be a positive integer, got {env_value!r}")
+        return value, "env"
+    if model in CONTEXT_WINDOWS:
+        return CONTEXT_WINDOWS[model], "table"
+    return DEFAULT_WINDOW, "default"
+
+
 def _valid_tool_call(tc) -> bool:
     """Structurally valid OpenAI tool call: non-empty string id, function object
     with non-empty string name, arguments absent/None or a string."""
@@ -220,7 +240,8 @@ class Runner:
                  temperature: float | None = None,
                  run_info: dict | None = None,
                  finalize: Callable[[], dict] | None = None,
-                 stall_turns: int = DEFAULT_STALL_TURNS):
+                 stall_turns: int = DEFAULT_STALL_TURNS,
+                 context_window: int | None = None):
         self.client = client
         self.executor = executor
         self.transcript = transcript
@@ -231,8 +252,8 @@ class Runner:
         self.run_info = run_info
         self.finalize = finalize
         self.stall_turns = stall_turns
-        window = CONTEXT_WINDOWS.get(model, DEFAULT_WINDOW)
-        self.char_budget = int(window * BUDGET_FRACTION * CHARS_PER_TOKEN)
+        self.context_window = context_window if context_window else CONTEXT_WINDOWS.get(model, DEFAULT_WINDOW)
+        self.char_budget = int(self.context_window * BUDGET_FRACTION * CHARS_PER_TOKEN)
 
     def run(self, system_prompt: str, task: str) -> RunResult:
         from .tools import TOOL_SCHEMAS
@@ -243,6 +264,7 @@ class Runner:
         ]
         self.transcript.write("run_start", task=task, model=self.model,
                               max_turns=self.max_turns, timeout=self.timeout,
+                              context_window=self.context_window,
                               schema_version=2, **(self.run_info or {}))
         usage = {"prompt_tokens": 0, "completion_tokens": 0}
         turns = 0
