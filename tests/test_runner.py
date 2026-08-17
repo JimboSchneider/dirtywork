@@ -31,11 +31,6 @@ from dirtywork.builtin_tools import default_registry
 from dirtywork.transcript import Transcript
 
 
-# These aliases were removed in the migration but tests still use them.
-_THINK = "<" + "think>"
-_THINK_END = "</" + "think>"
-
-
 def _resp(content=None, tool_calls=None, usage=None, finish_reason=None):
     return ChatResponse(text=content or "",
                         tool_calls=list(tool_calls or []),
@@ -459,8 +454,7 @@ def test_finish_without_summary_still_completes_with_empty_message(parts):
 
 def test_finish_with_malformed_args_does_not_end_run(parts):
     wt, registry, sandbox, transcript, tmp = parts
-    bad = _resp(tool_calls=[{"id": "f1", "type": "function",
-                             "function": {"name": "finish", "arguments": "{not json"}}])
+    bad = _resp(tool_calls=[_bad_args(call_id="f1", name="finish")])
     provider = FakeProvider([bad, _resp(tool_calls=[_call("f2", "finish", {"summary": "ok"})])])
     r = Runner(provider, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
@@ -525,6 +519,40 @@ def test_mixed_failure_kinds_do_not_abort_at_three(parts):
     transcript.close()
     assert result.status == "completed"
     assert result.turns == 4
+
+
+# NOTE: the tags below are built by concatenation ON PURPOSE. Local models' chat
+# templates parse these exact tags in their own output (Qwen3-coder's tool-call XML
+# uses function=/parameter= XML tags; think tags are stripped by the server), so a
+# worker model editing this file through its tool channel cannot emit them literally.
+# Keep every occurrence of these tags in this file and in runner.py concatenated.
+def _tag(name: str) -> str:
+    return "<" + name + ">"
+
+
+_THINK = _tag("think")
+_THINK_END = _tag("/think")
+
+
+@pytest.mark.parametrize("content,finish_reason,expected", [
+    ("Done: all tests pass", None, "answer"),
+    ("Done", "stop", "answer"),
+    ("anything", "length", "truncated"),
+    ("", None, "empty"),
+    (None, None, "empty"),
+    ("   \n", None, "empty"),
+    (_THINK + "let me reason" + _THINK_END, None, "empty"),
+    (_THINK + "never closed the tag", None, "empty"),
+    (_THINK + "plan" + _THINK_END + "Done, wrote the file.", None, "answer"),
+    (_tag("tool_call") + '{"name":"bash"}' + _tag("/tool_call"), None, "text_tool_call"),
+    ("<" + 'function=read_file>{"path":"x"}' + _tag("/function"), None, "text_tool_call"),
+    ("<" + "|tool_call|>bash", None, "text_tool_call"),
+    (_tag("function_call") + "bash" + _tag("/function_call"), None, "text_tool_call"),
+    ('I will run {"name": "bash", "arguments": {"command": "ls"}} now', None, "text_tool_call"),
+    ('The config is {"name": "app", "version": 2}', None, "answer"),
+])
+def test_classify_text_reply(content, finish_reason, expected):
+    assert classify_text_reply(content, finish_reason) == expected
 
 
 def test_strip_think_removes_blocks():

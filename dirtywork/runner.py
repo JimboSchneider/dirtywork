@@ -384,18 +384,6 @@ class Runner:
                     "assistant", text=transcript_text,
                     tool_calls=[{"name": tc.name, "arguments": (tc.raw_arguments or "")[:2000]}
                                 for tc in tool_calls])
-
-                abort_reason = None
-                for _ in range(malformed_count):
-                    reason = failures.record("malformed_entry")
-                    if abort_reason is None:
-                        abort_reason = reason
-                    result = "ERROR: malformed tool call entry (missing or invalid id/function fields)"
-                    self.transcript.write("tool_result", tool="", args="", result=result)
-                if abort_reason is not None:
-                    return finish("model_error", abort_reason)
-
-                # Append assistant message to history
                 if resp.tool_calls:
                     # The adapter re-serializes these into whatever wire shape
                     # its protocol needs; the runner keeps neutral objects.
@@ -407,6 +395,25 @@ class Runner:
                         messages.append(assistant_message(content, None))
                         return finish("completed", content)
                     messages.append(assistant_message(content, None))
+                    self.transcript.write("nudge", kind=kind, turn=turns)
+                    abort_reason = failures.record("empty_reply")
+                    if abort_reason is not None:
+                        return finish("model_error", abort_reason)
+                    stalled, stall_text = check_progress()
+                    if stalled is not None:
+                        return stalled
+                    messages.append({"role": "user", "content": _join_nudges(NUDGES[kind], stall_text)})
+                    continue
+
+                abort_reason = None
+                for _ in range(malformed_count):
+                    reason = failures.record("malformed_entry")
+                    if abort_reason is None:
+                        abort_reason = reason
+                    result = "ERROR: malformed tool call entry (missing or invalid id/function fields)"
+                    self.transcript.write("tool_result", tool="", args="", result=result)
+                if abort_reason is not None:
+                    return finish("model_error", abort_reason)
 
                 pending_finish = None
                 for tc in tool_calls:
