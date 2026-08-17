@@ -201,6 +201,59 @@ def test_oversized_response_raises_llmerror(server: str, monkeypatch):
         client.chat("m1", [{"role": "user", "content": "x"}], tools=[])
 
 
+class _RealLMStudio(BaseHTTPRequestHandler):
+    """Handler with an explicit Content-Length, so http.client can fully
+    buffer the (short) response body before our code touches the socket.
+    Regression test for CI (ubuntu-latest / Python 3.13): once the body is
+    fully buffered, http.client may already have closed the underlying
+    socket, so tightening its timeout with settimeout() raises
+    OSError(EBADF)."""
+
+    def do_GET(self):
+        body = json.dumps({"data": [{"id": "m"}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        self.rfile.read(length)
+        body = json.dumps({
+            "choices": [{"message": {"role": "assistant", "content": "hi"}}],
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):  # silence test output
+        pass
+
+
+@pytest.fixture()
+def real_server():
+    srv = HTTPServer(("127.0.0.1", 0), _RealLMStudio)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}/v1"
+    srv.shutdown()
+
+
+def test_real_http_server_list_models_and_chat(real_server: str):
+    # This is the exact CI failure mode: [Errno 9] Bad file descriptor from
+    # settimeout() on a socket http.client already closed. The Content-Length
+    # header above is what lets http.client fully buffer the body up front
+    # (triggering the early close on Linux/3.13); the assertions here are
+    # portable and are expected to pass on macOS too.
+    client = LMStudioClient(base_url=real_server)
+    assert client.list_models() == ["m"]
+    resp = client.chat("m", [{"role": "user", "content": "x"}], tools=[])
+    assert resp["choices"][0]["message"]["content"] == "hi"
+
+
 def test_http_error_body_read_is_bounded(monkeypatch):
     import urllib.error
     import urllib.request

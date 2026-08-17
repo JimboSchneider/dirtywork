@@ -51,6 +51,20 @@ def _object_hashes(repo: Path) -> dict:
     return hashes
 
 
+def _assert_status(payload: dict, expected) -> None:
+    """Assert payload["status"] against expected (a single status string, or
+    a tuple/set of acceptable statuses), folding payload.get("final_message")
+    into the failure text -- a bare status mismatch tells us nothing about
+    *why* docker-live failed, and that text is exactly what
+    tools/ci_sandbox_smoke.py and this project's CI need to see."""
+    status = payload["status"]
+    ok = status == expected if isinstance(expected, str) else status in expected
+    assert ok, (
+        f"expected status {expected!r}, got {status!r} -- "
+        f"final_message={payload.get('final_message')!r}"
+    )
+
+
 def _run_docker_main(monkeypatch, tmp_path, repo, responses, **extra_args):
     import dirtywork.__main__ as m
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
@@ -96,7 +110,7 @@ def test_docker_live_full_run_host_sentinels_and_isolation(tmp_path, monkeypatch
     _run_docker_main(monkeypatch, tmp_path, repo, responses)
     payload = json.loads(capsys.readouterr().out)
 
-    assert payload["status"] == "completed"
+    _assert_status(payload, "completed")
     worktree = Path(payload["worktree"])
     assert (worktree / "hello.txt").read_text() == "from worker\n"
 
@@ -125,7 +139,7 @@ def test_docker_live_timeout_kills_command_and_run_continues(tmp_path, monkeypat
     ]
     _run_docker_main(monkeypatch, tmp_path, repo, responses)
     payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "completed"
+    _assert_status(payload, "completed")
     events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
     bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
     assert "timed out" in bash_results[0].lower()
@@ -144,7 +158,7 @@ def test_docker_live_backgrounded_process_is_dead_after_reap(tmp_path, monkeypat
     ]
     _run_docker_main(monkeypatch, tmp_path, repo, responses)
     payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "completed"
+    _assert_status(payload, "completed")
     events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
     bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
     assert "GONE" in bash_results[1]
@@ -174,12 +188,63 @@ def test_docker_live_process_flood_triggers_reset(tmp_path, monkeypatch, capsys)
     ]
     _run_docker_main(monkeypatch, tmp_path, repo, responses)
     payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "completed"
+    _assert_status(payload, "completed")
     events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
     reset_events = [e for e in events if e["event"] == "sandbox_reset"]
     assert reset_events
     bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
     assert "alive-after-reset" in bash_results[1]
+
+
+@pytest.mark.docker
+def test_docker_live_pid_flood_past_limit_recovers_or_fails_closed(tmp_path, monkeypatch, capsys):
+    # D3 (final-rereview follow-up 1): restore live coverage of spec §6's
+    # closing claim -- "fork bombs are contained by --pids-limit and
+    # cleared by the reap/reset" -- at a flood size that actually crosses
+    # the default --pids-limit 512. test_docker_live_process_flood_triggers_reset
+    # above deliberately stays at 40 (well under the cap) to isolate plain
+    # stray-process detect-and-recover from this race; see that test's
+    # docstring for why. D1+D2 make the terminal outcome deterministic
+    # either way once the cap is actually crossed: "completed" with at
+    # least one sandbox_reset in the transcript (reap/reset recovered), or
+    # sandbox_error/budget_exceeded (the watchdog's own worktree sample
+    # failed closed -- spec §6's "second failure -> sandbox_error" -- or a
+    # genuine budget breach). Either is an acceptable terminal contract; a
+    # hang is not, and neither outcome may leave a container behind.
+    import time
+    repo = _make_live_repo(tmp_path)
+    responses = [
+        _resp(tool_calls=[_call("c1", "bash", {
+            "command": "for i in $(seq 1 600); do sleep 30 & done; echo spawned",
+            "timeout": 60,
+        })]),
+        _resp(tool_calls=[_call("c2", "bash", {"command": "echo alive"})]),
+        _resp(content="done"),
+    ]
+    start = time.monotonic()
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, timeout=60)
+    elapsed = time.monotonic() - start
+    payload = json.loads(capsys.readouterr().out)
+
+    assert elapsed < 90, f"run took {elapsed:.1f}s -- must reach a terminal state, not hang"
+    _assert_status(payload, ("completed", "sandbox_error", "budget_exceeded"))
+
+    slug = Path(payload["worktree"]).name
+    assert slug.startswith("dw-")
+    slug = slug[len("dw-"):]
+    leftover = subprocess.run(
+        ["docker", "ps", "-a", "--filter", f"label=dirtywork.run={slug}", "--format", "{{.Names}}"],
+        capture_output=True, text=True,
+    ).stdout
+    assert leftover.strip() == "", f"leftover container(s) after the run: {leftover!r}"
+
+    if payload["status"] == "completed":
+        events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
+        reset_events = [e for e in events if e["event"] == "sandbox_reset"]
+        assert reset_events  # reap/reset recovered from the flood
+        bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
+        assert len(bash_results) >= 2
+        assert "alive" in bash_results[1]  # the follow-up bash call still ran
 
 
 @pytest.mark.docker
@@ -194,7 +259,7 @@ def test_docker_live_export_reports_nested_git_and_escaping_symlink_and_skips_ig
     ]
     _run_docker_main(monkeypatch, tmp_path, repo, responses)
     payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "completed"
+    _assert_status(payload, "completed")
     worktree = Path(payload["worktree"])
     assert (worktree / "esc").is_symlink()
     assert not (worktree / "ignored.bin").exists()
@@ -220,7 +285,7 @@ def test_docker_live_over_budget_write_ends_run_with_budget_exceeded(tmp_path, m
     # max_worktree_mb cap governs the export's extract_validated call, and
     # the 5 MB file it wrote is over the 1 MB cap) -- export_failed must not
     # overwrite it.
-    assert payload["status"] == "budget_exceeded"
+    _assert_status(payload, "budget_exceeded")
     assert rc == 1
     run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
     assert run_json["status"] == "budget_exceeded"

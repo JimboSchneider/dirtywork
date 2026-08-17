@@ -33,10 +33,48 @@ jobs:
       # and is excluded by the default addopts in pyproject.toml.
       - run: python -m pytest -v
 
+  docker-live:
+    # The unit suite above only ever talks to a FakeDocker — this job is
+    # the only place in CI that exercises the real Docker sandbox
+    # end-to-end against a live daemon (container create/exec/reset/export,
+    # the watchdog, volume cleanup), so it gates releases even though it
+    # costs ~5-8 min per run (multi-platform-capable image build plus live
+    # container churn). cache-from/cache-to (type=gha) keep repeat CI runs
+    # from re-downloading the .NET SDK layer every time.
+    name: docker live suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install pytest
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: docker/
+          load: true
+          tags: ghcr.io/jimboschneider/dirtywork-worker:0.4
+          cache-from: type=gha
+          # ignore-error: fork PRs may not have write access to the cache scope.
+          cache-to: type=gha,mode=max,ignore-error=true
+      - name: Sandbox smoke (prints why start() fails)
+        run: python tools/ci_sandbox_smoke.py
+      - run: python -m pytest -q -rA -m docker tests/test_docker_live.py tests/test_docker_lifecycle.py
+      - name: Clean up dirtywork containers/volumes
+        if: always()
+        run: |
+          ids=$(docker ps -aq --filter label=dirtywork.repo)
+          [ -n "$ids" ] && docker rm -f $ids || true
+          vols=$(docker volume ls -q --filter label=dirtywork.repo)
+          [ -n "$vols" ] && docker volume rm $vols || true
+
   gate:
     # Single stable name for branch protection to require, regardless of
-    # how the matrix above evolves.
-    needs: test
+    # how the matrix above evolves. This is also the release gate: it now
+    # requires docker-live, not just the FakeDocker-only unit suite.
+    needs: [test, docker-live]
     runs-on: ubuntu-latest
     steps:
       - run: echo "all matrix legs green"

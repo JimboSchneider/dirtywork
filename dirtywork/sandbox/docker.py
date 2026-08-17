@@ -246,8 +246,14 @@ class DockerSandbox:
         volume is intact and the work is worth salvaging regardless."""
         self._stop_container()
         watchdog_violation = self.watchdog.violation if self.watchdog is not None else None
+        # D1: only meaningful when watchdog_violation itself is set -- see
+        # RunArtifacts.watchdog_violation_kind.
+        watchdog_violation_kind = (
+            self.watchdog.violation_kind if self.watchdog is not None and watchdog_violation else None
+        )
         if self.watchdog is not None:
             self.watchdog.violation = None
+            self.watchdog.violation_kind = "budget"
         label = docker_args.repo_label(self._repo)
         artifacts = export.export_run(
             self.cfg, slug=self._slug, base_commit=self._base_commit,
@@ -256,6 +262,7 @@ class DockerSandbox:
             run=self._run, popen=self._popen,
         )
         artifacts.watchdog_violation = watchdog_violation
+        artifacts.watchdog_violation_kind = watchdog_violation_kind
         if artifacts.export_status.startswith("export_failed"):
             # Leave the host worktree as it was (.git file only): read-tree
             # after a failed export would make host `git status` claim mass
@@ -528,36 +535,58 @@ class DockerSandbox:
             except docker_cli.DockerError:
                 pass
 
+    def _measure_worktree_once(self):
+        """One `du`/`find` exec against /work. Returns (kbytes, entries) on
+        a clean, parseable result, or None on any failure (exec error,
+        nonzero exit, unparseable output) -- callers decide what a failed
+        measurement means."""
+        argv = docker_args.exec_argv(
+            self.container, ["/bin/sh", "-c", "du -sk /work; find /work | wc -l"]
+        )
+        try:
+            captured = self._run(argv, timeout=docker_cli.T_QUERY)
+        except docker_cli.DockerError:
+            return None
+        if captured is None or captured.returncode != 0:
+            return None
+        lines = captured.output.decode("utf-8", errors="replace").splitlines()
+        try:
+            kbytes = int(lines[0].split()[0])
+            entries = int(lines[-1].strip())
+        except (IndexError, ValueError):
+            return None
+        return kbytes, entries
+
     def _sample_worktree(self) -> tuple:
         """(kbytes, entries) for /work, sampled inside the container. On
         exec failure, resets once and retries; a second failure raises
         SandboxError (spec §6: "If the exec itself fails ... → reset, then
         re-measure; a second failure → sandbox_error").
-        
-        Returns (kbytes, entries) on success or raises SandboxError after
-        two failures. If a reset was performed during sampling, the caller
-        should skip budget checks for this call (container was rebuilt)."""
-        for attempt in range(2):
-            argv = docker_args.exec_argv(
-                self.container, ["/bin/sh", "-c", "du -sk /work; find /work | wc -l"]
-            )
-            try:
-                captured = self._run(argv, timeout=docker_cli.T_QUERY)
-            except docker_cli.DockerError:
-                captured = None
-            if captured is not None and captured.returncode == 0:
-                lines = captured.output.decode("utf-8", errors="replace").splitlines()
-                try:
-                    kbytes = int(lines[0].split()[0])
-                    entries = int(lines[-1].strip())
-                except (IndexError, ValueError):
-                    pass
-                else:
-                    return kbytes, entries
-            if attempt == 0 and not self._reset_this_call:
-                # Only reset once per bash call
-                self.reset("budget sample failed")
-        raise SandboxError("worktree budget sample failed twice in a row")
+
+        D2: this is also the watchdog THREAD's own `sample` callback
+        (ticking every 5s while a bash call is in flight), independent of
+        _after_bash's own call -- so two calls can race a reset performed
+        by one of them. The retry is deterministic to avoid measuring a
+        possibly mid-reset container: a failed attempt resets (once, under
+        reset()'s own _reset_lock) and re-measures ONLY if no reset had
+        already happened this bash call; if one already had (this call
+        itself is then already "post-reset"), a single failed attempt is
+        sufficient -- raise immediately rather than retrying blind against
+        a container another thread may still be resetting.
+
+        Returns (kbytes, entries) on success or raises SandboxError. If a
+        reset was performed during sampling, the caller should skip budget
+        checks for this call (container was rebuilt)."""
+        result = self._measure_worktree_once()
+        if result is not None:
+            return result
+        if not self._reset_this_call:
+            self.reset("budget sample failed")
+            result = self._measure_worktree_once()
+            if result is not None:
+                return result
+            raise SandboxError("worktree budget sample failed twice in a row")
+        raise SandboxError("worktree budget sample failed after an earlier reset this call")
 
     def _after_bash(self) -> None:
         self._reap()
@@ -572,7 +601,16 @@ class DockerSandbox:
                 self.watchdog.check_worktree_budget_once()
             if self.watchdog.violation is not None:
                 violation = self.watchdog.violation
+                kind = self.watchdog.violation_kind
                 self.watchdog.violation = None
+                self.watchdog.violation_kind = "budget"
+                if kind == "sandbox_error":
+                    # D1: a watchdog-thread sample() failure (spec §6's
+                    # "second failure -> sandbox_error") is a sandbox
+                    # failure, not a budget breach -- raise the same
+                    # exception type the main-thread _sample_worktree path
+                    # already raises for the identical condition.
+                    raise SandboxError(violation)
                 raise BudgetExceeded(violation)
         # Reset the flag after each bash call completes
         with self._reset_lock:

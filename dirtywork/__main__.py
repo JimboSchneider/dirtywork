@@ -60,13 +60,22 @@ def _err(msg: str) -> None:
     print(f"error: {msg}", file=sys.stderr)
 
 
-def _docker_preflight(repo: Path, image: str):
+def _docker_preflight(repo: Path, image: str) -> tuple[str, str | None]:
     """Spec §2 step 1: docker_version (daemon reachable) → resolve_image
-    (digest, pulling if absent — the only network use at start) →
+    (local Id, pulling if absent — the only network use at start) →
     validate_objects_dir (the only host path ever mounted). All read-only
     on the operator's clone; nothing is created yet.
 
-    A DockerError raised by either of the first two steps is tagged with a
+    Returns (image_ref, image_digest). image_ref is the image's local
+    content-addressed Id (`sha256:<64hex>`) — handed to DockerSandbox for
+    EXECUTION, since an Id can never trigger a network pull at `docker
+    run`/`create` time, unlike a `name@sha256:...` digest reference (see
+    resolve_image's docstring). image_digest is the registry digest from
+    RepoDigests, or None for a locally-built image that was never pulled —
+    recorded for PROVENANCE only (sandbox_info, run.json), never used to
+    run anything.
+
+    A DockerError raised while resolving either value is tagged with a
     `.preflight_step` attribute ("daemon" or "image") so main()'s exit-2
     handler can give a hint specific to what actually failed, instead of
     blaming an unreachable daemon for e.g. an unpullable image (Important
@@ -79,15 +88,16 @@ def _docker_preflight(repo: Path, image: str):
         raise
     try:
         image_ref = resolve_image(image, pinned_digest=docker_args.PINNED_DIGEST)
+        image_digest = docker_cli.image_repo_digest(image, run=docker_cli.run)
     except DockerError as e:
         e.preflight_step = "image"
         raise
     validate_objects_dir(repo)
-    return image_ref
+    return image_ref, image_digest
 
 
 def _build_sandbox(args, *, run_dir: Path, worktree: Path, repo: Path, slug: str,
-                    base_commit: str, transcript, image_ref):
+                    base_commit: str, transcript, image_ref, image_digest):
     """Construct and start the backend named by --sandbox, returning
     (sandbox, sandbox_info) for Runner's run_info. A docker-mode failure
     during start() is cleaned up here (best-effort stop(), so a half-created
@@ -118,7 +128,7 @@ def _build_sandbox(args, *, run_dir: Path, worktree: Path, repo: Path, slug: str
             raise
         sandbox.watchdog.start()  # only place a real Watchdog thread is started
         sandbox_info = {
-            "backend": "docker", "image": args.image, "image_digest": image_ref,
+            "backend": "docker", "image": args.image, "image_digest": image_digest,
             "network": cfg.network, "memory": cfg.memory, "cpus": cfg.cpus,
             "pids_limit": cfg.pids_limit, "tmp_size": cfg.tmp_size,
             "gitdir_size": cfg.gitdir_size, "max_worktree_mb": cfg.max_worktree_mb,
@@ -134,7 +144,7 @@ def _build_sandbox(args, *, run_dir: Path, worktree: Path, repo: Path, slug: str
 
 
 def _write_run_json_start(run_dir: Path, *, slug: str, repo: Path, worktree: Path,
-                           branch: str, base_commit: str, args, image_ref) -> None:
+                           branch: str, base_commit: str, args, image_digest) -> None:
     write_run_json(run_dir, {
         "schema_version": 2,
         "status": "running",
@@ -146,7 +156,7 @@ def _write_run_json_start(run_dir: Path, *, slug: str, repo: Path, worktree: Pat
         "container": docker_args.container_name(slug) if args.sandbox == "docker" else None,
         "volume": docker_args.volume_name(slug) if args.sandbox == "docker" else None,
         "image": args.image if args.sandbox == "docker" else None,
-        "image_digest": image_ref,
+        "image_digest": image_digest,
         "host_pid": os.getpid(),
         "started": datetime.now(timezone.utc).isoformat(),
         "sandbox": args.sandbox,
@@ -201,7 +211,13 @@ def _final_status(result) -> str:
     takes precedence over it — the budget breach is the actual cause of the
     run ending, same as a BudgetExceeded raised mid-run already is; an
     export failure downstream of that kill is a secondary symptom. Same
-    only-replaces-'completed' rule applies."""
+    only-replaces-'completed' rule applies.
+
+    D1: `watchdog_violation_kind` (RunArtifacts.watchdog_violation_kind,
+    threaded through by DockerSandbox.finalize()) picks which status the
+    violation maps to -- "sandbox_error" for a watchdog-thread sample()
+    failure (spec §6's second-failure case), "budget_exceeded" (the
+    default kind, "budget") for every other watchdog kill."""
     extra = result.extra or {}
     if extra.get("finalize_error"):
         # Only replace completed with export_failed; keep other statuses as-is
@@ -211,7 +227,8 @@ def _final_status(result) -> str:
         return result.status
     if extra.get("watchdog_violation"):
         if result.status == "completed":
-            return "budget_exceeded"
+            mapped = "sandbox_error" if extra.get("watchdog_violation_kind") == "sandbox_error" else "budget_exceeded"
+            return mapped
         return result.status
     export_status = extra.get("export_status", "")
     if isinstance(export_status, str) and export_status.startswith("export_failed"):
@@ -338,9 +355,10 @@ def main(argv: list | None = None) -> int:
         return 2
 
     image_ref = None
+    image_digest = None
     if args.sandbox == "docker":
         try:
-            image_ref = _docker_preflight(repo, args.image)
+            image_ref, image_digest = _docker_preflight(repo, args.image)
         except DockerError as e:
             # Important #6: don't blame a running daemon for a failure that
             # isn't the daemon's — branch the hint on which preflight step
@@ -391,7 +409,7 @@ def main(argv: list | None = None) -> int:
     print(f"worktree:   {worktree}", file=sys.stderr)
 
     _write_run_json_start(run_dir, slug=slug, repo=repo, worktree=worktree, branch=branch,
-                           base_commit=base_commit, args=args, image_ref=image_ref)
+                           base_commit=base_commit, args=args, image_digest=image_digest)
 
     # ---- run ----
     # Everything from here on is wrapped in one boundary so the machine
@@ -405,6 +423,7 @@ def main(argv: list | None = None) -> int:
         sandbox, sandbox_info = _build_sandbox(
             args, run_dir=run_dir, worktree=worktree, repo=repo, slug=slug,
             base_commit=base_commit, transcript=transcript, image_ref=image_ref,
+            image_digest=image_digest,
         )
         sandbox_started = True
 
@@ -422,6 +441,7 @@ def main(argv: list | None = None) -> int:
                 "dropped_git_entries": artifacts.dropped_git_entries,
                 "export_status": artifacts.export_status,
                 "watchdog_violation": artifacts.watchdog_violation,
+                "watchdog_violation_kind": artifacts.watchdog_violation_kind,
             }
 
         runner = Runner(
@@ -471,6 +491,7 @@ def main(argv: list | None = None) -> int:
         patch_path=extra.get("patch_path"),
         finalize_error=finalize_error,
         watchdog_violation=extra.get("watchdog_violation"),
+        watchdog_violation_kind=extra.get("watchdog_violation_kind"),
     )
 
     print(json.dumps(_emit_result(
@@ -478,6 +499,7 @@ def main(argv: list | None = None) -> int:
         run_dir=run_dir, turns=result.turns, usage=result.usage, final_message=result.final_message,
         base_commit=base_commit, finalize_error=finalize_error,
         watchdog_violation=extra.get("watchdog_violation"),
+        watchdog_violation_kind=extra.get("watchdog_violation_kind"),
     ), indent=2))
     return 0 if final_status == "completed" else 1
 

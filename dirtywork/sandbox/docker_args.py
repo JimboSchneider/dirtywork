@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_IMAGE = "dirtywork/worker:0.4"
+DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.4"
 # Set at release, after `docker build`/publish (docker/README.md documents the
 # procedure). When set, resolve_image()'s pinned_digest check refuses to run
 # any image whose resolved digest does not match.

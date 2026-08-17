@@ -12,6 +12,7 @@ from dirtywork.sandbox.docker_cli import (
     _split_image_ref,
     docker_storage_paths,
     docker_version,
+    image_repo_digest,
     resolve_image,
     run,
     validate_objects_dir,
@@ -62,38 +63,60 @@ def test_docker_version_raises_on_nonzero(monkeypatch):
         docker_version(run=fake_run)
 
 
-def test_resolve_image_uses_repodigests_when_present():
+def test_resolve_image_returns_id_when_local_with_repodigests():
+    # Case 1 of 3 (local, RepoDigests present): resolve_image never trusts
+    # a RepoDigests candidate for EXECUTION -- buildx-loaded images can
+    # carry one that points at a registry manifest never pulled into the
+    # local store, and `docker run`/`create` on that ref would try to pull
+    # it even though `docker image inspect` on it succeeds. Only the
+    # local .Id is ever returned, and RepoDigests is never even consulted
+    # when there is no pinned_digest to check.
     calls = []
 
     def fake_run(argv, *, timeout, stdin=None):
         calls.append(argv)
-        digests = ["dirtywork/worker@sha256:" + "a" * 64]
-        return Captured(returncode=0, output=json.dumps(digests).encode(),
-                         truncated=False, timed_out=False)
+        if argv == ["image", "inspect", "--format", "{{.Id}}", "dirtywork/worker:0.3"]:
+            return Captured(returncode=0, output=b"sha256:" + b"a" * 64,
+                             truncated=False, timed_out=False)
+        raise AssertionError(f"unexpected argv {argv}")
 
     ref = resolve_image("dirtywork/worker:0.3", run=fake_run)
-    assert ref == "dirtywork/worker@sha256:" + "a" * 64
-    assert calls == [["image", "inspect", "--format", "{{json .RepoDigests}}",
-                       "dirtywork/worker:0.3"]]
+    assert ref == "sha256:" + "a" * 64
+    assert calls == [["image", "inspect", "--format", "{{.Id}}", "dirtywork/worker:0.3"]]
+    assert not any(c[0] == "pull" for c in calls)
 
 
-def test_resolve_image_pulls_when_absent_then_resolves():
+def test_resolve_image_returns_id_when_local_without_repodigests():
+    # Case 2 of 3 (local, no RepoDigests at all -- built, never pushed or
+    # pulled): same .Id-inspect call, same result shape as case 1.
+    def fake_run(argv, *, timeout, stdin=None):
+        if argv == ["image", "inspect", "--format", "{{.Id}}", "dirtywork/worker:0.3"]:
+            return Captured(returncode=0, output=b"sha256:" + b"c" * 64,
+                             truncated=False, timed_out=False)
+        raise AssertionError(f"unexpected argv {argv}")
+
+    ref = resolve_image("dirtywork/worker:0.3", run=fake_run)
+    assert ref == "sha256:" + "c" * 64
+
+
+def test_resolve_image_pulls_when_absent_then_returns_id():
+    # Case 3 of 3 (absent locally): pull, then inspect .Id -- RepoDigests
+    # is never consulted for execution, pulled or not.
     calls = []
 
     def fake_run(argv, *, timeout, stdin=None):
         calls.append(argv)
-        if argv[0] == "pull":
-            return Captured(returncode=0, output=b"", truncated=False, timed_out=False)
-        if calls.count(argv) == 1 and argv[0] == "image":
-            # first inspect: absent
+        if argv == ["image", "inspect", "--format", "{{.Id}}", "dirtywork/worker:0.3"]:
             if len([c for c in calls if c[0] == "image"]) == 1:
                 return Captured(returncode=1, output=b"no such image", truncated=False, timed_out=False)
-        digests = ["dirtywork/worker@sha256:" + "b" * 64]
-        return Captured(returncode=0, output=json.dumps(digests).encode(),
-                         truncated=False, timed_out=False)
+            return Captured(returncode=0, output=b"sha256:" + b"b" * 64,
+                             truncated=False, timed_out=False)
+        if argv[0] == "pull":
+            return Captured(returncode=0, output=b"", truncated=False, timed_out=False)
+        raise AssertionError(f"unexpected argv {argv}")
 
     ref = resolve_image("dirtywork/worker:0.3", run=fake_run)
-    assert ref == "dirtywork/worker@sha256:" + "b" * 64
+    assert ref == "sha256:" + "b" * 64
     assert ["pull", "dirtywork/worker:0.3"] in calls
 
 
@@ -107,21 +130,11 @@ def test_resolve_image_pull_failure_raises():
         resolve_image("dirtywork/worker:0.3", run=fake_run)
 
 
-def test_resolve_image_falls_back_to_id_when_repodigests_empty():
-    def fake_run(argv, *, timeout, stdin=None):
-        if argv == ["image", "inspect", "--format", "{{json .RepoDigests}}", "dirtywork/worker:0.3"]:
-            return Captured(returncode=0, output=b"[]", truncated=False, timed_out=False)
-        if argv == ["image", "inspect", "--format", "{{.Id}}", "dirtywork/worker:0.3"]:
-            return Captured(returncode=0, output=b"sha256:" + b"c" * 64,
-                             truncated=False, timed_out=False)
-        raise AssertionError(f"unexpected argv {argv}")
-
-    ref = resolve_image("dirtywork/worker:0.3", run=fake_run)
-    assert ref == "dirtywork/worker@sha256:" + "c" * 64
-
-
 def test_resolve_image_pinned_digest_mismatch_raises():
     def fake_run(argv, *, timeout, stdin=None):
+        if argv == ["image", "inspect", "--format", "{{.Id}}", "dirtywork/worker:0.3"]:
+            return Captured(returncode=0, output=b"sha256:" + b"a" * 64,
+                             truncated=False, timed_out=False)
         digests = ["dirtywork/worker@sha256:" + "a" * 64]
         return Captured(returncode=0, output=json.dumps(digests).encode(),
                          truncated=False, timed_out=False)
@@ -130,14 +143,73 @@ def test_resolve_image_pinned_digest_mismatch_raises():
         resolve_image("dirtywork/worker:0.3", run=fake_run, pinned_digest="sha256:" + "z" * 64)
 
 
-def test_resolve_image_pinned_digest_match_passes():
+def test_resolve_image_pinned_digest_match_returns_id():
     def fake_run(argv, *, timeout, stdin=None):
+        if argv == ["image", "inspect", "--format", "{{.Id}}", "dirtywork/worker:0.3"]:
+            return Captured(returncode=0, output=b"sha256:" + b"a" * 64,
+                             truncated=False, timed_out=False)
         digests = ["dirtywork/worker@sha256:" + "a" * 64]
         return Captured(returncode=0, output=json.dumps(digests).encode(),
                          truncated=False, timed_out=False)
 
     ref = resolve_image("dirtywork/worker:0.3", run=fake_run, pinned_digest="sha256:" + "a" * 64)
-    assert ref == "dirtywork/worker@sha256:" + "a" * 64
+    assert ref == "sha256:" + "a" * 64
+
+
+def test_resolve_image_pinned_digest_no_repodigests_raises():
+    # A locally-built image with no RepoDigests entry can never satisfy a
+    # pinned digest -- there is nothing to compare against, so it must
+    # refuse rather than silently let an unpinned image through.
+    def fake_run(argv, *, timeout, stdin=None):
+        if argv == ["image", "inspect", "--format", "{{.Id}}", "dirtywork/worker:0.3"]:
+            return Captured(returncode=0, output=b"sha256:" + b"a" * 64,
+                             truncated=False, timed_out=False)
+        return Captured(returncode=0, output=b"[]", truncated=False, timed_out=False)
+
+    with pytest.raises(DockerError, match="PINNED_DIGEST"):
+        resolve_image("dirtywork/worker:0.3", run=fake_run, pinned_digest="sha256:" + "a" * 64)
+
+
+def test_image_repo_digest_returns_matching_repodigests_entry():
+    candidate = "dirtywork/worker@sha256:" + "a" * 64
+
+    def fake_run(argv, *, timeout, stdin=None):
+        assert argv == ["image", "inspect", "--format", "{{json .RepoDigests}}",
+                         "dirtywork/worker:0.3"]
+        digests = [candidate]
+        return Captured(returncode=0, output=json.dumps(digests).encode(),
+                         truncated=False, timed_out=False)
+
+    assert image_repo_digest("dirtywork/worker:0.3", run=fake_run) == candidate
+
+
+def test_image_repo_digest_none_when_repodigests_empty():
+    def fake_run(argv, *, timeout, stdin=None):
+        return Captured(returncode=0, output=b"[]", truncated=False, timed_out=False)
+
+    assert image_repo_digest("dirtywork/worker:0.3", run=fake_run) is None
+
+
+def test_image_repo_digest_none_when_inspect_fails():
+    # Best-effort provenance only -- an uninspectable image (e.g. absent
+    # locally) yields None, never a raise (unlike resolve_image's pull
+    # path, which fails loud on the execution ref).
+    def fake_run(argv, *, timeout, stdin=None):
+        return Captured(returncode=1, output=b"no such image", truncated=False, timed_out=False)
+
+    assert image_repo_digest("dirtywork/worker:0.3", run=fake_run) is None
+
+
+def test_image_repo_digest_registry_port_name_match():
+    # Same name-matching fix as _split_image_ref: a ':' before the last
+    # '/' is a registry host:port, not a tag separator.
+    def fake_run(argv, *, timeout, stdin=None):
+        digests = ["localhost:5000/foo@sha256:" + "e" * 64]
+        return Captured(returncode=0, output=json.dumps(digests).encode(),
+                         truncated=False, timed_out=False)
+
+    assert image_repo_digest("localhost:5000/foo:tag", run=fake_run) == (
+        "localhost:5000/foo@sha256:" + "e" * 64)
 
 
 def test_split_image_ref_registry_with_tag():
@@ -162,22 +234,6 @@ def test_split_image_ref_digest_only():
 
 def test_split_image_ref_registry_port_no_tag():
     assert _split_image_ref("registry:5000/ns/img") == ("registry:5000/ns/img", None)
-
-
-def test_resolve_image_registry_port_matches_repodigests():
-    # End-to-end through resolve_image (not just _split_image_ref): the name
-    # used to match RepoDigests entries must be the full "host:port/path",
-    # not truncated at the port's ':'.
-    calls = []
-
-    def fake_run(argv, *, timeout, stdin=None):
-        calls.append(argv)
-        digests = ["localhost:5000/foo@sha256:" + "e" * 64]
-        return Captured(returncode=0, output=json.dumps(digests).encode(),
-                         truncated=False, timed_out=False)
-
-    ref = resolve_image("localhost:5000/foo:tag", run=fake_run)
-    assert ref == "localhost:5000/foo@sha256:" + "e" * 64
 
 
 def test_docker_storage_paths_linux(monkeypatch):

@@ -60,58 +60,83 @@ def _split_image_ref(image: str) -> tuple[str, str | None]:
     return base, None
 
 
-def resolve_image(image: str, *, run=run, pinned_digest: str | None = None) -> str:
-    """Resolve image to <name>@sha256:<digest>, pulling if absent (the only
-    network use at preflight). Falls back to .Id for locally-built images
-    with no RepoDigests. If pinned_digest is given, the resolved digest must
-    match it exactly or the run refuses to start."""
-    name, _tag = _split_image_ref(image)
+def image_repo_digest(image: str, *, run=run) -> str | None:
+    """Return the image's registry digest reference (`<name>@sha256:...`)
+    from RepoDigests, or None if the image was built locally and never
+    pushed/pulled (no RepoDigests entry), or cannot be inspected at all.
 
+    For PROVENANCE only -- record-keeping (run.json, the pinned-digest
+    check) -- never for execution. `docker run`/`create` on a RepoDigests
+    ref is not always safe: images loaded via `docker buildx build --load`
+    can carry a RepoDigests entry pointing at a registry manifest that was
+    never pulled into the local store, and running that ref would try to
+    pull it from the network. resolve_image() below sidesteps this
+    entirely by always executing the image's local content-addressed Id
+    instead, which can never trigger a pull."""
+    name, _tag = _split_image_ref(image)
     captured = run(["image", "inspect", "--format", "{{json .RepoDigests}}", image], timeout=T_QUERY)
+    if captured.returncode != 0:
+        return None
+    raw = captured.output.decode("utf-8", "replace").strip()
+    try:
+        digests = json.loads(raw) if raw else []
+    except json.JSONDecodeError:
+        return None
+    if isinstance(digests, list):
+        for d in digests:
+            if isinstance(d, str) and d.startswith(name + "@sha256:"):
+                return d
+    return None
+
+
+def resolve_image(image: str, *, run=run, pinned_digest: str | None = None) -> str:
+    """Resolve image to its local content-addressed Id (`sha256:<64hex>`)
+    for EXECUTION, pulling if absent (the only network use at preflight).
+    If pinned_digest is given, the image's registry digest (via
+    image_repo_digest, which still compares against RepoDigests) must
+    match it exactly or the run refuses to start.
+
+    Returning the Id -- never a `name@sha256:...` digest reference -- is
+    deliberate, not cosmetic: a RepoDigests candidate is not always
+    locally addressable. Images loaded via `docker buildx build --load`
+    can carry a RepoDigests entry pointing at a registry manifest that was
+    never pulled into the local store, and `docker run`/`create` on that
+    ref tries to pull it ("Unable to find image ... locally") -- even
+    though `docker image inspect` on the very same ref succeeds, because
+    inspect resolves it through the image's own Id under the hood.
+    Verifying addressability by inspect is therefore not a sufficient
+    check; it was tried and still let an unrunnable ref through. An Id, by
+    contrast, is always the local image store's own identifier: `docker
+    run`/`create` on an Id can never trigger a network pull, and it is
+    unambiguous."""
+    captured = run(["image", "inspect", "--format", "{{.Id}}", image], timeout=T_QUERY)
     if captured.returncode != 0:
         pulled = run(["pull", image], timeout=T_PULL)
         if pulled.returncode != 0:
             raise DockerError(
                 f"docker pull {image} failed: {pulled.output.decode('utf-8', 'replace')[:500]}"
             )
-        captured = run(["image", "inspect", "--format", "{{json .RepoDigests}}", image], timeout=T_QUERY)
+        captured = run(["image", "inspect", "--format", "{{.Id}}", image], timeout=T_QUERY)
         if captured.returncode != 0:
             raise DockerError(
                 f"docker image inspect {image} failed after pull: "
                 f"{captured.output.decode('utf-8', 'replace')[:500]}"
             )
 
-    raw = captured.output.decode("utf-8", "replace").strip()
-    try:
-        digests = json.loads(raw) if raw else []
-    except json.JSONDecodeError:
-        digests = []
-
-    ref = None
-    if isinstance(digests, list):
-        for d in digests:
-            if isinstance(d, str) and d.startswith(name + "@sha256:"):
-                ref = d
-                break
-
-    if ref is None:
-        id_captured = run(["image", "inspect", "--format", "{{.Id}}", image], timeout=T_QUERY)
-        if id_captured.returncode != 0:
-            raise DockerError(
-                f"cannot resolve a digest for {image}: "
-                f"{id_captured.output.decode('utf-8', 'replace')[:500]}"
-            )
-        image_id = id_captured.output.decode("utf-8", "replace").strip()
-        ref = f"{name}@{image_id}"
+    image_id = captured.output.decode("utf-8", "replace").strip()
+    if not image_id:
+        raise DockerError(f"docker image inspect {image} returned an empty Id")
 
     if pinned_digest is not None:
-        digest_part = ref.split("@", 1)[1] if "@" in ref else ""
+        digest = image_repo_digest(image, run=run)
+        digest_part = digest.split("@", 1)[1] if digest else ""
         if digest_part != pinned_digest:
             raise DockerError(
                 f"resolved image digest {digest_part!r} for {image!r} does not match "
                 f"PINNED_DIGEST {pinned_digest!r}; refusing to run an unpinned image"
             )
-    return ref
+
+    return image_id
 
 
 def docker_storage_paths(*, run=run) -> list:

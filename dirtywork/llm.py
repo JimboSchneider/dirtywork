@@ -59,7 +59,10 @@ class LMStudioClient:
                 if remaining <= 0:
                     raise LLMTimeout(f"request to {path} exceeded {effective_timeout}s")
                 if sock is not None:
-                    sock.settimeout(remaining)
+                    try:
+                        sock.settimeout(remaining)
+                    except OSError:  # http.client already closed the socket (body fully buffered)
+                        sock = None
                 try:
                     chunk = resp.read1(65536)
                 except socket.timeout:
