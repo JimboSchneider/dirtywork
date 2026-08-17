@@ -59,7 +59,9 @@ jobs:
           cache-from: type=gha
           # ignore-error: fork PRs may not have write access to the cache scope.
           cache-to: type=gha,mode=max,ignore-error=true
-      - run: python -m pytest -q -m docker tests/test_docker_live.py tests/test_docker_lifecycle.py
+      - name: Sandbox smoke (prints why start() fails)
+        run: python tools/ci_sandbox_smoke.py
+      - run: python -m pytest -q -rA -m docker tests/test_docker_live.py tests/test_docker_lifecycle.py
       - name: Clean up dirtywork containers/volumes
         if: always()
         run: |
