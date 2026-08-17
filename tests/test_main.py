@@ -292,6 +292,134 @@ def test_main_docker_build_sandbox_passes_preflight_image_ref(tmp_path, monkeypa
     assert run_json["image_digest"] is None  # provenance, resolved separately from image_ref
 
 
+def _install_immediate_done_docker_fakes(m, monkeypatch, *, constructed_with=None):
+    """Shared plumbing for the two image_pinned tests below: a
+    FakeDockerSandbox that records the image_ref it was constructed with (if
+    a list is given) and completes start()/finalize() as no-ops, plus an
+    LM Studio client that replies "done" on the first turn -- just enough
+    for main() to reach rc 0 and a written run.json without a real Docker
+    daemon or a real LLM."""
+    from dirtywork.sandbox import RunArtifacts
+    from dirtywork.sandbox.docker import DockerSandbox as RealDockerSandbox
+
+    class FakeWatchdog:
+        def start(self):
+            pass
+
+    class FakeDockerSandbox:
+        check_name_collision = staticmethod(RealDockerSandbox.check_name_collision)
+
+        def __init__(self, cfg, *, run_dir, transcript=None, image_ref=None):
+            if constructed_with is not None:
+                constructed_with.append(image_ref)
+            self.uid, self.gid = 501, 20
+            self.watchdog = FakeWatchdog()
+
+        def start(self, worktree, repo, slug, base_commit):
+            pass
+
+        def stop(self):
+            pass
+
+        def read_file(self, path, offset=0, limit=400):
+            return ""
+
+        def write_file(self, path, content):
+            return ""
+
+        def edit_file(self, path, old_string, new_string):
+            return ""
+
+        def list_dir(self, path="."):
+            return ""
+
+        def grep(self, pattern, path=".", glob=None, timeout=30):
+            return ""
+
+        def bash(self, command, timeout=120):
+            return ""
+
+        def finalize(self):
+            return RunArtifacts(export_status="ok")
+
+    monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
+
+    class ImmediateDoneClient:
+        def __init__(self, base_url=None):
+            pass
+
+        def list_models(self):
+            return [m.DEFAULT_MODEL]
+
+        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+            return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    monkeypatch.setattr(m, "LMStudioClient", ImmediateDoneClient)
+
+
+def test_main_docker_custom_image_skips_pinning(tmp_path, monkeypatch, capsys):
+    # Item 3: a user-supplied --image is never pinned, even when
+    # PINNED_DIGEST is set for the default image -- the operator chose this
+    # image deliberately. resolve_image must be called with pinned_digest
+    # None for it (not skipped, so any image still resolves/warns/errors
+    # exactly as it would for a bare "no pin configured" run -- it just
+    # never compares against PINNED_DIGEST).
+    from dirtywork.procs import Captured
+    m, repo = _docker_mode_scaffold(tmp_path, monkeypatch)
+    monkeypatch.setattr(m.docker_args, "PINNED_DIGEST", "sha256:" + "f" * 64)
+
+    calls = []
+
+    def fake_resolve_image(image, *, pinned_digest=None, run=None):
+        calls.append((image, pinned_digest))
+        return "sha256:" + "b" * 64
+
+    monkeypatch.setattr(m, "resolve_image", fake_resolve_image)
+    monkeypatch.setattr(m.docker_cli, "run",
+                        lambda argv, *, timeout, stdin=None: Captured(1, b"", False, False))
+    _install_immediate_done_docker_fakes(m, monkeypatch)
+
+    rc = m.main(["run", "--repo", str(repo), "--image", "custom-image:latest", "some task"])
+
+    assert rc == 0
+    assert calls == [("custom-image:latest", None)]  # pin not passed for a custom image
+    payload = json.loads(capsys.readouterr().out)
+    run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert run_json["image_pinned"] is False
+
+
+def test_main_docker_run_json_records_image_pinned_true_for_pulled_default_image(
+        tmp_path, monkeypatch, capsys):
+    # Item 3: image_pinned is true only when the pin was actually enforced
+    # against a pulled default image -- i.e. --image was not given (so the
+    # default image is used) AND the image has a RepoDigests entry matching
+    # PINNED_DIGEST (a locally built image with no RepoDigests would warn,
+    # not enforce -- see test_docker_cli.py's local-build test).
+    from dirtywork.procs import Captured
+    m, repo = _docker_mode_scaffold(tmp_path, monkeypatch)
+    pinned = "sha256:" + "a" * 64
+    monkeypatch.setattr(m.docker_args, "PINNED_DIGEST", pinned)
+    name = m.DEFAULT_IMAGE.rsplit(":", 1)[0]
+    repo_digest = f"{name}@{pinned}"
+
+    def fake_docker_cli_run(argv, *, timeout, stdin=None):
+        if argv[:2] == ["image", "inspect"]:
+            return Captured(0, json.dumps([repo_digest]).encode(), False, False)
+        return Captured(1, b"", False, False)  # container/volume collision checks: not found
+
+    monkeypatch.setattr(m.docker_cli, "run", fake_docker_cli_run)
+    _install_immediate_done_docker_fakes(m, monkeypatch)
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert run_json["image_digest"] == repo_digest
+    assert run_json["image_pinned"] is True
+
+
 def test_main_docker_name_collision_exits_2_and_creates_nothing(tmp_path, monkeypatch, capsys):
     import subprocess
     from dirtywork.procs import Captured

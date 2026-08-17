@@ -38,14 +38,29 @@ always be pointed at a full `name@sha256:...` reference directly.
 
 ## Pin a digest (PINNED_DIGEST)
 
-`dirtywork/sandbox/docker_args.py`'s `PINNED_DIGEST` (default `None`) is
-the supply-chain guarantee for the default image: once set,
-`resolve_image()` refuses to run any resolved image whose digest doesn't
-match, regardless of what `--image` or a mutable tag currently points to.
-The pin check compares `PINNED_DIGEST` against the image's *registry*
-digest (`RepoDigests`, via `image_repo_digest()`); the container itself
-always executes the image's local content-addressed Id, never that
-registry digest, so a run can never trigger a network pull.
+`dirtywork/sandbox/docker_args.py`'s `PINNED_DIGEST` (default `None`) is a
+REGISTRY PROVENANCE guarantee for the default image: it only ever applies
+when `--image` is left at its default (`--image` is the operator's own
+choice and is never pinned — see below), and only checks digests fetched
+from a registry. Once set, `resolve_image()` refuses to run a *pulled*
+default image whose digest doesn't match, regardless of what the mutable
+`:0.4` tag currently points to. The pin check compares `PINNED_DIGEST`
+against the image's *registry* digest (`RepoDigests`, via
+`image_repo_digest()`); the container itself always executes the image's
+local content-addressed Id, never that registry digest, so a run can never
+trigger a network pull.
+
+A *locally built or loaded* default image (no `RepoDigests` entry — it was
+never pushed to or pulled from a registry, e.g. `docker build -t
+ghcr.io/jimboschneider/dirtywork-worker:0.4 docker/` run by hand, or the CI
+gate that builds this same image locally) has nothing for the pin to
+compare against. `resolve_image()` does not refuse it: it returns the
+local Id and prints a one-line warning to stderr instead
+(`image_pinned` in `run.json`/`run_start` is `false` for this case, even
+though `PINNED_DIGEST` is set — the pin was not enforced). A `--image
+<ref>` the operator supplies explicitly is never checked against
+`PINNED_DIGEST` at all, pinned or not — that pin protects the *maintained
+default image only*.
 
 0.4.0 ships with `PINNED_DIGEST = None`: there is no prior publish to pin
 against on the very first release, so `resolve_image()` performs no pin

@@ -60,20 +60,29 @@ def _err(msg: str) -> None:
     print(f"error: {msg}", file=sys.stderr)
 
 
-def _docker_preflight(repo: Path, image: str) -> tuple[str, str | None]:
+def _docker_preflight(repo: Path, image: str) -> tuple[str, str | None, bool]:
     """Spec §2 step 1: docker_version (daemon reachable) → resolve_image
     (local Id, pulling if absent — the only network use at start) →
     validate_objects_dir (the only host path ever mounted). All read-only
     on the operator's clone; nothing is created yet.
 
-    Returns (image_ref, image_digest). image_ref is the image's local
-    content-addressed Id (`sha256:<64hex>`) — handed to DockerSandbox for
-    EXECUTION, since an Id can never trigger a network pull at `docker
-    run`/`create` time, unlike a `name@sha256:...` digest reference (see
-    resolve_image's docstring). image_digest is the registry digest from
-    RepoDigests, or None for a locally-built image that was never pulled —
-    recorded for PROVENANCE only (sandbox_info, run.json), never used to
-    run anything.
+    Returns (image_ref, image_digest, image_pinned). image_ref is the
+    image's local content-addressed Id (`sha256:<64hex>`) — handed to
+    DockerSandbox for EXECUTION, since an Id can never trigger a network
+    pull at `docker run`/`create` time, unlike a `name@sha256:...` digest
+    reference (see resolve_image's docstring). image_digest is the registry
+    digest from RepoDigests, or None for a locally-built image that was
+    never pulled — recorded for PROVENANCE only (sandbox_info, run.json),
+    never used to run anything.
+
+    PINNED_DIGEST is only ever passed for the maintained default image —
+    the operator chose a `--image` deliberately, so 0.4.1 never second-
+    guesses that choice against a pin meant for a different image (an
+    unrecognized/mismatched image would just make every custom --image run
+    refuse to start). image_pinned is True only when the pin was actually
+    enforced: PINNED_DIGEST was passed for this run AND the image has a
+    RepoDigests entry (i.e. it was pulled from the registry, not a local
+    build resolve_image only warns about — see resolve_image's docstring).
 
     A DockerError raised while resolving either value is tagged with a
     `.preflight_step` attribute ("daemon" or "image") so main()'s exit-2
@@ -86,18 +95,20 @@ def _docker_preflight(repo: Path, image: str) -> tuple[str, str | None]:
     except DockerError as e:
         e.preflight_step = "daemon"
         raise
+    pinned_digest = docker_args.PINNED_DIGEST if image == docker_args.DEFAULT_IMAGE else None
     try:
-        image_ref = resolve_image(image, pinned_digest=docker_args.PINNED_DIGEST)
+        image_ref = resolve_image(image, pinned_digest=pinned_digest)
         image_digest = docker_cli.image_repo_digest(image, run=docker_cli.run)
     except DockerError as e:
         e.preflight_step = "image"
         raise
     validate_objects_dir(repo)
-    return image_ref, image_digest
+    image_pinned = pinned_digest is not None and image_digest is not None
+    return image_ref, image_digest, image_pinned
 
 
 def _build_sandbox(args, *, run_dir: Path, worktree: Path, repo: Path, slug: str,
-                    base_commit: str, transcript, image_ref, image_digest):
+                    base_commit: str, transcript, image_ref, image_digest, image_pinned):
     """Construct and start the backend named by --sandbox, returning
     (sandbox, sandbox_info) for Runner's run_info. A docker-mode failure
     during start() is cleaned up here (best-effort stop(), so a half-created
@@ -129,6 +140,7 @@ def _build_sandbox(args, *, run_dir: Path, worktree: Path, repo: Path, slug: str
         sandbox.watchdog.start()  # only place a real Watchdog thread is started
         sandbox_info = {
             "backend": "docker", "image": args.image, "image_digest": image_digest,
+            "image_pinned": image_pinned,
             "network": cfg.network, "memory": cfg.memory, "cpus": cfg.cpus,
             "pids_limit": cfg.pids_limit, "tmp_size": cfg.tmp_size,
             "gitdir_size": cfg.gitdir_size, "max_worktree_mb": cfg.max_worktree_mb,
@@ -144,7 +156,8 @@ def _build_sandbox(args, *, run_dir: Path, worktree: Path, repo: Path, slug: str
 
 
 def _write_run_json_start(run_dir: Path, *, slug: str, repo: Path, worktree: Path,
-                           branch: str, base_commit: str, args, image_digest) -> None:
+                           branch: str, base_commit: str, args, image_digest,
+                           image_pinned) -> None:
     write_run_json(run_dir, {
         "schema_version": 2,
         "status": "running",
@@ -157,6 +170,7 @@ def _write_run_json_start(run_dir: Path, *, slug: str, repo: Path, worktree: Pat
         "volume": docker_args.volume_name(slug) if args.sandbox == "docker" else None,
         "image": args.image if args.sandbox == "docker" else None,
         "image_digest": image_digest,
+        "image_pinned": image_pinned,
         "host_pid": os.getpid(),
         "started": datetime.now(timezone.utc).isoformat(),
         "sandbox": args.sandbox,
@@ -356,9 +370,10 @@ def main(argv: list | None = None) -> int:
 
     image_ref = None
     image_digest = None
+    image_pinned = False
     if args.sandbox == "docker":
         try:
-            image_ref, image_digest = _docker_preflight(repo, args.image)
+            image_ref, image_digest, image_pinned = _docker_preflight(repo, args.image)
         except DockerError as e:
             # Important #6: don't blame a running daemon for a failure that
             # isn't the daemon's — branch the hint on which preflight step
@@ -409,7 +424,8 @@ def main(argv: list | None = None) -> int:
     print(f"worktree:   {worktree}", file=sys.stderr)
 
     _write_run_json_start(run_dir, slug=slug, repo=repo, worktree=worktree, branch=branch,
-                           base_commit=base_commit, args=args, image_digest=image_digest)
+                           base_commit=base_commit, args=args, image_digest=image_digest,
+                           image_pinned=image_pinned)
 
     # ---- run ----
     # Everything from here on is wrapped in one boundary so the machine
@@ -423,7 +439,7 @@ def main(argv: list | None = None) -> int:
         sandbox, sandbox_info = _build_sandbox(
             args, run_dir=run_dir, worktree=worktree, repo=repo, slug=slug,
             base_commit=base_commit, transcript=transcript, image_ref=image_ref,
-            image_digest=image_digest,
+            image_digest=image_digest, image_pinned=image_pinned,
         )
         sandbox_started = True
 
