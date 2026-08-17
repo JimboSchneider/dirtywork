@@ -1,0 +1,64 @@
+name: Publish worker image to GHCR
+
+# The dirtywork/worker image is published to GitHub Container Registry
+# (ghcr.io), not Docker Hub: it needs no separate account or long-lived
+# token -- this workflow already gets a scoped, expiring GITHUB_TOKEN with
+# packages:write via `permissions:` below -- and the image lives right next
+# to the source it was built from, versioned by the same release tag.
+#
+# One manual step this workflow cannot do for you: the FIRST time it pushes
+# a new package, GitHub defaults it to private. Visit
+# https://github.com/users/jimboschneider/packages/container/dirtywork-worker/settings
+# and set visibility to Public, or `docker pull` will 401 for anyone
+# without access to this repo (including CI runs and end users).
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Derive image tags from the release tag
+        id: version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          full="${TAG#v}"      # v0.4.0 -> 0.4.0
+          minor="${full%.*}"   # 0.4.0  -> 0.4
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+          echo "minor=$minor" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: docker/
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/jimboschneider/dirtywork-worker:${{ steps.version.outputs.minor }}
+            ghcr.io/jimboschneider/dirtywork-worker:${{ steps.version.outputs.full }}
+
+      - name: Record the pushed digest
+        run: |
+          {
+            echo "Pushed \`ghcr.io/jimboschneider/dirtywork-worker@${{ steps.build.outputs.digest }}\`."
+            echo ""
+            echo "Set \`docker_args.PINNED_DIGEST\` to this value."
+          } >> "$GITHUB_STEP_SUMMARY"
