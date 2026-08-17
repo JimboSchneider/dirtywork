@@ -355,8 +355,7 @@ dirtywork run --repo <path> "<task>"
     [--max-patch-mb 10]               # docker mode only; diff.patch cap
 ```
 
-```bash
-dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch-from/--sandbox/<task>;
+```dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch-from/--sandbox/<task>;
     [--model <m>]                     # defaults to the earlier run's model; --image defaults to its image
 ```
 
@@ -390,7 +389,7 @@ printed to stdout (nothing else goes to stdout):
 }
 ```
 
-`status` is one of: `completed`, `max_turns`, `stalled`, `timeout`,
+`status` is one of: `completed`, `max_turns`, `timeout`, `stalled`,
 `context_exhausted`, `model_error`, `interrupted`, `budget_exceeded`,
 `sandbox_error`, `export_failed`. When the run fails before a `RunResult`
 exists — the LLM client raises, post-worktree setup fails (e.g. the
@@ -407,13 +406,13 @@ end-of-run path — i.e. whenever `runner.run()` returns a result, `completed`
 or not — normally `null`; see `run_end` below for what each means. The two
 paths where `runner.run()` never returns (sandbox setup fails before it
 starts, or an exception escapes the loop and is caught in `main()`) report
-`base_commit` only, plus `export_status` too if a docker `finalize()` ran
+`base_commit` and `resumed_from` only, plus `export_status` too if a docker `finalize()` ran
 during that exception recovery.
 
 **Exit codes:**
 
 - `0` — `completed`.
-- `1` — any non-`completed` status (`max_turns`, `stalled`, `timeout`,
+- `1` — any non-`completed` status (`max_turns`, `timeout`, `stalled`,
   `context_exhausted`, `model_error`, `interrupted`, `budget_exceeded`,
   `sandbox_error`, `export_failed`); the worktree and branch are kept for
   salvage/review. `main` catches every `Exception` the run raises (not
@@ -452,7 +451,7 @@ host-disk-floor breach, `"sandbox_error"` for the watchdog's own
 worktree-sampling exec failing twice; otherwise `null`), and
 `finalize_error` (set when the finalize/export step itself raised an
 exception after the agent loop otherwise finished; `null` normally)).
-The model ends a run by calling the `finish(summary=...)` tool (a plain reply with no tool call also ends it); an empty, think-only, or truncated reply, or a tool call written as text, is sent back with a one-line nudge instead of being treated as completion.
+A `finish(summary=...)` call appears in the transcript as an ordinary tool call in its `assistant` event followed by a `tool_result` event whose `result` is `run finished`; the summary becomes the run's `final_message`.
 
 The docker settings dict (`run_start`'s `sandbox`, and the same fields in
 `run.json`) includes `image` (the `--image` argument as given),
@@ -463,7 +462,7 @@ locally-built image that was never pushed/pulled) — provenance only — and
 custom `--image` — never pinned — or a locally built/loaded default image,
 which only warns). `run.json` also records the run's key fields: `task`,
 `model`, `context_window`, `resumed_from`, and `turns` (at the end); when a
-run is resumed, its `resumed_by` field records the slug of the resumed run.
+run is resumed, the earlier run's `resumed_by` field records the slug of the new run that continued it.
 The container itself always runs from the image's local
 content-addressed Id, never a registry digest, so a run can never trigger a
 network pull.
