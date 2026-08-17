@@ -95,7 +95,7 @@ def _docker_preflight(repo: Path, image: str) -> tuple[str, str | None, bool]:
     except DockerError as e:
         e.preflight_step = "daemon"
         raise
-    pinned_digest = docker_args.PINNED_DIGEST if image == docker_args.DEFAULT_IMAGE else None
+    pinned_digest = docker_args.pin_for(image)
     try:
         image_ref = resolve_image(image, pinned_digest=pinned_digest)
         image_digest = docker_cli.image_repo_digest(image, run=docker_cli.run)

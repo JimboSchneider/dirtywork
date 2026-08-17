@@ -53,6 +53,13 @@ def volume_name(slug: str) -> str:
     return f"dw-{slug}-work"
 
 
+def pin_for(image: str) -> str | None:
+    """Return the digest pin if resolving the default image, else None.
+    The pin applies only to the maintained default image; a custom image is
+    never pinned. Single source of truth for the preflight rule."""
+    return PINNED_DIGEST if image == DEFAULT_IMAGE else None
+
+
 def repo_label(repo: Path) -> str:
     """sha256 hex of the resolved repo path — the dirtywork.repo label value,
     used by `runs clean`'s collision rule to confirm a container/volume

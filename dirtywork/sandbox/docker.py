@@ -144,8 +144,9 @@ class DockerSandbox:
         except WorkspaceError as e:
             raise SandboxError(str(e)) from e
         if self.image_ref is None:
+            # Preflight rule: the pin applies only when self.cfg.image == docker_args.DEFAULT_IMAGE; a custom image is never pinned.
             self.image_ref = docker_cli.resolve_image(
-                self.cfg.image, run=self._run, pinned_digest=docker_args.PINNED_DIGEST)
+                self.cfg.image, run=self._run, pinned_digest=docker_args.pin_for(self.cfg.image))
         label = docker_args.repo_label(repo)
 
         create_vol = self._run(

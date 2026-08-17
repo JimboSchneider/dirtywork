@@ -145,6 +145,41 @@ def test_start_resolves_image_when_no_image_ref_given(docker, tmp_path):
     assert any(c[0][:2] == ["image", "inspect"] for c in fake.calls)
 
 
+def test_start_custom_image_resolves_without_pinning(tmp_path):
+    # When cfg.image != DEFAULT_IMAGE, start() resolves it without checking
+    # the digest pin. To verify: configure the fake to return a RepoDigests
+    # value that would NOT match PINNED_DIGEST; start() must succeed,
+    # proving the pin was never checked.
+    from dirtywork.sandbox.docker_args import DEFAULT_IMAGE
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"b" * 64))
+    # Return a RepoDigests value that would NOT match PINNED_DIGEST
+    fake.script(["image", "inspect", "--format", "{{json .RepoDigests}}"],
+                _ok(b'["custom/img:1@sha256:' + b"c" * 64 + b'"]'))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())   # prep container
+    fake.script(["create"], _ok())  # worker create
+    fake.script(["exec"], _ok())  # ready-wait /bin/true and init
+    cfg = DockerConfig(image="custom/img:1")
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    sb = DockerSandbox(cfg, run_dir=run_dir, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    # This should succeed without raising SandboxError about a mismatched pin
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+
+    # Verify that image resolution occurred
+    assert any(c[0][:2] == ["image", "inspect"] for c in fake.calls)
+    # Verify that the custom image was used (not DEFAULT_IMAGE)
+    assert cfg.image != DEFAULT_IMAGE
+
+
 def test_start_refuses_on_container_collision(docker, tmp_path):
     sb, fake, run_dir = docker
     fake.script(["container", "inspect"], _ok())  # already exists
