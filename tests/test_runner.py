@@ -9,9 +9,12 @@ import pytest
 from dirtywork.llm import LLMTimeout
 from dirtywork.runner import (
     DEFAULT_WINDOW,
-    TRIM_MARKER,
+    FAILURE_KINDS,
+    FINISH_TOOL,
+    MAX_TOTAL_CONSECUTIVE_FAILURES,
     RunResult,
     Runner,
+    TRIM_MARKER,
     _valid_tool_call,
     trim_messages,
 )
@@ -635,3 +638,62 @@ def test_unknown_tool_error_mentions_finish(parts):
     transcript.close()
     tool_msgs = [m for m in client.requests[1] if m["role"] == "tool"]
     assert "finish(summary=...)" in tool_msgs[0]["content"]
+
+
+def test_failure_tracker_per_kind_threshold():
+    from dirtywork.runner import FailureTracker
+    t = FailureTracker()
+    assert t.record("unknown_tool") is None
+    assert t.record("malformed_args") is None
+    assert t.record("unknown_tool") is None
+    reason = t.record("unknown_tool")
+    assert reason == "aborted after 3 consecutive unknown_tool failures"
+
+
+def test_failure_tracker_total_threshold_across_kinds():
+    from dirtywork.runner import FailureTracker
+    t = FailureTracker()
+    seq = ["malformed_args", "unknown_tool", "bad_args", "malformed_args", "unknown_tool"]
+    for k in seq:
+        assert t.record(k) is None
+    assert t.record("bad_args") == f"aborted after {MAX_TOTAL_CONSECUTIVE_FAILURES} consecutive tool failures"
+
+
+def test_failure_tracker_reset_clears_all():
+    from dirtywork.runner import FailureTracker
+    t = FailureTracker()
+    t.record("unknown_tool"); t.record("unknown_tool")
+    t.reset()
+    assert t.record("unknown_tool") is None
+    assert t.record("unknown_tool") is None
+
+
+def test_failure_tracker_rejects_unknown_kind():
+    from dirtywork.runner import FailureTracker
+    with pytest.raises(ValueError):
+        FailureTracker().record("nope")
+
+
+def test_mixed_failure_kinds_do_not_abort_at_three(parts):
+    wt, executor, transcript, tmp = parts
+    bad_args = _resp(tool_calls=[{"id": "x", "type": "function",
+                                  "function": {"name": "read_file", "arguments": "{not json"}}])
+    unknown = _resp(tool_calls=[_call("u", "no_such_tool", {})])
+    wrong_type = _resp(tool_calls=[_call("t", "read_file", {})])   # missing required arg → TypeError → bad_args
+    client = FakeClient([bad_args, unknown, wrong_type, _resp(content="ok done")])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.turns == 4
+
+
+def test_abort_message_names_the_kind(parts):
+    wt, executor, transcript, tmp = parts
+    unknown = _resp(tool_calls=[_call("u", "no_such_tool", {})])
+    client = FakeClient([unknown, unknown, unknown])
+    r = Runner(client, executor, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+    assert result.final_message == "aborted after 3 consecutive unknown_tool failures"

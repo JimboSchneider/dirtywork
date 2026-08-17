@@ -22,6 +22,33 @@ CHARS_PER_TOKEN = 4
 BUDGET_FRACTION = 0.75
 MAX_CONSECUTIVE_FAILURES = 3
 FINISH_TOOL = "finish"
+FAILURE_KINDS = ("malformed_entry", "malformed_args", "unknown_tool", "bad_args", "empty_reply")
+MAX_TOTAL_CONSECUTIVE_FAILURES = 6
+
+
+class FailureTracker:
+    """Consecutive model failures, counted per kind and in total. Any
+    successful tool execution resets everything (spec §2)."""
+
+    def __init__(self):
+        self.counts = {kind: 0 for kind in FAILURE_KINDS}
+        self.total = 0
+
+    def record(self, kind: str) -> str | None:
+        if kind not in self.counts:
+            raise ValueError(f"unknown failure kind {kind!r}")
+        self.counts[kind] += 1
+        self.total += 1
+        if self.counts[kind] >= MAX_CONSECUTIVE_FAILURES:
+            return f"aborted after {MAX_CONSECUTIVE_FAILURES} consecutive {kind} failures"
+        if self.total >= MAX_TOTAL_CONSECUTIVE_FAILURES:
+            return f"aborted after {MAX_TOTAL_CONSECUTIVE_FAILURES} consecutive tool failures"
+        return None
+
+    def reset(self) -> None:
+        for kind in self.counts:
+            self.counts[kind] = 0
+        self.total = 0
 
 
 def _valid_tool_call(tc) -> bool:
@@ -107,7 +134,7 @@ class Runner:
                               schema_version=2, **(self.run_info or {}))
         usage = {"prompt_tokens": 0, "completion_tokens": 0}
         turns = 0
-        failures = 0
+        failures = FailureTracker()
         start = time.monotonic()
         deadline = start + self.timeout
         self.executor.deadline = deadline
@@ -197,13 +224,13 @@ class Runner:
                     messages.append(msg)
                     return finish("completed", msg.get("content") or "")
 
+                abort_reason = None
                 for _ in range(malformed_count):
-                    failures += 1
+                    abort_reason = failures.record("malformed_entry") or abort_reason
                     result = "ERROR: malformed tool call entry (missing or invalid id/function fields)"
                     self.transcript.write("tool_result", tool="", args="", result=result)
-                if malformed_count > 0 and failures >= MAX_CONSECUTIVE_FAILURES:
-                    return finish("model_error",
-                                  "aborted after repeated malformed tool calls")
+                if abort_reason is not None:
+                    return finish("model_error", abort_reason)
 
                 pending_finish = None
                 for tc in tool_calls:
@@ -211,6 +238,7 @@ class Runner:
                     name = fn_info.get("name") or ""
                     raw_args = fn_info.get("arguments") or "{}"
                     call_id = tc.get("id", "")
+                    abort_reason = None
                     try:
                         args = json.loads(raw_args)
                         if not isinstance(args, dict):
@@ -221,13 +249,13 @@ class Runner:
                             result = "run finished"
                         else:
                             result = self.executor.execute(name, args)
-                            failures = 0
+                            failures.reset()
                     except BudgetExceeded as e:
                         return finish("budget_exceeded", e.reason)
                     except SandboxError as e:
                         return finish("sandbox_error", str(e))
                     except (json.JSONDecodeError, ValueError) as e:
-                        failures += 1
+                        abort_reason = failures.record("malformed_args")
                         if finish_reason == "length":
                             result = (
                                 "ERROR: your reply was cut off at the token limit before "
@@ -238,21 +266,20 @@ class Runner:
                         else:
                             result = f"ERROR: malformed tool arguments: {e}"
                     except KeyError:
-                        failures += 1
+                        abort_reason = failures.record("unknown_tool")
                         available_tools = ', '.join(s['function']['name'] for s in TOOL_SCHEMAS)
                         result = (f"ERROR: unknown tool '{name}'. Available: {available_tools}. "
                                   f"To end the run call finish(summary=...).")
                     except TypeError as e:
-                        failures += 1
+                        abort_reason = failures.record("bad_args")
                         result = f"ERROR: bad arguments for {name}: {e}"
                     self.transcript.write("tool_result", tool=name,
                                           args=raw_args[:500],
                                           result=result[:2000])
                     messages.append({"role": "tool", "tool_call_id": call_id,
                                      "content": result})
-                    if failures >= MAX_CONSECUTIVE_FAILURES:
-                        return finish("model_error",
-                                      "aborted after repeated malformed tool calls")
+                    if abort_reason is not None:
+                        return finish("model_error", abort_reason)
 
                 if pending_finish is not None:
                     return finish("completed", pending_finish)
