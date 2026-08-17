@@ -1258,3 +1258,100 @@ def test_stdout_json_has_run_dir_and_base_commit(tmp_path, monkeypatch, capsys):
     # existing contract fields must still be present and unrenamed
     for key in ("status", "worktree", "branch", "transcript", "turns", "usage", "final_message"):
         assert key in payload
+
+
+def _host_repo(tmp_path):
+    import subprocess
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "--allow-empty", "-m", "i"], capture_output=True)
+    return repo
+
+
+class _ScriptedClient:
+    """LMStudioClient stand-in driven by a list of chat responses; the last
+    response repeats so a run can never underflow."""
+    instances = []
+
+    def __init__(self, base_url=None, responses=None):
+        self.responses = list(responses or [
+            {"choices": [{"message": {"role": "assistant", "content": "done"}}],
+             "usage": {"prompt_tokens": 1, "completion_tokens": 1}}])
+        _ScriptedClient.instances.append(self)
+
+    def list_models(self):
+        import dirtywork.__main__ as m
+        return [m.DEFAULT_MODEL, "other/model"]
+
+    def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+        if len(self.responses) > 1:
+            return self.responses.pop(0)
+        return self.responses[0]
+
+
+def _install_host_harness(monkeypatch, tmp_path, responses=None):
+    import dirtywork.__main__ as m
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(m, "LMStudioClient",
+                        lambda base_url=None: _ScriptedClient(base_url, responses))
+    return m
+
+
+def _read_only_run_json(tmp_path):
+    return json.loads(next((tmp_path / "runs").rglob("run.json")).read_text())
+
+
+def test_run_json_records_task_model_context_window_and_turns(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--context-window", "5000",
+                 "--stall-turns", "7", "some task"])
+    assert rc == 0
+    data = _read_only_run_json(tmp_path)
+    assert data["task"] == "some task"
+    assert data["model"] == m.DEFAULT_MODEL
+    assert data["context_window"] == 5000
+    assert data["turns"] == 1
+    assert data["resumed_from"] is None
+    start = next(e for e in (json.loads(l) for l in Path(
+        next((tmp_path / "runs").rglob("transcript.jsonl"))).read_text().splitlines())
+        if e["event"] == "run_start")
+    assert start["context_window"] == 5000 and start["resumed_from"] is None
+    out = json.loads(capsys.readouterr().out)
+    assert out["resumed_from"] is None
+
+
+def test_context_window_env_and_unknown_model_warning(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    monkeypatch.setenv("DIRTYWORK_CONTEXT_WINDOW", "4096")
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--model", "other/model", "t"])
+    assert rc == 0
+    assert _read_only_run_json(tmp_path)["context_window"] == 4096
+    assert "warning: no known context window" not in capsys.readouterr().err
+    monkeypatch.delenv("DIRTYWORK_CONTEXT_WINDOW")
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs2")
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--model", "other/model", "t"])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "warning: no known context window for 'other/model'; assuming 32768 tokens" in err
+
+
+def test_bad_context_window_env_exits_2(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    monkeypatch.setenv("DIRTYWORK_CONTEXT_WINDOW", "lots")
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "t"])
+    assert rc == 2
+    assert "DIRTYWORK_CONTEXT_WINDOW" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()
+
+
+def test_bad_stall_turns_flag_exits_2(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    with pytest.raises(SystemExit) as ei:
+        m.main(["run", "--repo", str(repo), "--sandbox", "none", "--stall-turns", "-1", "t"])
+    assert ei.value.code == 2
