@@ -1054,3 +1054,33 @@ def test_runner_exploring_new_files_is_not_a_stall(parts):
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed" and result.turns == 21
+
+
+def test_runner_argument_noise_does_not_count_as_progress(parts):
+    wt, executor, transcript, tmp = parts
+    # the same read spelled four ways: foo / ./foo / with an ignored key / with an explicit default
+    variants = [
+        _call("c1", "read_file", {"path": "f.txt"}),
+        _call("c2", "read_file", {"path": "./f.txt"}),
+        _call("c3", "read_file", {"path": "f.txt", "description": "look again"}),
+        _call("c4", "read_file", {"path": "f.txt", "offset": 0, "limit": 400}),
+        _call("c5", "read_file", {"path": "f.txt/"}),
+    ]
+    client = FakeClient([_resp(tool_calls=[v]) for v in variants] + [_resp(content="done")])
+    r = Runner(client, executor, transcript, model="m", stall_turns=4)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "stalled"          # 1 progress + 4 idle repeats
+    assert result.turns == 5
+
+
+def test_canonical_args_normalizes_effective_arguments(parts):
+    wt, executor, transcript, tmp = parts
+    a = executor.canonical_args("read_file", {"path": "./f.txt", "description": "x"})
+    b = executor.canonical_args("read_file", {"path": "f.txt", "offset": 0, "limit": 400})
+    assert a == b == {"path": "f.txt", "offset": 0, "limit": 400}
+    assert executor.canonical_args("bash", {"command": " ls \n", "timeout": 5}) == {"command": "ls"}
+    assert executor.canonical_args("bash", {"command": "ls"}) == {"command": "ls"}
+    assert executor.canonical_args("list_dir", {}) == {"path": "."}
+    assert executor.canonical_args("no_such_tool", {"x": 1}) == {"x": 1}
+    assert executor.canonical_args("read_file", "not a dict") == {}

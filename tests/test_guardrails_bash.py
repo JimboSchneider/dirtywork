@@ -124,50 +124,73 @@ def test_build_env_relocates_home(tmp_path, monkeypatch):
         assert key in ("PATH", "HOME", "TERM", "LANG", "TMPDIR", "PYTHONPATH")
 
 
-def test_build_env_exposes_operator_user_site_read_only(tmp_path, monkeypatch):
-    import site
+def _fake_worker_python(monkeypatch, tmp_path, user_site, rc=0):
+    """Pretend PATH resolves python3 to a fake interpreter whose user site is `user_site`."""
+    import subprocess
+    import types
+    import dirtywork.guardrails as g
+    monkeypatch.setattr(g, "_USER_SITE_CACHE", {})
+    monkeypatch.setattr(g.shutil, "which", lambda name, path=None: "/fake/bin/python3" if name == "python3" else None)
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return types.SimpleNamespace(returncode=rc, stdout=str(user_site) + "\n", stderr="")
+
+    monkeypatch.setattr(g.subprocess, "run", fake_run)
+    monkeypatch.delenv("PYTHONNOUSERSITE", raising=False)
+    return calls
+
+
+def test_build_env_exposes_worker_python_user_site(tmp_path, monkeypatch):
     user_site = tmp_path / "usersite"
     user_site.mkdir()
-    monkeypatch.setattr(site, "getusersitepackages", lambda: str(user_site))
+    calls = _fake_worker_python(monkeypatch, tmp_path, user_site)
     monkeypatch.setenv("PYTHONPATH", "/operator/secret/path")
-    monkeypatch.delenv("PYTHONNOUSERSITE", raising=False)
     home = tmp_path / "wt"
     home.mkdir()
     env = build_env(home=home)
     assert env["PYTHONPATH"] == str(user_site)
-    assert env["HOME"] == str(home)          # pip --user would still write into the worktree
+    assert env["HOME"] == str(home)                     # pip --user would still write into the worktree
+    assert calls and calls[0][0] == "/fake/bin/python3"  # the WORKER's interpreter was asked, not sys.executable
+    build_env(home=home)
+    assert len(calls) == 1                              # cached per interpreter
 
 
-def test_build_env_user_site_survives_venv_isolation(tmp_path, monkeypatch):
-    # Regression (0.5.0 review P1): inside a virtualenv (pipx!) site.ENABLE_USER_SITE
-    # is False, but the operator's user site must still be exposed.
-    import site
+def test_build_env_no_pythonpath_when_opted_out_missing_or_failed(tmp_path, monkeypatch):
+    import dirtywork.guardrails as g
     user_site = tmp_path / "usersite"
     user_site.mkdir()
-    monkeypatch.setattr(site, "ENABLE_USER_SITE", False)
-    monkeypatch.setattr(site, "getusersitepackages", lambda: str(user_site))
-    monkeypatch.delenv("PYTHONNOUSERSITE", raising=False)
-    env = build_env(home=tmp_path)
-    assert env["PYTHONPATH"] == str(user_site)
-
-
-def test_build_env_no_pythonpath_on_explicit_opt_out_or_missing_dir(tmp_path, monkeypatch):
-    import site
-    import sys
-    import types
-    user_site = tmp_path / "usersite"
-    user_site.mkdir()
-    monkeypatch.setattr(site, "getusersitepackages", lambda: str(user_site))
+    _fake_worker_python(monkeypatch, tmp_path, user_site)
     monkeypatch.setenv("PYTHONNOUSERSITE", "1")
     assert "PYTHONPATH" not in build_env(home=tmp_path)
     monkeypatch.delenv("PYTHONNOUSERSITE")
-    fake_flags = types.SimpleNamespace(**{**{k: getattr(sys.flags, k) for k in dir(sys.flags) if not k.startswith("_") and not callable(getattr(sys.flags, k))}, "no_user_site": 1})
-    monkeypatch.setattr(sys, "flags", fake_flags)
+    _fake_worker_python(monkeypatch, tmp_path, tmp_path / "does-not-exist")
     assert "PYTHONPATH" not in build_env(home=tmp_path)
-    monkeypatch.undo()
-    monkeypatch.setattr(site, "getusersitepackages", lambda: str(tmp_path / "does-not-exist"))
+    _fake_worker_python(monkeypatch, tmp_path, user_site, rc=1)
+    assert "PYTHONPATH" not in build_env(home=tmp_path)
+    monkeypatch.setattr(g, "_USER_SITE_CACHE", {})
+    monkeypatch.setattr(g.shutil, "which", lambda name, path=None: None)
+    assert "PYTHONPATH" not in build_env(home=tmp_path)
+
+
+def test_build_env_user_site_matches_real_python3(tmp_path, monkeypatch):
+    # No fakes: whatever python3 is on PATH must be the one whose user site lands on PYTHONPATH.
+    import shutil
+    import subprocess
+    import dirtywork.guardrails as g
+    monkeypatch.setattr(g, "_USER_SITE_CACHE", {})
     monkeypatch.delenv("PYTHONNOUSERSITE", raising=False)
-    assert "PYTHONPATH" not in build_env(home=tmp_path)
+    python3 = shutil.which("python3")
+    if python3 is None:
+        pytest.skip("no python3 on PATH")
+    expected = subprocess.run([python3, "-c", "import site; print(site.getusersitepackages())"],
+                              capture_output=True, text=True).stdout.strip()
+    env = build_env(home=tmp_path)
+    if os.path.isdir(expected):
+        assert env["PYTHONPATH"] == expected
+    else:
+        assert "PYTHONPATH" not in env
 
 
 def test_bash_home_is_worktree_not_operator_home(tmp_path):

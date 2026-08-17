@@ -474,7 +474,7 @@ class Runner:
                     except TypeError as e:
                         abort_reason = failures.record("bad_args")
                         result = f"ERROR: bad arguments for {name}: {e}"
-                    progress.note_call(name, args if isinstance(args, dict) else {}, result)
+                    progress.note_call(name, self.executor.canonical_args(name, args), result)
                     self.transcript.write("tool_result", tool=name,
                                           args=raw_args[:500],
                                           result=result[:2000])

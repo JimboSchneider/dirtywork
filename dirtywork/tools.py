@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import errno
+import inspect
 import os
+import posixpath
 import shutil
 import stat
 import subprocess
@@ -382,6 +384,34 @@ class ToolExecutor:
             "grep": sandbox.grep,
             "bash": sandbox.bash,
         }
+
+    def canonical_args(self, name: str, args: dict) -> dict:
+        """The call's *effective* arguments, for the runner's stall detector:
+        unknown keys dropped (execute() ignores them), defaults filled in from
+        the tool's signature, `timeout` dropped (execute() clamps it per call
+        anyway), path-like strings normalized (`foo` == `./foo` == `foo/`),
+        and `command` stripped. Two calls that do the same thing must look the
+        same, or a stuck model could dodge `stalled` by varying noise."""
+        if not isinstance(args, dict):
+            return {}
+        fn = self._table.get(name)
+        if fn is None:
+            return dict(args)
+        allowed = _TOOL_PARAMS.get(name, set())
+        out = {}
+        for pname, param in inspect.signature(fn).parameters.items():
+            if pname == "timeout":
+                continue
+            if pname in args and pname in allowed:
+                out[pname] = args[pname]
+            elif param.default is not inspect.Parameter.empty:
+                out[pname] = param.default
+        if isinstance(out.get("path"), str):
+            stripped = out["path"].strip()
+            out["path"] = posixpath.normpath(stripped) if stripped else "."
+        if isinstance(out.get("command"), str):
+            out["command"] = out["command"].strip()
+        return out
 
     def execute(self, name: str, args: dict) -> str:
         fn = self._table[name]  # KeyError → runner counts a model failure
