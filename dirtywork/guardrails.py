@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 import re
-import site
+import shutil
+import subprocess
 from pathlib import Path
 
 
@@ -193,10 +194,11 @@ def build_env(home: str | Path) -> dict:
     path (``~/.ssh``, ``~/.aws``, ``~/.netrc``). Build caches that key on ``$HOME``
     land in the worktree as a result, which is the intended, more-hermetic trade.
 
-    The operator's Python user site-packages (``pip install --user`` — where
-    pytest usually lives) is put on PYTHONPATH so it stays importable under the
-    redirected HOME; writes still go to the worktree because ``pip --user`` keys
-    on HOME, not PYTHONPATH.
+    The per-user site-packages of the worker's own ``python3`` (``pip install
+    --user`` — where pytest usually lives), as computed by that interpreter
+    under the operator's HOME, is put on PYTHONPATH so it stays importable
+    under the redirected HOME; writes still go to the worktree because ``pip
+    --user`` keys on HOME, not PYTHONPATH.
 
     This is NOT a sandbox: bash is a general shell and can still reference absolute
     host paths (``cat /etc/...``). See SECURITY.md for the real containment story.
@@ -204,18 +206,38 @@ def build_env(home: str | Path) -> dict:
     keep = ("PATH", "TERM", "LANG", "TMPDIR")
     env = {k: os.environ[k] for k in keep if k in os.environ}
     env["HOME"] = str(home)
-    user_site = _operator_user_site()
+    user_site = _operator_user_site(env.get("PATH"))
     if user_site is not None:
         env["PYTHONPATH"] = user_site
     return env
 
 
-def _operator_user_site() -> str | None:
-    """The operator's per-user site-packages directory, or None when user
-    site is disabled for this interpreter (e.g. -s / PYTHONNOUSERSITE)."""
-    if not site.ENABLE_USER_SITE:
+_USER_SITE_CACHE: dict = {}
+
+
+def _operator_user_site(path_env: str | None) -> str | None:
+    """The per-user site-packages directory of the WORKER's interpreter — the
+    `python3` that `path_env` (the PATH the worker's bash inherits) resolves —
+    computed by that interpreter itself under the operator's HOME, so it is
+    the directory it will actually import from (dirtywork itself may run
+    under a different Python, e.g. pipx's). None when the operator opted out
+    (PYTHONNOUSERSITE), python3 is not on PATH, the query fails, or the
+    directory does not exist. Cached per interpreter path for the process."""
+    if os.environ.get("PYTHONNOUSERSITE"):
         return None
+    python3 = shutil.which("python3", path=path_env)
+    if python3 is None:
+        return None
+    if python3 in _USER_SITE_CACHE:
+        return _USER_SITE_CACHE[python3]
     try:
-        return site.getusersitepackages()
-    except Exception:  # pragma: no cover - platform oddities; never block a run on this
-        return None
+        proc = subprocess.run(
+            [python3, "-c", "import site; print(site.getusersitepackages())"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        found = proc.stdout.strip() if proc.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        found = ""
+    result = found if found and os.path.isdir(found) else None
+    _USER_SITE_CACHE[python3] = result
+    return result

@@ -7,13 +7,12 @@ from pathlib import Path
 
 DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.5"
 # The multi-arch index digest of ghcr.io/jimboschneider/dirtywork-worker:0.5
-# as published by the release workflow. UNSET for 0.5.0: the :0.5 image is
-# first pushed by the v0.5.0 release itself, so its digest cannot be known
-# before that release ships; 0.5.1 re-pins it (verify via `docker pull
-# ghcr.io/jimboschneider/dirtywork-worker:0.5` followed by `docker image
-# inspect --format '{{json .RepoDigests}}'
-# ghcr.io/jimboschneider/dirtywork-worker:0.5`, or read publish-image.yml's
-# job summary for the release, or `docker buildx imagetools inspect
+# as published by release v0.5.0 (publish-image.yml run 32064861570) --
+# verified via `docker pull ghcr.io/jimboschneider/dirtywork-worker:0.5`
+# followed by `docker image inspect --format '{{json .RepoDigests}}'
+# ghcr.io/jimboschneider/dirtywork-worker:0.5`, and independently via an
+# anonymous registry manifest fetch (Docker-Content-Digest), which recorded
+# exactly this digest (equivalently `docker buildx imagetools inspect
 # ghcr.io/jimboschneider/dirtywork-worker:0.5`). This only pins a REGISTRY
 # digest -- resolve_image() enforces it against a *pulled* DEFAULT_IMAGE
 # only; a locally built/loaded image warns instead of refusing (see
@@ -23,7 +22,7 @@ DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.5"
 # rebuild/republish) -- otherwise resolve_image() refuses every pulled
 # default image with the now-stale pin. (0.4.x pinned :0.4 at
 # sha256:e312a5d88bd8d4e880a39e8f9555e0275b5ddc0181e17b9c6df0ea3b661580a1.)
-PINNED_DIGEST: str | None = None
+PINNED_DIGEST: str | None = "sha256:3b8d019a2f20a9df55a72ed51139076f02f2feb597243a69519bc41db1029648"
 # Always passed explicitly on every docker create/run/exec so an image's own
 # ENTRYPOINT/CMD/ENV can never substitute a different PATH for the tether,
 # chown, or an export step (spec §3 "Entrypoint and PATH are always explicit").

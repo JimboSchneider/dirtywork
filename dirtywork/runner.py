@@ -121,26 +121,39 @@ STALL_NUDGE = ("No progress in the last {n} turns: no file changed and no comman
                "new output. If the task is complete, commit (if asked) and call "
                "finish(summary=...); otherwise change your approach.")
 _MUTATING_TOOLS = ("write_file", "edit_file")
-_DIGITS_RE = re.compile(r"\d+")
+# Tokens that change between otherwise-identical runs of the same command:
+# durations ("in 24.51s", "0.39s", "12 ms"), clock times / ISO timestamps,
+# and long hex ids (git shas, container ids — at least one a-f letter, so a
+# plain 7+ digit number such as a byte count is NOT normalized). Only these
+# are normalized away — a counter, a line number, or a test count that
+# changes IS progress and must stay visible to the stall detector.
+_VOLATILE_RE = re.compile(
+    r"\d+(?:\.\d+)?\s?(?:ms|s|secs?|seconds?|min|mins?|minutes?|h|hours?)\b"
+    r"|\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?"
+    r"|\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?"
+    r"|\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,64}\b"
+)
 
 
 def _bash_fingerprint(command, result: str) -> str:
     """Identity of a bash call for progress purposes. The first result line
     ('exit code: N') is kept verbatim — a changed exit status is real news —
-    but digits are stripped from the rest, so re-running the same command
-    whose output differs only in timings/counters ('5 passed in 24.51s' vs
-    '5 passed in 25.02s') is not progress. Words still count: '1 failed' →
-    'passed' is a different fingerprint."""
+    but volatile tokens (durations, clock times, timestamps, long ids) are stripped from the rest,
+    so re-running the same command whose output differs only in timing
+    ('5 passed in 24.51s' vs '5 passed in 25.02s') is not progress.
+    Any other change — a count, a counter, a line number, a new word — still is."""
     head, sep, body = result.partition("\n")
-    normalized = head + sep + _DIGITS_RE.sub("", body)
+    normalized = head + sep + _VOLATILE_RE.sub("", body)
     return hashlib.sha256((str(command) + "\0" + normalized).encode("utf-8", "replace")).hexdigest()
 
 
 class ProgressTracker:
-    """Spec §3: a turn made progress if a write/edit succeeded or a bash call
-    produced a (command, output) pair not seen before in this run. Nudge once
-    per idle streak at stall_turns // 2; report 'stalled' at stall_turns.
-    stall_turns <= 0 disables detection."""
+    """Spec §3: a turn made progress if any tool call was new to this run
+    (first time this exact tool + arguments — a file not read before, a new
+    grep, a new command), a write/edit succeeded, or a bash call produced
+    output not seen before (volatile tokens ignored). Only repeats are idle.
+    Nudge once per idle streak at stall_turns // 2; report 'stalled' at
+    stall_turns. stall_turns <= 0 disables detection."""
 
     def __init__(self, stall_turns: int):
         self.stall_turns = stall_turns
@@ -148,13 +161,19 @@ class ProgressTracker:
         self._progressed = False
         self._nudged = False
         self._seen_bash = set()
+        self._seen_calls = set()
 
     def note_call(self, name: str, args, result: str) -> None:
         if not isinstance(result, str) or result.startswith("ERROR"):
             return
         if name in _MUTATING_TOOLS:
+            self._progressed = True          # a successful write/edit is always progress
+            return
+        call_key = name + "\0" + (json.dumps(args, sort_keys=True, default=str) if isinstance(args, dict) else "")
+        if call_key not in self._seen_calls:
+            self._seen_calls.add(call_key)   # first time this exact call happened: new ground
             self._progressed = True
-        elif name == "bash":
+        if name == "bash":
             command = args.get("command") if isinstance(args, dict) else None
             key = _bash_fingerprint(command, result)
             if key not in self._seen_bash:
@@ -455,7 +474,7 @@ class Runner:
                     except TypeError as e:
                         abort_reason = failures.record("bad_args")
                         result = f"ERROR: bad arguments for {name}: {e}"
-                    progress.note_call(name, args if isinstance(args, dict) else {}, result)
+                    progress.note_call(name, self.executor.canonical_args(name, args), result)
                     self.transcript.write("tool_result", tool=name,
                                           args=raw_args[:500],
                                           result=result[:2000])
