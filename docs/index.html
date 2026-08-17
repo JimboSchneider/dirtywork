@@ -235,7 +235,7 @@
 
 <div class="wrap">
 <header>
-  <p class="eyebrow">dirtywork.run · <span class="beta">v0.4 beta</span> · MIT</p>
+  <p class="eyebrow">dirtywork.run · <span class="beta">v0.5 beta</span> · MIT</p>
   <h1>dirtywork<span class="dot">.</span></h1>
   <p class="tagline">
     <span class="think">Frontier models do the thinking.</span>
@@ -256,7 +256,9 @@ free on your own machine, and <strong>nothing merges without review</strong>.</p
 <pre><span class="who fr">1 · you/ai</span> <span class="dim">$</span> dirtywork run --repo ~/code/app <span class="dim">"Add unit tests for parser.ts"</span>
 <span class="who lo">2 · local</span> explores the repo, edits, runs the tests — inside a
 <span class="who lo"></span> locked-down Docker container over an isolated worktree <span class="dim">(.worktrees/dw-…)</span>,
-<span class="who lo"></span> validated export, full JSONL transcript, no auto-commit — for $0
+<span class="who lo"></span> validated export, full JSONL transcript, no auto-commit — for $0;
+<span class="who lo"></span> ends the run with <span class="dim">finish(summary=…)</span>, is stopped when it stalls, and any run
+<span class="who lo"></span> can be picked up again with <span class="dim">dirtywork resume</span>
 <span class="who fr">3 · you/ai</span> audit the transcript, review the diff, re-run the gates,
 <span class="who fr"></span> commit only what survives</pre>
   </div>
@@ -265,7 +267,7 @@ free on your own machine, and <strong>nothing merges without review</strong>.</p
 </section>
 
 <div class="beta-strip">
-  <strong>0.4 is a beta.</strong> It works on my setup — LM&nbsp;Studio serving
+  <strong>0.5 is a beta.</strong> It works on my setup — LM&nbsp;Studio serving
   qwen3-coder or Devstral Small, driven by Claude Code as the orchestrator — and it is
   young everywhere else. Flags and output may shift. If it breaks on yours,
   <a href="https://github.com/JimboSchneider/dirtywork/issues">tell me what happened</a>.
