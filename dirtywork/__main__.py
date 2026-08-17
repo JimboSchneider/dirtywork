@@ -21,8 +21,10 @@ from .sandbox.docker_cli import DockerError, docker_version, resolve_image, vali
 from .sandbox.host import HostSandbox
 from .tools import ToolExecutor
 from .transcript import Transcript
+from .resume import ResumeError, build_resume_task, check_resumable, load_prior_run, render_transcript_tail, resolve_run_dir
 from .workspace import (
     WorkspaceError,
+    commit_exists,
     create_worktree,
     ensure_worktrees_excluded,
     load_repo_context,
@@ -241,7 +243,7 @@ def _build_sandbox(args, ctx: RunContext, *, run_dir: Path, transcript):
         )
         sandbox = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, image_ref=ctx.image_ref)
         try:
-            sandbox.start(ctx.worktree, ctx.repo, ctx.slug, ctx.base_commit)
+            sandbox.start(ctx.worktree, ctx.repo, ctx.slug, ctx.base_commit, branch=ctx.branch, seed_from_worktree=ctx.seed_from_worktree)
         except Exception:
             try:
                 sandbox.stop()
@@ -261,7 +263,7 @@ def _build_sandbox(args, ctx: RunContext, *, run_dir: Path, transcript):
     else:
         sandbox = HostSandbox(ctx.worktree, max_worktree_mb=args.max_worktree_mb,
                                max_worktree_files=args.max_worktree_files)
-        sandbox.start(ctx.worktree, ctx.repo, ctx.slug, ctx.base_commit)
+        sandbox.start(ctx.worktree, ctx.repo, ctx.slug, ctx.base_commit, branch=ctx.branch, seed_from_worktree=ctx.seed_from_worktree)
         sandbox_info = "none"
     return sandbox, sandbox_info
 
@@ -438,31 +440,47 @@ def _fail_run(e: Exception, ctx: RunContext, *, sandbox, sandbox_started: bool, 
     return 1
 
 
-def _parse_args(argv):
-    parser = argparse.ArgumentParser(prog="dirtywork")
-    sub = parser.add_subparsers(dest="cmd", required=True)
-    run_p = sub.add_parser("run", help="run one task in an isolated worktree")
-    run_p.add_argument("task")
-    run_p.add_argument("--repo", required=True, type=Path)
-    run_p.add_argument("--model", default=DEFAULT_MODEL)
-    run_p.add_argument("--branch-from", default=None)
-    run_p.add_argument("--max-turns", type=int, default=40)
-    run_p.add_argument("--timeout", type=int, default=1800)
-    run_p.add_argument("--temperature", type=float, default=None)
-    run_p.add_argument("--base-url", default="http://localhost:1234/v1")
-    run_p.add_argument("--max-worktree-mb", type=int, default=DEFAULT_MAX_WORKTREE_MB)
-    run_p.add_argument("--max-worktree-files", type=int, default=DEFAULT_MAX_WORKTREE_FILES)
-    run_p.add_argument("--sandbox", choices=["docker", "none"], default="docker")
-    run_p.add_argument("--image", default=DEFAULT_IMAGE)
-    run_p.add_argument("--allow-network", action="store_true", default=False)
-    run_p.add_argument("--memory", default="4g")
-    run_p.add_argument("--cpus", default="2")
-    run_p.add_argument("--tmp-size", default="1g")
-    run_p.add_argument("--gitdir-size", default="512m")
-    run_p.add_argument("--min-free-mb", type=int, default=2048)
-    run_p.add_argument("--keep-volume", action="store_true", default=False)
-    run_p.add_argument("--max-patch-mb", type=int, default=10)
-    return parser.parse_args(argv)
+def _load_resume_target(args) -> dict:
+    """Spec §5 lookup + refusals; also applies the prior run's defaults to
+    args (sandbox mode always; model/image unless given on the command line)."""
+    run_dir = resolve_run_dir(args.run, RUNS_DIR)
+    try:
+        prior = load_prior_run(run_dir)
+        check_resumable(prior)
+    except ResumeError as e:
+        raise PreflightFailure(str(e))
+    prior["run_dir"] = str(run_dir)
+    args.sandbox = prior["sandbox"]
+    if args.model is None:
+        args.model = prior["model"]
+    if args.image is None:
+        args.image = prior.get("image") or DEFAULT_IMAGE
+    return prior
+
+
+def _workspace_resume(args, prior: dict, context_window: int) -> RunContext:
+    repo = Path(prior["repo"]).expanduser().resolve()
+    if not commit_exists(repo, prior["base_commit"]):
+        raise PreflightFailure(f"base commit {prior['base_commit']} no longer exists in {repo}")
+    image_ref, image_digest, image_pinned = None, None, False
+    if args.sandbox == "docker":
+        image_ref, image_digest, image_pinned = _docker_preflight_or_fail(repo, args.image)
+    slug = make_slug(prior["task"], datetime.now())
+    if args.sandbox == "docker":
+        try:
+            DockerSandbox.check_name_collision(docker_cli.run, slug)
+        except SandboxError as e:
+            raise PreflightFailure(str(e))
+    tail = render_transcript_tail(Path(prior["run_dir"]) / "transcript.jsonl")
+    task = build_resume_task(prior["task"], prior["status"], prior.get("turns"), tail)
+    return RunContext(
+        repo=repo, slug=slug, branch=prior["branch"], worktree=Path(prior["worktree"]),
+        base_commit=prior["base_commit"], task=task, sandbox_mode=args.sandbox,
+        image_ref=image_ref, image_digest=image_digest, image_pinned=image_pinned,
+        context_window=context_window, resumed_from=prior["slug"],
+        prior_run_dir=Path(prior["run_dir"]), seed_from_worktree=(args.sandbox == "docker"),
+        owns_worktree=False,
+    )
 
 
 def _execute(ctx: RunContext, args, client) -> int:
@@ -608,17 +626,23 @@ def _parse_args(argv):
     run_p.add_argument("--branch-from", default=None)
     run_p.add_argument("--sandbox", choices=["docker", "none"], default="docker")
     _add_run_flags(run_p, resume=False)
+    resume_p = sub.add_parser("resume", help="continue an earlier run on its worktree")
+    resume_p.add_argument("run", help="run slug (under ~/.dirtywork/runs) or a run directory path")
+    _add_run_flags(resume_p, resume=True)
     return parser.parse_args(argv)
 
 
 def main(argv: list | None = None) -> int:
     args = _parse_args(argv)
     try:
-        repo = args.repo.expanduser().resolve()
+        prior = _load_resume_target(args) if args.cmd == "resume" else None
+        repo = Path(prior["repo"]) if prior else args.repo
+        repo = repo.expanduser().resolve()
         preflight_repo(repo)
         client = _preflight_llm(args)
         context_window = _resolve_context_window(args)
-        ctx = _workspace_new(args, repo, context_window)
+        ctx = (_workspace_resume(args, prior, context_window) if prior
+               else _workspace_new(args, repo, context_window))
     except (PreflightFailure, WorkspaceError) as e:
         _err(str(e))
         return 2
