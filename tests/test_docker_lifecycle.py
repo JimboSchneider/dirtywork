@@ -65,7 +65,10 @@ def _spawn_env(tmp_home: Path) -> dict:
     subprocess picks) is isolated per test — no CLI flag exists for the
     runs directory, but dirtywork.rundir.RUNS_DIR is Path.home()-derived,
     which $HOME fully controls."""
-    env = {k: v for k, v in os.environ.items() if k in ("PATH", "TERM", "LANG")}
+    # LD_LIBRARY_PATH/DYLD_LIBRARY_PATH: setup-python's Linux interpreter is a
+    # shared-lib build that cannot start without them (CI); harmless elsewhere.
+    keep = ("PATH", "TERM", "LANG", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "PYTHONPATH")
+    env = {k: v for k, v in os.environ.items() if k in keep}
     env["HOME"] = str(tmp_home)
     return env
 
@@ -79,7 +82,7 @@ def _dirtywork_argv(repo: Path, base_url: str, task: str = "do the task", extra=
     return argv
 
 
-def _wait_for_slug(tmp_home: Path, timeout: float) -> str:
+def _wait_for_slug(tmp_home: Path, timeout: float, proc=None) -> str:
     runs_root = tmp_home / ".dirtywork" / "runs"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -87,8 +90,14 @@ def _wait_for_slug(tmp_home: Path, timeout: float) -> str:
             entries = [p for p in runs_root.iterdir() if p.is_dir()]
             if entries:
                 return entries[0].name
+        if proc is not None and proc.poll() is not None:
+            break  # the subprocess already exited — no point waiting
         time.sleep(0.2)
-    raise TimeoutError("dirtywork subprocess never created a run directory")
+    detail = ""
+    if proc is not None and proc.poll() is not None:
+        err = proc.stderr.read().decode("utf-8", "replace")[-2000:] if proc.stderr else ""
+        detail = f" (subprocess exited {proc.returncode}; stderr tail: {err!r})"
+    raise TimeoutError("dirtywork subprocess never created a run directory" + detail)
 
 
 def _docker_ps_a(label_filter: str) -> str:
@@ -138,7 +147,7 @@ def test_docker_lifecycle_sigkill_leaves_container_gone_volume_recoverable(tmp_p
         proc = subprocess.Popen(_dirtywork_argv(repo, base_url), env=_spawn_env(tmp_home),
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
-            slug = _wait_for_slug(tmp_home, timeout=60)
+            slug = _wait_for_slug(tmp_home, timeout=60, proc=proc)
             _wait_for_container(slug, timeout=60)
 
             proc.kill()  # SIGKILL the whole dirtywork process
@@ -239,7 +248,7 @@ def test_docker_lifecycle_container_killed_during_exec_run_continues_after_reset
     try:
         proc = subprocess.Popen(_dirtywork_argv(repo, base_url), env=_spawn_env(tmp_home),
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        slug = _wait_for_slug(tmp_home, timeout=60)
+        slug = _wait_for_slug(tmp_home, timeout=60, proc=proc)
         _wait_for_container(slug, timeout=60)
         time.sleep(2)  # let the "sleep 20" bash exec actually start inside the container
         subprocess.run(["docker", "kill", f"dw-{slug}"], capture_output=True)
