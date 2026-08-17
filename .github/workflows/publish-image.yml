@@ -11,9 +11,20 @@ name: Publish worker image to GHCR
 # https://github.com/users/jimboschneider/packages/container/dirtywork-worker/settings
 # and set visibility to Public, or `docker pull` will 401 for anyone
 # without access to this repo (including CI runs and end users).
+#
+# WHEN it publishes: only on x.y.0 releases (a new minor), or when run by hand.
+# The :x.y tag is what DEFAULT_IMAGE points at and PINNED_DIGEST pins; if
+# every patch release rebuilt and re-pushed it, base-layer drift would change
+# the digest under an already-shipped pin. A Dockerfile fix inside a minor is
+# published deliberately via workflow_dispatch and followed by a re-pin.
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build/publish for (e.g. v0.4.1) — re-pin PINNED_DIGEST afterwards"
+        required: true
 
 permissions:
   contents: read
@@ -22,16 +33,21 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # A prerelease (e.g. v0.4.1-rc1) derives the same :0.4 minor tag as its
-    # eventual stable release and must not overwrite that moving tag early.
-    if: ${{ !github.event.release.prerelease }}
+    # Manual runs always publish. Release runs publish only for x.y.0 tags:
+    # patch releases must not rebuild the :x.y moving tag (see header), and a
+    # prerelease (v0.4.1-rc1) must not overwrite it early either.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'release' &&
+       !github.event.release.prerelease &&
+       endsWith(github.event.release.tag_name, '.0'))
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Derive image tags from the release tag
         id: version
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
         run: |
           full="${TAG#v}"      # v0.4.0 -> 0.4.0
           minor="${full%.*}"   # 0.4.0  -> 0.4

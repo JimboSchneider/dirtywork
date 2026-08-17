@@ -22,8 +22,13 @@ passes its own explicit `--entrypoint` or absolute binary path.
 
 `.github/workflows/publish-image.yml` builds and pushes this image to
 GitHub Container Registry (`ghcr.io/jimboschneider/dirtywork-worker`) on
-every GitHub release (`release: types: [published]` — the same trigger
-`publish.yml` uses for the PyPI package). It builds both `linux/amd64` and
+each **new minor** release (`vX.Y.0`; same `release: published` trigger as
+`publish.yml`, gated on the tag). Patch releases do not rebuild the image:
+the `:X.Y` tag is what `DEFAULT_IMAGE` points at and `PINNED_DIGEST` pins,
+and re-pushing it on every patch would let base-layer drift change the
+digest under a shipped pin. To publish a Dockerfile fix inside a minor, run
+the workflow by hand (`workflow_dispatch`, input: the release tag) and then
+re-pin `PINNED_DIGEST` in a follow-up. It builds both `linux/amd64` and
 `linux/arm64`, tags the push with both the release's minor version
 (`v0.4.0` → `:0.4`) and its full version (`:0.4.0`), and writes the pushed
 manifest digest to the workflow run's job summary. The one manual step it
