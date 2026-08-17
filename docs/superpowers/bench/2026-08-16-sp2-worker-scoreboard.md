@@ -58,3 +58,4 @@
 | T15 fix3 [Sonnet, escalated] | claude-sonnet (subagent) | completed | n/a | 7.7m | n/a | n/a | ✅ all items; 1 new I (host rule-order message precedence → final wave) |
 | T16 impl | qwen/qwen3-coder-next | max_turns | 80 | 15.9m | 3314157 | 20891 | 2I (inverted assertion dropped; dup helpers)/2M; live 3/3 |
 | T16 fix1 [Sonnet, escalated] | claude-sonnet (subagent) | completed | n/a | 4.3m | n/a | n/a | ✅ 3/3 addressed; live 10/10 |
+| FINAL fix wave [Sonnet] | claude-sonnet (subagent) | completed | n/a | 22.9m | n/a | n/a | ✅ 8/8 (Opus re-review); live 10/10; 454 unit |
