@@ -43,7 +43,8 @@ always be pointed at a full `name@sha256:...` reference directly.
 
 ## Pin a digest (PINNED_DIGEST)
 
-`dirtywork/sandbox/docker_args.py`'s `PINNED_DIGEST` (default `None`) is a
+`dirtywork/sandbox/docker_args.py`'s `PINNED_DIGEST` (unset only on the
+very first 0.4.0 release; pinned to a real digest from 0.4.1 onward) is a
 REGISTRY PROVENANCE guarantee for the default image: it only ever applies
 when `--image` is left at its default (`--image` is the operator's own
 choice and is never pinned — see below), and only checks digests fetched
