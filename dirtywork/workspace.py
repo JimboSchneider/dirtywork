@@ -279,3 +279,8 @@ def host_read_tree(worktree: Path) -> None:
                "read-tree", "HEAD", env=env)
     if res.returncode != 0:
         raise WorkspaceError(f"git read-tree HEAD failed in {worktree}: {res.stderr.strip()}")
+
+
+def commit_exists(repo: Path, sha: str) -> bool:
+    """True when `sha` names a commit reachable in the operator's repo."""
+    return _git(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode == 0
