@@ -355,7 +355,8 @@ dirtywork run --repo <path> "<task>"
     [--max-patch-mb 10]               # docker mode only; diff.patch cap
 ```
 
-```dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch-from/--sandbox/<task>;
+```
+dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch-from/--sandbox/<task>;
     [--model <m>]                     # defaults to the earlier run's model; --image defaults to its image
 ```
 
