@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Every Failure Was the Harness</title>
+<meta name="description" content="A 16-task Docker-sandbox build: a free local model did the typing, a frontier model planned and reviewed and ruled, a human decided what ships. The full run record — turns, tokens, bugs, rulings.">
+<link rel="canonical" href="https://dirtywork.run/every-failure-was-the-harness.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Every Failure Was the Harness">
+<meta property="og:description" content="A 16-task Docker-sandbox build: a free local model did the typing, a frontier model planned and reviewed and ruled, a human decided what ships. The full run record — turns, tokens, bugs, rulings.">
+<meta property="og:url" content="https://dirtywork.run/every-failure-was-the-harness.html">
+<meta property="og:image" content="https://dirtywork.run/og-card.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Every Failure Was the Harness">
+<meta name="twitter:description" content="A 16-task Docker-sandbox build: a free local model did the typing, a frontier model planned and reviewed and ruled, a human decided what ships. The full run record — turns, tokens, bugs, rulings.">
+<meta name="twitter:image" content="https://dirtywork.run/og-card.png">
+<style>
+  :root {
+    --bg: #F7F8F6;
+    --bg-raise: #FFFFFF;
+    --bg-inset: #EEF1ED;
+    --ink: #1B221D;
+    --ink-soft: #4A544D;
+    --ink-faint: #657069;
+    --line: #D9DFDA;
+    --local: #0E7A4E;
+    --local-soft: #E2F0E8;
+    --frontier: #A66A1E;
+    --frontier-soft: #F4EBDD;
+    --code-bg: #10150F;
+    --code-ink: #D6E2D6;
+    --code-accent: #7FC79E;
+    --code-dim: #7C8A7D;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111611;
+      --bg-raise: #171D17;
+      --bg-inset: #1C231C;
+      --ink: #E4EAE4;
+      --ink-soft: #A7B2A8;
+      --ink-faint: #828E84;
+      --line: #2A322A;
+      --local: #4EC58C;
+      --local-soft: #17251D;
+      --frontier: #D9A468;
+      --frontier-soft: #272015;
+      --code-bg: #0B0F0B;
+      --code-ink: #CFDCCF;
+      --code-accent: #7FC79E;
+      --code-dim: #6E7B6F;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111611;
+    --bg-raise: #171D17;
+    --bg-inset: #1C231C;
+    --ink: #E4EAE4;
+    --ink-soft: #A7B2A8;
+    --ink-faint: #828E84;
+    --line: #2A322A;
+    --local: #4EC58C;
+    --local-soft: #17251D;
+    --frontier: #D9A468;
+    --frontier-soft: #272015;
+    --code-bg: #0B0F0B;
+    --code-ink: #CFDCCF;
+    --code-accent: #7FC79E;
+    --code-dim: #6E7B6F;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Charter", "Iowan Old Style", Georgia, "Times New Roman", serif;
+    font-size: 1.0625rem;
+    line-height: 1.65;
+  }
+  .wrap { max-width: 44rem; margin: 0 auto; padding: 0 1.25rem 6rem; }
+
+  .display, h1, h2, h3 {
+    font-family: "Avenir Next", "Avenir", "Segoe UI", "Helvetica Neue", sans-serif;
+  }
+  h1, h2, h3 { text-wrap: balance; }
+  .mono, code, pre, .stat-num { font-family: ui-monospace, "SF Mono", "Menlo", "Cascadia Mono", monospace; }
+
+  header { padding: 4.5rem 0 2.5rem; }
+  .eyebrow {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--local);
+    margin: 0 0 1.1rem;
+  }
+  h1 {
+    font-size: clamp(2.2rem, 6vw, 3.1rem);
+    font-weight: 700;
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    margin: 0 0 1.2rem;
+  }
+  .standfirst {
+    font-size: 1.2rem;
+    line-height: 1.55;
+    color: var(--ink-soft);
+    margin: 0 0 2.2rem;
+    max-width: 38rem;
+  }
+  .standfirst strong { color: var(--ink); font-weight: 600; }
+
+  .terminal {
+    background: var(--code-bg);
+    border-radius: 8px;
+    padding: 1.1rem 1.25rem 1.2rem;
+    overflow-x: auto;
+    box-shadow: 0 1px 0 var(--line);
+  }
+  .terminal pre {
+    margin: 0;
+    color: var(--code-ink);
+    font-size: 0.82rem;
+    line-height: 1.6;
+  }
+  .terminal .c { color: var(--code-dim); }
+  .terminal .k { color: var(--code-accent); }
+  .terminal .err { color: #E08A8A; }
+  .term-cap {
+    font-size: 0.8rem;
+    color: var(--ink-faint);
+    margin: 0.6rem 0 0;
+    font-style: italic;
+  }
+
+  section { margin-top: 3.6rem; }
+  .sec-mark {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    border-top: 1px solid var(--line);
+    padding-top: 1.6rem;
+  }
+  .sec-mark .n {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.78rem;
+    color: var(--local);
+    letter-spacing: 0.08em;
+  }
+  h2 { font-size: 1.5rem; font-weight: 600; margin: 0; }
+  h3 { font-size: 1.05rem; font-weight: 600; margin: 2rem 0 0.6rem; }
+  p { margin: 1rem 0; }
+  a { color: var(--local); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--local); outline-offset: 2px; border-radius: 2px; }
+  ul, ol { padding-left: 1.4rem; margin: 1rem 0; }
+  li { margin: 0.45rem 0; }
+  li::marker { color: var(--ink-faint); }
+  strong { font-weight: 600; }
+  em { font-style: italic; }
+
+  code {
+    background: var(--bg-inset);
+    border-radius: 4px;
+    padding: 0.1em 0.35em;
+    font-size: 0.86em;
+  }
+
+  blockquote {
+    margin: 1.4rem 0;
+    padding: 0.1rem 0 0.1rem 1.1rem;
+    border-left: 3px solid var(--local);
+    color: var(--ink-soft);
+    font-style: italic;
+  }
+
+  .tiers { display: grid; grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr)); gap: 1rem; margin: 1.5rem 0; }
+  @media (max-width: 560px) { .tiers { grid-template-columns: 1fr; } }
+  .tier {
+    border-radius: 8px;
+    padding: 1.1rem 1.2rem 1.2rem;
+    border: 1px solid var(--line);
+    background: var(--bg-raise);
+  }
+  .tier .who {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin: 0 0 0.5rem;
+  }
+  .tier.frontier .who { color: var(--frontier); }
+  .tier.local .who { color: var(--local); }
+  .tier.human .who { color: var(--ink-faint); }
+  .tier .role { font-size: 0.9rem; color: var(--ink-soft); margin: 0; }
+  .tier .cost {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.76rem;
+    margin: 0.8rem 0 0;
+  }
+  .tier.frontier .cost { color: var(--frontier); }
+  .tier.local .cost { color: var(--local); }
+  .tier.human .cost { color: var(--ink-faint); }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 1.6rem 0;
+  }
+  .stat { background: var(--bg-raise); padding: 0.95rem 1rem 1rem; }
+  .stat-num {
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: var(--local);
+    font-variant-numeric: tabular-nums;
+    display: block;
+  }
+  .stat.amber .stat-num { color: var(--frontier); }
+  .stat-cap { font-size: 0.78rem; color: var(--ink-faint); line-height: 1.35; display: block; margin-top: 0.15rem;
+    font-family: "Avenir Next", "Avenir", "Segoe UI", sans-serif; }
+
+  .tblwrap { overflow-x: auto; margin: 1.5rem 0; border: 1px solid var(--line); border-radius: 8px; }
+  table.runs { width: 100%; border-collapse: collapse; font-size: 0.82rem; background: var(--bg-raise); }
+  table.runs caption { display: none; }
+  table.runs th, table.runs td { padding: 0.55rem 0.75rem; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  table.runs th {
+    font-family: "Avenir Next", "Avenir", "Segoe UI", sans-serif;
+    font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--ink-faint); background: var(--bg-inset);
+  }
+  table.runs td.review { white-space: normal; color: var(--ink-soft); min-width: 16rem; }
+  table.runs td.num { font-family: ui-monospace, "SF Mono", "Menlo", monospace; font-variant-numeric: tabular-nums; }
+  table.runs tr.totals td { font-weight: 600; border-top: 2px solid var(--line); background: var(--bg-inset); }
+  table.runs tr:last-child td { border-bottom: none; }
+
+  .footnote {
+    margin-top: 4rem;
+    border-top: 1px solid var(--line);
+    padding-top: 1.3rem;
+    font-size: 0.88rem;
+    color: var(--ink-faint);
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">Session postmortem · 2026-08-16 → 08-17 · part three</p>
+  <h1>Every Failure Was the Harness</h1>
+  <p class="standfirst">A follow-up to <a href="building-localagent.html">Building localagent</a> and
+  <a href="the-tool-renamed-itself.html">The Tool Renamed Itself</a>. Same bet, one Docker sandbox
+  later: a frontier model <strong>planned, reviewed, and ruled</strong>; a free local model
+  <strong>did the typing</strong>; I decided what merges and ships. This post is the receipts.</p>
+
+  <div class="terminal">
+<pre><span class="c">$ dirtywork run --repo ~/repos/dirtywork "Task 6: bash lifecycle helpers…"</span>
+{ <span class="k">"status"</span>: <span class="k">"completed"</span>, "commit": "cfbe595", "tests": 331 }
+<span class="c">$ # worker then calls a tool named `finish` — it doesn't exist</span>
+<span class="err">unknown tool 'finish' × 3 → malformed-call limit → run aborted</span>
+{ <span class="k">"status"</span>: <span class="k">"model_error"</span> }</pre>
+  </div>
+  <p class="term-cap">The work was already committed. The run failed because it succeeded.</p>
+</header>
+
+<section>
+  <div class="sec-mark"><span class="n">01</span><h2>A run that failed by succeeding</h2></div>
+  <p>Task 6's worker finished its job — 331 tests green, committed as <code>cfbe595</code> —
+  and then didn't know how to say so. It doesn't have a "done" button. So it called a tool
+  named <code>finish</code>, which doesn't exist in this harness. Three times. The runner
+  counts unknown-tool calls against a malformed-call limit, hit the limit, and aborted the
+  run. Final status: <code>model_error</code>. The work was fine. The harness just couldn't
+  hear it say so.</p>
+  <p>That's this whole post in miniature. Across sixteen tasks and fifty recorded runs, the
+  model rarely broke. The scaffolding around it did — repeatedly, in specific, fixable ways.
+  The fixes are in the repo. So is every run that found the bugs. This post walks through
+  both, in first person, with the numbers as they were recorded — not smoothed, not
+  rounded up.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">02</span><h2>What we set out to do</h2></div>
+  <p><code>dirtywork 0.3.0</code> — host-mode hardening — shipped the morning of the 16th.
+  Then we started on the thing that mattered more: a Docker sandbox, so a worker's bash
+  commands run inside a container instead of directly on my machine. Spec and a sixteen-task
+  plan were already written. What followed was two days of executing that plan, task by
+  task, with the same local model that renamed this tool back in its first week now building
+  the isolation layer meant to contain it.</p>
+  <p>Result, stated plainly up front so the rest of this post has somewhere to land: sixteen
+  of sixteen tasks done, 482 unit tests, and eleven live tests — seven host-sentinel, three
+  lifecycle, one process-flood — green both on my machine and in a new CI gate running real
+  Docker on GitHub's own runners. PR #10 merged. PR #11, the pre-tag follow-up, is green.
+  0.4.0 is next.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">03</span><h2>The loop</h2></div>
+  <p>Five roles, doing five different jobs:</p>
+  <div class="tiers">
+    <div class="tier local">
+      <p class="who">qwen3-coder-next</p>
+      <p class="role">80B MoE, local, LM Studio. Implements each task: reads the brief,
+      writes the code, runs the suite, commits.</p>
+      <p class="cost">free</p>
+    </div>
+    <div class="tier frontier">
+      <p class="who">Sonnet, reviewer</p>
+      <p class="role">Grades every task diff against the spec — correctness and quality,
+      DRY/SOLID counted as Important.</p>
+      <p class="cost">per-task review</p>
+    </div>
+    <div class="tier frontier">
+      <p class="who">Fable 5, controller</p>
+      <p class="role">Runs the loop. Writes every brief. Rules on plan-vs-code conflicts.
+      Ledgers every ruling as it happens.</p>
+      <p class="cost">planning + orchestration</p>
+    </div>
+    <div class="tier frontier">
+      <p class="who">Opus, final review</p>
+      <p class="role">One whole-branch review at the end — the seams no task-scoped review
+      can see.</p>
+      <p class="cost">per-branch review</p>
+    </div>
+    <div class="tier human">
+      <p class="who">Jim</p>
+      <p class="role">Merges. Decides releases. Makes the calls nobody else is allowed to
+      make — GHCR vs Docker Hub, what ships in 0.4.0, what waits.</p>
+      <p class="cost">judgment, not typing</p>
+    </div>
+  </div>
+  <p>Five of the fifty runs weren't qwen at all — three fix rounds (Tasks 12, 15, 16) got
+  escalated to Sonnet when the local model's work was too broken or too integration-heavy
+  to keep grinding on locally. More on that below.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">04</span><h2>The scoreboard</h2></div>
+  <p>Fifty recorded worker runs: 43 on qwen3-coder-next, 2 on Qwen3.6-35B-A3B for an A/B
+  test, 5 escalated to Sonnet. Statuses: 35 completed, 12 hit the max-turns cap, 3 ended in
+  <code>model_error</code> — including the one above. Ten representative rows, in order:</p>
+
+  <div class="tblwrap">
+  <table class="runs">
+  <caption>SP2 worker scoreboard, representative rows</caption>
+  <thead><tr><th>Run</th><th>Model</th><th>Status</th><th>Turns</th><th>Wall</th><th>Review</th></tr></thead>
+  <tbody>
+  <tr><td>T1 impl</td><td>qwen3-coder-next</td><td>completed</td><td class="num">58</td><td class="num">2.4m</td><td class="review">2 Important, both plan-mandated</td></tr>
+  <tr><td>T1 fix1</td><td>qwen3-coder-next</td><td>max_turns</td><td class="num">40</td><td class="num">0.9m</td><td class="review">no commit — <code>cd</code> guardrail false positive</td></tr>
+  <tr><td>T1 fix3</td><td>qwen3-coder-next</td><td>completed</td><td class="num">23</td><td class="num">1.1m</td><td class="review">4/4 addressed</td></tr>
+  <tr><td>T6 impl</td><td>qwen3-coder-next</td><td>model_error</td><td class="num">26</td><td class="num">2.7m</td><td class="review">committed, then 3× fake <code>finish</code> call</td></tr>
+  <tr><td>T7a [qwen3-coder-next]</td><td>qwen3-coder-next</td><td>completed</td><td class="num">34</td><td class="num">1.8m</td><td class="review">2 Important — winner, committed as instructed</td></tr>
+  <tr><td>T7a [Qwen3.6-35B-A3B]</td><td>Qwen3.6-35B-A3B</td><td>completed</td><td class="num">23</td><td class="num">2.1m</td><td class="review">same 2 defects — did not commit</td></tr>
+  <tr><td>T7b [Qwen3.6-35B-A3B]</td><td>Qwen3.6-35B-A3B</td><td>completed*</td><td class="num">16</td><td class="num">3.2m</td><td class="review">empty final message, 2 tests failing, no commit</td></tr>
+  <tr><td>T12 fix1 [escalated]</td><td>Sonnet</td><td>completed</td><td class="num">n/a</td><td class="num">13.4m</td><td class="review">9/9 addressed, Opus re-review</td></tr>
+  <tr><td>T15 impl</td><td>qwen3-coder-next</td><td>max_turns</td><td class="num">80</td><td class="num">5.2m</td><td class="review">suite written; 4/7 live pass — found a real reset race</td></tr>
+  <tr><td>Final fix wave [escalated]</td><td>Sonnet</td><td>completed</td><td class="num">n/a</td><td class="num">22.9m</td><td class="review">8/8 addressed, Opus re-review; live 10/10</td></tr>
+  <tr class="totals"><td colspan="2">50 runs total</td><td>35 / 12 / 3</td><td colspan="3">completed / max_turns / model_error</td></tr>
+  </tbody>
+  </table>
+  </div>
+  <p style="font-size:0.85rem; color:var(--ink-faint)">*Runner recorded this as "completed" — it wasn't. See the A/B section below.</p>
+
+  <div class="stats">
+    <div class="stat"><span class="stat-num">~44.7M</span><span class="stat-cap">local prompt tokens</span></div>
+    <div class="stat"><span class="stat-num">~348k</span><span class="stat-cap">local completion tokens</span></div>
+    <div class="stat"><span class="stat-num">~232 min</span><span class="stat-cap">local wall-clock, total</span></div>
+    <div class="stat amber"><span class="stat-num">58 → 12–27</span><span class="stat-cap">turns per task, before/after two harness fixes</span></div>
+  </div>
+
+  <p>Local runs took 1–4 minutes each. Sonnet and Opus reviews took 3–15 minutes each.
+  Reviews dominated the wall-clock — not the model. All of this ran on one Apple M5 Max
+  with 128&nbsp;GB of RAM. The full ledger — every run, every ruling — lives in the repo at
+  <code>docs/superpowers/bench/</code>, if you want to check my arithmetic.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">05</span><h2>Every failure was the harness</h2></div>
+  <p>Every hard failure in the early runs traced back to the scaffolding, not the model:</p>
+  <ol>
+    <li><strong>The guardrail blocked its own worktree.</strong> A rule meant to stop a
+    worker from <code>cd</code>-ing out of its sandbox also blocked <code>cd &lt;absolute
+    path&gt;</code> straight into the worktree it was already confined to. Ten blocked calls
+    in one run alone. It derailed an entire fix round.</li>
+    <li><strong>An extra field poisoned every bash call.</strong> qwen attached Claude
+    Code's <code>description</code> argument to its bash tool calls. The tool executor
+    didn't recognize it, threw a type error three times running, and aborted the run.</li>
+    <li><strong>The <code>finish</code> tool that doesn't exist.</strong> Covered above —
+    the model has no sanctioned way to say "I'm done," so it invents one, and the harness
+    punishes it for asking.</li>
+    <li><strong><code>git commit -am</code> silently skips new files.</strong> The
+    <code>-a</code> flag only stages tracked files. A worker that created new files and
+    committed with <code>-am</code> would leave them uncommitted and not notice.</li>
+  </ol>
+  <p>The first two were fixed the same day, in PR #9: a worktree-aware guardrail, and an
+  executor that drops unrecognized tool arguments instead of choking on them. The fourth got
+  a cheaper fix — an end-of-brief checklist baked into every worker prompt: <em>run the
+  suite, <code>git add -A</code>, commit, then summarize.</em> The third, the missing
+  "done" signal, is still open; it's first on the list for the next harness pass. Turns per
+  task fell from 58 on Task 1 to a 12–27
+  range afterward. Same model. Different harness.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">06</span><h2>What a small model needs from a brief</h2></div>
+  <p>qwen3-coder-next transcribes a well-specified brief nearly perfectly. It is much less
+  reliable at following instructions that arrive any other way. Rulings delivered as a
+  preamble or an appendix get dropped: Task 2 missed three of them; Task 5 flatly rewrote a
+  function it had been told, elsewhere in the same brief, to keep verbatim. The fix wasn't
+  a smarter model — it was weaving every ruling directly into the body of the instructions
+  the worker was already reading closely.</p>
+  <p>A related tax: any brief that said "compare your work with commit X" cost 20–40 turns
+  of the model running <code>git show | grep</code> against itself, hunting for the target
+  text. Inlining the exact text it needed to match made that cost disappear.</p>
+  <p>And a recurring finding that was really about the plan, not the worker: the reviewer
+  treats duplicated code as a defect — my standing rule, DRY and SOLID both count as
+  Important. Tasks 1, 2, 4, 6, and 11 all landed with verbatim-duplicated blocks, and in
+  every case the duplication was already sitting in the plan text. The worker had typed
+  exactly what it was told to type. Each became a small extracted helper in the fix round —
+  which means five findings that were really findings about my own planning, caught because
+  the review gate doesn't know or care who wrote the flawed instruction.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">07</span><h2>The A/B</h2></div>
+  <p>I asked for a controlled comparison, so we ran one: Task 7a, identical brief, identical
+  starting commit, two models. qwen3-coder-next took 34 turns, 1.8 minutes, landed two
+  Important findings, and committed exactly as instructed. Qwen3.6-35B-A3B took 23 turns,
+  2.1 minutes, found the <em>same</em> two defects — and did not commit. Both models made
+  the identical mistake in <code>edit_file</code>, which says the brief invited the mistake
+  more than either model made it independently.</p>
+  <p>Task 7b widened the gap. Qwen3.6 stopped after 16 turns with an empty final reply and
+  two failing tests. The runner, seeing no tool calls and no text to act on, recorded the
+  run as <code>completed</code>. It was not completed. That's a harness gap, not a model
+  failure exactly — but it's the kind of gap that would ship a broken run under a green
+  status if nobody was reading transcripts. It's on the list for the next release.</p>
+  <p>Verdict: keep qwen3-coder-next as the default. Qwen3.6 is attractive — 19&nbsp;GB
+  against qwen3-coder-next's much larger footprint — once the harness can actually detect an
+  empty reply for what it is.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">08</span><h2>What only live tests catch</h2></div>
+  <p>Unit tests, even 482 of them, don't touch a real Docker daemon. Two bugs only showed up
+  once we did.</p>
+  <p>Under a 600-process flood, the sandbox was resetting twice per bash call, and the two
+  resets raced each other into <code>git init</code>'s template copy — intermittent
+  <code>sandbox_error</code>, "File exists," the kind of flake that's murder to reproduce on
+  demand. Fixed with <code>git init --template=</code>, a <code>docker wait</code> before
+  restart, exactly one reset per call, and a lock around the reset path.</p>
+  <p>Separately: the worker image's Dockerfile installed .NET via an apt package that
+  doesn't exist for arm64 on Debian 12. It built fine on an amd64 CI runner and failed
+  silently everywhere else that mattered — including my own Mac. Switched to Microsoft's
+  <code>dotnet-install.sh</code>, arch-agnostic, and verified by actually building the image
+  locally rather than trusting the Dockerfile a second time.</p>
+  <p>Then the new CI gate — real Docker, on GitHub's ubuntu runners — found two more bugs on
+  its first runs, both Linux-only, both invisible on my Mac:</p>
+  <ul>
+    <li>An image loaded via <code>buildx</code> carries a repo digest that Docker won't run
+    directly — it tries to pull instead. Fixed by executing the image by its local Id.</li>
+    <li>The LM Studio client raised <code>EBADF</code> on Linux under Python 3.13 —
+    <code>http.client</code> was closing the socket early on short response bodies, which
+    surfaced as "cannot reach LM Studio" for no visible reason.</li>
+  </ul>
+  <p>Both of those would have hit every Linux user of 0.4.0, on day one, with no local
+  repro. That's the whole argument for a CI gate that runs the real thing instead of a
+  mock.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">09</span><h2>The decisions that were mine to make</h2></div>
+  <p>The model proposes; I still decide the things that don't have a technically correct
+  answer. On the record from this run: keep .NET in the worker image, because
+  <a href="https://github.com/JimboSchneider/localagent">invoicr</a> — a real downstream
+  project — needs it. Publish the worker image to GHCR, not Docker Hub, because I don't have
+  a paid Docker Hub org. Push the CI Docker job into the follow-up PR instead of blocking
+  the main one on it. Rewrite the README's "built in one day" story, because it stopped
+  being true somewhere around Task 6. Keep DRY-and-SOLID as a standing review rule. Ask for
+  the A/B in the first place. And when I floated adding live model metrics to this
+  release — my own idea, and still a good one — defer it: it belongs in SP3's
+  <code>dirtywork bench</code>, not stapled on here under deadline pressure.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">10</span><h2>Controller mistakes, plainly</h2></div>
+  <p>The frontier model running this loop made its own mistakes, and the ledger records
+  them the same way it records the model's. A shell-variable slip in a dispatch script left
+  a fix round unlaunched and the whole pipeline stalled for about 20 minutes before anyone
+  noticed. A tar-file test construction it prescribed for a fix round was simply wrong —
+  <code>TarFile.close()</code> pads its output to a full 10,240-byte record, which meant the
+  test it specified passed for the wrong reason. A second review caught that the test proved
+  nothing and sent it back for a construction verified end to end instead of assumed.</p>
+  <p>There are exactly two documented exceptions, in this whole run, to "the controller
+  never edits code directly": one docstring sentence, and one merge-conflict resolution
+  taken in favor of code that had already cleared review. Both are logged as exceptions, not
+  quietly absorbed into the normal flow.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">11</span><h2>Caveats</h2></div>
+  <p>This is one machine — an Apple M5 Max with 128&nbsp;GB of RAM — running one plan, with
+  one local model family doing almost all of the typing. It is not a benchmark. Any
+  performance figures I've cited for the models themselves (context windows, published
+  SWE-bench-style scores) are vendor self-reported; I haven't independently verified them
+  and you shouldn't take them as more than a starting point.</p>
+  <p>Cost: the local model's inference was $0 — it's electricity on hardware I already own.
+  The frontier spend went to planning, roughly forty review and re-review passes, and five
+  escalated fix rounds. I can't put a dollar figure on that side, and I'm not going to invent
+  one: I run Claude on a subscription, not a metered API key, so what I actually paid was a
+  session budget — and I hit its ceiling a few times over the weekend and had to wait it
+  out. That's the honest price: not money, but rationed frontier attention. Which is, not
+  coincidentally, the resource this whole tool exists to spend carefully.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">12</span><h2>What's next</h2></div>
+  <p>0.4.0 ships from this branch. Before that, a small "SP2.5" harness pass, mostly items
+  this run surfaced against itself: a real completion signal so a model never has to invent
+  a <code>finish</code> tool again; failure-kind tracking instead of one undifferentiated
+  abort counter; a guard against an empty reply masquerading as <code>completed</code>;
+  stall detection; and a way to resume a run instead of restarting it from zero. After that,
+  SP3 — which is where <code>dirtywork bench</code> lives, so the next version of this table
+  can build itself.</p>
+  <div class="stats">
+    <div class="stat"><span class="stat-num">16/16</span><span class="stat-cap">tasks done</span></div>
+    <div class="stat"><span class="stat-num">482</span><span class="stat-cap">unit tests</span></div>
+    <div class="stat"><span class="stat-num">11/11</span><span class="stat-cap">live tests, local and in CI</span></div>
+    <div class="stat amber"><span class="stat-num">$0</span><span class="stat-cap">local inference cost</span></div>
+  </div>
+  <p>Coexistence, not replacement: a frontier model planned, reviewed, and ruled. A free
+  local model did the typing. I decided what merges and ships. Every number in this post
+  came from that same run's own record — which is the only way I know to ask you to believe
+  it.</p>
+</section>
+
+<p><strong>Previous:</strong> <a href="the-tool-renamed-itself.html">The Tool Renamed Itself</a> —
+part two, in which the tool executes its own rename.</p>
+
+<p class="footnote">Claude (Fable 5) planned, reviewed, and ruled on this session, and drafted
+this post from the session record — the same ledger linked above. Jim edited it. Same process
+as the two earlier posts. Source:
+<a href="https://github.com/JimboSchneider/dirtywork">github.com/JimboSchneider/dirtywork</a> ·
+install: <span class="mono">pipx install dirtywork</span> ·
+<a href="https://dirtywork.run">dirtywork.run</a></p>
+</div>
+
+</body>
+</html>

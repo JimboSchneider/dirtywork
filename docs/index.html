@@ -235,14 +235,14 @@
 
 <div class="wrap">
 <header>
-  <p class="eyebrow">dirtywork.run · <span class="beta">v0.3 beta</span> · MIT</p>
+  <p class="eyebrow">dirtywork.run · <span class="beta">v0.4 beta</span> · MIT</p>
   <h1>dirtywork<span class="dot">.</span></h1>
   <p class="tagline">
     <span class="think">Frontier models do the thinking.</span>
     <span class="dirty">Local models do the dirty work.</span>
   </p>
   <p class="install"><span class="p">$</span> pipx install dirtywork<span class="caret"></span></p>
-  <p class="sub-install">Python 3.9+, stdlib only · macOS/Linux · needs LM&nbsp;Studio (or any OpenAI-compatible server) with a tool-calling model</p>
+  <p class="sub-install">Python 3.9+, stdlib only · macOS/Linux · needs LM&nbsp;Studio (or any OpenAI-compatible server) with a tool-calling model · Docker Desktop / dockerd for the default sandbox (<code>--sandbox none</code> to run on the host)</p>
 </header>
 
 <p class="flip">Most of the ecosystem is racing to <strong>replace</strong> frontier
@@ -254,9 +254,9 @@ free on your own machine, and <strong>nothing merges without review</strong>.</p
   <h2>How a run works</h2>
   <div class="run">
 <pre><span class="who fr">1 · you/ai</span> <span class="dim">$</span> dirtywork run --repo ~/code/app <span class="dim">"Add unit tests for parser.ts"</span>
-<span class="who lo">2 · local</span> explores the repo, edits, runs the tests — in an
-<span class="who lo"></span> isolated git worktree <span class="dim">(.worktrees/dw-…)</span>, guardrails on every
-<span class="who lo"></span> tool call, full JSONL transcript, no auto-commit — for $0
+<span class="who lo">2 · local</span> explores the repo, edits, runs the tests — inside a
+<span class="who lo"></span> locked-down Docker container over an isolated worktree <span class="dim">(.worktrees/dw-…)</span>,
+<span class="who lo"></span> validated export, full JSONL transcript, no auto-commit — for $0
 <span class="who fr">3 · you/ai</span> audit the transcript, review the diff, re-run the gates,
 <span class="who fr"></span> commit only what survives</pre>
   </div>
@@ -265,7 +265,7 @@ free on your own machine, and <strong>nothing merges without review</strong>.</p
 </section>
 
 <div class="beta-strip">
-  <strong>0.3 is a beta.</strong> It works on my setup — LM&nbsp;Studio serving
+  <strong>0.4 is a beta.</strong> It works on my setup — LM&nbsp;Studio serving
   qwen3-coder or Devstral Small, driven by Claude Code as the orchestrator — and it is
   young everywhere else. Flags and output may shift. If it breaks on yours,
   <a href="https://github.com/JimboSchneider/dirtywork/issues">tell me what happened</a>.
@@ -280,6 +280,7 @@ free on your own machine, and <strong>nothing merges without review</strong>.</p
   <div class="writing">
     <h3>Writing</h3>
     <ul>
+      <li><span class="date">2026-08-17</span><a href="every-failure-was-the-harness.html">Every Failure Was the Harness</a></li>
       <li><span class="date">2026-08-14</span><a href="the-tool-renamed-itself.html">The Tool Renamed Itself</a></li>
       <li><span class="date">2026-08-14</span><a href="building-localagent.html">Building localagent</a></li>
     </ul>
