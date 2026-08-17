@@ -235,13 +235,19 @@ Design docs: `docs/superpowers/specs/2026-08-13-localagent-design.md`
 
 ## The story
 
-dirtywork was designed, built, reviewed, and shipped in one day — by the
-exact orchestrator/worker pattern it implements — and its first production
-run surfaced a real cent-level rounding bug in the invoicing app it was
-pointed at. The full postmortem, including a build-one-yourself recipe:
-[the postmortem](https://github.com/JimboSchneider/dirtywork/blob/main/docs/2026-08-14-building-localagent.md)
-(or read [the designed HTML edition](https://dirtywork.run/building-localagent.html)
-served via Pages).
+dirtywork's first version was designed, built, reviewed, and shipped in a
+single day — by the exact orchestrator/worker pattern it implements — and
+its first production run surfaced a real cent-level rounding bug in the
+invoicing app it was pointed at. That was v0.1. Since then the work has been
+the unglamorous kind: hardening the host mode (0.3), putting the worker in a
+container (0.4), and running the tool against its own security plans, task
+by task, with a frontier model planning and reviewing, a local model doing
+the typing, and every decision on the record — reviews, ledgers, a
+scoreboard, and a release gate that runs on real Docker. The postmortems:
+[building localagent](https://dirtywork.run/building-localagent.html),
+[the tool renamed itself](https://dirtywork.run/the-tool-renamed-itself.html),
+and the process record for the sandbox work in
+[`docs/superpowers/bench/`](docs/superpowers/bench/).
 
 In August 2026 the project was renamed **dirtywork** — same tool, a name that says what it does.
 
