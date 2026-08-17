@@ -19,6 +19,7 @@ from dirtywork.runner import (
     Runner,
     STALL_NUDGE,
     TRIM_MARKER,
+    _bash_fingerprint,
     _valid_tool_call,
     classify_text_reply,
     resolve_context_window,
@@ -833,6 +834,30 @@ def test_progress_tracker_definitions():
     assert t.end_turn() is None and t.idle_turns == 1
     # same command, new output: progress
     t.note_call("bash", {"command": "pytest"}, "exit code: 0\n5 passed")
+    assert t.end_turn() is None and t.idle_turns == 0
+
+
+def test_bash_fingerprint_ignores_digits_in_body_but_not_exit_code():
+    a = _bash_fingerprint("pytest", "exit code: 0\n5 passed in 24.51s")
+    b = _bash_fingerprint("pytest", "exit code: 0\n5 passed in 25.02s")
+    c = _bash_fingerprint("pytest", "exit code: 0\n6 passed in 24.51s")
+    d = _bash_fingerprint("pytest", "exit code: 1\n5 passed, 1 failed in 24.51s")
+    e = _bash_fingerprint("pytest -q", "exit code: 0\n5 passed in 24.51s")
+    f = _bash_fingerprint("test -e x", "exit code: 1\n")
+    g = _bash_fingerprint("test -e x", "exit code: 0\n")
+    assert a == b == c                 # timings and counters do not matter
+    assert a != d                      # 'failed' appeared: different words
+    assert a != e                      # different command
+    assert f != g                      # exit status alone is real news
+
+
+def test_progress_tracker_pytest_rerun_with_new_timing_is_idle():
+    t = ProgressTracker(stall_turns=4)
+    t.note_call("bash", {"command": "pytest -q"}, "exit code: 0\n5 passed in 24.51s")
+    assert t.end_turn() is None and t.idle_turns == 0
+    t.note_call("bash", {"command": "pytest -q"}, "exit code: 0\n5 passed in 25.02s")
+    assert t.end_turn() is None and t.idle_turns == 1
+    t.note_call("bash", {"command": "pytest -q"}, "exit code: 1\n4 passed, 1 failed in 25.02s")
     assert t.end_turn() is None and t.idle_turns == 0
 
 

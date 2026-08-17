@@ -298,6 +298,14 @@ In August 2026 the project was renamed **dirtywork** — same tool, a name that 
   and no new command output; the worktree is kept. Usually the work is
   done but the model never called `finish` — inspect the worktree, or
   `dirtywork resume <slug>`.
+- **host mode (`--sandbox none`): "No module named pytest", or a
+  `Library/`/`.cache/` directory appears in the worktree** — bash runs with
+  `HOME` set to the worktree on purpose (so `~/.ssh` and friends are out of
+  reach), which is where `$HOME`-keyed caches and `pip install --user` land.
+  The operator's own user-site packages stay importable (they are put on
+  `PYTHONPATH`); if a tool still cannot be found, install it system-wide or in
+  the project's virtualenv rather than with `pip install --user` from inside a
+  run.
 - **status `context_exhausted`** — the task needed more context than the
   model's window; split the task or use the larger-context model.
 - **status `budget_exceeded`** — the worktree grew past
@@ -350,7 +358,7 @@ dirtywork run --repo <path> "<task>"
     [--max-worktree-mb 2048]
     [--max-worktree-files 200000]
     [--sandbox docker|none]           # default: docker
-    [--image ghcr.io/jimboschneider/dirtywork-worker:0.4]  # docker mode only
+    [--image ghcr.io/jimboschneider/dirtywork-worker:0.5]  # docker mode only
     [--allow-network]                 # docker mode only; default --network none
     [--memory 4g]                     # docker mode only
     [--cpus 2]                        # docker mode only

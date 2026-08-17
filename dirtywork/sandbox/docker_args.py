@@ -5,23 +5,25 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.4"
-# The multi-arch index digest of ghcr.io/jimboschneider/dirtywork-worker:0.4
-# as published by release v0.4.0 -- verified via `docker pull
-# ghcr.io/jimboschneider/dirtywork-worker:0.4` followed by `docker image
+DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.5"
+# The multi-arch index digest of ghcr.io/jimboschneider/dirtywork-worker:0.5
+# as published by the release workflow. UNSET for 0.5.0: the :0.5 image is
+# first pushed by the v0.5.0 release itself, so its digest cannot be known
+# before that release ships; 0.5.1 re-pins it (verify via `docker pull
+# ghcr.io/jimboschneider/dirtywork-worker:0.5` followed by `docker image
 # inspect --format '{{json .RepoDigests}}'
-# ghcr.io/jimboschneider/dirtywork-worker:0.4`, which recorded exactly this
-# digest in RepoDigests (equivalently obtainable from publish-image.yml's
-# job summary for that release, or `docker buildx imagetools inspect
-# ghcr.io/jimboschneider/dirtywork-worker:0.4`). This only pins a REGISTRY
+# ghcr.io/jimboschneider/dirtywork-worker:0.5`, or read publish-image.yml's
+# job summary for the release, or `docker buildx imagetools inspect
+# ghcr.io/jimboschneider/dirtywork-worker:0.5`). This only pins a REGISTRY
 # digest -- resolve_image() enforces it against a *pulled* DEFAULT_IMAGE
 # only; a locally built/loaded image warns instead of refusing (see
 # resolve_image's docstring), and a user-supplied --image is never checked
 # against it at all (docker/README.md documents the full procedure). MUST
-# be updated to the new digest whenever the :0.4 tag is re-pushed (a new
-# 0.4.x release, or a manual rebuild/republish) -- otherwise resolve_image()
-# refuses every pulled default image with the now-stale pin.
-PINNED_DIGEST: str | None = "sha256:e312a5d88bd8d4e880a39e8f9555e0275b5ddc0181e17b9c6df0ea3b661580a1"
+# be updated to the new digest whenever the :0.5 tag is re-pushed (a manual
+# rebuild/republish) -- otherwise resolve_image() refuses every pulled
+# default image with the now-stale pin. (0.4.x pinned :0.4 at
+# sha256:e312a5d88bd8d4e880a39e8f9555e0275b5ddc0181e17b9c6df0ea3b661580a1.)
+PINNED_DIGEST: str | None = None
 # Always passed explicitly on every docker create/run/exec so an image's own
 # ENTRYPOINT/CMD/ENV can never substitute a different PATH for the tether,
 # chown, or an export step (spec §3 "Entrypoint and PATH are always explicit").

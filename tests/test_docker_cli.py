@@ -220,8 +220,8 @@ def test_image_repo_digest_registry_port_name_match():
 
 
 def test_split_image_ref_registry_with_tag():
-    assert _split_image_ref("ghcr.io/jimboschneider/dirtywork-worker:0.4") == (
-        "ghcr.io/jimboschneider/dirtywork-worker", "0.4")
+    assert _split_image_ref("ghcr.io/jimboschneider/dirtywork-worker:0.5") == (
+        "ghcr.io/jimboschneider/dirtywork-worker", "0.5")
 
 
 def test_split_image_ref_localhost_port_with_tag():
