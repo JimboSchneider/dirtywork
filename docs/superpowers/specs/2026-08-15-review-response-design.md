@@ -130,7 +130,7 @@ with a pre-placed symlink at the exact destination.
   is empty until the run ends; the exported tree must fit the export
   container's object store. Kernel disk quota is *not* gained by this
   choice — see the threat model.
-- **Image via `--image` with a maintained default** (`dirtywork/worker`,
+- **Image via `--image` with a maintained default** (`ghcr.io/jimboschneider/dirtywork-worker` (published to GHCR since 0.4),
   built from `docker/Dockerfile` in this repo: Debian-based, `USER worker`
   (uid 1000), git, bash, coreutils, findutils, python3, node, .NET SDK,
   ripgrep). The reference in code is pinned by digest. Preflight resolves

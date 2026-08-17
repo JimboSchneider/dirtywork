@@ -1,4 +1,4 @@
-# dirtywork/worker image
+# dirtywork worker image (ghcr.io/jimboschneider/dirtywork-worker)
 
 Built from `docker/Dockerfile`: Debian bookworm-slim, `USER worker` (uid
 1000), git, bash, coreutils, findutils, python3, node, .NET SDK, ripgrep.

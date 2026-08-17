@@ -208,7 +208,7 @@ def test_docker_live_pid_flood_past_limit_recovers_or_fails_closed(tmp_path, mon
         _resp(content="done"),
     ]
     start = time.monotonic()
-    _run_docker_main(monkeypatch, tmp_path, repo, responses)
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, timeout=60)
     elapsed = time.monotonic() - start
     payload = json.loads(capsys.readouterr().out)
 

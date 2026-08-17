@@ -248,6 +248,43 @@ def test_violation_kind_defaults_to_budget_on_disk_floor_breach(tmp_path, monkey
     assert wdg.violation_kind == "budget"
 
 
+def test_check_worktree_budget_once_explicitly_resets_stale_sandbox_error_kind():
+    # followup-review.md Minor #1: relying on "budget" only as the never-
+    # touched constructor default is an implicit invariant -- if the
+    # watchdog thread already died with kind "sandbox_error" (run()'s
+    # exception handler) and then a later, synchronous
+    # check_worktree_budget_once() call (from DockerSandbox._after_bash)
+    # records a genuine budget breach, the kind must still read "budget",
+    # not the stale "sandbox_error" left over from the thread's death.
+    kills = []
+    wdg = Watchdog(kill=lambda r: kills.append(r), sample=lambda: (3 * 1024 * 1024, 10),
+                    storage_paths=[], min_free_mb=1, max_worktree_mb=2048,
+                    max_worktree_files=200_000)
+    wdg.violation_kind = "sandbox_error"  # simulate a stale kind from a prior thread death
+    result = wdg.check_worktree_budget_once()
+    assert result is True
+    assert wdg.violation_kind == "budget"
+
+
+def test_check_disk_explicitly_resets_stale_sandbox_error_kind(tmp_path, monkeypatch):
+    # Same invariant as above, for the disk-floor breach path.
+    import dirtywork.sandbox.watchdog as wd
+
+    class FakeUsage:
+        free = 100 * 1024 * 1024  # below the floor
+
+    monkeypatch.setattr(wd.shutil, "disk_usage", lambda path: FakeUsage())
+    wdg = wd.Watchdog(
+        kill=lambda reason: None, sample=lambda: (0, 0),
+        storage_paths=[tmp_path], min_free_mb=2048, max_worktree_mb=2048,
+        max_worktree_files=200_000, clock=lambda: 0.0, sleep=lambda s: None,
+    )
+    wdg.violation_kind = "sandbox_error"  # simulate a stale kind from a prior thread death
+    result = wdg._check_disk()
+    assert result is True
+    assert wdg.violation_kind == "budget"
+
+
 def test_disk_check_failure_counter_resets_on_success(tmp_path, monkeypatch):
     import dirtywork.sandbox.watchdog as wd
 

@@ -41,13 +41,14 @@ class Watchdog(threading.Thread):
         self.clock = clock
         self.sleep = sleep
         self.violation: str | None = None
-        # D1: what kind of violation `self.violation` is. "budget" (the
-        # default) covers both breach paths below (disk floor,
-        # check_worktree_budget_once) -- neither ever overwrites this.
-        # run()'s own exception handler is the one place that sets
-        # "sandbox_error": a sample()/`_check_disk` exception is a sandbox
-        # failure, not a budget breach, and DockerSandbox needs to tell the
-        # two apart to raise/report the correct terminal status.
+        # D1: what kind of violation `self.violation` is. "budget" is both
+        # the default and set EXPLICITLY at both breach paths below (disk
+        # floor, check_worktree_budget_once), so a genuine budget breach is
+        # never misreported under a stale kind left over from an earlier
+        # thread death. run()'s own exception handler is the one place that
+        # sets "sandbox_error": a sample()/`_check_disk` exception is a
+        # sandbox failure, not a budget breach, and DockerSandbox needs to
+        # tell the two apart to raise/report the correct terminal status.
         self.violation_kind: str = "budget"
         self._bash_in_flight = False
         self._stop_event = threading.Event()
@@ -75,6 +76,7 @@ class Watchdog(threading.Thread):
             if self._disk_check_failures >= MAX_DISK_CHECK_FAILURES:
                 reason = f"host free-space check failing ({e!s}); refusing to run unmeasured"
                 self.violation = reason
+                self.violation_kind = "budget"
                 self.kill(reason)
                 return True
             return False
@@ -82,6 +84,7 @@ class Watchdog(threading.Thread):
         if free_mb < self.min_free_mb:
             reason = f"host free space below {self.min_free_mb} MB"
             self.violation = reason
+            self.violation_kind = "budget"
             self.kill(reason)
             return True
         return False
@@ -98,6 +101,7 @@ class Watchdog(threading.Thread):
                 f"{self.max_worktree_files} files (sampled {mb:.1f} MB, {entries} files)"
             )
             self.violation = reason
+            self.violation_kind = "budget"
             self.kill(reason)
             return True
         return False

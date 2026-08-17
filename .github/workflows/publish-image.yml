@@ -22,6 +22,9 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # A prerelease (e.g. v0.4.1-rc1) derives the same :0.4 minor tag as its
+    # eventual stable release and must not overwrite that moving tag early.
+    if: ${{ !github.event.release.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 

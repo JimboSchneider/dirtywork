@@ -43,6 +43,7 @@ jobs:
     # from re-downloading the .NET SDK layer every time.
     name: docker live suite
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -56,15 +57,16 @@ jobs:
           load: true
           tags: ghcr.io/jimboschneider/dirtywork-worker:0.4
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # ignore-error: fork PRs may not have write access to the cache scope.
+          cache-to: type=gha,mode=max,ignore-error=true
       - run: python -m pytest -q -m docker tests/test_docker_live.py tests/test_docker_lifecycle.py
       - name: Clean up dirtywork containers/volumes
         if: always()
         run: |
           ids=$(docker ps -aq --filter label=dirtywork.repo)
-          if [ -n "$ids" ]; then docker rm -f $ids; fi
+          [ -n "$ids" ] && docker rm -f $ids || true
           vols=$(docker volume ls -q --filter label=dirtywork.repo)
-          if [ -n "$vols" ]; then docker volume rm $vols; fi
+          [ -n "$vols" ] && docker volume rm $vols || true
 
   gate:
     # Single stable name for branch protection to require, regardless of
