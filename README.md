@@ -25,6 +25,9 @@ a shell is a shell — read [Security & trust](#security--trust) before pointing
 at a model or repo you don't trust. Parallelism comes from launching multiple
 processes — LM Studio serves 4 concurrent requests per model.
 
+Developed and benchmarked on macOS/Apple Silicon; CI-tested on Linux and
+macOS (Windows unsupported — see below).
+
 ## Security & trust
 
 > **Docker mode protects host integrity and host execution, not
@@ -104,6 +107,19 @@ machine. Read the transcript and diff before you merge — that review is
 still the real gate for *what a run produced*, even though docker mode now
 also gates *what a run could do to your host while producing it*.
 
+## Platform support
+
+| Tier | Platform | What it means |
+|---|---|---|
+| Developed & benchmarked | macOS on Apple Silicon (M-series, unified memory) with LM Studio | all worker/bench numbers and model-sizing guidance in `docs/superpowers/bench/` were measured here |
+| CI-tested | Linux x86_64 (Ubuntu, Python 3.9 + 3.13) and macOS | unit suite on every push; the Docker sandbox live tests run on Linux in CI |
+| Unsupported | Windows | until a Windows integration suite passes (see the note in [Security & trust](#security--trust)) |
+
+Other OpenAI-compatible servers (Ollama, vLLM, llama.cpp) should work via
+`--base-url`/`--provider`; only LM Studio and the Anthropic API adapter
+(`--provider anthropic`, recorded-fixture tests, no live tests) are
+exercised by the test suites.
+
 ## Requirements
 
 - macOS/Linux, Python 3.9+ (stdlib only — no venv, no pip deps)
@@ -119,8 +135,8 @@ also gates *what a run could do to your host while producing it*.
 
 **Other servers:** anything speaking the OpenAI chat-completions API with tool
 calling should work via `--base-url` (e.g. Ollama at
-`http://localhost:11434/v1`) — but only LM Studio is tested today. Reports
-welcome.
+`http://localhost:11434/v1`) — see [Platform support](#platform-support) for
+what's actually exercised by the test suites. Reports welcome.
 
 ## Install
 
