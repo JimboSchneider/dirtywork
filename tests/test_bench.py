@@ -590,7 +590,7 @@ def test_summarize_compare_pairs_rows_and_shows_deltas(tmp_path, monkeypatch, ca
     # table, plus its legend clause
     assert "OUTCOMES" in out
     assert "outcomes = pass/fail/gamed/skipped" in out
-    assert "0/0/1/0 -> 1/0/0/0" in out    # t4: a gamed, b pass
+    assert "0/0/1/0 -> 1/0/0/0 (+1/0/-1/0)" in out    # t4: a gamed, b pass; component-wise delta
     # the per-model block is paired the same way
     assert "per-model (A -> B):" in out
     assert "MODEL" in out and "GAMED" in out
@@ -610,7 +610,7 @@ def test_summarize_compare_harness_cell_missing_for_bench_error_only_side(
     rc = bench.cmd_summarize(argparse.Namespace(file=str(a), compare=str(b)))
     assert rc == 0
     out = capsys.readouterr().out
-    assert "- -> 0/0/0" in out
+    assert "- -> 0/0/0" in out and "- -> 0/0/0 (" not in out   # no delta against an unknown side
     assert "harness data present for" not in out   # no partial side, no footnote
 
 
@@ -635,7 +635,7 @@ def test_summarize_compare_harness_cell_partial_side_gets_asterisk_and_footnote(
     rc = bench.cmd_summarize(argparse.Namespace(file=str(a), compare=str(b)))
     assert rc == 0
     out = capsys.readouterr().out
-    assert "1/0/0* -> 0/0/0" in out       # A partial (1 of 2 rows), B full -- unchanged
+    assert "1/0/0* -> 0/0/0 (-1/0/0)" in out   # A partial (1 of 2 rows), B full; delta on the known counts
     assert "* harness data present for 1 of 2 runs" in out
 
 
@@ -666,3 +666,10 @@ def test_fmt_delta_snaps_to_displayed_precision_before_diffing():
     # 5.02 -> 5.06 displays as 5.0 -> 5.1; the delta must equal that shown
     # difference (+0.1), not the raw 0.04 s swing.
     assert bench._compare_cell(5.02, 5.06) == "5.0 -> 5.1 (+0.1)"
+
+
+def test_fmt_component_delta_signs():
+    assert bench._fmt_component_delta((1, 0, 0), (0, 0, 0)) == "-1/0/0"
+    assert bench._fmt_component_delta((0, 0, 1, 0), (1, 0, 0, 0)) == "+1/0/-1/0"
+    assert bench._fmt_component_delta((2, 2), (2, 2)) == "0/0"
+

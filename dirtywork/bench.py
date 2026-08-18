@@ -561,10 +561,42 @@ def _harness_cell(summary) -> str:
     visible instead of silently reading like a clean zero."""
     if summary is None or summary["harness_rows"] == 0:
         return MISSING
-    cell = f"{summary['nudges']}/{summary['stalled']}/{summary['max_turns']}"
+    cell = "/".join(str(n) for n in _harness_counts(summary))
     if summary["harness_rows"] < summary["runs"]:
         cell += "*"
     return cell
+
+
+def _harness_counts(summary) -> tuple:
+    return (summary["nudges"], summary["stalled"], summary["max_turns"])
+
+
+def _harness_known(summary) -> bool:
+    return summary is not None and summary["harness_rows"] > 0
+
+
+def _outcome_counts(summary) -> tuple:
+    o = summary["outcomes"]
+    return (o["pass"], o["fail"], o["gamed"], o["skipped"])
+
+
+def _fmt_component_delta(a: tuple, b: tuple) -> str:
+    """Component-wise `+N/-N/0` for count tuples (B - A), same sign convention
+    as _fmt_delta -- the legend promises a delta on every paired cell."""
+    parts = []
+    for x, y in zip(a, b):
+        d = y - x
+        parts.append("0" if d == 0 else f"{d:+d}")
+    return "/".join(parts)
+
+
+def _paired_counts_cell(left: str, right: str, a: tuple, b: tuple) -> str:
+    """`A -> B (dA/dB/...)`; no delta when either side is missing (nothing to
+    subtract), like _compare_cell."""
+    text = f"{left} -> {right}"
+    if a is None or b is None:
+        return text
+    return f"{text} ({_fmt_component_delta(a, b)})"
 
 
 def _outcomes_cell(summary) -> str:
@@ -607,10 +639,15 @@ def _compare_rows(agg_a: dict, agg_b: dict) -> list:
                                         _stat(b, "mean_completion_tokens")),
             "accept": _compare_cell(_stat(a, "acceptance_rate"),
                                     _stat(b, "acceptance_rate"), "pct"),
-            "outcomes": f"{_outcomes_cell(a)} -> {_outcomes_cell(b)}",
+            "outcomes": _paired_counts_cell(
+                _outcomes_cell(a), _outcomes_cell(b),
+                _outcome_counts(a) if a else None, _outcome_counts(b) if b else None),
             "verdict": _compare_cell(_stat(a, "verdict_rate"),
                                      _stat(b, "verdict_rate"), "pct"),
-            "harness": f"{_harness_cell(a)} -> {_harness_cell(b)}",
+            "harness": _paired_counts_cell(
+                _harness_cell(a), _harness_cell(b),
+                _harness_counts(a) if _harness_known(a) else None,
+                _harness_counts(b) if _harness_known(b) else None),
         })
     return rows
 
@@ -643,7 +680,7 @@ def _print_comparison(path_a: Path, rows_a: list, path_b: Path, rows_b: list) ->
     agg_b = _aggregate(rows_b, _model_task_key)
     print(f"A = {path_a}")
     print(f"B = {path_b}")
-    print("cells: A -> B (Δ); Δ = B - A; "
+    print("cells: A -> B (Δ); Δ = B - A (component-wise for count cells); "
           f"'{MISSING}' = no rows for that key in that file; "
           "outcomes = pass/fail/gamed/skipped")
     print("harness: nudges/stalled/max_turns")

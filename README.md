@@ -293,7 +293,8 @@ median review seconds). `--compare <other.jsonl>` prints two paired
 `A -> B (Δ)` tables instead — the per-(model, task) table and the paired
 per-model summary — deltas are B minus A, a key only one sweep ran shows
 `-` on the other side, the per-(model, task) table's `outcomes` column
-breaks the acceptance rate down as `pass/fail/gamed/skipped` per side, and
+breaks the acceptance rate down as `pass/fail/gamed/skipped` per side (count
+cells carry a component-wise delta, e.g. `0/0/1/0 -> 1/0/0/0 (+1/0/-1/0)`), and
 its `harness` column reads `-` for a side whose rows never ran the harness
 (bench_error only) or is suffixed `*` when only some of that side's rows did.
 
