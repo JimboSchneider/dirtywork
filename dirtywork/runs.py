@@ -11,6 +11,7 @@ imported by value, so tests can point it at a tmp_path.
 """
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -215,6 +216,30 @@ def _summary_value(key: str, data: dict) -> str:
     return text.replace("\n", " ") if key == "task" else text
 
 
+def read_transcript_events(path) -> tuple:
+    """(events, error) -- the one transcript parser in this module. Both
+    renderers of `runs show` (the text timeline and the Markdown document) read
+    the file through here, so what counts as an event is decided once. A missing
+    transcript is not an error (a run that died in preflight never wrote one); an
+    unreadable one yields no events plus the message to report."""
+    path = Path(path)
+    if not path.is_file():
+        return [], None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return [], str(e)
+    events = []
+    for line in text.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events, None
+
+
 def _timeline_line(event: dict) -> str:
     ts = event.get("ts", "")
     name = str(event.get("event", ""))
@@ -239,6 +264,167 @@ def _timeline_line(event: dict) -> str:
     return f"{ts}  {name}"
 
 
+MD_HEADER_FIELDS = ("status", "task", "model", "provider", "sandbox", "turns",
+                    "base_commit", "branch", "worktree", "resumed_from", "resumed_by")
+MD_VERDICT_FIELDS = ("verdict", "note")
+MD_RESULT_FIELDS = ("status", "export_status", "finalize_error", "watchdog_violation")
+MD_ARGS_CHARS = 200      # the transcript already caps `args` at 500
+MD_RESULT_CHARS = 2000   # the transcript's own `preview` cap for a tool result
+
+
+def _md_trim(value, limit: int) -> str:
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + " ... [truncated]"
+
+
+def _md_fence(text: str) -> str:
+    """A fence longer than any backtick run inside `text` -- a tool result (or a
+    diff of a Markdown file) may itself contain a fence and would otherwise close
+    the block early."""
+    longest = max([len(m) for m in re.findall(r"`+", text)] or [0])
+    return "`" * max(3, longest + 1)
+
+
+def _md_block(text: str, lang: str = "") -> list:
+    fence = _md_fence(text)
+    return [f"{fence}{lang}", text, fence, ""]
+
+
+def _md_inline(value, limit: int) -> str:
+    """Model/tool output that lands in an inline Markdown or HTML context (a
+    <summary> line, a blockquote callout): trimmed, then HTML-escaped, because
+    tool arguments and guardrail reasons routinely contain `<` and `&`. Text
+    that lands inside a fenced block is NOT escaped -- a fence is already
+    literal, and escaping there would print `&lt;` to the reader. `quote=False`:
+    this is element text, never an attribute value, and JSON arguments are full
+    of quotes that would otherwise render as `&quot;` noise."""
+    return html.escape(_md_trim(value, limit), quote=False)
+
+
+def _md_event_lines(event: dict) -> list:
+    """One non-assistant timeline event as Markdown: tool results become
+    collapsible <details> blocks, harness events become blockquote callouts."""
+    name = str(event.get("event", ""))
+    if name == "tool_result":
+        tool = event.get("tool") or "(malformed call)"
+        result = str(event.get("result", ""))
+        outcome = ("ERROR" if result.startswith("ERROR")
+                   else "BLOCKED" if result.startswith("BLOCKED") else "ok")
+        summary = (f"{html.escape(str(tool))}"
+                   f"({_md_inline(event.get('args', ''), MD_ARGS_CHARS)}) [{outcome}]")
+        lines = ["<details>", f"<summary>{summary}</summary>", ""]
+        lines += _md_block(_md_trim(result, MD_RESULT_CHARS))
+        lines += ["</details>", ""]
+        return lines
+    if name == "nudge":
+        return [f"> **nudge** `{event.get('kind', '')}` (turn {event.get('turn', '')})", ""]
+    if name == "guardrail_block":
+        return [f"> **guardrail_block** `{event.get('tool', '')}`: "
+                f"{_md_inline(event.get('reason', ''), MD_ARGS_CHARS)}", ""]
+    if name == "sandbox_reset":
+        return [f"> **sandbox_reset**: {_md_inline(event.get('reason', ''), MD_ARGS_CHARS)}", ""]
+    return []
+
+
+def _md_timeline(events: list) -> list:
+    """`## Timeline`, one `### Turn N` per assistant event; every other event is
+    rendered under the turn it followed."""
+    lines = ["## Timeline", ""]
+    turn = 0
+    for event in events:
+        name = str(event.get("event", ""))
+        if name in ("run_start", "run_end"):
+            continue
+        if name == "assistant":
+            turn += 1
+            lines += [f"### Turn {turn}", ""]
+            text = str(event.get("text") or "").strip()
+            if text:
+                lines += [text, ""]
+            tools = ", ".join(f"`{tc.get('name')}`" for tc in (event.get("tool_calls") or [])
+                              if isinstance(tc, dict))
+            lines += [f"_tool calls: {tools}_" if tools else "_text reply, no tool calls_", ""]
+            continue
+        lines += _md_event_lines(event)
+    if turn == 0 and len(lines) == 2:
+        lines += ["_(no timeline events recorded)_", ""]
+    return lines
+
+
+def _last_event(events: list, name: str) -> dict:
+    for event in reversed(events):
+        if event.get("event") == name:
+            return event
+    return {}
+
+
+def _final_message(events: list) -> str:
+    """The run's final message, reconstructed from the transcript: run.json does
+    not record it. A `finish(summary=...)` call is what the runner turned into
+    `final_message`; otherwise (or when the 500-char `args` cap truncated the
+    JSON) it is the last non-empty assistant reply."""
+    for event in reversed(events):
+        if event.get("event") == "tool_result" and event.get("tool") == "finish":
+            try:
+                args = json.loads(str(event.get("args") or "{}"))
+            except ValueError:
+                args = {}
+            if isinstance(args, dict) and args.get("summary"):
+                return str(args["summary"])
+            break
+    for event in reversed(events):
+        if event.get("event") == "assistant":
+            text = str(event.get("text") or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def _md_result(data: dict, events: list) -> list:
+    end = _last_event(events, "run_end")
+    lines = ["## Result", ""]
+    for key in MD_RESULT_FIELDS:
+        value = data.get(key) or end.get(key)
+        if value not in (None, ""):
+            lines.append(f"- **{key}:** {str(value).splitlines()[0]}")
+    lines.append("")
+    diff_stat = data.get("diff_stat") or end.get("diff_stat")
+    if diff_stat:
+        lines += ["**diff_stat**", ""] + _md_block(str(diff_stat))
+    final = _final_message(events)
+    lines += ["**final message**", ""]
+    lines += _md_block(final) if final else ["_(none recorded)_", ""]
+    return lines
+
+
+def render_markdown(slug: str, data: dict, events: list, *, diff=None, error=None) -> str:
+    """The whole run as one Markdown document: run.json for the header and the
+    result, the transcript for the turns. Token counts come from the transcript's
+    `run_end.usage` -- run.json has never carried them."""
+    lines = [f"# {slug}", ""]
+    for key in MD_HEADER_FIELDS:
+        lines.append(f"- **{key}:** {_summary_value(key, data)}")
+    usage = _last_event(events, "run_end").get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    for key in ("prompt_tokens", "completion_tokens"):
+        value = usage.get(key)
+        lines.append(f"- **{key}:** {'-' if value is None else value}")
+    for key in MD_VERDICT_FIELDS:
+        if data.get(key):
+            lines.append(f"- **{key}:** {_summary_value(key, data)}")
+    lines.append("")
+    if error:
+        lines += [f"> **transcript unreadable:** {error}", ""]
+    lines += _md_timeline(events)
+    lines += _md_result(data, events)
+    if diff is not None:
+        lines += ["## Diff", ""] + _md_block(diff, "diff")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+NO_PATCH_NOTE = "no diff.patch for this run (host mode, or the export never ran)"
+
+
 def cmd_show(args) -> int:
     try:
         run_dir, data = _open_run(args.slug)
@@ -246,34 +432,55 @@ def cmd_show(args) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
+    # `getattr`, not `args.x`: existing callers build a Namespace with
+    # slug/diff only (tests/test_runs.py) and must keep working.
+    want_diff = getattr(args, "diff", False)
+    markdown = getattr(args, "markdown", False)
+    out = getattr(args, "out", None)
+    if out and not markdown:
+        print("error: --out requires --markdown", file=sys.stderr)
+        return 2
+
+    transcript_path = run_dir / "transcript.jsonl"
+    patch_path = run_dir / "diff.patch"
+
+    if markdown:
+        events, read_error = read_transcript_events(transcript_path)
+        diff_text = None
+        if want_diff:
+            diff_text = (patch_path.read_text(encoding="utf-8", errors="replace")
+                         if patch_path.is_file() else NO_PATCH_NOTE)
+        document = render_markdown(args.slug, data, events, diff=diff_text, error=read_error)
+        if out:
+            try:
+                Path(out).write_text(document, encoding="utf-8")
+            except OSError as e:
+                print(f"error: cannot write '{out}': {e}", file=sys.stderr)
+                return 2
+            print(f"wrote {out}")
+        else:
+            print(document, end="")
+        return 0
+
     for key in SHOW_FIELDS:
         print(f"{key}: {_summary_value(key, data)}")
     print()
     print(json.dumps(data, indent=2, sort_keys=True))
 
-    transcript_path = run_dir / "transcript.jsonl"
     if transcript_path.is_file():
         print("\ntimeline:")
-        try:
-            lines = transcript_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError as e:
-            lines = []
-            print(f"  (cannot read transcript: {e})")
-        for line in lines:
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(event, dict):
-                print(_timeline_line(event))
+        events, read_error = read_transcript_events(transcript_path)
+        if read_error:
+            print(f"  (cannot read transcript: {read_error})")
+        for event in events:
+            print(_timeline_line(event))
 
-    if getattr(args, "diff", False):
-        patch_path = run_dir / "diff.patch"
+    if want_diff:
         if patch_path.is_file():
             print("\ndiff:")
             print(patch_path.read_text(encoding="utf-8", errors="replace"))
         else:
-            print("\nno diff.patch for this run (host mode, or the export never ran)")
+            print(f"\n{NO_PATCH_NOTE}")
     return 0
 
 

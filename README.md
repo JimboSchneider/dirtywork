@@ -214,9 +214,14 @@ of whether the run is still going:
 - `dirtywork runs list [--json]` — every run under `~/.dirtywork/runs`: slug,
   status, when it started, its place in a resume chain, branch, whether the
   worktree still exists, and container/volume state.
-- `dirtywork runs show <slug> [--diff]` — the run's summary fields, its full
-  `run.json`, and a timeline reconstructed from the transcript; `--diff`
-  also prints `diff.patch`.
+- `dirtywork runs show <slug> [--diff] [--markdown] [--out FILE]` — the run's
+  summary fields, its full `run.json`, and a timeline reconstructed from the
+  transcript; `--diff` also prints `diff.patch`. `--markdown` renders the same
+  run as a Markdown report instead (header block, one `### Turn N` section per
+  assistant turn, collapsible `<details>` tool results, blockquote callouts for
+  nudges/guardrail blocks/sandbox resets, a `## Result` section, and with
+  `--diff` the patch in a fenced block) — paste-ready for a PR or an issue;
+  `--out FILE` writes it to a file instead of stdout.
 - `dirtywork runs export <slug> [--max-worktree-mb 2048] [--max-worktree-files 200000] [--max-patch-mb 10] [--keep-volume]` —
   re-runs the docker export into the worktree for a run whose volume still
   exists (after `export_failed`, or a crash before the export ran); refuses

@@ -206,4 +206,11 @@ Rows marked *verdict* are added post hoc by `dirtywork runs verdict <slug> …`
 (a merge-update; no existing key is dropped) and are absent until then.
 
 `dirtywork runs show <slug>` prints this file alongside a tool-call timeline
-reconstructed from the transcript.
+reconstructed from the transcript. `dirtywork runs show <slug> --markdown
+[--out FILE]` exports those same two sources as one Markdown document —
+`run.json` for the header block and the `## Result` section, the transcript for
+one `### Turn N` per `assistant` event with its `tool_result`s as `<details>`
+blocks (capped at the same 2000-char preview the transcript itself applies) and
+its `nudge`/`guardrail_block`/`sandbox_reset` events as blockquote callouts.
+Token counts in the header come from `run_end.usage`, and the final message from
+the `finish` call's `summary`, because `run.json` records neither.

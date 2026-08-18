@@ -882,3 +882,135 @@ def test_cmd_verdict_unknown_slug_exits_2(tmp_path, monkeypatch, capsys):
                                              note=None, review_seconds=None))
     assert rc == 2
     assert "no such run" in capsys.readouterr().err
+
+
+FENCE = "`" * 3
+
+
+def _markdown_run(tmp_path, **over):
+    """A run dir with a two-turn transcript: a nudge, a guardrail_block, a
+    finish call, and a run_end carrying usage."""
+    data = {
+        "status": "completed", "slug": "md1", "task": "fix the off-by-one",
+        "model": "qwen/qwen3-coder-next", "provider": "openai", "turns": 2,
+        "sandbox": "docker", "base_commit": "abc1234", "branch": "dirtywork/md1",
+        "worktree": "/repo/.worktrees/dw-md1", "resumed_from": None, "resumed_by": None,
+        "diff_stat": " x.py | 2 +-\n 1 file changed", "export_status": "ok",
+        "verdict": "accept", "note": "clean patch",
+    }
+    data.update(over)
+    run_dir = _write_run(tmp_path / "runs", "md1", data)
+    (run_dir / "transcript.jsonl").write_text(
+        json.dumps({"ts": "t0", "event": "run_start", "model": "qwen/qwen3-coder-next"}) + "\n"
+        + json.dumps({"ts": "t1", "event": "assistant", "text": "Looking at the file.",
+                      "tool_calls": [{"name": "bash", "arguments": "{}"}]}) + "\n"
+        + json.dumps({"ts": "t2", "event": "tool_result", "tool": "bash",
+                      "args": "{\"command\": \"rm -rf /\"}",
+                      "result": "BLOCKED: refusing <destructive> command"}) + "\n"
+        + json.dumps({"ts": "t3", "event": "guardrail_block", "tool": "bash",
+                      "args": {"command": "rm -rf /"},
+                      "reason": "BLOCKED: refusing <destructive> command"}) + "\n"
+        + json.dumps({"ts": "t4", "event": "nudge", "kind": "stall", "turn": 1}) + "\n"
+        + json.dumps({"ts": "t5", "event": "assistant", "text": "Fixed it.",
+                      "tool_calls": [{"name": "finish", "arguments": "{}"}]}) + "\n"
+        + json.dumps({"ts": "t6", "event": "tool_result", "tool": "finish",
+                      "args": "{\"summary\": \"off-by-one corrected\"}",
+                      "result": "run finished"}) + "\n"
+        + json.dumps({"ts": "t7", "event": "run_end", "status": "completed", "turns": 2,
+                      "usage": {"prompt_tokens": 1234, "completion_tokens": 56}}) + "\n"
+    )
+    return run_dir
+
+
+def test_cmd_show_markdown_renders_document(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _markdown_run(tmp_path)
+    rc = runs.cmd_show(argparse.Namespace(slug="md1", diff=False, markdown=True, out=None))
+    assert rc == 0
+    out = capsys.readouterr().out
+    # header block
+    assert out.startswith("# md1\n")
+    assert "- **task:** fix the off-by-one" in out
+    assert "- **model:** qwen/qwen3-coder-next" in out
+    assert "- **provider:** openai" in out
+    assert "- **base_commit:** abc1234" in out
+    assert "- **branch:** dirtywork/md1" in out
+    assert "- **prompt_tokens:** 1234" in out
+    assert "- **completion_tokens:** 56" in out
+    assert "- **verdict:** accept" in out
+    assert "- **note:** clean patch" in out
+    # one section per assistant turn, in order
+    assert "## Timeline" in out
+    assert "### Turn 1" in out
+    assert "### Turn 2" in out
+    assert out.index("### Turn 1") < out.index("### Turn 2")
+    assert "Looking at the file." in out
+    # tool calls become collapsible blocks with the result in a fenced block,
+    # where text is literal and therefore NOT html-escaped
+    assert "<details>" in out and "</details>" in out
+    assert "<summary>bash(" in out
+    assert "BLOCKED: refusing <destructive> command" in out
+    assert FENCE in out
+    # harness events become blockquote callouts -- inline context, so escaped
+    assert "> **nudge**" in out
+    assert "> **guardrail_block**" in out
+    assert "refusing &lt;destructive&gt; command" in out
+    # result block
+    assert "## Result" in out
+    assert "- **status:** completed" in out
+    assert "- **export_status:** ok" in out
+    assert "1 file changed" in out
+    assert "off-by-one corrected" in out          # final message from the finish call
+
+
+def test_cmd_show_markdown_out_writes_file(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _markdown_run(tmp_path)
+    target = tmp_path / "report.md"
+    rc = runs.cmd_show(argparse.Namespace(slug="md1", diff=False, markdown=True,
+                                          out=str(target)))
+    assert rc == 0
+    text = target.read_text()
+    assert text.startswith("# md1\n")
+    assert "### Turn 2" in text
+    assert str(target) in capsys.readouterr().out   # the path is reported, not the document
+
+
+def test_cmd_show_markdown_diff_embeds_fenced_patch(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    run_dir = _markdown_run(tmp_path)
+    (run_dir / "diff.patch").write_text("--- a/x.py\n+++ b/x.py\n@@\n-1\n+2\n")
+    rc = runs.cmd_show(argparse.Namespace(slug="md1", diff=True, markdown=True, out=None))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "## Diff" in out
+    assert FENCE + "diff" in out
+    assert "--- a/x.py" in out
+
+
+def test_cmd_show_out_without_markdown_exits_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _markdown_run(tmp_path)
+    rc = runs.cmd_show(argparse.Namespace(slug="md1", diff=False, markdown=False,
+                                          out=str(tmp_path / "x.md")))
+    assert rc == 2
+    assert "--out requires --markdown" in capsys.readouterr().err
+
+
+def test_cmd_show_markdown_caps_long_results_and_survives_inner_fences(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    run_dir = _write_run(tmp_path / "runs", "md1", {"status": "completed", "slug": "md1"})
+    huge = FENCE + "\n" + ("x" * 5000)
+    (run_dir / "transcript.jsonl").write_text(
+        json.dumps({"ts": "t1", "event": "assistant", "text": "", "tool_calls": []}) + "\n"
+        + json.dumps({"ts": "t2", "event": "tool_result", "tool": "read_file",
+                      "args": "{\"path\": \"big.txt\"}", "result": huge}) + "\n"
+    )
+    rc = runs.cmd_show(argparse.Namespace(slug="md1", diff=False, markdown=True, out=None))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "x" * 100 in out
+    assert "x" * 4000 not in out                  # capped at MD_RESULT_CHARS
+    assert "[truncated]" in out
+    assert FENCE + "`" in out                     # fence widened past the inner fence
