@@ -404,7 +404,20 @@ def _detail_row(row: dict, verdict, review_seconds) -> dict:
     }
 
 
+def _mean(values: list):
+    """None for an empty sample -- a bench_error row records no turns, no
+    tokens and no verdict, and a mean of nothing is not 0."""
+    return (sum(values) / len(values)) if values else None
+
+
+def _numbers(rows: list, key: str) -> list:
+    return [r[key] for r in rows if isinstance(r.get(key), (int, float))]
+
+
 def _summarize_model(rows: list, verdicts: list, review_seconds: list) -> dict:
+    """The one aggregation in this module. `cmd_summarize` calls it per model;
+    `--compare` calls it per (model, task) -- same function, different key, so
+    the two blocks can never disagree about what a rate means."""
     n = len(rows)
     completed = sum(1 for r in rows if r.get("status") == "completed")
     accepted = sum(1 for r in rows if r.get("acceptance") == "pass")
@@ -412,24 +425,46 @@ def _summarize_model(rows: list, verdicts: list, review_seconds: list) -> dict:
     tokens = [(r.get("prompt_tokens") or 0) + (r.get("completion_tokens") or 0)
               for r in rows if r.get("prompt_tokens") is not None
               or r.get("completion_tokens") is not None]
-    walls = [r["wall_s"] for r in rows if isinstance(r.get("wall_s"), (int, float))]
+    # P2-2: a bench_error row (docker/staging failure before the harness ever
+    # ran) carries an empty `harness` dict -- it must not be counted as zero
+    # nudges/stalls/max_turns among rows that DID run the harness.
+    harness_dicts = [r.get("harness") for r in rows
+                     if isinstance(r.get("harness"), dict) and r.get("harness")]
+    outcomes = {"pass": 0, "fail": 0, "gamed": 0, "skipped": 0}
+    for r in rows:
+        acceptance = r.get("acceptance")
+        outcomes[acceptance if acceptance in outcomes else "skipped"] += 1
     return {
         "runs": n,
         "completion_rate": completed / n if n else 0.0,
         "acceptance_rate": accepted / n if n else 0.0,
         "gamed": gamed,
-        "mean_tokens": (sum(tokens) / len(tokens)) if tokens else None,
-        "mean_wall_s": (sum(walls) / len(walls)) if walls else None,
+        "outcomes": outcomes,
+        "mean_tokens": _mean(tokens),
+        "mean_wall_s": _mean(_numbers(rows, "wall_s")),
         "verdict_rate": (verdicts.count("accept") / len(verdicts)) if verdicts else None,
         "median_review_seconds": statistics.median(review_seconds) if review_seconds else None,
+        # added for `--compare`; the per-model block above ignores them
+        "mean_turns": _mean(_numbers(rows, "turns")),
+        "mean_prompt_tokens": _mean(_numbers(rows, "prompt_tokens")),
+        "mean_completion_tokens": _mean(_numbers(rows, "completion_tokens")),
+        "harness_rows": len(harness_dicts),
+        "nudges": sum((h.get(f"nudge_{kind}") or 0) for h in harness_dicts for kind in NUDGE_KINDS),
+        "stalled": sum(1 for h in harness_dicts if h.get("stalled")),
+        "max_turns": sum(1 for h in harness_dicts if h.get("max_turns")),
     }
 
 
-def cmd_summarize(args) -> int:
-    path = Path(args.file)
-    if not path.is_file():
-        print(f"error: no such file '{path}'", file=sys.stderr)
-        return 2
+MISSING = "-"
+COMPARE_COLUMNS = ("model", "task", "runs", "turns", "wall_s", "prompt", "completion",
+                   "accept", "outcomes", "verdict", "harness")
+COMPARE_MODEL_COLUMNS = ("model", "runs", "completion", "accept", "gamed", "tokens",
+                         "wall_s", "verdict", "review_s")
+
+
+def _load_results(path: Path) -> list:
+    """Every JSON object in a results JSONL file. Blank and malformed lines are
+    skipped: a sweep killed mid-write must still summarize."""
     rows = []
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = line.strip()
@@ -441,6 +476,243 @@ def cmd_summarize(args) -> int:
             continue
         if isinstance(parsed, dict):
             rows.append(parsed)
+    return rows
+
+
+def _model_key(row: dict) -> str:
+    return row.get("model", "?")
+
+
+def _model_task_key(row: dict) -> tuple:
+    return (row.get("model", "?"), row.get("task", "?"))
+
+
+def _aggregate(rows: list, key) -> dict:
+    """{key: _summarize_model(...)} for one results file. Verdicts are re-read
+    per row through `_verdict_for` (the operator records them after the sweep),
+    exactly as the per-model block does."""
+    grouped, verdicts, reviews = {}, {}, {}
+    for row in rows:
+        k = key(row)
+        grouped.setdefault(k, []).append(row)
+        verdict, review = _verdict_for(row)
+        if verdict:
+            verdicts.setdefault(k, []).append(verdict)
+        if isinstance(review, (int, float)):
+            reviews.setdefault(k, []).append(review)
+    return {k: _summarize_model(v, verdicts.get(k, []), reviews.get(k, []))
+            for k, v in grouped.items()}
+
+
+def _fmt_cell(value, kind: str) -> str:
+    """One side of a paired cell. None means the file has no rows for this key
+    (or no sample for this statistic), and prints as a dash."""
+    if value is None:
+        return MISSING
+    if kind == "pct":
+        return f"{value:.0%}"
+    if kind == "int":
+        return f"{int(value)}"
+    return f"{value:.1f}"
+
+
+def _fmt_delta(a, b, kind: str) -> str:
+    """`+N` / `-N` (`0` for no change), or "" when either side is missing --
+    there is nothing to subtract from a key one file never ran. The delta is
+    computed from the DISPLAYED quantities -- each side snapped to the same
+    precision `_fmt_cell` prints -- so a paired cell can never contradict
+    itself: 33% -> 67% must show (+34%), the difference of the two displayed
+    numbers, not some unrounded value in between."""
+    if a is None or b is None:
+        return ""
+    if kind == "pct":
+        diff = round(b * 100) - round(a * 100)
+    elif kind == "int":
+        diff = int(b) - int(a)
+    else:
+        diff = round(b, 1) - round(a, 1)
+    if diff == 0:
+        return "0"
+    if kind == "pct":
+        text = f"{abs(diff)}%"
+    elif kind == "int":
+        text = f"{abs(diff)}"
+    else:
+        text = f"{abs(diff):.1f}"
+    return ("+" if diff > 0 else "-") + text
+
+
+def _compare_cell(a, b, kind: str = "float") -> str:
+    """`A -> B (delta)` for one statistic."""
+    delta = _fmt_delta(a, b, kind)
+    text = f"{_fmt_cell(a, kind)} -> {_fmt_cell(b, kind)}"
+    return f"{text} ({delta})" if delta else text
+
+
+def _stat(summary, key: str):
+    """One statistic out of a summary, or None when that file has no such key."""
+    return summary.get(key) if summary else None
+
+
+def _harness_cell(summary) -> str:
+    """nudges/stalled/max_turns for one side, compact. MISSING when none of
+    this side's rows carried a harness dict (bench_error rows only -- P2-2);
+    suffixed with `*` when only SOME of them did, so partial knowledge is
+    visible instead of silently reading like a clean zero."""
+    if summary is None or summary["harness_rows"] == 0:
+        return MISSING
+    cell = "/".join(str(n) for n in _harness_counts(summary))
+    if summary["harness_rows"] < summary["runs"]:
+        cell += "*"
+    return cell
+
+
+def _harness_counts(summary) -> tuple:
+    return (summary["nudges"], summary["stalled"], summary["max_turns"])
+
+
+def _harness_known(summary) -> bool:
+    return summary is not None and summary["harness_rows"] > 0
+
+
+def _outcome_counts(summary) -> tuple:
+    o = summary["outcomes"]
+    return (o["pass"], o["fail"], o["gamed"], o["skipped"])
+
+
+def _fmt_component_delta(a: tuple, b: tuple) -> str:
+    """Component-wise `+N/-N/0` for count tuples (B - A), same sign convention
+    as _fmt_delta -- the legend promises a delta on every paired cell."""
+    parts = []
+    for x, y in zip(a, b):
+        d = y - x
+        parts.append("0" if d == 0 else f"{d:+d}")
+    return "/".join(parts)
+
+
+def _paired_counts_cell(left: str, right: str, a: tuple, b: tuple) -> str:
+    """`A -> B (dA/dB/...)`; no delta when either side is missing (nothing to
+    subtract), like _compare_cell."""
+    text = f"{left} -> {right}"
+    if a is None or b is None:
+        return text
+    return f"{text} ({_fmt_component_delta(a, b)})"
+
+
+def _outcomes_cell(summary) -> str:
+    """pass/fail/gamed/skipped for one side, compact (P2-3)."""
+    if summary is None:
+        return MISSING
+    o = summary["outcomes"]
+    return f"{o['pass']}/{o['fail']}/{o['gamed']}/{o['skipped']}"
+
+
+def _harness_partial_footnote(agg_a: dict, agg_b: dict):
+    """`* harness data present for N of M runs`, or None when no side of any
+    key in the table has partial harness coverage. N/M are summed across
+    every summary (either file) that has SOME but not all rows carrying a
+    harness dict -- one line covering every `*` in the table rather than one
+    line per cell."""
+    partial = [s for s in list(agg_a.values()) + list(agg_b.values())
+              if 0 < s["harness_rows"] < s["runs"]]
+    if not partial:
+        return None
+    n = sum(s["harness_rows"] for s in partial)
+    m = sum(s["runs"] for s in partial)
+    return f"* harness data present for {n} of {m} runs"
+
+
+def _compare_rows(agg_a: dict, agg_b: dict) -> list:
+    """One row per (model, task) key present in either file, sorted."""
+    rows = []
+    for model, task in sorted(set(agg_a) | set(agg_b)):
+        a, b = agg_a.get((model, task)), agg_b.get((model, task))
+        rows.append({
+            "model": model,
+            "task": task,
+            "runs": _compare_cell(_stat(a, "runs"), _stat(b, "runs"), "int"),
+            "turns": _compare_cell(_stat(a, "mean_turns"), _stat(b, "mean_turns")),
+            "wall_s": _compare_cell(_stat(a, "mean_wall_s"), _stat(b, "mean_wall_s")),
+            "prompt": _compare_cell(_stat(a, "mean_prompt_tokens"),
+                                    _stat(b, "mean_prompt_tokens")),
+            "completion": _compare_cell(_stat(a, "mean_completion_tokens"),
+                                        _stat(b, "mean_completion_tokens")),
+            "accept": _compare_cell(_stat(a, "acceptance_rate"),
+                                    _stat(b, "acceptance_rate"), "pct"),
+            "outcomes": _paired_counts_cell(
+                _outcomes_cell(a), _outcomes_cell(b),
+                _outcome_counts(a) if a else None, _outcome_counts(b) if b else None),
+            "verdict": _compare_cell(_stat(a, "verdict_rate"),
+                                     _stat(b, "verdict_rate"), "pct"),
+            "harness": _paired_counts_cell(
+                _harness_cell(a), _harness_cell(b),
+                _harness_counts(a) if _harness_known(a) else None,
+                _harness_counts(b) if _harness_known(b) else None),
+        })
+    return rows
+
+
+def _compare_model_rows(agg_a: dict, agg_b: dict) -> list:
+    """The per-model stats `bench summarize` already prints, paired A -> B."""
+    rows = []
+    for model in sorted(set(agg_a) | set(agg_b)):
+        a, b = agg_a.get(model), agg_b.get(model)
+        rows.append({
+            "model": model,
+            "runs": _compare_cell(_stat(a, "runs"), _stat(b, "runs"), "int"),
+            "completion": _compare_cell(_stat(a, "completion_rate"),
+                                        _stat(b, "completion_rate"), "pct"),
+            "accept": _compare_cell(_stat(a, "acceptance_rate"),
+                                    _stat(b, "acceptance_rate"), "pct"),
+            "gamed": _compare_cell(_stat(a, "gamed"), _stat(b, "gamed"), "int"),
+            "tokens": _compare_cell(_stat(a, "mean_tokens"), _stat(b, "mean_tokens")),
+            "wall_s": _compare_cell(_stat(a, "mean_wall_s"), _stat(b, "mean_wall_s")),
+            "verdict": _compare_cell(_stat(a, "verdict_rate"),
+                                     _stat(b, "verdict_rate"), "pct"),
+            "review_s": _compare_cell(_stat(a, "median_review_seconds"),
+                                      _stat(b, "median_review_seconds")),
+        })
+    return rows
+
+
+def _print_comparison(path_a: Path, rows_a: list, path_b: Path, rows_b: list) -> int:
+    agg_a = _aggregate(rows_a, _model_task_key)
+    agg_b = _aggregate(rows_b, _model_task_key)
+    print(f"A = {path_a}")
+    print(f"B = {path_b}")
+    print("cells: A -> B (Δ); Δ = B - A (component-wise for count cells); "
+          f"'{MISSING}' = no rows for that key in that file; "
+          "outcomes = pass/fail/gamed/skipped")
+    print("harness: nudges/stalled/max_turns")
+    print()
+    print(format_table(COMPARE_COLUMNS, _compare_rows(agg_a, agg_b)))
+    footnote = _harness_partial_footnote(agg_a, agg_b)
+    if footnote:
+        print(footnote)
+    print()
+    print("per-model (A -> B):")
+    print(format_table(COMPARE_MODEL_COLUMNS,
+                       _compare_model_rows(_aggregate(rows_a, _model_key),
+                                           _aggregate(rows_b, _model_key))))
+    return 0
+
+
+def cmd_summarize(args) -> int:
+    path = Path(args.file)
+    if not path.is_file():
+        print(f"error: no such file '{path}'", file=sys.stderr)
+        return 2
+    rows = _load_results(path)
+
+    # `getattr`, not `args.compare`: existing callers build a Namespace with
+    # `file` only (tests/test_bench.py) and must keep working.
+    compare = getattr(args, "compare", None)
+    if compare:
+        other = Path(compare)
+        if not other.is_file():
+            print(f"error: no such file '{other}'", file=sys.stderr)
+            return 2
+        return _print_comparison(path, rows, other, _load_results(other))
 
     detail, by_model, verdicts, reviews = [], {}, {}, {}
     for row in rows:

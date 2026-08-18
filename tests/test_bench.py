@@ -538,3 +538,138 @@ def test_python_m_dirtywork_bench_does_not_double_load_main(tmp_path):
     assert cp.returncode == 0, cp.stderr
     assert cp.stdout.strip().splitlines()[-1] == "SAME", cp.stdout + cp.stderr
 
+
+def test_summarize_compare_pairs_rows_and_shows_deltas(tmp_path, monkeypatch, capsys):
+    # Two sweeps of the same two tasks, plus one task only B ran. Rows carry
+    # slug=None so _verdict_for never touches the (monkeypatched) runs dir.
+    monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs")
+    a = tmp_path / "a.jsonl"
+    b = tmp_path / "b.jsonl"
+    a_rows = [
+        _result_row(model="m1", task="t1", turns=4, wall_s=2.0, slug=None),
+        _result_row(model="m1", task="t1", repeat=1, turns=6, wall_s=4.0,
+                    acceptance="fail", slug=None),
+        # a bench_error row: every numeric field is None and harness is {}
+        _result_row(model="m1", task="t2", status="bench_error", turns=None, wall_s=1.0,
+                    prompt_tokens=None, completion_tokens=None, acceptance="skipped",
+                    harness={}, slug=None),
+        # P2-3: a gamed row, paired against a B-side 'pass' at a task no other
+        # row touches, so the outcomes cell is unambiguous.
+        _result_row(model="m1", task="t4", acceptance="gamed", turns=3, wall_s=1.5, slug=None),
+    ]
+    b_rows = [
+        _result_row(model="m1", task="t1", turns=2, wall_s=1.0, slug=None),
+        _result_row(model="m1", task="t1", repeat=1, turns=4, wall_s=3.0, slug=None),
+        _result_row(model="m1", task="t2", status="bench_error", turns=None, wall_s=1.0,
+                    prompt_tokens=None, completion_tokens=None, acceptance="skipped",
+                    harness={}, slug=None),
+        _result_row(model="m1", task="t3", turns=8, wall_s=5.0, slug=None),
+        _result_row(model="m1", task="t4", acceptance="pass", turns=3, wall_s=1.5, slug=None),
+    ]
+    a.write_text("\n".join(json.dumps(r) for r in a_rows) + "\n")
+    b.write_text("\n".join(json.dumps(r) for r in b_rows) + "\n")
+
+    rc = bench.cmd_summarize(argparse.Namespace(file=str(a), compare=str(b)))
+    assert rc == 0
+    out = capsys.readouterr().out
+    # header names both files and states the delta direction
+    assert f"A = {a}" in out
+    assert f"B = {b}" in out
+    assert "Δ = B - A" in out
+    # m1/t1: mean turns 5.0 -> 3.0, mean wall 3.0 -> 2.0, acceptance 50% -> 100%
+    assert "5.0 -> 3.0 (-2.0)" in out
+    assert "3.0 -> 2.0 (-1.0)" in out
+    assert "50% -> 100% (+50%)" in out
+    # the bench_error row aggregates instead of crashing: no numbers on either side
+    assert "t2" in out
+    assert "- -> -" in out
+    # a key only B ran shows the dash on the A side
+    assert "t3" in out
+    assert "- -> 1" in out
+    # P2-3: outcomes column (pass/fail/gamed/skipped) on the per-(model, task)
+    # table, plus its legend clause
+    assert "OUTCOMES" in out
+    assert "outcomes = pass/fail/gamed/skipped" in out
+    assert "0/0/1/0 -> 1/0/0/0 (+1/0/-1/0)" in out    # t4: a gamed, b pass; component-wise delta
+    # the per-model block is paired the same way
+    assert "per-model (A -> B):" in out
+    assert "MODEL" in out and "GAMED" in out
+
+
+def test_summarize_compare_harness_cell_missing_for_bench_error_only_side(
+        tmp_path, monkeypatch, capsys):
+    # P2-2: a side whose only row for a key is bench_error (harness={}) must
+    # render '-' for the harness cell -- it is not "zero failures", it never
+    # ran the harness at all.
+    monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs")
+    a = tmp_path / "a.jsonl"
+    b = tmp_path / "b.jsonl"
+    a.write_text(json.dumps(_result_row(model="m1", task="t1", status="bench_error",
+                                        acceptance="skipped", harness={}, slug=None)) + "\n")
+    b.write_text(json.dumps(_result_row(model="m1", task="t1", slug=None)) + "\n")
+    rc = bench.cmd_summarize(argparse.Namespace(file=str(a), compare=str(b)))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "- -> 0/0/0" in out and "- -> 0/0/0 (" not in out   # no delta against an unknown side
+    assert "harness data present for" not in out   # no partial side, no footnote
+
+
+def test_summarize_compare_harness_cell_partial_side_gets_asterisk_and_footnote(
+        tmp_path, monkeypatch, capsys):
+    # P2-2: a side with SOME rows carrying a harness dict and some not (mixed
+    # bench_error and real rows for the same key) must stay visible as
+    # partial data, not silently collapse into the full-coverage numbers.
+    monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs")
+    a = tmp_path / "a.jsonl"
+    b = tmp_path / "b.jsonl"
+    ok_harness = {"nudge_stall": 1, "nudge_empty": 0, "nudge_truncated": 0,
+                  "nudge_text_tool_call": 0, "nudge_other": 0, "empty_reply": 0,
+                  "stalled": 0, "max_turns": 0, "sandbox_error": 0, "abort_kind": None}
+    a_rows = [
+        _result_row(model="m1", task="t1", slug=None, harness=ok_harness),
+        _result_row(model="m1", task="t1", repeat=1, status="bench_error",
+                    acceptance="skipped", harness={}, slug=None),
+    ]
+    a.write_text("\n".join(json.dumps(r) for r in a_rows) + "\n")
+    b.write_text(json.dumps(_result_row(model="m1", task="t1", slug=None)) + "\n")  # full side
+    rc = bench.cmd_summarize(argparse.Namespace(file=str(a), compare=str(b)))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "1/0/0* -> 0/0/0 (-1/0/0)" in out   # A partial (1 of 2 rows), B full; delta on the known counts
+    assert "* harness data present for 1 of 2 runs" in out
+
+
+def test_summarize_compare_missing_file_exits_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs")
+    a = tmp_path / "a.jsonl"
+    a.write_text(json.dumps(_result_row(slug=None)) + "\n")
+    rc = bench.cmd_summarize(argparse.Namespace(file=str(a),
+                                                compare=str(tmp_path / "nope.jsonl")))
+    assert rc == 2
+    assert "no such file" in capsys.readouterr().err
+
+
+def test_fmt_delta_zero_and_sub_display_deltas_render_as_zero():
+    assert bench._fmt_delta(2, 2, "int") == "0"
+    assert bench._fmt_delta(3.02, 3.0, "float") == "0"      # 0.02 s shows as 0, not +0.0
+    assert bench._fmt_delta(0.501, 0.5, "pct") == "0"       # 0.1 pp shows as 0, not +0%
+    assert bench._fmt_delta(2, 5, "int") == "+3"
+    assert bench._fmt_delta(3.5, 2.0, "float") == "-1.5"
+    assert bench._fmt_delta(0.5, 1.0, "pct") == "+50%"
+    assert bench._fmt_delta(None, 1, "int") == ""
+
+
+def test_fmt_delta_snaps_to_displayed_precision_before_diffing():
+    # 1/3 -> 2/3 displays as 33% -> 67%; the delta must equal that displayed
+    # difference (+34%), not the unrounded ~33.33 pp swing.
+    assert bench._compare_cell(1 / 3, 2 / 3, "pct") == "33% -> 67% (+34%)"
+    # 5.02 -> 5.06 displays as 5.0 -> 5.1; the delta must equal that shown
+    # difference (+0.1), not the raw 0.04 s swing.
+    assert bench._compare_cell(5.02, 5.06) == "5.0 -> 5.1 (+0.1)"
+
+
+def test_fmt_component_delta_signs():
+    assert bench._fmt_component_delta((1, 0, 0), (0, 0, 0)) == "-1/0/0"
+    assert bench._fmt_component_delta((0, 0, 1, 0), (1, 0, 0, 0)) == "+1/0/-1/0"
+    assert bench._fmt_component_delta((2, 2), (2, 2)) == "0/0"
+

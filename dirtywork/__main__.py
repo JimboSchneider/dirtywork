@@ -703,6 +703,11 @@ def _add_runs_parsers(sub) -> None:
     show_p = runs_sub.add_parser("show", help="show one run's summary, run.json and timeline")
     show_p.add_argument("slug")
     show_p.add_argument("--diff", action="store_true", help="also print the run's diff.patch")
+    show_p.add_argument("--markdown", action="store_true",
+                        help="render the run as a Markdown document (header, one section per "
+                             "turn, collapsible tool results) instead of the JSON dump")
+    show_p.add_argument("--out", default=None, metavar="FILE",
+                        help="with --markdown, write the document to FILE instead of stdout")
 
     export_p = runs_sub.add_parser("export", help="re-run the export flow for a run")
     export_p.add_argument("slug")
@@ -745,6 +750,10 @@ def _add_bench_parsers(sub) -> None:
     bench_sub = bench_p.add_subparsers(dest="bench_cmd")
     summarize_p = bench_sub.add_parser("summarize", help="summarize a bench results file")
     summarize_p.add_argument("file")
+    summarize_p.add_argument("--compare", default=None, metavar="FILE",
+                             help="second results file: print two paired 'A -> B (delta)' "
+                                  "tables instead of the usual summary -- the per-(model, task) "
+                                  "table and the paired per-model summary")
 
 
 def _parse_args(argv):

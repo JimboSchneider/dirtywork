@@ -214,9 +214,16 @@ of whether the run is still going:
 - `dirtywork runs list [--json]` — every run under `~/.dirtywork/runs`: slug,
   status, when it started, its place in a resume chain, branch, whether the
   worktree still exists, and container/volume state.
-- `dirtywork runs show <slug> [--diff]` — the run's summary fields, its full
-  `run.json`, and a timeline reconstructed from the transcript; `--diff`
-  also prints `diff.patch`.
+- `dirtywork runs show <slug> [--diff] [--markdown] [--out FILE]` — the run's
+  summary fields, its full `run.json`, and a timeline reconstructed from the
+  transcript; `--diff` also prints `diff.patch`. `--markdown` renders the same
+  run as a Markdown report instead (header block whose `task` field is a
+  one-line preview, a `## Task` section with the full task text, one
+  `### Turn N` section per assistant turn, collapsible `<details>` tool
+  results, blockquote callouts for nudges/guardrail blocks/sandbox resets, a
+  `## Result` section, and with `--diff` the patch in a fenced block) —
+  paste-ready for a PR or an issue; `--out FILE` writes it to a file instead
+  of stdout.
 - `dirtywork runs export <slug> [--max-worktree-mb 2048] [--max-worktree-files 200000] [--max-patch-mb 10] [--keep-volume]` —
   re-runs the docker export into the worktree for a run whose volume still
   exists (after `export_failed`, or a crash before the export ran); refuses
@@ -264,7 +271,7 @@ of whether the run is still going:
     dirtywork bench --models 'model[@provider][=base_url],...' \
         [--provider openai] [--base-url URL] [--tasks name1,name2] \
         [--repeats N] [--out PATH] [--max-turns 40] [--timeout 1800]
-    dirtywork bench summarize <results.jsonl>
+    dirtywork bench summarize <results.jsonl> [--compare <other.jsonl>]
 
 Runs every (model × task × repeat) combination through the normal
 `dirtywork run --sandbox docker --keep-volume` path against the fixture
@@ -282,7 +289,14 @@ the sweep-wide `--provider`/`--base-url`, which in turn fall back to
 `~/.dirtywork/bench/<UTC-timestamp>.jsonl` (or `--out`); `dirtywork bench
 summarize <file>` prints a per-case table plus a per-model summary
 (completion/acceptance/verdict rates, gamed count, mean tokens/wall time,
-median review seconds).
+median review seconds). `--compare <other.jsonl>` prints two paired
+`A -> B (Δ)` tables instead — the per-(model, task) table and the paired
+per-model summary — deltas are B minus A, a key only one sweep ran shows
+`-` on the other side, the per-(model, task) table's `outcomes` column
+breaks the acceptance rate down as `pass/fail/gamed/skipped` per side (count
+cells carry a component-wise delta, e.g. `0/0/1/0 -> 1/0/0/0 (+1/0/-1/0)`), and
+its `harness` column reads `-` for a side whose rows never ran the harness
+(bench_error only) or is suffixed `*` when only some of that side's rows did.
 
 `bench` runs from a source checkout only — `bench/` and its fixture repos
 are not part of the installed package.
@@ -487,7 +501,7 @@ dirtywork run --repo <path> "<task>"
     [--max-worktree-mb 2048]
     [--max-worktree-files 200000]
     [--sandbox docker|none]           # default: docker
-    [--image ghcr.io/jimboschneider/dirtywork-worker:0.6]  # docker mode only
+    [--image ghcr.io/jimboschneider/dirtywork-worker:0.7]  # docker mode only
     [--allow-network]                 # docker mode only; default --network none
     [--memory 4g]                     # docker mode only
     [--cpus 2]                        # docker mode only
