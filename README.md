@@ -370,6 +370,7 @@ dirtywork run --repo <path> "<task>"
     [--min-free-mb 2048]              # docker mode only; host free-space floor
     [--keep-volume]                   # docker mode only; skip volume cleanup
     [--max-patch-mb 10]               # docker mode only; diff.patch cap
+    [--allow-commit]                  # host mode only; worker commits its own work
 ```
 
 ```
@@ -384,6 +385,14 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   transcript trimming budget. Precedence: flag, then `DIRTYWORK_CONTEXT_WINDOW`,
   then a built-in table for the known LM Studio models, then 32768 (with a
   warning on stderr).
+
+- `--allow-commit` (host mode only) — replaces the prompt's "leave all changes
+  uncommitted for review" rule with "commit your work in small conventional
+  commits as you go", so the run's branch comes back as real history instead of
+  a dirty worktree. Rejected in preflight with `--sandbox docker`: the export
+  carries files, not commits (its archive can never contain a `.git` entry), so
+  a container's commits could not reach the host anyway. `dirtywork resume`
+  inherits the setting from the run it continues.
 
 **stdout:** on any run that gets past preflight, exactly one JSON object is
 printed to stdout (nothing else goes to stdout):

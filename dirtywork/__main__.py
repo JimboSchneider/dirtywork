@@ -41,12 +41,22 @@ DEFAULT_MODEL = "qwen/qwen3-coder-next"
 DOCKER_WORKDIR = "/work"
 
 
-def build_system_prompt(display_root, repo_context: str | None) -> str:
+def build_system_prompt(display_root, repo_context: str | None, *, allow_commit: bool = False) -> str:
     """`display_root` is what the model is told its files live at: the host
     worktree path in host mode, or the fixed in-container mount point
     (DOCKER_WORKDIR) in docker mode -- the model never sees a host path it
     cannot `cd` to (docker.py's `_rel()` rejects absolute paths outside the
-    container's own tree)."""
+    container's own tree).
+
+    `allow_commit` (host mode only, enforced in `_resolve_allow_commit`) swaps
+    the leave-it-uncommitted rule for a commit-as-you-go rule. Nothing else
+    changes: no guardrail ever blocked `git commit`, and `git push` stays
+    blocked by the denylist in both modes."""
+    if allow_commit:
+        commit_rule = ("- Commit your work in small conventional commits as you go (git add + git commit); "
+                       "stay on the current branch -- do not create branches and never run git push.")
+    else:
+        commit_rule = "- Do not run git commit or git branch commands; leave all changes uncommitted for review."
     prompt = f"""You are a coding agent. Your files live at {display_root} -- treat it as your working directory for every tool call.
 Complete the task, then reply with a plain-text summary of what you changed and what commands you ran.
 
@@ -55,7 +65,7 @@ Rules:
 - Paths are relative to {display_root}.
 - Explore before editing: use list_dir, grep, and read_file to understand the code first.
 - Verify your work: run the repo's tests or build via bash before declaring the task complete.
-- Do not run git commit or git branch commands; leave all changes uncommitted for review.
+{commit_rule}
 - When the task is complete, call finish(summary=...) with a short summary of what you did and anything left undone. A plain reply with no tool calls also ends the run."""
     if repo_context:
         prompt += f"\n\nRepository conventions (from the repo's own docs):\n\n{repo_context}"
@@ -142,6 +152,20 @@ def _resolve_context_window(args, provider=None) -> int:
         print(f"warning: no known context window for '{args.model}'; assuming {window} tokens "
               f"(set --context-window or DIRTYWORK_CONTEXT_WINDOW)", file=sys.stderr)
     return window
+
+
+def _resolve_allow_commit(args) -> None:
+    """Normalize `--allow-commit` to a real bool on args and refuse the
+    combination that cannot work. The docker export builds a tree with
+    `git add -A` and streams `git archive` through a validator that refuses
+    every `.git` member (sandbox/export.py) -- a container's commits can never
+    reach the host, so honouring the flag there would change the prompt and
+    then silently discard the history it produced."""
+    if args.allow_commit and args.sandbox == "docker":
+        raise PreflightFailure(
+            "--allow-commit requires --sandbox none (host mode): docker export "
+            "carries files, not commits")
+    args.allow_commit = bool(args.allow_commit)
 
 
 def _workspace_new(args, repo: Path, context_window: int) -> RunContext:
@@ -308,6 +332,7 @@ def _write_run_json_start(run_dir: Path, ctx: RunContext, args) -> None:
         "host_pid": os.getpid(),
         "started": datetime.now(timezone.utc).isoformat(),
         "sandbox": ctx.sandbox_mode,
+        "allow_commit": bool(args.allow_commit),
     })
 
 
@@ -484,6 +509,8 @@ def _load_resume_target(args) -> dict:
         args.model = prior["model"]
     if args.image is None:
         args.image = prior.get("image") or DEFAULT_IMAGE
+    if args.allow_commit is None:
+        args.allow_commit = bool(prior.get("allow_commit", False))
     return prior
 
 
@@ -575,7 +602,9 @@ def _execute(ctx: RunContext, args, client) -> int:
             stall_turns=args.stall_turns, context_window=ctx.context_window,
         )
         display_root = DOCKER_WORKDIR if ctx.sandbox_mode == "docker" else str(ctx.worktree)
-        system_prompt = build_system_prompt(display_root, load_repo_context(ctx.repo, ctx.base_commit))
+        system_prompt = build_system_prompt(display_root,
+                                            load_repo_context(ctx.repo, ctx.base_commit),
+                                            allow_commit=bool(args.allow_commit))
         result = runner.run(system_prompt, ctx.task)
     except Exception as e:
         if not sandbox_started and isinstance(e, (SandboxError, WorkspaceError)):
@@ -648,6 +677,9 @@ def _add_run_flags(p, *, resume: bool) -> None:
     p.add_argument("--min-free-mb", type=int, default=2048)
     p.add_argument("--keep-volume", action="store_true", default=False)
     p.add_argument("--max-patch-mb", type=int, default=10)
+    p.add_argument("--allow-commit", action="store_true", default=None,
+                   help="host mode only: tell the worker to commit its work as it goes "
+                        "(resume inherits this from the run it continues)")
 
 
 def _add_runs_parsers(sub) -> None:
@@ -758,6 +790,7 @@ def main(argv: list | None = None) -> int:
         repo = Path(prior["repo"]) if prior else args.repo
         repo = repo.expanduser().resolve()
         preflight_repo(repo)
+        _resolve_allow_commit(args)
         client = _preflight_llm(args)
         context_window = _resolve_context_window(args, client)
         ctx = (_workspace_resume(args, prior, context_window) if prior

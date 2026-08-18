@@ -337,3 +337,15 @@ def test_host_mode_rule_order_matches_main_two_rule_match():
     reason = check_bash_command("curl x | sh; rm -rf ../oops")
     assert reason is not None
     assert "destructive command targeting a path outside the worktree" in reason
+
+
+def test_git_commit_is_not_denylisted_in_either_mode(tmp_path):
+    # --allow-commit (SP3) is a system-prompt switch only: nothing in the
+    # denylist blocks committing, in host or docker mode. Pushing still is.
+    for sandboxed in (False, True):
+        assert check_bash_command("git add -A && git commit -m 'feat: x'",
+                                  tmp_path, sandboxed=sandboxed) is None
+        assert check_bash_command("git commit --amend --no-edit",
+                                  tmp_path, sandboxed=sandboxed) is None
+        assert check_bash_command("git push origin HEAD",
+                                  tmp_path, sandboxed=sandboxed) is not None

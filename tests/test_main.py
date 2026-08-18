@@ -1580,3 +1580,97 @@ def test_runs_show_unknown_slug_exits_2(tmp_path, monkeypatch, capsys):
     rc = m.main(["runs", "show", "nope"])
     assert rc == 2
     assert "no such run" in capsys.readouterr().err
+
+
+def test_build_system_prompt_allow_commit_replaces_the_no_commit_rule(tmp_path: Path):
+    default = build_system_prompt(tmp_path, None)
+    assert "Do not run git commit" in default
+    assert "leave all changes uncommitted for review" in default
+
+    allowed = build_system_prompt(tmp_path, None, allow_commit=True)
+    assert "Do not run git commit" not in allowed
+    assert "small conventional commits" in allowed
+    assert "git push" in allowed          # pushing stays forbidden, guardrail and prompt alike
+    assert "finish(summary=...)" in allowed
+
+
+def test_allow_commit_with_docker_sandbox_exits_2_and_creates_nothing(tmp_path, monkeypatch, capsys):
+    import subprocess
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
+                    "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
+                   capture_output=True)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "docker", "--allow-commit", "t"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--allow-commit requires --sandbox none" in err
+    assert "docker export carries files, not commits" in err
+    assert not (tmp_path / "runs").exists()
+
+
+def test_allow_commit_records_the_flag_and_switches_the_prompt(tmp_path, monkeypatch, capsys):
+    from dirtywork.runner import RunResult
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    captured = {}
+
+    def fake_run(self, system_prompt, task):
+        captured["prompt"] = system_prompt
+        return RunResult("completed", 1, "done", {"prompt_tokens": 0, "completion_tokens": 0})
+
+    monkeypatch.setattr(m.Runner, "run", fake_run)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--allow-commit", "t"])
+    assert rc == 0
+    assert _read_only_run_json(tmp_path)["allow_commit"] is True
+    assert "small conventional commits" in captured["prompt"]
+
+
+def test_without_allow_commit_run_json_records_false(tmp_path, monkeypatch, capsys):
+    from dirtywork.runner import RunResult
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    captured = {}
+
+    def fake_run(self, system_prompt, task):
+        captured["prompt"] = system_prompt
+        return RunResult("completed", 1, "done", {"prompt_tokens": 0, "completion_tokens": 0})
+
+    monkeypatch.setattr(m.Runner, "run", fake_run)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "t"])
+    assert rc == 0
+    assert _read_only_run_json(tmp_path)["allow_commit"] is False
+    assert "Do not run git commit" in captured["prompt"]
+
+
+def test_resume_inherits_allow_commit_from_the_prior_run(tmp_path, monkeypatch, capsys):
+    import json
+    # One tool-call response (which repeats) so the first run ends `max_turns`
+    # instead of completing on turn 1 -- the shape the shipped resume tests use.
+    write_once = [
+        {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "w1", "type": "function", "function": {"name": "write_file",
+             "arguments": json.dumps({"path": "new.txt", "content": "from run 1\n"})}}]}}],
+         "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+    ]
+    m = _install_host_harness(monkeypatch, tmp_path, write_once)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+                 "--allow-commit", "add a file"])
+    assert rc == 1                      # max_turns
+    first = json.loads(capsys.readouterr().out)
+    assert json.loads((Path(first["run_dir"]) / "run.json").read_text())["allow_commit"] is True
+
+    captured = {}
+    real_build = m.build_system_prompt
+
+    def spy_build(display_root, repo_context, **kwargs):
+        captured.update(kwargs)
+        return real_build(display_root, repo_context, **kwargs)
+
+    monkeypatch.setattr(m, "build_system_prompt", spy_build)
+    rc = m.main(["resume", Path(first["run_dir"]).name, "--max-turns", "1"])  # no --allow-commit
+    second = json.loads(capsys.readouterr().out)
+    assert captured["allow_commit"] is True
+    assert json.loads((Path(second["run_dir"]) / "run.json").read_text())["allow_commit"] is True
