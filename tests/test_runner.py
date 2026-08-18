@@ -254,7 +254,7 @@ def test_context_exhausted_status(parts):
 
 def test_length_finish_reason_gives_helpful_hint(parts):
     wt, registry, sandbox, transcript, tmp = parts
-    truncated = _resp(tool_calls=[_bad_args("c", "write_file", '{"path": "x", "content": "abc"}')],
+    truncated = _resp(tool_calls=[_bad_args("c", "write_file", '{"path": "x", "content": "abc')],
                       finish_reason="length",
                       usage={"prompt_tokens": 1, "completion_tokens": 1})
     provider = FakeProvider([truncated, _resp(content="done")])
@@ -898,6 +898,7 @@ def test_runner_argument_noise_does_not_count_as_progress(parts):
     transcript.close()
     assert result.status == "stalled"          # 1 progress + 4 idle repeats
     assert result.turns == 5
+
 
 def test_plain_llm_error_escapes_the_runner(parts):
     # A transport-level LLMError is NOT caught here: __main__._fail_run handles

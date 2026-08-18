@@ -62,8 +62,6 @@ class FailureTracker:
 _THINK_OPEN = "<" + "think>"
 _THINK_CLOSE = "</" + "think>"
 # Aliases for backwards compatibility with tests
-_THINK = _THINK_OPEN
-_THINK_END = _THINK_CLOSE
 _THINK_RE = re.compile(re.escape(_THINK_OPEN) + r".*?(?:" + re.escape(_THINK_CLOSE) + r"|\Z)",
                        re.DOTALL)
 _TEXT_TOOL_MARKERS = tuple("<" + m for m in ("tool_call>", "function=", "function_call>", "|tool_call|>"))

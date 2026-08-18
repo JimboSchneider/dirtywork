@@ -145,8 +145,6 @@ def test_main_docker_mode_happy_path_with_fake_sandbox(tmp_path, monkeypatch, ca
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
     class WritingFakeClient(DictProvider):
-        def __init__(self, base_url=None):
-            super().__init__(base_url)
         def reply(self, model, messages, tools):
             if self.calls == 1:
                 return {"choices": [{"message": {
@@ -270,8 +268,6 @@ def test_main_docker_build_sandbox_passes_preflight_image_ref(tmp_path, monkeypa
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
     class ImmediateDoneClient(DictProvider):
-        def __init__(self, base_url=None):
-            super().__init__(base_url)
 
 
         def reply(self, model, messages, tools):
@@ -343,8 +339,6 @@ def _install_immediate_done_docker_fakes(m, monkeypatch, *, constructed_with=Non
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
     class ImmediateDoneClient(DictProvider):
-        def __init__(self, base_url=None):
-            super().__init__(base_url)
 
 
         def reply(self, model, messages, tools):
@@ -656,8 +650,6 @@ def test_main_docker_export_failed_status_from_finalize_result(tmp_path, monkeyp
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
     class ImmediateDoneClient(DictProvider):
-        def __init__(self, base_url=None):
-            super().__init__(base_url)
 
 
         def reply(self, model, messages, tools):
@@ -698,8 +690,6 @@ def test_main_docker_watchdog_violation_status_from_finalize_result(tmp_path, mo
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
     class ImmediateDoneClient(DictProvider):
-        def __init__(self, base_url=None):
-            super().__init__(base_url)
 
 
         def reply(self, model, messages, tools):
@@ -746,8 +736,6 @@ def test_main_docker_watchdog_violation_sandbox_error_kind_status(tmp_path, monk
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
     class ImmediateDoneClient(DictProvider):
-        def __init__(self, base_url=None):
-            super().__init__(base_url)
 
 
         def reply(self, model, messages, tools):
@@ -785,8 +773,6 @@ def test_main_docker_export_failed_status_from_finalize_exception(tmp_path, monk
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
     class ImmediateDoneClient(DictProvider):
-        def __init__(self, base_url=None):
-            super().__init__(base_url)
 
 
         def reply(self, model, messages, tools):
@@ -1036,8 +1022,6 @@ def test_run_start_has_all_provenance_fields(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
 
     class ImmediateDoneClient(DictProvider):
-        def __init__(self, base_url=None):
-            super().__init__(base_url)
 
 
         def reply(self, model, messages, tools):
@@ -1073,8 +1057,6 @@ def test_run_end_has_diff_stat_after_writing_tracked_file(tmp_path, monkeypatch)
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
 
     class WritingFakeClient(DictProvider):
-        def __init__(self, base_url=None):
-            super().__init__(base_url)
         def reply(self, model, messages, tools):
             if self.calls == 1:
                 return {"choices": [{"message": {
@@ -1116,8 +1098,6 @@ def test_run_end_has_untracked_after_writing_new_file(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
 
     class WritingFakeClient(DictProvider):
-        def __init__(self, base_url=None):
-            super().__init__(base_url)
         def reply(self, model, messages, tools):
             if self.calls == 1:
                 return {"choices": [{"message": {
