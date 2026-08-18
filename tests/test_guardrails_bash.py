@@ -121,7 +121,28 @@ def test_build_env_relocates_home(tmp_path, monkeypatch):
     assert env["HOME"] != os.environ.get("HOME")
     assert "AWS_SECRET_ACCESS_KEY" not in env
     for key in env:
-        assert key in ("PATH", "HOME", "TERM", "LANG", "TMPDIR", "PYTHONPATH")
+        assert key in ("PATH", "HOME", "TERM", "LANG", "TMPDIR", "PYTHONPATH",
+                       "VOLTA_HOME", "RUSTUP_HOME", "CARGO_HOME", "NVM_DIR", "PYENV_ROOT")
+
+
+def test_build_env_carries_toolchain_homes(tmp_path, monkeypatch):
+    # Toolchain managers key on $HOME: under HOME=worktree their shims would
+    # re-download whole toolchains into the worktree (volta's `node` took 120 s
+    # per worker run). The operator's explicit root is kept verbatim...
+    real_home = tmp_path / "operator"
+    (real_home / ".rustup").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.setenv("VOLTA_HOME", "/opt/volta")
+    for var in ("RUSTUP_HOME", "CARGO_HOME", "NVM_DIR", "PYENV_ROOT"):
+        monkeypatch.delenv(var, raising=False)
+    env = build_env(home=tmp_path / "wt")
+    assert env["HOME"] == str(tmp_path / "wt")
+    assert env["VOLTA_HOME"] == "/opt/volta"
+    # ...an unset one defaults to the conventional directory when it exists...
+    assert env["RUSTUP_HOME"] == str(real_home / ".rustup")
+    # ...and is absent (never pointed into the worktree) when it does not.
+    for var in ("CARGO_HOME", "NVM_DIR", "PYENV_ROOT"):
+        assert var not in env
 
 
 def _fake_worker_python(monkeypatch, tmp_path, user_site, rc=0):

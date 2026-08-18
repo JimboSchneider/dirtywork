@@ -198,7 +198,11 @@ def build_env(home: str | Path) -> dict:
     --user`` — where pytest usually lives), as computed by that interpreter
     under the operator's HOME, is put on PYTHONPATH so it stays importable
     under the redirected HOME; writes still go to the worktree because ``pip
-    --user`` keys on HOME, not PYTHONPATH.
+    --user`` keys on HOME, not PYTHONPATH. Likewise the roots of HOME-keyed
+    toolchain managers (VOLTA_HOME, RUSTUP_HOME, CARGO_HOME, NVM_DIR,
+    PYENV_ROOT) are carried over — kept when the operator's shell sets them,
+    else defaulted to the conventional ``~/.volta``-style directory when it
+    exists — so their shims do not re-download toolchains into the worktree.
 
     This is NOT a sandbox: bash is a general shell and can still reference absolute
     host paths (``cat /etc/...``). See SECURITY.md for the real containment story.
@@ -209,7 +213,39 @@ def build_env(home: str | Path) -> dict:
     user_site = _operator_user_site(env.get("PATH"))
     if user_site is not None:
         env["PYTHONPATH"] = user_site
+    env.update(_toolchain_homes(os.environ))
     return env
+
+
+# Toolchain managers that key their install root on $HOME unless told otherwise.
+# Under HOME=worktree their shims (volta's `node`, rustup's `cargo`, ...) see an
+# empty root and re-download whole toolchains INTO the worktree on every run
+# (minutes per run; SP3 measured a 120 s `node` call). Point them back at the
+# operator's real root: keep the variable when the operator's shell sets it,
+# else default it to the conventional directory when that exists.
+_TOOLCHAIN_HOMES = (
+    ("VOLTA_HOME", ".volta"),
+    ("RUSTUP_HOME", ".rustup"),
+    ("CARGO_HOME", ".cargo"),
+    ("NVM_DIR", ".nvm"),
+    ("PYENV_ROOT", ".pyenv"),
+)
+
+
+def _toolchain_homes(operator_env) -> dict:
+    """The toolchain-root variables to carry into the worker env (see
+    _TOOLCHAIN_HOMES). Values are paths, not secrets; they only make already
+    installed toolchains resolvable under the redirected HOME."""
+    out = {}
+    real_home = operator_env.get("HOME")
+    for var, default_dir in _TOOLCHAIN_HOMES:
+        value = operator_env.get(var)
+        if not value and real_home:
+            candidate = os.path.join(real_home, default_dir)
+            value = candidate if os.path.isdir(candidate) else None
+        if value:
+            out[var] = value
+    return out
 
 
 _USER_SITE_CACHE: dict = {}
