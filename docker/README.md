@@ -7,6 +7,11 @@ Built from `docker/Dockerfile`: Debian bookworm-slim, `USER worker` (uid
 No `ENTRYPOINT`/`CMD` — every `docker create`/`run`/`exec` in dirtywork
 passes its own explicit `--entrypoint` or absolute binary path.
 
+The same image is also used by `dirtywork bench` for the post-run
+acceptance containers (hash check via `/usr/bin/sha256sum`, the acceptance
+command via `/bin/sh`; the node fixture needs `nodejs`, which this image
+installs) and by `dirtywork runs export` for re-exports.
+
 ## Build
 
     docker build -t ghcr.io/jimboschneider/dirtywork-worker:0.5 docker/

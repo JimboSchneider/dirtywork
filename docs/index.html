@@ -258,9 +258,12 @@ free on your own machine, and <strong>nothing merges without review</strong>.</p
 <span class="who lo"></span> locked-down Docker container over an isolated worktree <span class="dim">(.worktrees/dw-…)</span>,
 <span class="who lo"></span> validated export, full JSONL transcript, no auto-commit — for $0;
 <span class="who lo"></span> ends the run with <span class="dim">finish(summary=…)</span>, is stopped when it stalls, and any run
-<span class="who lo"></span> can be picked up again with <span class="dim">dirtywork resume</span>
+<span class="who lo"></span> can be picked up again with <span class="dim">dirtywork resume</span>;
+<span class="who lo"></span> the model can be LM&nbsp;Studio's local server, or the Anthropic API <span class="dim">(--provider anthropic)</span>
 <span class="who fr">3 · you/ai</span> audit the transcript, review the diff, re-run the gates,
-<span class="who fr"></span> commit only what survives</pre>
+<span class="who fr"></span> commit only what survives
+<span class="who fr">4 · you/ai</span> afterwards, <span class="dim">dirtywork runs list|show|clean</span> inspects and
+<span class="who fr"></span> cleans up runs; <span class="dim">dirtywork bench</span> scores models on fixture repos</pre>
   </div>
   <p class="legend"><span class="fr">frontier / you — spends judgment</span>
   <span class="lo">local worker — spends electricity</span></p>
