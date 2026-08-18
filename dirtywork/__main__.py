@@ -672,6 +672,12 @@ def _add_runs_parsers(sub) -> None:
     clean_p.add_argument("--keep-transcript", action="store_true", default=False)
     clean_p.add_argument("--force", action="store_true", default=False)
 
+    verdict_p = runs_sub.add_parser("verdict", help="record accept/reject/cleanup for a run")
+    verdict_p.add_argument("slug")
+    verdict_p.add_argument("verdict", choices=["accept", "reject", "cleanup"])
+    verdict_p.add_argument("--note", default=None)
+    verdict_p.add_argument("--review-seconds", type=float, default=None)
+
 
 def _parse_args(argv):
     parser = argparse.ArgumentParser(prog="dirtywork")

@@ -528,3 +528,39 @@ def test_clean_unknown_slug_reports_skip(tmp_path, monkeypatch, capsys):
     rc = runs.cmd_clean(_clean_args("nope", keep_transcript=True))
     assert "no such run" in capsys.readouterr().out
     assert rc == 1
+
+
+def test_cmd_verdict_records_fields(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    run_dir = _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "ended": "2026-08-16T00:00:00+00:00",
+    })
+    rc = runs.cmd_verdict(argparse.Namespace(slug="slug1", verdict="accept",
+                                             note="looks good", review_seconds=42))
+    assert rc == 0
+    data = json.loads((run_dir / "run.json").read_text())
+    assert data["verdict"] == "accept"
+    assert data["note"] == "looks good"
+    assert data["review_seconds"] == 42
+    assert "verdict_at" in data
+    assert data["time_to_verdict_s"] >= 0
+    assert data["status"] == "completed"        # the run's own fields are untouched
+
+
+def test_cmd_verdict_missing_ended_leaves_time_to_verdict_none(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    run_dir = _write_run(tmp_path / "runs", "slug1", {"status": "running"})
+    rc = runs.cmd_verdict(argparse.Namespace(slug="slug1", verdict="cleanup",
+                                             note=None, review_seconds=None))
+    assert rc == 0
+    data = json.loads((run_dir / "run.json").read_text())
+    assert data["time_to_verdict_s"] is None
+
+
+def test_cmd_verdict_unknown_slug_exits_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    (tmp_path / "runs").mkdir()
+    rc = runs.cmd_verdict(argparse.Namespace(slug="nope", verdict="reject",
+                                             note=None, review_seconds=None))
+    assert rc == 2
+    assert "no such run" in capsys.readouterr().err
