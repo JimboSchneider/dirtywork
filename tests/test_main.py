@@ -148,7 +148,7 @@ def test_main_docker_mode_happy_path_with_fake_sandbox(tmp_path, monkeypatch, ca
         def __init__(self, base_url=None):
             super().__init__(base_url)
         def reply(self, model, messages, tools):
-            if self.calls == 0:
+            if self.calls == 1:
                 return {"choices": [{"message": {
                     "role": "assistant", "content": None,
                     "tool_calls": [{"id": "c1", "type": "function",
@@ -516,10 +516,6 @@ def test_main_docker_sandbox_error_mid_run_exits_1(tmp_path, monkeypatch, capsys
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
     class OneBashCallClient(DictProvider):
-        def __init__(self, base_url=None):
-            pass
-
-
         def reply(self, model, messages, tools):
             return {"choices": [{"message": {
                 "role": "assistant", "content": None,
@@ -619,7 +615,6 @@ def test_main_docker_llm_error_after_start_finalizes_before_stop(tmp_path, monke
 
     class FlakyClient(DictProvider):
         def reply(self, model, messages, tools):
-            self.calls += 1
             if self.calls == 1:
                 return {"choices": [{"message": {
                     "role": "assistant", "content": None,
@@ -841,10 +836,6 @@ def test_main_docker_export_failed_with_budget_exceeded_status(tmp_path, monkeyp
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
     class BashCallingClient(DictProvider):
-        def __init__(self, base_url=None):
-            pass
-
-
         def reply(self, model, messages, tools):
             return {"choices": [{"message": {
                 "role": "assistant", "content": None,
@@ -1085,7 +1076,6 @@ def test_run_end_has_diff_stat_after_writing_tracked_file(tmp_path, monkeypatch)
         def __init__(self, base_url=None):
             super().__init__(base_url)
         def reply(self, model, messages, tools):
-            self.calls += 1
             if self.calls == 1:
                 return {"choices": [{"message": {
                     "role": "assistant", "content": None,
@@ -1129,7 +1119,6 @@ def test_run_end_has_untracked_after_writing_new_file(tmp_path, monkeypatch):
         def __init__(self, base_url=None):
             super().__init__(base_url)
         def reply(self, model, messages, tools):
-            self.calls += 1
             if self.calls == 1:
                 return {"choices": [{"message": {
                     "role": "assistant", "content": None,
@@ -1236,27 +1225,6 @@ def _host_repo(tmp_path):
     subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
                     "commit", "--allow-empty", "-m", "i"], capture_output=True)
     return repo
-
-
-class _ScriptedClient:
-    """LMStudioClient stand-in driven by a list of chat responses; the last
-    response repeats so a run can never underflow."""
-    instances = []
-
-    def __init__(self, base_url=None, responses=None):
-        self.responses = list(responses or [
-            {"choices": [{"message": {"role": "assistant", "content": "done"}}],
-             "usage": {"prompt_tokens": 1, "completion_tokens": 1}}])
-        _ScriptedClient.instances.append(self)
-
-    def list_models(self):
-        import dirtywork.__main__ as m
-        return [m.DEFAULT_MODEL, "other/model"]
-
-    def reply(self, model, messages, tools):
-        if len(self.responses) > 1:
-            return self.responses.pop(0)
-        return self.responses[0]
 
 
 def _install_host_harness(monkeypatch, tmp_path, responses=None):
@@ -1551,3 +1519,65 @@ def test_resume_docker_mode_seeds_and_keeps_branch(tmp_path, monkeypatch, capsys
     assert second_json["sandbox"] == "docker"
     assert second_json["image"] == first_json["image"]
     assert second_json["container"] != first_json["container"]
+
+
+def test_main_unknown_provider_rejected_by_argparse(tmp_path):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["run", "--repo", str(tmp_path), "--provider", "bogus", "do things"])
+    assert exc_info.value.code == 2
+
+
+def test_base_url_defaults_per_provider(tmp_path, monkeypatch, capsys):
+    import dirtywork.__main__ as m
+    from dirtywork.runner import RunResult
+    repo = _host_repo(tmp_path)
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
+    seen = {}
+
+    def factory(base_url=None):
+        seen["base_url"] = base_url
+        return PreflightProvider(base_url)
+
+    patch_provider(monkeypatch, m, factory)
+    monkeypatch.setattr(m.Runner, "run", lambda self, sp, task: RunResult("completed", 1, "ok", {}))
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "task"])
+    assert rc == 0
+    assert seen["base_url"] == "http://localhost:1234/v1"
+
+
+def test_run_json_and_stdout_record_the_provider(tmp_path, monkeypatch, capsys):
+    import dirtywork.__main__ as m
+    m2 = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    rc = m2.main(["run", "--repo", str(repo), "--sandbox", "none", "task"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["provider"] == "openai"
+    run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert run_json["provider"] == "openai"
+    transcript = (Path(payload["run_dir"]) / "transcript.jsonl").read_text().splitlines()
+    run_start = next(json.loads(l) for l in transcript if json.loads(l)["event"] == "run_start")
+    assert run_start["provider"] == "openai"
+    assert run_start["base_url"] == "http://localhost:1234/v1"
+
+
+def test_resume_refuses_a_provider_switch(tmp_path, monkeypatch, capsys):
+    import dirtywork.__main__ as m
+    m2 = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m2.main(["run", "--repo", str(repo), "--sandbox", "none", "task"]) == 0
+    slug = json.loads(capsys.readouterr().out)["run_dir"].rsplit("/", 1)[-1]
+    rc = m2.main(["resume", str(tmp_path / "runs" / slug), "--provider", "anthropic"])
+    assert rc == 2
+    assert "provider 'openai'" in capsys.readouterr().err
+
+
+def test_resume_inherits_the_prior_provider(tmp_path, monkeypatch, capsys):
+    import dirtywork.__main__ as m
+    m2 = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m2.main(["run", "--repo", str(repo), "--sandbox", "none", "task"]) == 0
+    slug = json.loads(capsys.readouterr().out)["run_dir"].rsplit("/", 1)[-1]
+    assert m2.main(["resume", str(tmp_path / "runs" / slug)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["provider"] == "openai"

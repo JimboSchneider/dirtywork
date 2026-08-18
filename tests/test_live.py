@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from dirtywork.llm import LLMError, LMStudioClient
+from dirtywork.llm import LLMError
+from dirtywork.providers import get_provider
 
 QWEN = "qwen/qwen3-coder-next"
 DEVSTRAL = "mistralai/devstral-small-2-2512"
@@ -21,7 +22,7 @@ PROBE_TOOL = [{"type": "function", "function": {
 
 def _server_up() -> bool:
     try:
-        LMStudioClient(timeout=5).list_models()
+        get_provider("openai", timeout=5).list_models()
         return True
     except LLMError:
         return False
@@ -34,14 +35,13 @@ pytestmark = [pytest.mark.live,
 @pytest.mark.parametrize("model", [QWEN, DEVSTRAL])
 def test_model_emits_tool_calls(model):
     """Devstral tool-calling was unverified at design time — this settles it."""
-    client = LMStudioClient()
+    client = get_provider("openai")
     resp = client.chat(model,
                        [{"role": "user", "content": "What files are in src?"}],
                        tools=PROBE_TOOL, max_tokens=200, temperature=0)
-    msg = resp["choices"][0]["message"]
-    calls = msg.get("tool_calls") or []
-    assert calls, f"{model} returned no tool_calls: {msg.get('content')!r:.200}"
-    assert calls[0]["function"]["name"] == "list_dir"
+    calls = resp.tool_calls
+    assert calls, f"{model} returned no tool_calls: {resp.text!r:.200}"
+    assert calls[0].name == "list_dir"
 
 
 def test_end_to_end_run(tmp_path: Path):
