@@ -358,7 +358,10 @@ class Runner:
                     # A body we cannot read is a model failure, not a transport
                     # failure: end through finish() so finalize() runs and a
                     # run_end event is written. A plain LLMError deliberately
-                    # escapes to __main__._fail_run instead.
+                    # escapes to __main__._fail_run instead. The request was
+                    # made and answered, so it counts as a turn (as it did when
+                    # the runner parsed bodies itself).
+                    turns += 1
                     return finish("model_error", str(e))
                 turns += 1
                 finish_reason = resp.finish_reason
@@ -368,8 +371,9 @@ class Runner:
                 # An entry the provider could not address (no id) cannot be
                 # answered with a tool result: that is a malformed *entry*. One
                 # with an id but undecodable arguments is answerable.
-                malformed_count = sum(1 for tc in resp.tool_calls
-                                      if tc.error is not None and not tc.id)
+                malformed_entries = [tc for tc in resp.tool_calls
+                                     if tc.error is not None and not tc.id]
+                malformed_count = len(malformed_entries)
                 tool_calls = [tc for tc in resp.tool_calls if tc.id]
                 transcript_text = resp.text
                 if isinstance(transcript_text, str) and len(transcript_text) > MAX_ASSISTANT_TEXT_CHARS:
@@ -404,11 +408,13 @@ class Runner:
                     continue
 
                 abort_reason = None
-                for _ in range(malformed_count):
+                for entry in malformed_entries:
                     reason = failures.record("malformed_entry")
                     if abort_reason is None:
                         abort_reason = reason
-                    result = "ERROR: malformed tool call entry (missing or invalid id/function fields)"
+                    # The adapter knows the wire shape it failed to parse; its
+                    # error text is what the transcript records.
+                    result = f"ERROR: {entry.error}"
                     self.transcript.write("tool_result", tool="", args="", result=result)
                 if abort_reason is not None:
                     return finish("model_error", abort_reason)
@@ -467,7 +473,7 @@ class Runner:
                 malformed_text = None
                 if malformed_count > 0:
                     malformed_text = (f"{malformed_count} of your tool calls were malformed "
-                                      "(missing or invalid id/function fields) and were "
+                                      "(unaddressable: no usable id/name) and were "
                                       "discarded. Re-issue them as valid tool calls.")
                 nudge_text = _join_nudges(malformed_text, stall_text)
                 if nudge_text:

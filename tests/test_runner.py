@@ -202,6 +202,10 @@ def test_malformed_tool_call_entry_recovers(parts):
     assert not [m for m in second if m["role"] == "tool"]
     user_msgs = [m for m in second if m["role"] == "user"]
     assert any("malformed" in (m.get("content") or "").lower() for m in user_msgs)
+    # The transcript records the ADAPTER's own error text for the entry (it
+    # knows the wire shape it failed to parse), not runner-invented wording.
+    bad_results = [e for e in _events(tmp) if e.get("event") == "tool_result" and e.get("tool") == ""]
+    assert bad_results and bad_results[0]["result"] == "ERROR: " + _bad_entry().error
 
 
 def test_malformed_response_is_model_error(parts):
@@ -219,6 +223,7 @@ def test_malformed_response_is_model_error(parts):
     assert result.status == "model_error"
     assert "malformed response from server" in result.final_message
     assert _events(tmp)[-1]["event"] == "run_end"
+    assert result.turns == 1     # the request was made and answered: it counts
 
 
 def test_strike_counter_resets_on_success(parts):

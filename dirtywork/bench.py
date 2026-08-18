@@ -25,8 +25,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import rundir
-from .__main__ import run_once
 from .runner import FAILURE_KINDS
+
+
+def run_once(argv):
+    """Drive one `dirtywork run` through the real CLI. Imported lazily: a
+    module-level `from .__main__ import run_once` would execute __main__.py as
+    a second module object under `python3 -m dirtywork bench`. Kept as a
+    module attribute so tests can monkeypatch `bench.run_once`."""
+    from .__main__ import run_once as _run_once
+    return _run_once(argv)
 from .runs import _uid_gid, format_table
 from .sandbox import docker_args, docker_cli
 
