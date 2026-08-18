@@ -412,6 +412,14 @@ def render_markdown(slug: str, data: dict, events: list, *, diff=None, error=Non
     `run_end.usage` -- run.json has never carried them."""
     lines = [f"# {slug}", ""]
     for key in MD_HEADER_FIELDS:
+        if key == "task":
+            # The full task text gets its own section below; the header keeps a
+            # one-line preview (no "(full text below)" -- there is no JSON dump here).
+            preview = str(data.get("task") or "").replace("\n", " ")
+            if len(preview) > TASK_PREVIEW_CHARS:
+                preview = preview[:TASK_PREVIEW_CHARS] + " ..."
+            lines.append(f"- **task:** {preview}")
+            continue
         lines.append(f"- **{key}:** {_summary_value(key, data)}")
     usage = _last_event(events, "run_end").get("usage")
     usage = usage if isinstance(usage, dict) else {}
@@ -424,6 +432,9 @@ def render_markdown(slug: str, data: dict, events: list, *, diff=None, error=Non
     lines.append("")
     if error:
         lines += [f"> **transcript unreadable:** {error}", ""]
+    task_text = data.get("task")
+    if task_text:
+        lines += ["## Task", ""] + _md_block(str(task_text))
     lines += _md_timeline(events)
     lines += _md_result(data, events)
     if diff is not None:

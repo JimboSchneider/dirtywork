@@ -931,6 +931,7 @@ def test_cmd_show_markdown_renders_document(tmp_path, monkeypatch, capsys):
     # header block
     assert out.startswith("# md1\n")
     assert "- **task:** fix the off-by-one" in out
+    assert "## Task\n" in out and "(full text below)" not in out
     assert "- **model:** qwen/qwen3-coder-next" in out
     assert "- **provider:** openai" in out
     assert "- **base_commit:** abc1234" in out
@@ -1014,3 +1015,21 @@ def test_cmd_show_markdown_caps_long_results_and_survives_inner_fences(
     assert "x" * 4000 not in out                  # capped at MD_RESULT_CHARS
     assert "[truncated]" in out
     assert FENCE + "`" in out                     # fence widened past the inner fence
+
+
+def test_cmd_show_markdown_prints_the_full_task_text(tmp_path, monkeypatch, capsys):
+    # A long task is previewed in the header (no "(full text below)" -- there is
+    # no JSON dump in Markdown mode) and printed in full under "## Task".
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    long_task = "line one of a long task\n" + ("x" * 300) + "\nlast line"
+    _write_run(tmp_path / "runs", "mdlong", {"status": "completed", "task": long_task,
+                                             "model": "m", "provider": "openai"})
+    (tmp_path / "runs" / "mdlong" / "transcript.jsonl").write_text("")
+    rc = runs.cmd_show(argparse.Namespace(slug="mdlong", diff=False, markdown=True, out=None))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "(full text below)" not in out
+    assert "## Task" in out
+    assert long_task in out                     # verbatim, newlines intact
+    assert "- **task:** line one of a long task" in out and " ..." in out
+
