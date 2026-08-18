@@ -1,0 +1,9 @@
+{
+  "task": "sum_range(low, high) in sum_range.py must be inclusive of `high` but currently excludes it. Fix the bug so `python3 acceptance/check_sum_range.py` passes when run from the repo root.",
+  "acceptance": {
+    "command": "python3 /acceptance/check_sum_range.py",
+    "hashes": {
+      "acceptance/check_sum_range.py": "3135ce45c45c647f078869a55bbf6133b97f97d0dbf8f885fd99c7e04368e0aa"
+    }
+  }
+}
