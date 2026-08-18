@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -25,7 +26,7 @@ from pathlib import Path
 from . import rundir
 from .__main__ import run_once
 from .runner import FAILURE_KINDS
-from .runs import _uid_gid
+from .runs import _uid_gid, format_table
 from .sandbox import docker_args, docker_cli
 
 BENCH_REPOS = Path(__file__).resolve().parent.parent / "bench" / "repos"
@@ -323,6 +324,127 @@ def cmd_bench(args) -> int:
     return 0
 
 
+DETAIL_COLUMNS = ("model", "task", "rep", "status", "turns", "wall_s", "prompt",
+                  "completion", "accept", "verdict", "review_s", "nudges", "failures")
+
+
+def _verdict_for(row: dict) -> tuple:
+    """(verdict, review_seconds) for a result row, re-read from run.json at
+    summarize time -- the operator usually records a verdict long after the bench
+    sweep, so the value stored in the row itself is only a fallback."""
+    slug = row.get("slug")
+    if slug:
+        run_dir = Path(rundir.RUNS_DIR) / slug
+        if run_dir.is_dir():
+            try:
+                data = rundir.read_run_json(run_dir)
+                return data.get("verdict"), data.get("review_seconds")
+            except (OSError, ValueError):
+                pass
+    return row.get("verdict"), row.get("review_seconds")
+
+
+def _failure_cell(harness: dict) -> str:
+    parts = [name for name in ("stalled", "max_turns", "sandbox_error") if harness.get(name)]
+    if harness.get("empty_reply"):
+        parts.append(f"empty_reply={harness['empty_reply']}")
+    if harness.get("abort_kind"):
+        parts.append(f"abort={harness['abort_kind']}")
+    return ",".join(parts) if parts else "-"
+
+
+def _detail_row(row: dict, verdict, review_seconds) -> dict:
+    harness = row.get("harness") or {}
+    nudges = "/".join(str(harness.get(f"nudge_{kind}", 0)) for kind in NUDGE_KINDS)
+    return {
+        "model": row.get("model", "?"), "task": row.get("task", "?"),
+        "rep": row.get("repeat", 0), "status": row.get("status", "?"),
+        "turns": "-" if row.get("turns") is None else row["turns"],
+        "wall_s": "-" if row.get("wall_s") is None else row["wall_s"],
+        "prompt": "-" if row.get("prompt_tokens") is None else row["prompt_tokens"],
+        "completion": "-" if row.get("completion_tokens") is None else row["completion_tokens"],
+        "accept": row.get("acceptance", "-"),
+        "verdict": verdict or "-",
+        "review_s": "-" if review_seconds is None else review_seconds,
+        "nudges": nudges, "failures": _failure_cell(harness),
+    }
+
+
+def _summarize_model(rows: list, verdicts: list, review_seconds: list) -> dict:
+    n = len(rows)
+    completed = sum(1 for r in rows if r.get("status") == "completed")
+    accepted = sum(1 for r in rows if r.get("acceptance") == "pass")
+    gamed = sum(1 for r in rows if r.get("acceptance") == "gamed")
+    tokens = [(r.get("prompt_tokens") or 0) + (r.get("completion_tokens") or 0)
+              for r in rows if r.get("prompt_tokens") is not None
+              or r.get("completion_tokens") is not None]
+    walls = [r["wall_s"] for r in rows if isinstance(r.get("wall_s"), (int, float))]
+    return {
+        "runs": n,
+        "completion_rate": completed / n if n else 0.0,
+        "acceptance_rate": accepted / n if n else 0.0,
+        "gamed": gamed,
+        "mean_tokens": (sum(tokens) / len(tokens)) if tokens else None,
+        "mean_wall_s": (sum(walls) / len(walls)) if walls else None,
+        "verdict_rate": (verdicts.count("accept") / len(verdicts)) if verdicts else None,
+        "median_review_seconds": statistics.median(review_seconds) if review_seconds else None,
+    }
+
+
+def cmd_summarize(args) -> int:
+    path = Path(args.file)
+    if not path.is_file():
+        print(f"error: no such file '{path}'", file=sys.stderr)
+        return 2
+    rows = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            rows.append(parsed)
+
+    detail, by_model, verdicts, reviews = [], {}, {}, {}
+    for row in rows:
+        model = row.get("model", "?")
+        verdict, review = _verdict_for(row)
+        detail.append(_detail_row(row, verdict, review))
+        by_model.setdefault(model, []).append(row)
+        if verdict:
+            verdicts.setdefault(model, []).append(verdict)
+        if isinstance(review, (int, float)):
+            reviews.setdefault(model, []).append(review)
+
+    if detail:
+        print("nudges: stall/empty/truncated/text_tool_call")
+        print(format_table(DETAIL_COLUMNS, detail))
+        print()
+
+    for model in sorted(by_model):
+        summary = _summarize_model(by_model[model], verdicts.get(model, []),
+                                   reviews.get(model, []))
+        print(f"model: {model}")
+        print(f"  runs: {summary['runs']}")
+        print(f"  completion rate: {summary['completion_rate']:.0%}")
+        print(f"  acceptance rate: {summary['acceptance_rate']:.0%}")
+        print(f"  gamed: {summary['gamed']}")
+        print(f"  mean tokens: {summary['mean_tokens']:.1f}" if summary["mean_tokens"] is not None
+              else "  mean tokens: n/a")
+        print(f"  mean wall_s: {summary['mean_wall_s']:.1f}" if summary["mean_wall_s"] is not None
+              else "  mean wall_s: n/a")
+        if summary["verdict_rate"] is not None:
+            print(f"  verdict rate: {summary['verdict_rate']:.0%}")
+            print(f"  median review_seconds: {summary['median_review_seconds']:g}")
+        print()
+    return 0
+
+
 def dispatch(args) -> int:
     """`main()` routes `dirtywork bench ...` here."""
+    if getattr(args, "bench_cmd", None) == "summarize":
+        return cmd_summarize(args)
     return cmd_bench(args)

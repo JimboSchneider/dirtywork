@@ -335,3 +335,77 @@ def test_cmd_bench_rejects_an_unknown_task(tmp_path, capsys):
                                             max_turns=40, timeout=1800))
     assert rc == 2
     assert "no-such-task" in capsys.readouterr().err
+
+
+def _result_row(**over):
+    row = {"model": "m1", "task": "t", "repeat": 0, "status": "completed",
+           "acceptance": "pass", "turns": 4, "wall_s": 2.0,
+           "prompt_tokens": 10, "completion_tokens": 5, "slug": "s1",
+           "harness": {"nudge_stall": 0, "nudge_empty": 0, "nudge_truncated": 0,
+                       "nudge_text_tool_call": 0, "nudge_other": 0, "empty_reply": 0,
+                       "stalled": 0, "max_turns": 0, "sandbox_error": 0, "abort_kind": None}}
+    row.update(over)
+    return row
+
+
+def test_summarize_prints_detail_table_and_per_model_stats(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs")
+    results = tmp_path / "results.jsonl"
+    rows = [
+        _result_row(),
+        _result_row(repeat=1, acceptance="fail", prompt_tokens=20, completion_tokens=10,
+                    wall_s=4.0, slug="s2"),
+        _result_row(model="m2", status="stalled", acceptance="skipped", turns=12,
+                    wall_s=1.0, prompt_tokens=5, completion_tokens=1, slug="s3",
+                    harness={"nudge_stall": 2, "nudge_empty": 1, "nudge_truncated": 0,
+                             "nudge_text_tool_call": 0, "nudge_other": 0, "empty_reply": 1,
+                             "stalled": 1, "max_turns": 0, "sandbox_error": 0,
+                             "abort_kind": None}),
+    ]
+    results.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    for slug, verdict, review in [("s1", "accept", 30), ("s2", "reject", 90)]:
+        run_dir = tmp_path / "runs" / slug
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.json").write_text(json.dumps({"verdict": verdict,
+                                                      "review_seconds": review}))
+
+    rc = bench.cmd_summarize(argparse.Namespace(file=str(results)))
+    assert rc == 0
+    out = capsys.readouterr().out
+    # detail table
+    assert "MODEL" in out and "NUDGES" in out and "FAILURES" in out
+    assert "2/1/0/0" in out            # m2's nudge counts
+    assert "stalled" in out
+    assert "accept" in out and "reject" in out
+    # per-model block
+    assert "model: m1" in out
+    assert "runs: 2" in out
+    assert "completion rate: 100%" in out
+    assert "acceptance rate: 50%" in out
+    assert "verdict rate: 50%" in out
+    assert "median review_seconds: 60" in out
+    assert "model: m2" in out
+
+
+def test_summarize_missing_file_exits_2(tmp_path, capsys):
+    rc = bench.cmd_summarize(argparse.Namespace(file=str(tmp_path / "nope.jsonl")))
+    assert rc == 2
+    assert "no such file" in capsys.readouterr().err
+
+
+def test_summarize_ignores_blank_and_malformed_lines(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs")
+    results = tmp_path / "results.jsonl"
+    results.write_text(json.dumps(_result_row()) + "\n\nnot json\n")
+    assert bench.cmd_summarize(argparse.Namespace(file=str(results))) == 0
+    assert "runs: 1" in capsys.readouterr().out
+
+
+def test_dispatch_routes_summarize_and_bench(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs")
+    results = tmp_path / "r.jsonl"
+    results.write_text(json.dumps(_result_row(slug=None)) + "\n")
+    rc = bench.dispatch(argparse.Namespace(bench_cmd="summarize", file=str(results)))
+    assert rc == 0
+    monkeypatch.setattr(bench, "cmd_bench", lambda args: 7)
+    assert bench.dispatch(argparse.Namespace(bench_cmd=None, models="m1")) == 7

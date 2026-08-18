@@ -699,6 +699,10 @@ def _add_bench_parsers(sub) -> None:
     bench_p.add_argument("--max-turns", type=_positive_int, default=40)
     bench_p.add_argument("--timeout", type=_positive_int, default=1800)
 
+    bench_sub = bench_p.add_subparsers(dest="bench_cmd")
+    summarize_p = bench_sub.add_parser("summarize", help="summarize a bench results file")
+    summarize_p.add_argument("file")
+
 
 def _parse_args(argv):
     parser = argparse.ArgumentParser(prog="dirtywork")
