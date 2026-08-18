@@ -666,6 +666,12 @@ def _add_runs_parsers(sub) -> None:
     export_p.add_argument("--max-patch-mb", type=int, default=10)
     export_p.add_argument("--keep-volume", action="store_true", default=False)
 
+    clean_p = runs_sub.add_parser("clean", help="remove a run's container/volume/worktree/run dir")
+    clean_p.add_argument("slug", nargs="?", default=None)
+    clean_p.add_argument("--all", action="store_true", default=False)
+    clean_p.add_argument("--keep-transcript", action="store_true", default=False)
+    clean_p.add_argument("--force", action="store_true", default=False)
+
 
 def _parse_args(argv):
     parser = argparse.ArgumentParser(prog="dirtywork")

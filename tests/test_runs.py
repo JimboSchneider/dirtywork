@@ -3,13 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from dirtywork import rundir, runs
-from dirtywork.sandbox import RunArtifacts
+from dirtywork.resume import stash_dir_for
+from dirtywork.sandbox import RunArtifacts, docker_args
 
 from .fake_docker import FakeCaptured
 
@@ -321,3 +323,208 @@ def test_cmd_export_failure_reports_and_returns_1(tmp_path, repo, monkeypatch, c
     assert "export failed" in capsys.readouterr().err
     data = json.loads((run_dir / "run.json").read_text())
     assert data["status"] == "export_failed"
+
+
+def _fake_docker_run(container_label=None, volume_label=None, rm_ok=True):
+    """container_label/volume_label are the `<run>\t<repo>` label pair the fake
+    `docker inspect --format` prints; None means 'no such object'."""
+    def _run(argv, timeout=None):
+        if argv[:1] == ["inspect"]:
+            return FakeCaptured(1) if container_label is None else FakeCaptured(
+                0, container_label.encode())
+        if argv[:2] == ["volume", "inspect"]:
+            return FakeCaptured(1) if volume_label is None else FakeCaptured(
+                0, volume_label.encode())
+        if argv[:1] == ["rm"] or argv[:2] == ["volume", "rm"]:
+            return FakeCaptured(0 if rm_ok else 1)
+        return FakeCaptured(1)
+    return _run
+
+
+def _clean_args(slug=None, all=False, keep_transcript=False, force=False):
+    return argparse.Namespace(slug=slug, all=all, keep_transcript=keep_transcript, force=force)
+
+
+def test_clean_skips_unlabeled_container(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": None,
+        "container": "dw-slug1", "volume": None, "branch": None,
+    })
+    monkeypatch.setattr(runs.docker_cli, "run",
+                        _fake_docker_run(container_label="other-slug\twrong-repo-label"))
+    rc = runs.cmd_clean(_clean_args("slug1", keep_transcript=True))
+    out = capsys.readouterr().out
+    assert "labels do not match" in out
+    assert rc == 1
+
+
+def test_clean_skips_not_owned_by_current_user(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": None,
+        "container": None, "volume": None,
+    })
+    real_uid = os.getuid()
+    # capture the real uid FIRST: the lambda must not call the patched getuid
+    monkeypatch.setattr(runs.os, "getuid", lambda: real_uid + 1)
+    rc = runs.cmd_clean(_clean_args("slug1", keep_transcript=True))
+    assert "not owned by the current user" in capsys.readouterr().out
+    assert rc == 1
+
+
+def test_clean_skips_running_with_alive_pid(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "running", "host_pid": os.getpid(), "repo": str(repo),
+        "worktree": None, "container": None, "volume": None,
+    })
+    rc = runs.cmd_clean(_clean_args("slug1", keep_transcript=True))
+    assert "host process" in capsys.readouterr().out
+    assert rc == 1
+
+
+def test_clean_refuses_dead_pid_without_force(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "running", "host_pid": 999999, "repo": str(repo),
+        "worktree": None, "container": None, "volume": None,
+    })
+    rc = runs.cmd_clean(_clean_args("slug1", keep_transcript=True))
+    assert "dead host process" in capsys.readouterr().out
+    assert rc == 1
+
+
+def test_clean_removes_dead_pid_with_force(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    run_dir = _write_run(tmp_path / "runs", "slug1", {
+        "status": "running", "host_pid": 999999, "repo": str(repo),
+        "worktree": None, "container": None, "volume": None, "branch": None,
+    })
+    rc = runs.cmd_clean(_clean_args("slug1", force=True))
+    assert "removed-rundir" in capsys.readouterr().out
+    assert not run_dir.exists()
+    assert rc == 0
+
+
+def test_clean_removes_matching_container_and_volume(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    label = docker_args.repo_label(repo)
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": None,
+        "container": "dw-slug1", "volume": "dw-slug1-work", "branch": None,
+    })
+    monkeypatch.setattr(runs.docker_cli, "run", _fake_docker_run(
+        container_label=f"slug1\t{label}", volume_label=f"slug1\t{label}"))
+    rc = runs.cmd_clean(_clean_args("slug1"))
+    out = capsys.readouterr().out
+    assert "removed-container: dw-slug1" in out
+    assert "removed-volume: dw-slug1-work" in out
+    assert rc == 0
+
+
+def test_clean_refuses_dirty_worktree_without_force(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = repo / ".worktrees" / "dw-slug1"
+    _git(repo, "worktree", "add", "-b", "dirtywork/slug1", str(wt), "HEAD")
+    (wt / "dirty.txt").write_text("uncommitted")
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": str(wt),
+        "container": None, "volume": None, "branch": "dirtywork/slug1",
+    })
+    rc = runs.cmd_clean(_clean_args("slug1", keep_transcript=True))
+    out = capsys.readouterr().out
+    assert "uncommitted changes" in out
+    assert wt.exists()
+    assert rc == 1
+
+
+def test_clean_force_removes_dirty_worktree_and_branch(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = repo / ".worktrees" / "dw-slug1"
+    _git(repo, "worktree", "add", "-b", "dirtywork/slug1", str(wt), "HEAD")
+    (wt / "dirty.txt").write_text("uncommitted")
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": str(wt),
+        "container": None, "volume": None, "branch": "dirtywork/slug1",
+    })
+    rc = runs.cmd_clean(_clean_args("slug1", force=True))
+    out = capsys.readouterr().out
+    assert "removed-worktree" in out
+    assert "removed-branch" in out
+    assert not wt.exists()
+    assert rc == 0
+    assert "dirtywork/slug1" not in _git(repo, "branch", "--list", "dirtywork/slug1").stdout
+
+
+def test_clean_removes_the_runs_pre_resume_stash(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = repo / ".worktrees" / "dw-prior"
+    _git(repo, "worktree", "add", "-b", "dirtywork/prior", str(wt), "HEAD")
+    stash = stash_dir_for(wt, "slug1")
+    stash.mkdir()
+    (stash / "kept.txt").write_text("prior content")
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": str(wt),
+        "container": None, "volume": None, "branch": "dirtywork/prior",
+    })
+    rc = runs.cmd_clean(_clean_args("slug1", force=True))
+    out = capsys.readouterr().out
+    assert f"removed-stash: {stash}" in out
+    assert not stash.exists()
+    assert rc == 0
+
+
+def test_clean_keeps_worktree_shared_with_a_later_resume(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = repo / ".worktrees" / "dw-first"
+    _git(repo, "worktree", "add", "-b", "dirtywork/first", str(wt), "HEAD")
+    run_dir = _write_run(tmp_path / "runs", "first", {
+        "status": "max_turns", "repo": str(repo), "worktree": str(wt),
+        "container": None, "volume": None, "branch": "dirtywork/first",
+        "resumed_by": "second",
+    })
+    rc = runs.cmd_clean(_clean_args("first"))
+    out = capsys.readouterr().out
+    assert "kept-worktree" in out
+    assert "second" in out
+    assert wt.exists()                                   # the newer run still owns it
+    assert "dirtywork/first" in _git(repo, "branch", "--list", "dirtywork/first").stdout
+    assert not run_dir.exists()                          # but this run's own dir is gone
+    assert rc == 0
+
+
+def test_clean_keep_transcript_preserves_transcript_and_run_json(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    run_dir = _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": None,
+        "container": None, "volume": None,
+    })
+    (run_dir / "transcript.jsonl").write_text('{"event": "run_start"}\n')
+    (run_dir / "diff.patch").write_text("stuff")
+    rc = runs.cmd_clean(_clean_args("slug1", keep_transcript=True))
+    assert rc == 0
+    assert (run_dir / "transcript.jsonl").exists()
+    assert (run_dir / "run.json").exists()
+    assert not (run_dir / "diff.patch").exists()
+
+
+def test_clean_all_processes_every_run_dir(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    for slug in ("a", "b"):
+        _write_run(tmp_path / "runs", slug, {
+            "status": "completed", "repo": str(repo), "worktree": None,
+            "container": None, "volume": None,
+        })
+    rc = runs.cmd_clean(_clean_args(all=True))
+    assert rc == 0
+    assert not (tmp_path / "runs" / "a").exists()
+    assert not (tmp_path / "runs" / "b").exists()
+
+
+def test_clean_unknown_slug_reports_skip(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    (tmp_path / "runs").mkdir()
+    rc = runs.cmd_clean(_clean_args("nope", keep_transcript=True))
+    assert "no such run" in capsys.readouterr().out
+    assert rc == 1

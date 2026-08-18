@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from . import rundir
-from .resume import pid_alive
+from .resume import find_stashes, pid_alive, stash_dir_for
 from .sandbox import docker_args, docker_cli, export
 
 COLUMN_GAP = "  "
@@ -348,9 +349,205 @@ def cmd_export(args) -> int:
 def dispatch(args) -> int:
     """`main()` routes `dirtywork runs <sub>` here. Each later task adds one
     entry to this table and one parser block in `__main__._add_runs_parsers`."""
+    if args.runs_cmd == "clean":
+        if not args.all and not args.slug:
+            print("error: 'runs clean' needs a slug or --all", file=sys.stderr)
+            return 2
+        if args.all and args.slug:
+            print("error: 'runs clean' takes a slug or --all, not both", file=sys.stderr)
+            return 2
     handlers = {
         "list": cmd_list,
         "show": cmd_show,
         "export": cmd_export,
+        "clean": cmd_clean,
     }
     return handlers[args.runs_cmd](args)
+
+
+def _staleness(data: dict, force: bool):
+    """(is_stale, why_not) per SP2 section 3: any status other than 'running' is
+    stale; 'running' is stale only with a confirmed-dead host_pid AND --force."""
+    if data.get("status") != "running":
+        return True, None
+    host_pid = data.get("host_pid")
+    if not isinstance(host_pid, int) or isinstance(host_pid, bool):
+        return False, "status is 'running' and no host_pid is recorded to check"
+    if pid_alive(host_pid):
+        return False, f"status is 'running' and its host process ({host_pid}) is alive"
+    if force:
+        return True, None
+    return False, ("status is 'running' with a dead host process -- pass --force to "
+                   "confirm cleanup")
+
+
+def _run_json_owned_by_current_user(run_dir: Path) -> bool:
+    """SP2 section 3's ownership condition. Windows has no uid ownership and no
+    integration suite yet, so this fails closed there."""
+    if not hasattr(os, "getuid"):
+        return False
+    try:
+        return (run_dir / "run.json").stat().st_uid == os.getuid()
+    except OSError:
+        return False
+
+
+def _clean_docker_resource(kind: str, name: str, repo: str, slug: str, log: list) -> None:
+    """kind is 'container' or 'volume'. Removes ONLY a resource whose
+    dirtywork.run/dirtywork.repo labels match this exact run; anything missing,
+    unlabeled, or belonging to another run/repo is reported and left alone."""
+    if kind == "container":
+        inspect_argv = ["inspect", "--format",
+                        '{{index .Config.Labels "dirtywork.run"}}\t'
+                        '{{index .Config.Labels "dirtywork.repo"}}', name]
+        rm_argv = ["rm", "-f", name]
+    else:
+        inspect_argv = ["volume", "inspect", "--format",
+                        '{{index .Labels "dirtywork.run"}}\t'
+                        '{{index .Labels "dirtywork.repo"}}', name]
+        rm_argv = ["volume", "rm", name]
+    try:
+        cp = docker_cli.run(inspect_argv, timeout=docker_cli.T_QUERY)
+    except Exception as e:
+        log.append((f"skip-{kind}", f"'{name}': cannot inspect: {e}"))
+        return
+    if cp.returncode != 0:
+        log.append((f"skip-{kind}", f"'{name}': not found (already removed?)"))
+        return
+    run_label, _, repo_label_value = cp.output.decode("utf-8", errors="replace").strip().partition("\t")
+    if run_label != slug or repo_label_value != docker_args.repo_label(Path(repo)):
+        log.append((f"skip-{kind}", f"'{name}': labels do not match this run -- never touching it"))
+        return
+    try:
+        rm = docker_cli.run(rm_argv, timeout=docker_cli.T_LIFECYCLE)
+    except Exception as e:
+        log.append((f"skip-{kind}", f"'{name}': removal failed: {e}"))
+        return
+    log.append((f"removed-{kind}" if rm.returncode == 0 else f"skip-{kind}", name))
+
+
+def _worktree_is_dirty(worktree: str) -> bool:
+    """Fail closed: if git cannot be asked, treat the worktree as dirty."""
+    try:
+        cp = subprocess.run(["git", "-C", str(worktree), "status", "--porcelain"],
+                            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return cp.returncode != 0 or bool(cp.stdout.strip())
+
+
+def _clean_worktree_and_branch(data: dict, force: bool, log: list) -> bool:
+    """Returns True when the worktree was actually removed. A run whose worktree
+    was taken over by a later resume (resumed_by set) keeps both the worktree and
+    the branch -- they belong to the newest run in the chain."""
+    worktree = data.get("worktree")
+    repo = data.get("repo", "")
+    if not worktree or not repo:
+        return False
+    resumed_by = data.get("resumed_by")
+    if resumed_by:
+        log.append(("kept-worktree",
+                    f"'{worktree}': shared with the later resume run '{resumed_by}' -- "
+                    f"the worktree and branch belong to the newest run in the chain; "
+                    f"run `dirtywork runs clean {resumed_by}` to remove them"))
+        return False
+    if _worktree_is_dirty(worktree) and not force:
+        log.append(("skip-worktree",
+                    f"'{worktree}': has uncommitted changes (pass --force to remove anyway)"))
+        return False
+    try:
+        rm = subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree)],
+                            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        log.append(("skip-worktree", f"'{worktree}': {e}"))
+        return False
+    if rm.returncode != 0:
+        log.append(("skip-worktree", f"'{worktree}': {rm.stderr.strip() or 'git worktree remove failed'}"))
+        return False
+    log.append(("removed-worktree", str(worktree)))
+    branch = data.get("branch")
+    if branch:
+        try:
+            br = subprocess.run(["git", "-C", str(repo), "branch", "-D", str(branch)],
+                                capture_output=True, text=True, timeout=10)
+            log.append(("removed-branch" if br.returncode == 0 else "skip-branch", str(branch)))
+        except (OSError, subprocess.SubprocessError) as e:
+            log.append(("skip-branch", f"'{branch}': {e}"))
+    return True
+
+
+def _clean_stashes(data: dict, slug: str, worktree_removed: bool, log: list) -> None:
+    """A docker resume parks the pre-resume worktree content in
+    `<worktree>.pre-resume-<slug>` (resume.stash_dir_for). Cleaning a run removes
+    the stash that run created; once the worktree itself is gone, every remaining
+    stash beside it is orphaned and goes too."""
+    worktree = data.get("worktree")
+    if not worktree:
+        return
+    worktree = Path(worktree)
+    targets = [stash_dir_for(worktree, slug)]
+    if worktree_removed:
+        targets += [p for p in find_stashes(worktree) if p not in targets]
+    for stash in targets:
+        if stash.is_dir():
+            shutil.rmtree(stash, ignore_errors=True)
+            log.append(("removed-stash", str(stash)))
+
+
+def _clean_run_dir(run_dir: Path, keep_transcript: bool, log: list) -> None:
+    if keep_transcript:
+        for child in run_dir.iterdir():
+            if child.name in ("transcript.jsonl", "run.json"):
+                continue
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                try:
+                    child.unlink()
+                except OSError:
+                    pass
+        log.append(("kept-transcript", str(run_dir)))
+    else:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        log.append(("removed-rundir", str(run_dir)))
+
+
+def _clean_one(slug: str, *, keep_transcript: bool, force: bool) -> list:
+    """(action, detail) pairs describing what happened. Any action starting with
+    'skip' means something was deliberately left alone -- never a silent no-op."""
+    log: list = []
+    try:
+        run_dir, data = _open_run(slug)
+    except RunsError as e:
+        log.append(("skip", str(e)))
+        return log
+    if not _run_json_owned_by_current_user(run_dir):
+        log.append(("skip", f"'{slug}': run.json is not owned by the current user"))
+        return log
+    is_stale, why_not = _staleness(data, force)
+    if not is_stale:
+        log.append(("skip", f"'{slug}': {why_not}"))
+        return log
+
+    repo = data.get("repo", "")
+    if data.get("container"):
+        _clean_docker_resource("container", data["container"], repo, slug, log)
+    if data.get("volume"):
+        _clean_docker_resource("volume", data["volume"], repo, slug, log)
+
+    worktree_removed = _clean_worktree_and_branch(data, force, log)
+    _clean_stashes(data, slug, worktree_removed, log)
+    _clean_run_dir(run_dir, keep_transcript, log)
+    return log
+
+
+def cmd_clean(args) -> int:
+    slugs = ([d.name for d in _iter_run_dirs(rundir.RUNS_DIR)] if args.all else [args.slug])
+    any_skipped = False
+    for slug in slugs:
+        for action, detail in _clean_one(slug, keep_transcript=args.keep_transcript,
+                                         force=args.force):
+            print(f"{action}: {detail}")
+            if action.startswith("skip"):
+                any_skipped = True
+    return 1 if any_skipped else 0
