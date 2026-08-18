@@ -8,6 +8,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -511,4 +512,29 @@ def test_verdict_for_falls_back_when_run_json_is_not_an_object(tmp_path, monkeyp
     (run_dir / "run.json").write_text("[1, 2, 3]")
     row = {"slug": "slug1", "verdict": "accept", "review_seconds": 12}
     assert bench._verdict_for(row) == ("accept", 12)
+
+
+def test_python_m_dirtywork_bench_does_not_double_load_main(tmp_path):
+    # `python -m dirtywork bench …` runs __main__.py as "__main__"; bench's lazy
+    # `import dirtywork.__main__` must resolve to THAT module (aliased in
+    # sys.modules), not execute the file a second time. Observed from inside a
+    # subprocess that runs the module the way `-m` does, then imports it again.
+    results = tmp_path / "r.jsonl"
+    results.write_text("")
+    probe = (
+        "import runpy, sys\n"
+        "sys.argv = ['dirtywork', 'bench', 'summarize', %r]\n"
+        "try:\n"
+        "    runpy.run_module('dirtywork', run_name='__main__', alter_sys=True)\n"
+        "except SystemExit:\n"
+        "    pass\n"
+        "import dirtywork.__main__ as again\n"
+        # The module that ran under -m keeps __name__ == '__main__'; a second,
+        # freshly executed copy would be named 'dirtywork.__main__'.
+        "print('SAME' if again.__name__ == '__main__' else 'DOUBLE-LOADED:' + again.__name__)\n"
+    ) % str(results)
+    cp = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                        cwd=str(Path(__file__).resolve().parent.parent), timeout=120)
+    assert cp.returncode == 0, cp.stderr
+    assert cp.stdout.strip().splitlines()[-1] == "SAME", cp.stdout + cp.stderr
 

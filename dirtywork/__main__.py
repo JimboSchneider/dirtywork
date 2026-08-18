@@ -7,6 +7,15 @@ import io
 import json
 import os
 import sys
+
+if __name__ == "__main__":
+    # `python -m dirtywork` executes this file as the module named "__main__";
+    # `dirtywork.__main__` is NOT registered, so a later `import dirtywork.__main__`
+    # (bench.run_once, lazily) would execute the file a SECOND time as another
+    # module object. Alias the running module under its package name so that
+    # import returns this one. The console-script entry point imports
+    # dirtywork.__main__ normally and never hits this branch.
+    sys.modules.setdefault("dirtywork.__main__", sys.modules[__name__])
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
