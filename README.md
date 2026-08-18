@@ -423,6 +423,23 @@ In August 2026 the project was renamed **dirtywork** — same tool, a name that 
 - **exit 2, "Docker is the default sandbox since 0.4..."** — Docker
   Desktop/dockerd isn't running or isn't reachable. Start it, or pass
   `--sandbox none` to run unsandboxed on the host.
+- **exit 2 with "permission denied while trying to connect to the Docker
+  daemon socket"** (Linux) — the daemon is up but your user can't talk to
+  it. Either add yourself to the `docker` group (`sudo usermod -aG docker
+  $USER`, then log out and back in — `newgrp docker` works for the current
+  shell), or run rootless Docker (`dockerd-rootless-setuptool.sh install`,
+  then `DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock`). Verify with
+  `docker version` before retrying; dirtywork uses the same `docker` CLI
+  and socket you do. On macOS/Windows Docker Desktop this doesn't apply
+  (Desktop owns the socket for your user); if Desktop shows running but
+  `docker version` fails, `DOCKER_HOST` or a stale `~/.docker/config.json`
+  context is the usual culprit (`docker context ls`).
+- **`docker: command not found` / "Cannot connect to the Docker daemon"
+  from inside a run's `bash` tool** — expected in docker mode: the worker
+  has no docker socket and no network by design (the container mounts only
+  the run's volume and the read-only object store; `--network none`).
+  In host mode the worker inherits your PATH, so this means the same
+  socket problem as above.
 - **exit 2, "Build or pull the worker image..."** — the configured
   `--image` couldn't be resolved (not pullable, or a digest mismatch
   against `PINNED_DIGEST`). Build/pull it per `docker/README.md`, pass a
