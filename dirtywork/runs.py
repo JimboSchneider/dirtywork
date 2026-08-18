@@ -451,7 +451,10 @@ def _clean_docker_resource(kind: str, name: str, repo: str, slug: str, log: list
         log.append((f"skip-{kind}", f"'{name}': cannot inspect: {e}"))
         return
     if cp.returncode != 0:
-        log.append((f"skip-{kind}", f"'{name}': not found (already removed?)"))
+        # Not a refusal: a completed docker run already removed its container and
+        # volume in sandbox.stop(), so this is the normal end state. It must not
+        # count as "skipped" (exit 1 / run dir kept / --force needed).
+        log.append((f"absent-{kind}", f"'{name}': not found (already removed)"))
         return
     run_label, _, repo_label_value = cp.output.decode("utf-8", errors="replace").strip().partition("\t")
     if run_label != slug or repo_label_value != docker_args.repo_label(Path(repo)):

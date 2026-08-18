@@ -440,6 +440,25 @@ def test_clean_removes_dead_pid_with_force(tmp_path, repo, monkeypatch, capsys):
     assert rc == 0
 
 
+def test_clean_completed_docker_run_with_resources_already_gone_removes_run_dir(tmp_path, repo, monkeypatch, capsys):
+    # The normal end state of a completed docker run: sandbox.stop() already
+    # removed the container and volume. That is not a refusal -- the run dir
+    # goes, and the exit code is 0 without --force.
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": None,
+        "container": "dw-slug1", "volume": "dw-slug1-work", "branch": None,
+    })
+    monkeypatch.setattr(runs.docker_cli, "run",
+                        lambda argv, timeout=None: FakeCaptured(1, b"Error: No such object"))
+    rc = runs.cmd_clean(_clean_args("slug1"))
+    out = capsys.readouterr().out
+    assert "absent-container" in out and "absent-volume" in out
+    assert "kept-run-dir" not in out
+    assert not (tmp_path / "runs" / "slug1").exists()
+    assert rc == 0
+
+
 def test_clean_removes_matching_container_and_volume(tmp_path, repo, monkeypatch, capsys):
     monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
     label = docker_args.repo_label(repo)
