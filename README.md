@@ -143,22 +143,31 @@ what's actually exercised by the test suites. Reports welcome.
 
 ## Install
 
-**pipx (PyPI):**
+**Recommended — pipx (PyPI):**
 
     pipx install dirtywork
 
-**pipx (straight from GitHub):**
+Update later with `pipx upgrade dirtywork`. pipx keeps dirtywork in its own
+venv and puts a `dirtywork` shim on your PATH, so it can't collide with your
+projects' dependencies. If you don't have pipx, see the
+[pipx install docs](https://pipx.pypa.io/stable/how-to/install-pipx.html) (macOS:
+`brew install pipx && pipx ensurepath`).
+
+**pipx (straight from GitHub, unreleased `main`):**
 
     pipx install git+https://github.com/JimboSchneider/dirtywork
 
-**From source:**
+**From source (for hacking on dirtywork itself):**
 
     git clone https://github.com/JimboSchneider/dirtywork
     cd dirtywork
     chmod +x bin/dirtywork
     ln -sf "$PWD/bin/dirtywork" ~/.local/bin/dirtywork
 
-The launcher is self-locating, so this works from any clone location.
+The launcher is self-locating, so this works from any clone location. Note
+that whatever branch or working tree is checked out becomes "the tool" —
+prefer the pipx install for day-to-day use and run `bin/dirtywork` from the
+clone explicitly when testing unreleased changes.
 
 ## Use
 
