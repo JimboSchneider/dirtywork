@@ -606,3 +606,11 @@ def test_fmt_delta_zero_and_sub_display_deltas_render_as_zero():
     assert bench._fmt_delta(0.5, 1.0, "pct") == "+50%"
     assert bench._fmt_delta(None, 1, "int") == ""
 
+
+def test_fmt_delta_snaps_to_displayed_precision_before_diffing():
+    # 1/3 -> 2/3 displays as 33% -> 67%; the delta must equal that displayed
+    # difference (+34%), not the unrounded ~33.33 pp swing.
+    assert bench._compare_cell(1 / 3, 2 / 3, "pct") == "33% -> 67% (+34%)"
+    # 5.02 -> 5.06 displays as 5.0 -> 5.1; the delta must equal that shown
+    # difference (+0.1), not the raw 0.04 s swing.
+    assert bench._compare_cell(5.02, 5.06) == "5.0 -> 5.1 (+0.1)"

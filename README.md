@@ -217,11 +217,13 @@ of whether the run is still going:
 - `dirtywork runs show <slug> [--diff] [--markdown] [--out FILE]` — the run's
   summary fields, its full `run.json`, and a timeline reconstructed from the
   transcript; `--diff` also prints `diff.patch`. `--markdown` renders the same
-  run as a Markdown report instead (header block, one `### Turn N` section per
-  assistant turn, collapsible `<details>` tool results, blockquote callouts for
-  nudges/guardrail blocks/sandbox resets, a `## Result` section, and with
-  `--diff` the patch in a fenced block) — paste-ready for a PR or an issue;
-  `--out FILE` writes it to a file instead of stdout.
+  run as a Markdown report instead (header block whose `task` field is a
+  one-line preview, a `## Task` section with the full task text, one
+  `### Turn N` section per assistant turn, collapsible `<details>` tool
+  results, blockquote callouts for nudges/guardrail blocks/sandbox resets, a
+  `## Result` section, and with `--diff` the patch in a fenced block) —
+  paste-ready for a PR or an issue; `--out FILE` writes it to a file instead
+  of stdout.
 - `dirtywork runs export <slug> [--max-worktree-mb 2048] [--max-worktree-files 200000] [--max-patch-mb 10] [--keep-volume]` —
   re-runs the docker export into the worktree for a run whose volume still
   exists (after `export_failed`, or a crash before the export ran); refuses
@@ -287,9 +289,10 @@ the sweep-wide `--provider`/`--base-url`, which in turn fall back to
 `~/.dirtywork/bench/<UTC-timestamp>.jsonl` (or `--out`); `dirtywork bench
 summarize <file>` prints a per-case table plus a per-model summary
 (completion/acceptance/verdict rates, gamed count, mean tokens/wall time,
-median review seconds). `--compare <other.jsonl>` prints one paired
-`A -> B (Δ)` table instead — keyed by model and task, deltas are B minus A,
-and a key only one sweep ran shows `-` on the other side.
+median review seconds). `--compare <other.jsonl>` prints two paired
+`A -> B (Δ)` tables instead — the per-(model, task) table and the paired
+per-model summary — deltas are B minus A, and a key only one sweep ran shows
+`-` on the other side.
 
 `bench` runs from a source checkout only — `bench/` and its fixture repos
 are not part of the installed package.

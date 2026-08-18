@@ -1033,3 +1033,48 @@ def test_cmd_show_markdown_prints_the_full_task_text(tmp_path, monkeypatch, caps
     assert long_task in out                     # verbatim, newlines intact
     assert "- **task:** line one of a long task" in out and " ..." in out
 
+
+def test_md_timeline_auto_closes_unbalanced_fence_before_next_turn():
+    events = [
+        {"event": "assistant", "tool_calls": [],
+         "text": "partial:\n```python\ndef f():\n    pass"},
+        {"event": "assistant", "tool_calls": [], "text": "next turn"},
+    ]
+    lines = runs._md_timeline(events)
+    text = "\n".join(lines)
+    assert text.count("```") == 2   # the opener plus the auto-added closer
+    assert "_[fence auto-closed by the exporter]_" in text
+    assert text.index("_[fence auto-closed by the exporter]_") < text.index("### Turn 2")
+
+
+def test_md_event_lines_sandbox_reset_callout_escapes_reason():
+    event = {"event": "sandbox_reset", "reason": "container died: <oom>"}
+    lines = runs._md_event_lines(event)
+    text = "\n".join(lines)
+    assert "> **sandbox_reset**: container died: &lt;oom&gt;" in text
+
+
+def test_render_markdown_error_branch_prints_callout():
+    doc = runs.render_markdown("slug1", {}, [], error="boom")
+    assert "> **transcript unreadable:** boom" in doc
+
+
+def test_md_inline_collapses_newlines_to_spaces():
+    assert runs._md_inline("line one\nline two", 200) == "line one line two"
+
+
+def test_render_markdown_task_header_falls_back_to_dash_when_missing():
+    doc = runs.render_markdown("slug1", {}, [])
+    assert "- **task:** -" in doc
+
+
+def test_render_markdown_result_includes_run_end_error():
+    events = [{"event": "run_end", "status": "model_error", "error": "no such model"}]
+    doc = runs.render_markdown("slug1", {"status": "model_error"}, events)
+    assert "- **error:** no such model" in doc
+
+
+def test_render_markdown_diff_fallback_note_is_plain_text_not_fenced():
+    doc = runs.render_markdown("slug1", {}, [], diff=runs.NO_PATCH_NOTE)
+    assert runs.NO_PATCH_NOTE in doc
+    assert "```diff" not in doc

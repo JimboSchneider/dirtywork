@@ -277,7 +277,7 @@ def _timeline_line(event: dict) -> str:
 MD_HEADER_FIELDS = ("status", "task", "model", "provider", "sandbox", "turns",
                     "base_commit", "branch", "worktree", "resumed_from", "resumed_by")
 MD_VERDICT_FIELDS = ("verdict", "note")
-MD_RESULT_FIELDS = ("status", "export_status", "finalize_error", "watchdog_violation")
+MD_RESULT_FIELDS = ("status", "error", "export_status", "finalize_error", "watchdog_violation")
 MD_ARGS_CHARS = 200      # the transcript already caps `args` at 500
 MD_RESULT_CHARS = 2000   # the transcript's own `preview` cap for a tool result
 
@@ -307,8 +307,11 @@ def _md_inline(value, limit: int) -> str:
     that lands inside a fenced block is NOT escaped -- a fence is already
     literal, and escaping there would print `&lt;` to the reader. `quote=False`:
     this is element text, never an attribute value, and JSON arguments are full
-    of quotes that would otherwise render as `&quot;` noise."""
-    return html.escape(_md_trim(value, limit), quote=False)
+    of quotes that would otherwise render as `&quot;` noise. Newlines collapse
+    to spaces: a blank line inside a tool's `args` would otherwise open a
+    second paragraph inside a <summary>/<details> element and break it."""
+    text = _md_trim(value, limit).replace("\r\n", "\n").replace("\n", " ")
+    return html.escape(text, quote=False)
 
 
 def _md_event_lines(event: dict) -> list:
@@ -335,6 +338,23 @@ def _md_event_lines(event: dict) -> list:
     return []
 
 
+_MD_FENCE_LINE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})", re.MULTILINE)
+
+
+def _balance_fences(text: str) -> str:
+    """An assistant reply is emitted into the Markdown document raw -- it is
+    already the reader's own Markdown. An odd number of fence-opening lines
+    means the last one was never closed, and everything the exporter appends
+    after it (later turns, the `## Result` section) would be swallowed into
+    that code block. Close it explicitly instead, with a fence of the same
+    char/length as the unclosed opener."""
+    openers = _MD_FENCE_LINE_RE.findall(text)
+    if len(openers) % 2 == 0:
+        return text
+    closer = openers[-1]
+    return f"{text}\n{closer}\n\n_[fence auto-closed by the exporter]_"
+
+
 def _md_timeline(events: list) -> list:
     """`## Timeline`, one `### Turn N` per assistant event; every other event is
     rendered under the turn it followed."""
@@ -349,7 +369,7 @@ def _md_timeline(events: list) -> list:
             lines += [f"### Turn {turn}", ""]
             text = str(event.get("text") or "").strip()
             if text:
-                lines += [text, ""]
+                lines += [_balance_fences(text), ""]
             tools = ", ".join(f"`{tc.get('name')}`" for tc in (event.get("tool_calls") or [])
                               if isinstance(tc, dict))
             lines += [f"_tool calls: {tools}_" if tools else "_text reply, no tool calls_", ""]
@@ -415,7 +435,12 @@ def render_markdown(slug: str, data: dict, events: list, *, diff=None, error=Non
         if key == "task":
             # The full task text gets its own section below; the header keeps a
             # one-line preview (no "(full text below)" -- there is no JSON dump here).
-            preview = str(data.get("task") or "").replace("\n", " ")
+            # Missing/empty falls back to "-" like every other header field.
+            raw_task = data.get("task")
+            if not raw_task:
+                lines.append("- **task:** -")
+                continue
+            preview = str(raw_task).replace("\n", " ")
             if len(preview) > TASK_PREVIEW_CHARS:
                 preview = preview[:TASK_PREVIEW_CHARS] + " ..."
             lines.append(f"- **task:** {preview}")
@@ -438,7 +463,10 @@ def render_markdown(slug: str, data: dict, events: list, *, diff=None, error=Non
     lines += _md_timeline(events)
     lines += _md_result(data, events)
     if diff is not None:
-        lines += ["## Diff", ""] + _md_block(diff, "diff")
+        # The "no diff.patch" fallback sentence is prose, not a patch -- it must
+        # not be wrapped in a ```diff fence like a real patch would be.
+        lines += ["## Diff", ""]
+        lines += [diff, ""] if diff == NO_PATCH_NOTE else _md_block(diff, "diff")
     return "\n".join(lines).rstrip() + "\n"
 
 

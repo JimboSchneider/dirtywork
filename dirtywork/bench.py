@@ -508,20 +508,27 @@ def _fmt_cell(value, kind: str) -> str:
 
 def _fmt_delta(a, b, kind: str) -> str:
     """`+N` / `-N` (`0` for no change), or "" when either side is missing --
-    there is nothing to subtract from a key one file never ran."""
+    there is nothing to subtract from a key one file never ran. The delta is
+    computed from the DISPLAYED quantities -- each side snapped to the same
+    precision `_fmt_cell` prints -- so a paired cell can never contradict
+    itself: 33% -> 67% must show (+34%), the difference of the two displayed
+    numbers, not some unrounded value in between."""
     if a is None or b is None:
         return ""
-    diff = b - a
     if kind == "pct":
-        text = f"{abs(diff):.0%}"
+        diff = round(b * 100) - round(a * 100)
     elif kind == "int":
-        text = f"{int(abs(diff))}"
+        diff = int(b) - int(a)
+    else:
+        diff = round(b, 1) - round(a, 1)
+    if diff == 0:
+        return "0"
+    if kind == "pct":
+        text = f"{abs(diff)}%"
+    elif kind == "int":
+        text = f"{abs(diff)}"
     else:
         text = f"{abs(diff):.1f}"
-    # Decide "no change" on the DISPLAYED magnitude, not the raw float: a delta
-    # of 0.04 s must not print as "+0.0", and 0.2 pp must not print as "+0%".
-    if diff == 0 or text.lstrip("0.").rstrip("%") == "":
-        return "0"
     return ("+" if diff > 0 else "-") + text
 
 

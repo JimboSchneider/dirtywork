@@ -751,8 +751,9 @@ def _add_bench_parsers(sub) -> None:
     summarize_p = bench_sub.add_parser("summarize", help="summarize a bench results file")
     summarize_p.add_argument("file")
     summarize_p.add_argument("--compare", default=None, metavar="FILE",
-                             help="second results file: print one paired 'A -> B (delta)' "
-                                  "table keyed by model and task instead of the usual summary")
+                             help="second results file: print two paired 'A -> B (delta)' "
+                                  "tables instead of the usual summary -- the per-(model, task) "
+                                  "table and the paired per-model summary")
 
 
 def _parse_args(argv):
