@@ -319,7 +319,7 @@ def _md_event_lines(event: dict) -> list:
         tool = event.get("tool") or "(malformed call)"
         result = str(event.get("result", ""))
         outcome = _tool_result_outcome(result)
-        summary = (f"{html.escape(str(tool))}"
+        summary = (f"{html.escape(str(tool), quote=False)}"
                    f"({_md_inline(event.get('args', ''), MD_ARGS_CHARS)}) [{outcome}]")
         lines = ["<details>", f"<summary>{summary}</summary>", ""]
         lines += _md_block(_md_trim(result, MD_RESULT_CHARS))
@@ -355,7 +355,7 @@ def _md_timeline(events: list) -> list:
             lines += [f"_tool calls: {tools}_" if tools else "_text reply, no tool calls_", ""]
             continue
         lines += _md_event_lines(event)
-    if turn == 0 and len(lines) == 2:
+    if len(lines) == 2:   # nothing was appended after the '## Timeline' heading
         lines += ["_(no timeline events recorded)_", ""]
     return lines
 
