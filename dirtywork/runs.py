@@ -12,12 +12,14 @@ imported by value, so tests can point it at a tmp_path.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 from . import rundir
-from .sandbox import docker_cli
+from .resume import pid_alive
+from .sandbox import docker_args, docker_cli, export
 
 COLUMN_GAP = "  "
 LIST_COLUMNS = ("slug", "status", "started", "resumed", "branch", "worktree",
@@ -163,6 +165,22 @@ def cmd_list(args) -> int:
     return 0
 
 
+def _uid_gid():
+    """Same rule DockerSandbox.start uses: the invoking user on POSIX, the
+    image's baked-in worker uid elsewhere."""
+    return (os.getuid(), os.getgid()) if os.name == "posix" else (1000, 1000)
+
+
+def _export_status_update(previous: str, export_status: str) -> str:
+    """What `status` becomes after a re-export, mirroring `__main__._final_status`:
+    an export result only ever replaces a status that was ABOUT the export (or a
+    run left marked 'running' by a crash). A run that ended `budget_exceeded` or
+    `timeout` keeps that status — the export is not why it ended."""
+    if export_status == "ok":
+        return "completed" if previous in (None, "", "running", "export_failed") else previous
+    return "export_failed" if previous in (None, "", "running", "completed") else previous
+
+
 def _summary_value(key: str, data: dict) -> str:
     value = data.get(key)
     if value is None or value == "":
@@ -235,11 +253,100 @@ def cmd_show(args) -> int:
     return 0
 
 
+def cmd_export(args) -> int:
+    """Spec SP3 section 4: re-run the SP2 section 7 export for a run whose volume
+    still exists (a crash, or `export_failed` after the operator raised a limit).
+    Refuses a non-empty worktree, a still-running run, and anything that is not a
+    docker-sandbox run."""
+    try:
+        run_dir, data = _open_run(args.slug)
+    except RunsError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    if data.get("sandbox") != "docker":
+        print(f"error: run '{args.slug}' is not a docker-sandbox run; nothing to export",
+              file=sys.stderr)
+        return 2
+    if data.get("status") == "running" and pid_alive(data.get("host_pid")):
+        print(f"error: run '{args.slug}' is still running (pid {data.get('host_pid')}); "
+              f"wait for it to finish before exporting", file=sys.stderr)
+        return 2
+
+    volume = data.get("volume") or ""
+    if not volume:
+        print(f"error: run.json for '{args.slug}' records no volume", file=sys.stderr)
+        return 2
+    worktree = Path(data.get("worktree", ""))
+    if not worktree.is_dir():
+        print(f"error: worktree {worktree} is missing; nothing to export into", file=sys.stderr)
+        return 2
+    existing = list(worktree.iterdir())
+    if len(existing) != 1 or existing[0].name != ".git" or not existing[0].is_file():
+        print(f"error: worktree {worktree} is not empty (it holds more than the .git file); "
+              f"the export refuses to overwrite work already on disk", file=sys.stderr)
+        return 2
+
+    try:
+        cp = docker_cli.run(["volume", "inspect", volume], timeout=docker_cli.T_QUERY)
+    except Exception as e:
+        print(f"error: cannot query docker: {e}", file=sys.stderr)
+        return 2
+    if cp.returncode != 0:
+        print(f"error: volume '{volume}' does not exist -- nothing to export "
+              f"(it may already have been removed by 'runs clean')", file=sys.stderr)
+        return 2
+
+    repo = Path(data["repo"])
+    try:
+        objects_dir = docker_cli.validate_objects_dir(repo)
+    except Exception as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    image = data.get("image") or docker_args.DEFAULT_IMAGE
+    try:
+        image_ref = docker_cli.resolve_image(image, pinned_digest=docker_args.pin_for(image))
+    except Exception as e:
+        print(f"error: cannot resolve image '{image}': {e}", file=sys.stderr)
+        return 2
+
+    cfg = docker_args.DockerConfig(image=image, max_patch_mb=args.max_patch_mb,
+                                   keep_volume=args.keep_volume)
+    uid, gid = _uid_gid()
+    artifacts = export.export_run(
+        cfg, slug=args.slug, base_commit=data["base_commit"], worktree=worktree,
+        run_dir=run_dir, objects_dir=objects_dir, image_ref=image_ref, uid=uid, gid=gid,
+        repo_label=docker_args.repo_label(repo),
+    )
+
+    data["status"] = _export_status_update(data.get("status"), artifacts.export_status)
+    data["export_status"] = artifacts.export_status
+    data["diff_stat"] = artifacts.diff_stat
+    data["patch_path"] = artifacts.patch_path
+    data["worktree_bytes"] = artifacts.worktree_bytes
+    data["worktree_files"] = artifacts.worktree_files
+    data["escaping_symlinks"] = artifacts.escaping_symlinks
+    data["dropped_git_entries"] = artifacts.dropped_git_entries
+    rundir.write_run_json(run_dir, data)
+
+    if artifacts.export_status != "ok":
+        print(f"error: export failed: {artifacts.export_status}\n"
+              f"the volume was kept, so this command can be retried after raising a limit",
+              file=sys.stderr)
+        return 1
+    print(f"exported '{args.slug}' into {worktree}")
+    if artifacts.diff_stat:
+        print(artifacts.diff_stat)
+    return 0
+
+
 def dispatch(args) -> int:
     """`main()` routes `dirtywork runs <sub>` here. Each later task adds one
     entry to this table and one parser block in `__main__._add_runs_parsers`."""
     handlers = {
         "list": cmd_list,
         "show": cmd_show,
+        "export": cmd_export,
     }
     return handlers[args.runs_cmd](args)

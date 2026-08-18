@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from dirtywork import rundir, runs
+from dirtywork.sandbox import RunArtifacts
 
 from .fake_docker import FakeCaptured
 
@@ -212,3 +214,110 @@ def test_cmd_show_diff_missing_patch_notes_it(tmp_path, monkeypatch, capsys):
     rc = runs.cmd_show(argparse.Namespace(slug="slug1", diff=True))
     assert rc == 0
     assert "no diff.patch" in capsys.readouterr().out
+
+
+def _docker_run_json(runs_dir: Path, slug: str, repo: Path, worktree: Path, **over):
+    data = {
+        "status": "export_failed", "sandbox": "docker", "slug": slug,
+        "repo": str(repo), "worktree": str(worktree), "base_commit": "abc123",
+        "volume": f"dw-{slug}-work", "container": f"dw-{slug}",
+        "image": "ghcr.io/jimboschneider/dirtywork-worker:0.5", "host_pid": 999999,
+    }
+    data.update(over)
+    return _write_run(runs_dir, slug, data)
+
+
+def _empty_worktree(repo: Path, slug: str) -> Path:
+    """A worktree in the state export_run requires: the .git file and nothing else."""
+    wt = repo / ".worktrees" / f"dw-{slug}"
+    wt.mkdir(parents=True)
+    (wt / ".git").write_text("gitdir: /nowhere\n")
+    return wt
+
+
+def _export_ok(monkeypatch, artifacts):
+    monkeypatch.setattr(runs.docker_cli, "run", lambda *a, **k: FakeCaptured(0))
+    monkeypatch.setattr(runs.docker_cli, "validate_objects_dir",
+                        lambda repo: Path(repo) / ".git" / "objects")
+    monkeypatch.setattr(runs.docker_cli, "resolve_image",
+                        lambda image, **kw: f"sha256:{'a' * 64}")
+    monkeypatch.setattr(runs.export, "export_run", lambda cfg, **kw: artifacts)
+
+
+def test_cmd_export_not_docker_sandbox_rejected(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "hostrun", {"status": "completed", "sandbox": "none"})
+    rc = runs.cmd_export(argparse.Namespace(slug="hostrun", max_patch_mb=10, keep_volume=False))
+    assert rc == 2
+    assert "not a docker-sandbox run" in capsys.readouterr().err
+
+
+def test_cmd_export_live_run_rejected(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = _empty_worktree(repo, "slug1")
+    _docker_run_json(tmp_path / "runs", "slug1", repo, wt,
+                     status="running", host_pid=os.getpid())
+    rc = runs.cmd_export(argparse.Namespace(slug="slug1", max_patch_mb=10, keep_volume=False))
+    assert rc == 2
+    assert "still running" in capsys.readouterr().err
+
+
+def test_cmd_export_non_empty_worktree_rejected(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = _empty_worktree(repo, "slug1")
+    (wt / "already-exported.txt").write_text("x")
+    _docker_run_json(tmp_path / "runs", "slug1", repo, wt)
+    rc = runs.cmd_export(argparse.Namespace(slug="slug1", max_patch_mb=10, keep_volume=False))
+    assert rc == 2
+    assert "not empty" in capsys.readouterr().err
+
+
+def test_cmd_export_missing_volume_exits_2(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = _empty_worktree(repo, "slug1")
+    _docker_run_json(tmp_path / "runs", "slug1", repo, wt)
+    monkeypatch.setattr(runs.docker_cli, "run", lambda *a, **k: FakeCaptured(1))
+    rc = runs.cmd_export(argparse.Namespace(slug="slug1", max_patch_mb=10, keep_volume=False))
+    assert rc == 2
+    assert "does not exist" in capsys.readouterr().err
+
+
+def test_cmd_export_success_updates_run_json(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = _empty_worktree(repo, "slug1")
+    run_dir = _docker_run_json(tmp_path / "runs", "slug1", repo, wt)
+    _export_ok(monkeypatch, RunArtifacts(diff_stat=" 1 file changed",
+                                         patch_path=str(run_dir / "diff.patch"),
+                                         worktree_bytes=100, worktree_files=1,
+                                         export_status="ok"))
+    rc = runs.cmd_export(argparse.Namespace(slug="slug1", max_patch_mb=10, keep_volume=False))
+    assert rc == 0
+    assert "exported 'slug1'" in capsys.readouterr().out
+    data = json.loads((run_dir / "run.json").read_text())
+    assert data["export_status"] == "ok"
+    assert data["diff_stat"] == " 1 file changed"
+    assert data["status"] == "completed"       # export_failed -> completed
+
+
+def test_cmd_export_success_keeps_a_non_export_status(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = _empty_worktree(repo, "slug1")
+    run_dir = _docker_run_json(tmp_path / "runs", "slug1", repo, wt, status="budget_exceeded")
+    _export_ok(monkeypatch, RunArtifacts(export_status="ok"))
+    rc = runs.cmd_export(argparse.Namespace(slug="slug1", max_patch_mb=10, keep_volume=False))
+    assert rc == 0
+    data = json.loads((run_dir / "run.json").read_text())
+    assert data["export_status"] == "ok"
+    assert data["status"] == "budget_exceeded"   # why the run ended is not rewritten
+
+
+def test_cmd_export_failure_reports_and_returns_1(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = _empty_worktree(repo, "slug1")
+    run_dir = _docker_run_json(tmp_path / "runs", "slug1", repo, wt, status="completed")
+    _export_ok(monkeypatch, RunArtifacts(export_status="export_failed: archive too large"))
+    rc = runs.cmd_export(argparse.Namespace(slug="slug1", max_patch_mb=10, keep_volume=False))
+    assert rc == 1
+    assert "export failed" in capsys.readouterr().err
+    data = json.loads((run_dir / "run.json").read_text())
+    assert data["status"] == "export_failed"

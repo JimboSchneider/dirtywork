@@ -661,6 +661,11 @@ def _add_runs_parsers(sub) -> None:
     show_p.add_argument("slug")
     show_p.add_argument("--diff", action="store_true", help="also print the run's diff.patch")
 
+    export_p = runs_sub.add_parser("export", help="re-run the export flow for a run")
+    export_p.add_argument("slug")
+    export_p.add_argument("--max-patch-mb", type=int, default=10)
+    export_p.add_argument("--keep-volume", action="store_true", default=False)
+
 
 def _parse_args(argv):
     parser = argparse.ArgumentParser(prog="dirtywork")
