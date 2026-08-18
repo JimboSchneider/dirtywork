@@ -14,14 +14,14 @@ installs) and by `dirtywork runs export` for re-exports.
 
 ## Build
 
-    docker build -t ghcr.io/jimboschneider/dirtywork-worker:0.5 docker/
+    docker build -t ghcr.io/jimboschneider/dirtywork-worker:0.6 docker/
 
 ## Verify locally
 
-    docker run --rm --entrypoint /usr/bin/git ghcr.io/jimboschneider/dirtywork-worker:0.5 --version
-    docker run --rm --entrypoint /usr/bin/rg ghcr.io/jimboschneider/dirtywork-worker:0.5 --version
-    docker run --rm --entrypoint /usr/bin/python3 ghcr.io/jimboschneider/dirtywork-worker:0.5 --version
-    docker run --rm --entrypoint /usr/bin/dotnet ghcr.io/jimboschneider/dirtywork-worker:0.5 --version
+    docker run --rm --entrypoint /usr/bin/git ghcr.io/jimboschneider/dirtywork-worker:0.6 --version
+    docker run --rm --entrypoint /usr/bin/rg ghcr.io/jimboschneider/dirtywork-worker:0.6 --version
+    docker run --rm --entrypoint /usr/bin/python3 ghcr.io/jimboschneider/dirtywork-worker:0.6 --version
+    docker run --rm --entrypoint /usr/bin/dotnet ghcr.io/jimboschneider/dirtywork-worker:0.6 --version
 
 ## Publishing (automated)
 
@@ -64,7 +64,7 @@ trigger a network pull.
 
 A *locally built or loaded* default image (no `RepoDigests` entry — it was
 never pushed to or pulled from a registry, e.g. `docker build -t
-ghcr.io/jimboschneider/dirtywork-worker:0.5 docker/` run by hand, or the CI
+ghcr.io/jimboschneider/dirtywork-worker:0.6 docker/` run by hand, or the CI
 gate that builds this same image locally) has nothing for the pin to
 compare against. `resolve_image()` does not refuse it: it returns the
 local Id and prints a one-line warning to stderr instead
@@ -74,18 +74,18 @@ though `PINNED_DIGEST` is set — the pin was not enforced). A `--image
 `PINNED_DIGEST` at all, pinned or not — that pin protects the *maintained
 default image only*.
 
-The first release of a minor (0.4.0, 0.5.0) ships with `PINNED_DIGEST = None`: there is no prior publish to pin
+The first release of a minor (0.4.0, 0.5.0, 0.6.0) ships with `PINNED_DIGEST = None`: there is no prior publish to pin
 against on the very first release, so `resolve_image()` performs no pin
 check and trusts whatever `docker image inspect` currently reports for
-`ghcr.io/jimboschneider/dirtywork-worker:0.5`. The next patch release
-(0.4.1 for 0.4; 0.5.1 for 0.5) pins — once `publish-image.yml` has run, take the
+`ghcr.io/jimboschneider/dirtywork-worker:0.6`. The next patch release
+(0.4.1 for 0.4; 0.5.1 for 0.5; 0.6.1 for 0.6) pins — once `publish-image.yml` has run, take the
 digest from its job summary (or resolve it yourself below) and commit it
 as `PINNED_DIGEST` ahead of the next release.
 
 1. Resolve the published digest:
 
-       docker pull ghcr.io/jimboschneider/dirtywork-worker:0.5
-       docker image inspect --format '{{json .RepoDigests}}' ghcr.io/jimboschneider/dirtywork-worker:0.5
+       docker pull ghcr.io/jimboschneider/dirtywork-worker:0.6
+       docker image inspect --format '{{json .RepoDigests}}' ghcr.io/jimboschneider/dirtywork-worker:0.6
 
    This prints a JSON array like
    `["ghcr.io/jimboschneider/dirtywork-worker@sha256:<64 hex chars>"]`.
@@ -100,8 +100,8 @@ as `PINNED_DIGEST` ahead of the next release.
 `publish-image.yml` is the normal path; a manual push is only needed to
 recover from a broken automated run:
 
-    docker build -t ghcr.io/jimboschneider/dirtywork-worker:0.5 docker/
-    docker push ghcr.io/jimboschneider/dirtywork-worker:0.5
+    docker build -t ghcr.io/jimboschneider/dirtywork-worker:0.6 docker/
+    docker push ghcr.io/jimboschneider/dirtywork-worker:0.6
 
 then resolve/pin the digest as above.
 

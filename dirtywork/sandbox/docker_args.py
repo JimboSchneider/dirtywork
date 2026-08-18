@@ -5,24 +5,23 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.5"
-# The multi-arch index digest of ghcr.io/jimboschneider/dirtywork-worker:0.5
-# as published by release v0.5.0 (publish-image.yml run 32064861570) --
-# verified via `docker pull ghcr.io/jimboschneider/dirtywork-worker:0.5`
-# followed by `docker image inspect --format '{{json .RepoDigests}}'
-# ghcr.io/jimboschneider/dirtywork-worker:0.5`, and independently via an
-# anonymous registry manifest fetch (Docker-Content-Digest), which recorded
-# exactly this digest (equivalently `docker buildx imagetools inspect
-# ghcr.io/jimboschneider/dirtywork-worker:0.5`). This only pins a REGISTRY
-# digest -- resolve_image() enforces it against a *pulled* DEFAULT_IMAGE
-# only; a locally built/loaded image warns instead of refusing (see
-# resolve_image's docstring), and a user-supplied --image is never checked
-# against it at all (docker/README.md documents the full procedure). MUST
-# be updated to the new digest whenever the :0.5 tag is re-pushed (a manual
-# rebuild/republish) -- otherwise resolve_image() refuses every pulled
-# default image with the now-stale pin. (0.4.x pinned :0.4 at
+DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.6"
+# Unset for 0.6.0: the :0.6 image is first published by the v0.6.0 release
+# itself (publish-image.yml runs on x.y.0 tags), so there is no prior publish
+# to pin against -- resolve_image() performs no pin check and trusts whatever
+# `docker image inspect` reports for the tag. The next patch (0.6.1) pins the
+# multi-arch index digest: `docker pull ghcr.io/jimboschneider/dirtywork-worker:0.6`
+# then `docker image inspect --format '{{json .RepoDigests}}' ...` (or
+# `docker buildx imagetools inspect ...`), cross-checked against the
+# publish-image.yml job summary; docker/README.md documents the procedure.
+# This only pins a REGISTRY digest -- resolve_image() enforces it against a
+# *pulled* DEFAULT_IMAGE only; a locally built/loaded image warns instead of
+# refusing, and a user-supplied --image is never checked. MUST be re-resolved
+# whenever the :0.6 tag is re-pushed. (0.5.x pinned :0.5 at
+# sha256:3b8d019a2f20a9df55a72ed51139076f02f2feb597243a69519bc41db1029648;
+# 0.4.x pinned :0.4 at
 # sha256:e312a5d88bd8d4e880a39e8f9555e0275b5ddc0181e17b9c6df0ea3b661580a1.)
-PINNED_DIGEST: str | None = "sha256:3b8d019a2f20a9df55a72ed51139076f02f2feb597243a69519bc41db1029648"
+PINNED_DIGEST: str | None = None
 # Always passed explicitly on every docker create/run/exec so an image's own
 # ENTRYPOINT/CMD/ENV can never substitute a different PATH for the tether,
 # chown, or an export step (spec §3 "Entrypoint and PATH are always explicit").
