@@ -518,7 +518,9 @@ def _fmt_delta(a, b, kind: str) -> str:
         text = f"{int(abs(diff))}"
     else:
         text = f"{abs(diff):.1f}"
-    if diff == 0:
+    # Decide "no change" on the DISPLAYED magnitude, not the raw float: a delta
+    # of 0.04 s must not print as "+0.0", and 0.2 pp must not print as "+0%".
+    if diff == 0 or text.lstrip("0.").rstrip("%") == "":
         return "0"
     return ("+" if diff > 0 else "-") + text
 

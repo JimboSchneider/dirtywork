@@ -596,3 +596,13 @@ def test_summarize_compare_missing_file_exits_2(tmp_path, monkeypatch, capsys):
     assert rc == 2
     assert "no such file" in capsys.readouterr().err
 
+
+def test_fmt_delta_zero_and_sub_display_deltas_render_as_zero():
+    assert bench._fmt_delta(2, 2, "int") == "0"
+    assert bench._fmt_delta(3.02, 3.0, "float") == "0"      # 0.02 s shows as 0, not +0.0
+    assert bench._fmt_delta(0.501, 0.5, "pct") == "0"       # 0.1 pp shows as 0, not +0%
+    assert bench._fmt_delta(2, 5, "int") == "+3"
+    assert bench._fmt_delta(3.5, 2.0, "float") == "-1.5"
+    assert bench._fmt_delta(0.5, 1.0, "pct") == "+50%"
+    assert bench._fmt_delta(None, 1, "int") == ""
+
