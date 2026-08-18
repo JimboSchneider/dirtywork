@@ -66,10 +66,20 @@ BLOCKED = [
     # test_cd_worktree_parent_escape_blocked below): "cd /wt/../x" rewrites
     # to "cd ./../x", and the escape target must still match past the "./".
     "cd ./../etc",
+    # $HOME and the toolchain-root vars build_env() passes through unredirected
+    # (VOLTA_HOME/RUSTUP_HOME/CARGO_HOME/NVM_DIR/PYENV_ROOT) point at the
+    # OPERATOR's real home, not the worktree -- these must be caught even
+    # though a blanket leading `$` is not matched.
+    "rm -rf \"$CARGO_HOME\"",
+    "rm -rf ${VOLTA_HOME}/tools",
+    "echo x > $RUSTUP_HOME/settings.toml",
+    "cd $NVM_DIR && rm -rf .",
+    "rm -rf $PYENV_ROOT",
 ]
 
 ALLOWED = [
     "ls -la",
+    "rm -rf $HOME/.cache",   # $HOME is the worktree in host mode: in-worktree cleanup
     "npm rm leftpad",                # 'rm' subword, no absolute target
     "rm -rf node_modules",           # relative path
     "git status && git diff",
@@ -91,10 +101,10 @@ ALLOWED = [
     "git reflog",                     # viewing history is fine; expire/delete blocked
     "git -C sub status",              # -C with a read-only subcommand is fine
     "git -c color.ui=false log",      # -c with a read-only subcommand is fine
-    # $VAR idioms — HOME is relocated into the worktree, so these stay confined
+    # $VAR idioms for a var NOT on the tracked list stay confined/allowed
     "rm -rf \"$BUILD_DIR\"",
+    "rm -rf ./target",
     "chmod +x \"$SCRIPT\"",
-    "rm -rf $HOME/.cache",
     "cd \"$dir\" && make",
     "make > \"$LOG\" 2>&1",
 ]

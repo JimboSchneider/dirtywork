@@ -7,6 +7,7 @@ from pathlib import Path
 
 DIRTYWORK_HOME = Path.home() / ".dirtywork"
 RUNS_DIR = DIRTYWORK_HOME / "runs"
+BENCH_HOME = DIRTYWORK_HOME / "bench"
 
 
 class RunDirError(Exception):
@@ -43,6 +44,15 @@ def ensure_runs_dir(runs_dir: Path = RUNS_DIR) -> Path:
     _ensure_owned_dir(runs_dir.parent)
     _ensure_owned_dir(runs_dir)
     return runs_dir
+
+
+def ensure_bench_dir(bench_home: Path = BENCH_HOME) -> Path:
+    """Same ownership/permission guarantees as ensure_runs_dir, for
+    ~/.dirtywork/bench (dirtywork bench's own results directory)."""
+    bench_home = Path(bench_home)
+    _ensure_owned_dir(bench_home.parent)
+    _ensure_owned_dir(bench_home)
+    return bench_home
 
 
 def create_run_dir(runs_dir: Path, slug: str) -> Path:

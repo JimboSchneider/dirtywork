@@ -42,8 +42,14 @@ def resolve_in_worktree(path_str: str, worktree: Path, writing: bool = False) ->
 # bar for a *confused* model. The escape-target rules match the natural accident
 # forms — absolute (/), home (~), and parent-relative (..) — since a worktree at
 # <repo>/.worktrees/dw-<slug> is escaped by `../..`. We deliberately do NOT match
-# a leading `$`: HOME is relocated into the worktree (so $HOME/~ stay confined),
-# and a blanket `$` would reject ordinary idioms like `rm -rf "$BUILD_DIR"`.
+# a blanket leading `$`: that would reject ordinary idioms like
+# `rm -rf "$BUILD_DIR"`. The one place `$` IS matched is the small, closed list
+# of toolchain roots build_env() passes through unredirected (_HOME_KEYED_VARS
+# below: VOLTA_HOME/RUSTUP_HOME/CARGO_HOME/NVM_DIR/PYENV_ROOT). Those roots point
+# at the OPERATOR's real home even though HOME itself is relocated into the
+# worktree, so `rm -rf "$CARGO_HOME"` would otherwise reach outside the worktree
+# undetected. `$HOME` itself is deliberately NOT matched: it resolves inside the
+# worktree, so `rm -rf $HOME/.cache` is a legitimate in-worktree cleanup.
 #
 # WHY the cd/pushd and redirect rules below get a worktree-aware rewrite before
 # they run: absolute paths INTO the worktree are legitimate — local models cd
@@ -87,6 +93,23 @@ def resolve_in_worktree(path_str: str, worktree: Path, writing: bool = False) ->
 #     worktree-rewrite step (there is no worktree path for the container's
 #     commands to be rewritten against).
 _ESCAPE_TARGET = r"(?:\./)*(?:/|~|\.\.)"
+# Toolchain managers that key their install root on $HOME unless told otherwise
+# (see build_env() / _toolchain_homes() below for why these are passed through
+# unredirected). Declared here, ahead of _RULES, so _HOME_KEYED_VARS below is
+# built from the SAME list build_env() reads -- one source of truth for which
+# vars point at the operator's real home.
+_TOOLCHAIN_HOMES = (
+    ("VOLTA_HOME", ".volta"),
+    ("RUSTUP_HOME", ".rustup"),
+    ("CARGO_HOME", ".cargo"),
+    ("NVM_DIR", ".nvm"),
+    ("PYENV_ROOT", ".pyenv"),
+)
+# $HOME plus the toolchain roots above: `$VAR` or `${VAR}` referencing any of
+# these resolves to the OPERATOR's real home, not the worktree -- see the WHY
+# comment above _RULES.
+_HOME_KEYED_VARS = (r"\$\{?(?:" + "|".join(var for var, _ in _TOOLCHAIN_HOMES) + r")\b")
+_HOME_ESCAPE_TARGET = r"(?:" + _ESCAPE_TARGET + r"|" + _HOME_KEYED_VARS + r")"
 # git accepts global options (-C <path>, -c <key>=<value>, --<flag>[=value],
 # -<x>) before the subcommand. The old \bgit\s+<subcommand> rules didn't skip
 # these, so `git -C ../.. config ...` or `git -c core.hooksPath=x push` had the
@@ -115,16 +138,16 @@ _RULES: list[tuple[str, str, str]] = [  # (scope, reason, pattern) — ORDER IS 
      r"|" + _GIT_OPTS + r"branch\s+(-[dDmM]\b|--(delete|move)\b)"
      r"|" + _GIT_OPTS + r"tag\s+(-d\b|--delete\b)"),
     ("host", "destructive command targeting a path outside the worktree",
-     r"\b(rm|mv|chmod|chown)\b[^|;&]*\s['\"]?" + _ESCAPE_TARGET),
+     r"\b(rm|mv|chmod|chown)\b[^|;&]*\s['\"]?" + _HOME_ESCAPE_TARGET),
     ("always", "piping a download into an interpreter is not allowed",
      r"\b(curl|wget)\b[^|;&]*\|\s*['\"]?\w*\s*"
      r"((ba|z|da)?sh|python[0-9.]*|node|ruby|perl)\b"),
     ("always", "system-control commands are not allowed",
      r"\b(osascript|launchctl|shutdown|reboot|killall)\b"),
     ("host", "redirecting output outside the worktree is not allowed",
-     r">>?\s*['\"]?(?!/dev/null)" + _ESCAPE_TARGET),
+     r">>?\s*['\"]?(?!/dev/null)" + _HOME_ESCAPE_TARGET),
     ("host", "changing directory out of the worktree is not allowed",
-     r"\b(cd|pushd)\s+['\"]?" + _ESCAPE_TARGET),
+     r"\b(cd|pushd)\s+['\"]?" + _HOME_ESCAPE_TARGET),
 ]
 
 _COMPILED = [(scope, reason, re.compile(pat, re.IGNORECASE)) for scope, reason, pat in _RULES]
@@ -217,19 +240,13 @@ def build_env(home: str | Path) -> dict:
     return env
 
 
-# Toolchain managers that key their install root on $HOME unless told otherwise.
-# Under HOME=worktree their shims (volta's `node`, rustup's `cargo`, ...) see an
-# empty root and re-download whole toolchains INTO the worktree on every run
-# (minutes per run; SP3 measured a 120 s `node` call). Point them back at the
-# operator's real root: keep the variable when the operator's shell sets it,
-# else default it to the conventional directory when that exists.
-_TOOLCHAIN_HOMES = (
-    ("VOLTA_HOME", ".volta"),
-    ("RUSTUP_HOME", ".rustup"),
-    ("CARGO_HOME", ".cargo"),
-    ("NVM_DIR", ".nvm"),
-    ("PYENV_ROOT", ".pyenv"),
-)
+# Under HOME=worktree the toolchain shims above (volta's `node`, rustup's
+# `cargo`, ...) would otherwise see an empty root and re-download whole
+# toolchains INTO the worktree on every run (minutes per run; SP3 measured a
+# 120 s `node` call). Point them back at the operator's real root: keep the
+# variable when the operator's shell sets it, else default it to the
+# conventional directory when that exists. (_TOOLCHAIN_HOMES itself is
+# declared above _RULES so _HOME_KEYED_VARS can be built from it.)
 
 
 def _toolchain_homes(operator_env) -> dict:

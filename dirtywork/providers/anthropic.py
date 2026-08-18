@@ -42,9 +42,22 @@ def _to_anthropic_tool(t: dict) -> dict:
 
 
 def _to_anthropic_messages(history: list):
-    """Returns (system: str | None, messages: list). Consecutive `tool` entries
-    merge into one `user` message with multiple tool_result blocks, per the
-    Anthropic wire contract (tool results ride in a single user turn)."""
+    """Returns (system: str | None, messages: list). The Messages API requires
+    strict user/assistant alternation, so three shapes get merged/dropped
+    rather than serialized as their own turn:
+    - Consecutive `tool` entries merge into one `user` message with multiple
+      tool_result blocks (tool results ride in a single user turn).
+    - A neutral `user` text entry that directly follows another serialized
+      `user` message -- e.g. the runner's nudge after a tool-result turn, or
+      two plain user texts in a row -- merges onto that same message as an
+      extra text block instead of starting a new (illegally consecutive)
+      user turn.
+    - An empty model reply (no text, no addressable tool_use blocks) is
+      dropped entirely rather than serialized as an assistant message with
+      content "" -- a following user nudge then merges into the prior user
+      turn per the rule above. An assistant entry with tool_use blocks is
+      always kept, even when its text is empty.
+    """
     system_parts = []
     messages = []
     for m in history:
@@ -63,7 +76,9 @@ def _to_anthropic_messages(history: list):
                     continue     # unaddressable: never resent
                 blocks.append({"type": "tool_use", "id": tc.id, "name": tc.name,
                                "input": tc.arguments or {}})
-            messages.append({"role": "assistant", "content": blocks if blocks else (text or "")})
+            if not blocks:
+                continue    # empty reply: drop rather than send content=""
+            messages.append({"role": "assistant", "content": blocks})
             continue
         if role == "tool":
             block = {"type": "tool_result", "tool_use_id": m["tool_call_id"],
@@ -76,7 +91,17 @@ def _to_anthropic_messages(history: list):
             else:
                 messages.append({"role": "user", "content": [block]})
             continue
-        messages.append({"role": role, "content": m.get("content") or ""})
+        # A neutral (typically "user") entry: merge onto a directly preceding
+        # user message so the wire never sees two consecutive user turns.
+        text = m.get("content") or ""
+        if messages and messages[-1]["role"] == "user":
+            prev = messages[-1]
+            if isinstance(prev["content"], str):
+                prev["content"] = ([{"type": "text", "text": prev["content"]}]
+                                   if prev["content"] else [])
+            prev["content"].append({"type": "text", "text": text})
+        else:
+            messages.append({"role": role, "content": text})
     system = "\n\n".join(system_parts) if system_parts else None
     return system, messages
 

@@ -13,6 +13,7 @@ The acceptance COMMAND always comes from /acceptance; the worker's own copy unde
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import statistics
@@ -30,7 +31,7 @@ from .runs import _uid_gid, format_table
 from .sandbox import docker_args, docker_cli
 
 BENCH_REPOS = Path(__file__).resolve().parent.parent / "bench" / "repos"
-BENCH_HOME = Path.home() / ".dirtywork" / "bench"
+BENCH_HOME = rundir.BENCH_HOME
 NUDGE_KINDS = ("stall", "empty", "truncated", "text_tool_call")
 ACCEPTANCE_MEMORY = "2g"
 ACCEPTANCE_CPUS = "2"
@@ -126,15 +127,20 @@ def _acceptance_run_argv(volume: str, image_ref: str, uid: int, gid: int,
 
 
 def _run_acceptance(task: str, bench_data: dict, volume: str, *, run=docker_cli.run) -> str:
-    """'pass' | 'fail' | 'gamed' | 'skipped'. Never raises: a docker failure
+    """'pass' | 'fail' | 'gamed' | 'skipped'. Never raises: a docker failure, OR
+    a bench.json missing/malformed `acceptance.hashes`/`acceptance.command`,
     degrades to 'skipped' rather than aborting the whole bench sweep."""
+    acceptance = bench_data.get("acceptance")
+    hashes = acceptance.get("hashes") if isinstance(acceptance, dict) else None
+    command = acceptance.get("command") if isinstance(acceptance, dict) else None
+    if not isinstance(hashes, dict) or not isinstance(command, str):
+        return "skipped"
     image = docker_args.DEFAULT_IMAGE
     try:
         image_ref = docker_cli.resolve_image(image, pinned_digest=docker_args.pin_for(image))
     except Exception:
         return "skipped"
     uid, gid = _uid_gid()
-    hashes = bench_data["acceptance"]["hashes"]
 
     try:
         cp = run(_hash_check_argv(volume, image_ref, uid, gid,
@@ -160,8 +166,7 @@ def _run_acceptance(task: str, bench_data: dict, volume: str, *, run=docker_cli.
 
     try:
         cp = run(_acceptance_run_argv(volume, image_ref, uid, gid,
-                                      BENCH_REPOS / task / "acceptance",
-                                      bench_data["acceptance"]["command"]),
+                                      BENCH_REPOS / task / "acceptance", command),
                  timeout=docker_cli.T_EXPORT_STEP)
     except Exception:
         return "skipped"
@@ -319,9 +324,13 @@ def cmd_bench(args) -> int:
         return 2
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out_path = Path(args.out) if args.out else (BENCH_HOME / f"{stamp}.jsonl")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "a", encoding="utf-8") as fh:
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        out_path = rundir.ensure_bench_dir(BENCH_HOME) / f"{stamp}.jsonl"
+    fd = os.open(str(out_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
         for spec in specs:
             model, provider, base_url = parse_model_spec(spec, args.provider, args.base_url)
             for task in tasks:
@@ -452,7 +461,9 @@ def cmd_summarize(args) -> int:
               else "  mean wall_s: n/a")
         if summary["verdict_rate"] is not None:
             print(f"  verdict rate: {summary['verdict_rate']:.0%}")
-            print(f"  median review_seconds: {summary['median_review_seconds']:g}")
+            print(f"  median review_seconds: {summary['median_review_seconds']:g}"
+                  if summary["median_review_seconds"] is not None
+                  else "  median review_seconds: n/a")
         print()
     return 0
 

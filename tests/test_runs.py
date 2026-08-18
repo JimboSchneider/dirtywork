@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from dirtywork import rundir, runs
+from dirtywork.budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB
 from dirtywork.resume import stash_dir_for
 from dirtywork.sandbox import RunArtifacts, docker_args
 
@@ -246,10 +247,18 @@ def _export_ok(monkeypatch, artifacts):
     monkeypatch.setattr(runs.export, "export_run", lambda cfg, **kw: artifacts)
 
 
+def _export_args(slug, **over):
+    args = dict(slug=slug, max_patch_mb=10, keep_volume=False,
+               max_worktree_mb=DEFAULT_MAX_WORKTREE_MB,
+               max_worktree_files=DEFAULT_MAX_WORKTREE_FILES)
+    args.update(over)
+    return argparse.Namespace(**args)
+
+
 def test_cmd_export_not_docker_sandbox_rejected(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
     _write_run(tmp_path / "runs", "hostrun", {"status": "completed", "sandbox": "none"})
-    rc = runs.cmd_export(argparse.Namespace(slug="hostrun", max_patch_mb=10, keep_volume=False))
+    rc = runs.cmd_export(_export_args("hostrun"))
     assert rc == 2
     assert "not a docker-sandbox run" in capsys.readouterr().err
 
@@ -259,7 +268,7 @@ def test_cmd_export_live_run_rejected(tmp_path, repo, monkeypatch, capsys):
     wt = _empty_worktree(repo, "slug1")
     _docker_run_json(tmp_path / "runs", "slug1", repo, wt,
                      status="running", host_pid=os.getpid())
-    rc = runs.cmd_export(argparse.Namespace(slug="slug1", max_patch_mb=10, keep_volume=False))
+    rc = runs.cmd_export(_export_args("slug1"))
     assert rc == 2
     assert "still running" in capsys.readouterr().err
 
@@ -269,7 +278,7 @@ def test_cmd_export_non_empty_worktree_rejected(tmp_path, repo, monkeypatch, cap
     wt = _empty_worktree(repo, "slug1")
     (wt / "already-exported.txt").write_text("x")
     _docker_run_json(tmp_path / "runs", "slug1", repo, wt)
-    rc = runs.cmd_export(argparse.Namespace(slug="slug1", max_patch_mb=10, keep_volume=False))
+    rc = runs.cmd_export(_export_args("slug1"))
     assert rc == 2
     assert "not empty" in capsys.readouterr().err
 
@@ -279,7 +288,7 @@ def test_cmd_export_missing_volume_exits_2(tmp_path, repo, monkeypatch, capsys):
     wt = _empty_worktree(repo, "slug1")
     _docker_run_json(tmp_path / "runs", "slug1", repo, wt)
     monkeypatch.setattr(runs.docker_cli, "run", lambda *a, **k: FakeCaptured(1))
-    rc = runs.cmd_export(argparse.Namespace(slug="slug1", max_patch_mb=10, keep_volume=False))
+    rc = runs.cmd_export(_export_args("slug1"))
     assert rc == 2
     assert "does not exist" in capsys.readouterr().err
 
@@ -292,7 +301,7 @@ def test_cmd_export_success_updates_run_json(tmp_path, repo, monkeypatch, capsys
                                          patch_path=str(run_dir / "diff.patch"),
                                          worktree_bytes=100, worktree_files=1,
                                          export_status="ok"))
-    rc = runs.cmd_export(argparse.Namespace(slug="slug1", max_patch_mb=10, keep_volume=False))
+    rc = runs.cmd_export(_export_args("slug1"))
     assert rc == 0
     assert "exported 'slug1'" in capsys.readouterr().out
     data = json.loads((run_dir / "run.json").read_text())
@@ -306,7 +315,7 @@ def test_cmd_export_success_keeps_a_non_export_status(tmp_path, repo, monkeypatc
     wt = _empty_worktree(repo, "slug1")
     run_dir = _docker_run_json(tmp_path / "runs", "slug1", repo, wt, status="budget_exceeded")
     _export_ok(monkeypatch, RunArtifacts(export_status="ok"))
-    rc = runs.cmd_export(argparse.Namespace(slug="slug1", max_patch_mb=10, keep_volume=False))
+    rc = runs.cmd_export(_export_args("slug1"))
     assert rc == 0
     data = json.loads((run_dir / "run.json").read_text())
     assert data["export_status"] == "ok"
@@ -318,11 +327,35 @@ def test_cmd_export_failure_reports_and_returns_1(tmp_path, repo, monkeypatch, c
     wt = _empty_worktree(repo, "slug1")
     run_dir = _docker_run_json(tmp_path / "runs", "slug1", repo, wt, status="completed")
     _export_ok(monkeypatch, RunArtifacts(export_status="export_failed: archive too large"))
-    rc = runs.cmd_export(argparse.Namespace(slug="slug1", max_patch_mb=10, keep_volume=False))
+    rc = runs.cmd_export(_export_args("slug1"))
     assert rc == 1
     assert "export failed" in capsys.readouterr().err
     data = json.loads((run_dir / "run.json").read_text())
     assert data["status"] == "export_failed"
+
+
+def test_cmd_export_passes_worktree_limits_into_cfg(tmp_path, repo, monkeypatch, capsys):
+    # E1: --max-worktree-mb/--max-worktree-files must reach the DockerConfig
+    # export_run builds, not just the defaults baked into DockerConfig itself.
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = _empty_worktree(repo, "slug1")
+    _docker_run_json(tmp_path / "runs", "slug1", repo, wt)
+    monkeypatch.setattr(runs.docker_cli, "run", lambda *a, **k: FakeCaptured(0))
+    monkeypatch.setattr(runs.docker_cli, "validate_objects_dir",
+                        lambda repo: Path(repo) / ".git" / "objects")
+    monkeypatch.setattr(runs.docker_cli, "resolve_image",
+                        lambda image, **kw: f"sha256:{'a' * 64}")
+    seen_cfg = []
+
+    def fake_export_run(cfg, **kw):
+        seen_cfg.append(cfg)
+        return RunArtifacts(export_status="ok")
+
+    monkeypatch.setattr(runs.export, "export_run", fake_export_run)
+    rc = runs.cmd_export(_export_args("slug1", max_worktree_mb=777, max_worktree_files=123))
+    assert rc == 0
+    assert seen_cfg[0].max_worktree_mb == 777
+    assert seen_cfg[0].max_worktree_files == 123
 
 
 def _fake_docker_run(container_label=None, volume_label=None, rm_ok=True):
@@ -428,7 +461,7 @@ def test_clean_refuses_dirty_worktree_without_force(tmp_path, repo, monkeypatch,
     wt = repo / ".worktrees" / "dw-slug1"
     _git(repo, "worktree", "add", "-b", "dirtywork/slug1", str(wt), "HEAD")
     (wt / "dirty.txt").write_text("uncommitted")
-    _write_run(tmp_path / "runs", "slug1", {
+    run_dir = _write_run(tmp_path / "runs", "slug1", {
         "status": "completed", "repo": str(repo), "worktree": str(wt),
         "container": None, "volume": None, "branch": "dirtywork/slug1",
     })
@@ -436,7 +469,84 @@ def test_clean_refuses_dirty_worktree_without_force(tmp_path, repo, monkeypatch,
     out = capsys.readouterr().out
     assert "uncommitted changes" in out
     assert wt.exists()
+    # B4: a skip anywhere in the run's log means the run dir is kept too --
+    # this test now also covers that (was: only checked the worktree survived).
+    assert "kept-run-dir" in out
+    assert run_dir.exists()
+    assert (run_dir / "run.json").exists()
     assert rc == 1
+
+
+def test_clean_refuses_branch_with_commits_beyond_base_without_force(tmp_path, repo, monkeypatch, capsys):
+    # B1: even a CLEAN worktree must not be force-deleted if its branch carries
+    # commits beyond the run's base_commit -- an --allow-commit run's real work
+    # would otherwise be silently lost (the dirty-worktree check alone misses this
+    # since a committed change leaves the worktree clean).
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    base = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    wt = repo / ".worktrees" / "dw-slug1"
+    _git(repo, "worktree", "add", "-b", "dirtywork/slug1", str(wt), "HEAD")
+    (wt / "new.txt").write_text("work")
+    _git(wt, "add", "new.txt")
+    _git(wt, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "work")
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": str(wt),
+        "container": None, "volume": None, "branch": "dirtywork/slug1",
+        "base_commit": base,
+    })
+    rc = runs.cmd_clean(_clean_args("slug1", keep_transcript=True))
+    out = capsys.readouterr().out
+    assert "commit(s) beyond base" in out
+    assert wt.exists()
+    assert "kept-run-dir" in out
+    assert rc == 1
+
+
+def test_clean_force_removes_branch_with_commits_beyond_base(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    base = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    wt = repo / ".worktrees" / "dw-slug1"
+    _git(repo, "worktree", "add", "-b", "dirtywork/slug1", str(wt), "HEAD")
+    (wt / "new.txt").write_text("work")
+    _git(wt, "add", "new.txt")
+    _git(wt, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "work")
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": str(wt),
+        "container": None, "volume": None, "branch": "dirtywork/slug1",
+        "base_commit": base,
+    })
+    rc = runs.cmd_clean(_clean_args("slug1", force=True))
+    out = capsys.readouterr().out
+    assert "removed-worktree" in out
+    assert "removed-branch" in out
+    assert not wt.exists()
+    assert rc == 0
+
+
+def test_clean_skips_branch_delete_when_worktree_checked_out_a_different_branch(
+        tmp_path, repo, monkeypatch, capsys):
+    # B2: run.json is data, not authority -- `git branch -D` must only ever
+    # target the branch the worktree actually had checked out, read BEFORE
+    # removal via `git worktree list --porcelain`.
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    base = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    wt = repo / ".worktrees" / "dw-slug1"
+    _git(repo, "worktree", "add", "-b", "dirtywork/actual", str(wt), "HEAD")
+    _git(wt, "checkout", "-b", "dirtywork/other")
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": str(wt),
+        "container": None, "volume": None, "branch": "dirtywork/actual",
+        "base_commit": base,
+    })
+    rc = runs.cmd_clean(_clean_args("slug1", keep_transcript=True))
+    out = capsys.readouterr().out
+    assert "removed-worktree" in out
+    assert "skip-branch" in out
+    assert "not the branch checked out" in out
+    assert not wt.exists()
+    assert "dirtywork/actual" in _git(repo, "branch", "--list", "dirtywork/actual").stdout
+    assert rc == 1                     # skip-branch is a "skip" -> exit 1, run dir kept
+    assert "kept-run-dir" in out
 
 
 def test_clean_force_removes_dirty_worktree_and_branch(tmp_path, repo, monkeypatch, capsys):
@@ -494,6 +604,35 @@ def test_clean_removes_the_runs_pre_resume_stash(tmp_path, repo, monkeypatch, ca
     assert f"removed-stash: {stash}" in out
     assert not stash.exists()
     assert rc == 0
+
+
+def test_clean_keeps_stash_when_worktree_removal_refused_removes_it_with_force(
+        tmp_path, repo, monkeypatch, capsys):
+    # B3: a stash beside a worktree that clean refused to remove must survive
+    # too (it may still be needed to recover that worktree's content) --
+    # unless --force is given, which removes both together.
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = repo / ".worktrees" / "dw-slug1"
+    _git(repo, "worktree", "add", "-b", "dirtywork/slug1", str(wt), "HEAD")
+    (wt / "dirty.txt").write_text("uncommitted")
+    stash = stash_dir_for(wt, "slug1")
+    stash.mkdir()
+    (stash / "kept.txt").write_text("prior content")
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": str(wt),
+        "container": None, "volume": None, "branch": "dirtywork/slug1",
+    })
+    rc = runs.cmd_clean(_clean_args("slug1", keep_transcript=True))
+    out = capsys.readouterr().out
+    assert "kept-stash" in out
+    assert stash.exists()
+    assert rc == 1
+
+    rc2 = runs.cmd_clean(_clean_args("slug1", force=True))
+    out2 = capsys.readouterr().out
+    assert "removed-stash" in out2
+    assert not stash.exists()
+    assert rc2 == 0
 
 
 def test_clean_keeps_worktree_shared_with_a_later_resume(tmp_path, repo, monkeypatch, capsys):
@@ -576,6 +715,19 @@ def test_cmd_verdict_missing_ended_leaves_time_to_verdict_none(tmp_path, monkeyp
     assert rc == 0
     data = json.loads((run_dir / "run.json").read_text())
     assert data["time_to_verdict_s"] is None
+
+
+def test_cmd_verdict_naive_ended_timestamp_assumes_utc(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    run_dir = _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "ended": "2026-08-16T00:00:00",   # no tz offset
+    })
+    rc = runs.cmd_verdict(argparse.Namespace(slug="slug1", verdict="accept",
+                                             note=None, review_seconds=None))
+    assert rc == 0
+    data = json.loads((run_dir / "run.json").read_text())
+    assert data["time_to_verdict_s"] is not None
+    assert data["time_to_verdict_s"] >= 0
 
 
 def test_cmd_verdict_unknown_slug_exits_2(tmp_path, monkeypatch, capsys):

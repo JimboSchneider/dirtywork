@@ -77,7 +77,7 @@ def get_provider(name: str, base_url: str | None = None, timeout: int = 600) -> 
     """The adapters are imported lazily, inside the branches, so this module
     imports cleanly before either concrete adapter exists (Task 5/7) and so a
     missing optional dependency in one adapter can never break the other."""
-    url = base_url or DEFAULT_BASE_URLS.get(name)
+    url = DEFAULT_BASE_URLS.get(name) if base_url is None else base_url
     if name == "openai":
         from .openai_compat import OpenAICompatClient
         return OpenAICompatClient(base_url=url, timeout=timeout)

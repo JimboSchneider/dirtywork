@@ -93,6 +93,24 @@ _TYPE_CHECKS = {
 }
 
 
+def _coerce_numeric_string(ptype: str, value):
+    """A numeric STRING for an "integer"/"number" param, coerced the way the
+    old ToolExecutor's own `int(timeout)` did -- local models routinely send
+    "60" instead of 60. Returns the coerced int/float, or None when `value`
+    is not a string or does not parse as that type ("abc", "1.5" for
+    "integer"). bool is never a str, so True/False never reach here."""
+    if not isinstance(value, str):
+        return None
+    try:
+        if ptype == "integer":
+            return int(value)
+        if ptype == "number":
+            return float(value)
+    except ValueError:
+        return None
+    return None
+
+
 def _validate_args(spec: ToolSpec, args: dict) -> dict:
     """Effective keyword arguments for spec.fn. Unknown keys are DROPPED, not
     rejected (SP1, commit 23a9c22): local models routinely attach parameters
@@ -111,8 +129,11 @@ def _validate_args(spec: ToolSpec, args: dict) -> dict:
                 continue
             check = _TYPE_CHECKS.get(pspec.type)
             if check is not None and not check(value):
-                raise ToolValidationError(
-                    f"parameter '{pname}' must be {pspec.type}, got {type(value).__name__}")
+                coerced = _coerce_numeric_string(pspec.type, value)
+                if coerced is None:
+                    raise ToolValidationError(
+                        f"parameter '{pname}' must be {pspec.type}, got {type(value).__name__}")
+                value = coerced
             call_args[pname] = value
         elif pspec.default is not MISSING:
             call_args[pname] = pspec.default
@@ -177,7 +198,12 @@ class ToolRegistry:
             if pname == "timeout":
                 continue
             if pname in args:
-                out[pname] = args[pname]
+                value = args[pname]
+                if pspec.type in ("integer", "number"):
+                    coerced = _coerce_numeric_string(pspec.type, value)
+                    if coerced is not None:
+                        value = coerced   # "5" and 5 must canonicalize the same way execute() sees them
+                out[pname] = value
             elif pspec.default is not MISSING:
                 out[pname] = pspec.default
         if isinstance(out.get("path"), str):

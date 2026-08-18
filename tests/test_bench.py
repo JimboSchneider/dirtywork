@@ -3,10 +3,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shlex
 import shutil
+import stat
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from dirtywork import bench
 from dirtywork.sandbox import docker_args
@@ -210,6 +214,29 @@ def test_run_acceptance_skipped_when_docker_is_unavailable(monkeypatch):
     assert bench._run_acceptance("sh-fix-script", data, "dw-x-work", run=boom) == "skipped"
 
 
+def _never_called(*a, **k):
+    raise AssertionError("must not touch docker when acceptance fields are missing/malformed")
+
+
+def test_run_acceptance_skipped_when_bench_json_has_no_acceptance_key(monkeypatch):
+    # D4: _run_acceptance's "never raises" docstring must hold for a malformed
+    # bench.json too, not just a docker failure.
+    monkeypatch.setattr(bench.docker_cli, "resolve_image", _never_called)
+    assert bench._run_acceptance("sh-fix-script", {}, "dw-x-work", run=_never_called) == "skipped"
+
+
+def test_run_acceptance_skipped_when_acceptance_missing_command(monkeypatch):
+    monkeypatch.setattr(bench.docker_cli, "resolve_image", _never_called)
+    data = {"acceptance": {"hashes": {"foo.txt": "abc"}}}   # no "command" key
+    assert bench._run_acceptance("sh-fix-script", data, "dw-x-work", run=_never_called) == "skipped"
+
+
+def test_run_acceptance_skipped_when_acceptance_hashes_not_a_dict(monkeypatch):
+    monkeypatch.setattr(bench.docker_cli, "resolve_image", _never_called)
+    data = {"acceptance": {"hashes": None, "command": "true"}}
+    assert bench._run_acceptance("sh-fix-script", data, "dw-x-work", run=_never_called) == "skipped"
+
+
 def _fake_run_environment(tmp_path, monkeypatch, *, payload, transcript_events=(), run_json=None):
     """Wires run_once/_stage_repo/_run_acceptance/docker_cli.run and lays down the
     run dir the real CLI would have produced. Returns the list argv is recorded into."""
@@ -328,6 +355,30 @@ def test_cmd_bench_writes_one_row_per_model_spec(tmp_path, monkeypatch, capsys):
     assert ("m2", "sh-fix-script", 0, "anthropic", None) in calls
 
 
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX permissions only")
+def test_cmd_bench_creates_bench_dir_and_results_file_with_safe_perms(tmp_path, monkeypatch, capsys):
+    # D2: the default ~/.dirtywork/bench directory and results file must get
+    # the same 0700/0600 treatment as ~/.dirtywork/runs and run.json.
+    home = tmp_path / "home"
+    home.mkdir()
+    bench_home = home / ".dirtywork" / "bench"
+    monkeypatch.setattr(bench, "BENCH_HOME", bench_home)
+
+    def fake_case(model, task, repeat, *, provider, base_url, stamp, max_turns, timeout):
+        return {"stamp": stamp, "model": model, "task": task, "repeat": repeat,
+                "provider": provider, "status": "completed", "acceptance": "pass"}
+
+    monkeypatch.setattr(bench, "run_one_bench_case", fake_case)
+    rc = bench.cmd_bench(argparse.Namespace(models="m1", provider=None, base_url=None,
+                                            repeats=1, tasks="sh-fix-script", out=None,
+                                            max_turns=40, timeout=1800))
+    assert rc == 0
+    assert stat.S_IMODE(bench_home.stat().st_mode) == 0o700
+    results = list(bench_home.glob("*.jsonl"))
+    assert len(results) == 1
+    assert stat.S_IMODE(results[0].stat().st_mode) == 0o600
+
+
 def test_cmd_bench_rejects_an_unknown_task(tmp_path, capsys):
     rc = bench.cmd_bench(argparse.Namespace(models="m1", provider=None, base_url=None,
                                             repeats=1, tasks="no-such-task",
@@ -384,7 +435,31 @@ def test_summarize_prints_detail_table_and_per_model_stats(tmp_path, monkeypatch
     assert "acceptance rate: 50%" in out
     assert "verdict rate: 50%" in out
     assert "median review_seconds: 60" in out
+    # D3: exact mean tokens / mean wall_s, computed from the fixture rows above.
+    # m1: tokens (10+5, 20+10) -> mean 22.5; wall_s (2.0, 4.0) -> mean 3.0.
+    assert "mean tokens: 22.5" in out
+    assert "mean wall_s: 3.0" in out
     assert "model: m2" in out
+    # m2: a single row -- tokens 5+1=6, wall_s 1.0.
+    assert "mean tokens: 6.0" in out
+    assert "mean wall_s: 1.0" in out
+
+
+def test_summarize_median_review_seconds_is_na_when_verdicts_have_no_numeric_review_seconds(
+        tmp_path, monkeypatch, capsys):
+    # D1: a model can have a verdict (so verdict_rate is not None) without any
+    # numeric review_seconds recorded -- must print "n/a", not raise TypeError.
+    monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs")
+    results = tmp_path / "results.jsonl"
+    results.write_text(json.dumps(_result_row(slug="s1")) + "\n")
+    run_dir = tmp_path / "runs" / "s1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(json.dumps({"verdict": "accept"}))  # no review_seconds
+    rc = bench.cmd_summarize(argparse.Namespace(file=str(results)))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "verdict rate: 100%" in out
+    assert "median review_seconds: n/a" in out
 
 
 def test_summarize_missing_file_exits_2(tmp_path, capsys):

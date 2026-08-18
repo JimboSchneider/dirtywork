@@ -254,6 +254,51 @@ def test_execute_int_accepted_for_number_param():
     assert result.kind == "ok" and result.text == "n=3"
 
 
+def test_execute_coerces_numeric_string_for_integer_param():
+    # F3: local models routinely send "60" instead of 60 -- the old ToolExecutor
+    # did int(timeout) itself; the coerced value must reach spec.fn as a real int.
+    r = ToolRegistry()
+    spec = ToolSpec(name="takesint", description="d",
+                    params={"n": ParamSpec(type="integer")}, required=("n",),
+                    fn=lambda sandbox, n: f"n={n}:{type(n).__name__}", caps=Caps(fs="none"))
+    r.register(spec)
+    result = r.execute("takesint", {"n": "60"}, sandbox=object(), deadline=None)
+    assert result.kind == "ok"
+    assert result.text == "n=60:int"
+
+
+def test_execute_coerces_numeric_string_for_number_param():
+    r = ToolRegistry()
+    spec = ToolSpec(name="takesnum", description="d",
+                    params={"n": ParamSpec(type="number")}, required=("n",),
+                    fn=lambda sandbox, n: f"n={n}:{type(n).__name__}", caps=Caps(fs="none"))
+    r.register(spec)
+    result = r.execute("takesnum", {"n": "1.5"}, sandbox=object(), deadline=None)
+    assert result.kind == "ok"
+    assert result.text == "n=1.5:float"
+
+
+def test_execute_non_numeric_string_stays_bad_args():
+    r = ToolRegistry()
+    spec = ToolSpec(name="takesint", description="d",
+                    params={"n": ParamSpec(type="integer")}, required=("n",),
+                    fn=lambda sandbox, n: f"n={n}", caps=Caps(fs="none"))
+    r.register(spec)
+    result = r.execute("takesint", {"n": "abc"}, sandbox=object(), deadline=None)
+    assert result.kind == "error" and result.failure == "bad_args"
+
+
+def test_execute_non_integer_numeric_string_for_integer_param_stays_bad_args():
+    # "1.5" coerces for "number" but not for "integer".
+    r = ToolRegistry()
+    spec = ToolSpec(name="takesint", description="d",
+                    params={"n": ParamSpec(type="integer")}, required=("n",),
+                    fn=lambda sandbox, n: f"n={n}", caps=Caps(fs="none"))
+    r.register(spec)
+    result = r.execute("takesint", {"n": "1.5"}, sandbox=object(), deadline=None)
+    assert result.kind == "error" and result.failure == "bad_args"
+
+
 def test_execute_explicit_null_allowed_for_none_defaulted_param():
     # `grep(glob=None)`: a model that spells the default out explicitly must not
     # take a bad_args strike for it.
@@ -384,3 +429,15 @@ def test_canonical_args_normalizes_trailing_slash_and_empty_path():
 def test_canonical_args_omits_params_without_defaults():
     r = _registry()
     assert r.canonical_args("paths", {}) == {"offset": 0, "limit": 400}
+
+
+def test_canonical_args_coerces_numeric_strings_like_execute():
+    # F3: a stuck model alternating "5" and 5 for the same call must not dodge
+    # stall detection -- canonical_args has to see the same coercion execute() does.
+    r = ToolRegistry()
+    spec = ToolSpec(name="takesint", description="d",
+                    params={"n": ParamSpec(type="integer")}, required=("n",),
+                    fn=lambda sandbox, n: f"n={n}", caps=Caps(fs="none"))
+    r.register(spec)
+    assert r.canonical_args("takesint", {"n": "5"}) == {"n": 5}
+    assert r.canonical_args("takesint", {"n": 5}) == {"n": 5}

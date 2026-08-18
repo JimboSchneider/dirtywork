@@ -699,6 +699,8 @@ def _add_runs_parsers(sub) -> None:
     export_p.add_argument("slug")
     export_p.add_argument("--max-patch-mb", type=int, default=10)
     export_p.add_argument("--keep-volume", action="store_true", default=False)
+    export_p.add_argument("--max-worktree-mb", type=int, default=DEFAULT_MAX_WORKTREE_MB)
+    export_p.add_argument("--max-worktree-files", type=int, default=DEFAULT_MAX_WORKTREE_FILES)
 
     clean_p = runs_sub.add_parser("clean", help="remove a run's container/volume/worktree/run dir")
     clean_p.add_argument("slug", nargs="?", default=None)

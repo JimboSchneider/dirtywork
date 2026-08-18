@@ -135,3 +135,57 @@ def test_context_window_claude_prefix_and_unknown():
     client = _client(RecordingTransport([]))
     assert client.context_window("claude-opus-5") == 200000
     assert client.context_window("nonexistent/model") is None
+
+
+def _assert_alternating(messages):
+    """Every wire message alternates user/assistant strictly -- what the
+    Anthropic Messages API requires and what A1/A2's merges exist to
+    guarantee."""
+    assert messages, "expected at least one message"
+    for i in range(1, len(messages)):
+        assert messages[i]["role"] != messages[i - 1]["role"], (
+            f"messages[{i - 1}] and messages[{i}] are both '{messages[i]['role']}': {messages}")
+
+
+def test_tool_result_then_user_nudge_merges_into_one_user_turn():
+    from dirtywork.providers import ToolCall, assistant_message, tool_message
+    transport = RecordingTransport([_fixture("simple_ok.json")])
+    calls = [ToolCall(id="c1", name="list_dir", arguments={}, error=None)]
+    history = [{"role": "user", "content": "go"}, assistant_message(None, calls),
+               tool_message("c1", "a"), {"role": "user", "content": "please continue"}]
+    _client(transport).chat("claude-x", history, [], temperature=None,
+                            max_tokens=10, timeout=5)
+    messages = transport.calls[0]["payload"]["messages"]
+    _assert_alternating(messages)
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    last_content = messages[-1]["content"]
+    assert last_content[-1] == {"type": "text", "text": "please continue"}
+
+
+def test_empty_assistant_reply_dropped_and_user_texts_merge():
+    transport = RecordingTransport([_fixture("simple_ok.json")])
+    history = [{"role": "user", "content": "task"},
+               {"role": "assistant", "content": ""},
+               {"role": "user", "content": "nudge"}]
+    _client(transport).chat("claude-x", history, [], temperature=None,
+                            max_tokens=10, timeout=5)
+    messages = transport.calls[0]["payload"]["messages"]
+    _assert_alternating(messages)
+    assert messages == [{"role": "user", "content": [
+        {"type": "text", "text": "task"}, {"type": "text", "text": "nudge"}]}]
+
+
+def test_assistant_with_tool_use_and_empty_text_is_kept():
+    from dirtywork.providers import ToolCall, assistant_message, tool_message
+    transport = RecordingTransport([_fixture("simple_ok.json")])
+    calls = [ToolCall(id="c1", name="list_dir", arguments={}, error=None)]
+    history = [{"role": "user", "content": "go"}, assistant_message("", calls),
+               tool_message("c1", "a")]
+    _client(transport).chat("claude-x", history, [], temperature=None,
+                            max_tokens=10, timeout=5)
+    messages = transport.calls[0]["payload"]["messages"]
+    _assert_alternating(messages)
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    assistant_msg = messages[1]
+    assert assistant_msg["content"] == [
+        {"type": "tool_use", "id": "c1", "name": "list_dir", "input": {}}]

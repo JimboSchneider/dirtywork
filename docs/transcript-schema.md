@@ -185,9 +185,13 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `sandbox` | start | `"docker"` \| `"none"` |
 | `ended` | end | UTC ISO-8601 |
 | `turns` | end | |
-| `diff_stat` | end | |
-| `export_status` | end | `"ok"` \| `"export_failed: …"` \| `"n/a"` |
-| `patch_path` | end | |
+| `diff_stat` | end, export | rewritten by `dirtywork runs export` when it succeeds |
+| `export_status` | end, export | `"ok"` \| `"export_failed: …"` \| `"n/a"`; rewritten by `dirtywork runs export` |
+| `patch_path` | end, export | rewritten by `dirtywork runs export` |
+| `worktree_bytes` | end (docker), or export | sampled worktree size from `budget.measure_worktree`; absent in host mode until an export is run |
+| `worktree_files` | end (docker), or export | sampled worktree entry count; absent in host mode until an export is run |
+| `escaping_symlinks` | end (docker), or export | symlinks whose target is absolute or escapes the worktree — never followed, always reported |
+| `dropped_git_entries` | end (docker), or export | `.git`-named entries the export refused to add |
 | `finalize_error` | end | |
 | `watchdog_violation` | end | |
 | `watchdog_violation_kind` | end | |

@@ -90,6 +90,14 @@ def test_get_provider_defaults_base_url_per_provider(monkeypatch):
     assert get_provider("anthropic").base_url == DEFAULT_BASE_URLS["anthropic"]
 
 
+def test_get_provider_explicit_empty_base_url_is_not_replaced_by_default(monkeypatch):
+    # An explicit "" is a caller choice (e.g. a CLI flag parsed to ""), not
+    # "unset" -- only None means "use the provider's own default".
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    assert get_provider("anthropic", "").base_url == ""
+    assert get_provider("openai", "").base_url == ""
+
+
 def test_every_provider_name_is_constructible(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     for name in PROVIDER_NAMES:

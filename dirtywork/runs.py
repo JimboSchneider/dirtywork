@@ -318,7 +318,9 @@ def cmd_export(args) -> int:
         return 2
 
     cfg = docker_args.DockerConfig(image=image, max_patch_mb=args.max_patch_mb,
-                                   keep_volume=args.keep_volume)
+                                   keep_volume=args.keep_volume,
+                                   max_worktree_mb=args.max_worktree_mb,
+                                   max_worktree_files=args.max_worktree_files)
     uid, gid = _uid_gid()
     artifacts = export.export_run(
         cfg, slug=args.slug, base_commit=data["base_commit"], worktree=worktree,
@@ -368,9 +370,13 @@ def cmd_verdict(args) -> int:
     if ended:
         try:
             ended_dt = datetime.fromisoformat(str(ended).replace("Z", "+00:00"))
+            if ended_dt.tzinfo is None:
+                # A naive timestamp (no tz offset recorded): assume UTC rather
+                # than crash subtracting an aware datetime from a naive one.
+                ended_dt = ended_dt.replace(tzinfo=timezone.utc)
             data["time_to_verdict_s"] = (
                 datetime.fromisoformat(verdict_at) - ended_dt).total_seconds()
-        except ValueError:
+        except (ValueError, TypeError):
             pass
 
     rundir.write_run_json(run_dir, data)
@@ -469,6 +475,55 @@ def _worktree_is_dirty(worktree: str) -> bool:
     return cp.returncode != 0 or bool(cp.stdout.strip())
 
 
+def _commits_beyond_base(repo: str, base_commit, branch):
+    """Commits `branch` carries past `base_commit`, or None when either value
+    is missing or git could not answer. Callers treat None as "unknown,
+    assume the worst": an --allow-commit run's real work must never be
+    force-deleted just because we couldn't check."""
+    if not base_commit or not branch:
+        return None
+    try:
+        cp = subprocess.run(["git", "-C", str(repo), "rev-list", "--count",
+                            f"{base_commit}..{branch}"],
+                            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if cp.returncode != 0:
+        return None
+    try:
+        return int(cp.stdout.strip())
+    except ValueError:
+        return None
+
+
+def _worktree_checked_out_branch(repo: str, worktree):
+    """The short branch name `git worktree list --porcelain` records for
+    `worktree`, read BEFORE any removal so `git branch -D` only ever targets
+    the branch actually checked out there -- run.json is data, not authority.
+    None for a detached HEAD or a worktree git does not know about."""
+    try:
+        cp = subprocess.run(["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+                            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if cp.returncode != 0:
+        return None
+    try:
+        target = str(Path(worktree).resolve())
+    except OSError:
+        return None
+    current = None
+    for line in cp.stdout.splitlines():
+        if line.startswith("worktree "):
+            try:
+                current = str(Path(line[len("worktree "):]).resolve())
+            except OSError:
+                current = None
+        elif line.startswith("branch refs/heads/") and current == target:
+            return line[len("branch refs/heads/"):]
+    return None
+
+
 def _clean_worktree_and_branch(data: dict, force: bool, log: list) -> bool:
     """Returns True when the worktree was actually removed. A run whose worktree
     was taken over by a later resume (resumed_by set) keeps both the worktree and
@@ -496,6 +551,27 @@ def _clean_worktree_and_branch(data: dict, force: bool, log: list) -> bool:
         log.append(("skip-worktree",
                     f"'{worktree}': has uncommitted changes (pass --force to remove anyway)"))
         return False
+    branch = data.get("branch")
+    # A dirty-worktree check alone misses an --allow-commit run: the worker
+    # may have committed real work, leaving the worktree clean but the branch
+    # ahead of base_commit. That work must survive an un-forced clean too.
+    if not force:
+        beyond = _commits_beyond_base(repo, data.get("base_commit"), branch)
+        if beyond is None:
+            log.append(("skip-worktree",
+                        f"'{branch}': cannot determine commits beyond base "
+                        f"{data.get('base_commit') or '?'} (unknown -- pass --force to "
+                        f"remove anyway)"))
+            return False
+        if beyond > 0:
+            short_base = str(data.get("base_commit"))[:7]
+            log.append(("skip-worktree",
+                        f"'{branch}': has {beyond} commit(s) beyond base {short_base} "
+                        f"(pass --force to remove anyway)"))
+            return False
+    # Read BEFORE removal: once the worktree is gone, git can no longer say
+    # which branch it had checked out.
+    actual_branch = _worktree_checked_out_branch(repo, worktree)
     try:
         rm = subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree)],
                             capture_output=True, text=True, timeout=30)
@@ -506,33 +582,46 @@ def _clean_worktree_and_branch(data: dict, force: bool, log: list) -> bool:
         log.append(("skip-worktree", f"'{worktree}': {rm.stderr.strip() or 'git worktree remove failed'}"))
         return False
     log.append(("removed-worktree", str(worktree)))
-    branch = data.get("branch")
     if branch:
-        try:
-            br = subprocess.run(["git", "-C", str(repo), "branch", "-D", str(branch)],
-                                capture_output=True, text=True, timeout=10)
-            log.append(("removed-branch" if br.returncode == 0 else "skip-branch", str(branch)))
-        except (OSError, subprocess.SubprocessError) as e:
-            log.append(("skip-branch", f"'{branch}': {e}"))
+        if actual_branch != branch:
+            log.append(("skip-branch",
+                        f"'{branch}': not the branch checked out in {worktree} "
+                        f"(was {actual_branch or 'detached'})"))
+        else:
+            try:
+                br = subprocess.run(["git", "-C", str(repo), "branch", "-D", str(branch)],
+                                    capture_output=True, text=True, timeout=10)
+                log.append(("removed-branch" if br.returncode == 0 else "skip-branch", str(branch)))
+            except (OSError, subprocess.SubprocessError) as e:
+                log.append(("skip-branch", f"'{branch}': {e}"))
     return True
 
 
-def _clean_stashes(data: dict, slug: str, worktree_removed: bool, log: list) -> None:
+def _clean_stashes(data: dict, slug: str, worktree_removed: bool, force: bool, log: list) -> None:
     """A docker resume parks the pre-resume worktree content in
     `<worktree>.pre-resume-<slug>` (resume.stash_dir_for). Cleaning a run removes
     the stash that run created; once the worktree itself is gone, every remaining
-    stash beside it is orphaned and goes too."""
+    stash beside it is orphaned and goes too. A stash is only ever removed when
+    the worktree it belongs beside was actually removed in this invocation, or
+    --force was given -- otherwise it is left in place (it may still be needed
+    to recover the worktree's pre-resume content)."""
     worktree = data.get("worktree")
     if not worktree:
         return
     worktree = Path(worktree)
     targets = [stash_dir_for(worktree, slug)]
-    if worktree_removed:
+    if worktree_removed or force:
         targets += [p for p in find_stashes(worktree) if p not in targets]
     for stash in targets:
-        if stash.is_dir():
+        if not stash.is_dir():
+            continue
+        if worktree_removed or force:
             shutil.rmtree(stash, ignore_errors=True)
             log.append(("removed-stash", str(stash)))
+        else:
+            log.append(("kept-stash",
+                        f"{stash}: kept -- worktree was not removed (pass --force to "
+                        f"remove it too)"))
 
 
 def _clean_run_dir(run_dir: Path, keep_transcript: bool, log: list) -> None:
@@ -577,8 +666,13 @@ def _clean_one(slug: str, *, keep_transcript: bool, force: bool) -> list:
         _clean_docker_resource("volume", data["volume"], repo, slug, log)
 
     worktree_removed = _clean_worktree_and_branch(data, force, log)
-    _clean_stashes(data, slug, worktree_removed, log)
-    _clean_run_dir(run_dir, keep_transcript, log)
+    _clean_stashes(data, slug, worktree_removed, force, log)
+    if any(action.startswith("skip") for action, _ in log):
+        log.append(("kept-run-dir",
+                    f"{run_dir}: kept because a resource it describes was not removed "
+                    f"-- re-run with --force"))
+    else:
+        _clean_run_dir(run_dir, keep_transcript, log)
     return log
 
 
