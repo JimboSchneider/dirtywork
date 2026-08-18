@@ -240,13 +240,23 @@ def read_transcript_events(path) -> tuple:
     return events, None
 
 
+def _tool_result_outcome(result_text) -> str:
+    """ERROR / BLOCKED / ok, from the tool result's leading token -- the one
+    classification both the text timeline and the Markdown export use."""
+    text = str(result_text or "")
+    if text.startswith("ERROR"):
+        return "ERROR"
+    if text.startswith("BLOCKED"):
+        return "BLOCKED"
+    return "ok"
+
+
 def _timeline_line(event: dict) -> str:
     ts = event.get("ts", "")
     name = str(event.get("event", ""))
     if name == "tool_result":
         result = str(event.get("result", ""))
-        outcome = ("ERROR" if result.startswith("ERROR")
-                   else "BLOCKED" if result.startswith("BLOCKED") else "ok")
+        outcome = _tool_result_outcome(result)
         tool = event.get("tool") or "(malformed call)"
         return f"{ts}  {name:<15} {tool:<12} {str(event.get('args', ''))[:80]:<80} [{outcome}]"
     if name == "assistant":
@@ -308,8 +318,7 @@ def _md_event_lines(event: dict) -> list:
     if name == "tool_result":
         tool = event.get("tool") or "(malformed call)"
         result = str(event.get("result", ""))
-        outcome = ("ERROR" if result.startswith("ERROR")
-                   else "BLOCKED" if result.startswith("BLOCKED") else "ok")
+        outcome = _tool_result_outcome(result)
         summary = (f"{html.escape(str(tool))}"
                    f"({_md_inline(event.get('args', ''), MD_ARGS_CHARS)}) [{outcome}]")
         lines = ["<details>", f"<summary>{summary}</summary>", ""]
