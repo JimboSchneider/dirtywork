@@ -1561,3 +1561,22 @@ def test_resume_inherits_the_prior_provider(tmp_path, monkeypatch, capsys):
     assert m2.main(["resume", str(tmp_path / "runs" / slug)]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["provider"] == "openai"
+
+
+def test_runs_list_dispatches_to_cmd_list(tmp_path, monkeypatch, capsys):
+    import dirtywork.__main__ as m
+    from dirtywork import rundir
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    rc = m.main(["runs", "list", "--json"])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "[]"
+
+
+def test_runs_show_unknown_slug_exits_2(tmp_path, monkeypatch, capsys):
+    import dirtywork.__main__ as m
+    from dirtywork import rundir
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    (tmp_path / "runs").mkdir()
+    rc = m.main(["runs", "show", "nope"])
+    assert rc == 2
+    assert "no such run" in capsys.readouterr().err

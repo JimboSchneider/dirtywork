@@ -648,6 +648,20 @@ def _add_run_flags(p, *, resume: bool) -> None:
     p.add_argument("--max-patch-mb", type=int, default=10)
 
 
+def _add_runs_parsers(sub) -> None:
+    """`dirtywork runs ...` (spec SP3 section 4). Every subcommand is
+    implemented in dirtywork/runs.py and routed by `runs.dispatch()`."""
+    runs_p = sub.add_parser("runs", help="inspect and manage dirtywork runs")
+    runs_sub = runs_p.add_subparsers(dest="runs_cmd", required=True)
+
+    list_p = runs_sub.add_parser("list", help="list every run under ~/.dirtywork/runs")
+    list_p.add_argument("--json", action="store_true", help="machine-readable output")
+
+    show_p = runs_sub.add_parser("show", help="show one run's summary, run.json and timeline")
+    show_p.add_argument("slug")
+    show_p.add_argument("--diff", action="store_true", help="also print the run's diff.patch")
+
+
 def _parse_args(argv):
     parser = argparse.ArgumentParser(prog="dirtywork")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -660,11 +674,15 @@ def _parse_args(argv):
     resume_p = sub.add_parser("resume", help="continue an earlier run on its worktree")
     resume_p.add_argument("run", help="run slug (under ~/.dirtywork/runs) or a run directory path")
     _add_run_flags(resume_p, resume=True)
+    _add_runs_parsers(sub)
     return parser.parse_args(argv)
 
 
 def main(argv: list | None = None) -> int:
     args = _parse_args(argv)
+    if args.cmd == "runs":
+        from . import runs as runs_mod
+        return runs_mod.dispatch(args)
     try:
         prior = _load_resume_target(args) if args.cmd == "resume" else None
         repo = Path(prior["repo"]) if prior else args.repo
