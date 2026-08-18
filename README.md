@@ -442,6 +442,9 @@ during that exception recovery.
 All progress (transcript path, worktree path, `error:`-prefixed messages) is
 written to stderr; watch a live run with `tail -f` on the transcript path.
 
+Full field-by-field schema, including every v1→v2 addition and the
+`run.json` field list: [`docs/transcript-schema.md`](docs/transcript-schema.md).
+
 **Transcript events** (JSONL, one per line): `run_start` (task, repo, model,
 config, `schema_version: 2`, plus provenance: `worktree`, `base_commit`,
 `branch`, `branch_from`, `base_url`, `dirtywork_version`, `temperature`,
