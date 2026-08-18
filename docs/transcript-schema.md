@@ -191,6 +191,14 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `finalize_error` | end | |
 | `watchdog_violation` | end | |
 | `watchdog_violation_kind` | end | |
+| `verdict` | verdict | written by `dirtywork runs verdict`: `"accept"` \| `"reject"` \| `"cleanup"` |
+| `note` | verdict | `--note` text, or null |
+| `verdict_at` | verdict | UTC ISO-8601 |
+| `review_seconds` | verdict | `--review-seconds` as given, or null |
+| `time_to_verdict_s` | verdict | seconds from `ended` to `verdict_at`; null when the run has no `ended` yet |
+
+Rows marked *verdict* are added post hoc by `dirtywork runs verdict <slug> …`
+(a merge-update; no existing key is dropped) and are absent until then.
 
 `dirtywork runs show <slug>` prints this file alongside a tool-call timeline
 reconstructed from the transcript.
