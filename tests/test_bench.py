@@ -104,13 +104,13 @@ def test_hash_check_argv_exact():
     assert argv == [
         "run", "--rm",
         "--network", "none",
-        "--user", "501:20",
+        "--pids-limit", "256",          # docker_args.security_args: shared with worker/export containers
         "--read-only",
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
+        "--user", "501:20",
         "--memory", "2g", "--memory-swap", "2g",
         "--cpus", "2",
-        "--pids-limit", "256",
         "--tmpfs", "/tmp:rw,exec,size=256m,mode=1777",
         "--mount", "type=volume,src=dw-slug-work,dst=/work",
         "-e", f"PATH={docker_args.PATH_ENV}",
@@ -409,3 +409,20 @@ def test_dispatch_routes_summarize_and_bench(tmp_path, monkeypatch, capsys):
     assert rc == 0
     monkeypatch.setattr(bench, "cmd_bench", lambda args: 7)
     assert bench.dispatch(argparse.Namespace(bench_cmd=None, models="m1")) == 7
+
+
+def test_run_one_bench_case_staging_failure_becomes_bench_error_row(monkeypatch):
+    # A staging failure (git missing/misconfigured, disk full) must degrade to a
+    # recorded bench_error row -- never abort the whole sweep.
+    def boom(task):
+        raise RuntimeError("git: command not found")
+    monkeypatch.setattr(bench, "_stage_repo", boom)
+    called = []
+    monkeypatch.setattr(bench, "run_once", lambda argv: called.append(argv))
+    row = bench.run_one_bench_case("m", "py-fix-off-by-one", 1, provider=None, base_url=None,
+                                   stamp="s", max_turns=1, timeout=1)
+    assert row["status"] == "bench_error"
+    assert "git: command not found" in row["error"]
+    assert row["acceptance"] == "skipped"
+    assert called == []
+

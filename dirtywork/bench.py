@@ -75,12 +75,16 @@ def _stage_repo(task: str) -> Path:
     src = BENCH_REPOS / task
     dest = Path(tempfile.mkdtemp(prefix=f"dwbench-{task}-"))
     shutil.rmtree(dest)                     # mkdtemp created it; copytree needs it absent
-    shutil.copytree(src, dest)
-    git_id = ["-c", "user.email=bench@dirtywork.local", "-c", "user.name=dirtywork-bench"]
-    subprocess.run(["git", "-C", str(dest), "init", "-q"], check=True)
-    subprocess.run(["git", "-C", str(dest), *git_id, "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(dest), *git_id, "commit", "-q", "-m", "bench fixture"],
-                   check=True)
+    try:
+        shutil.copytree(src, dest)
+        git_id = ["-c", "user.email=bench@dirtywork.local", "-c", "user.name=dirtywork-bench"]
+        subprocess.run(["git", "-C", str(dest), "init", "-q"], check=True)
+        subprocess.run(["git", "-C", str(dest), *git_id, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(dest), *git_id, "commit", "-q", "-m", "bench fixture"],
+                       check=True)
+    except Exception:
+        shutil.rmtree(dest, ignore_errors=True)   # never leak a half-staged tree
+        raise
     return dest
 
 
@@ -93,13 +97,10 @@ def _acceptance_base_argv(volume: str, uid: int, gid: int, extra_mounts=()) -> l
     argv = [
         "run", "--rm",
         "--network", "none",
+        *docker_args.security_args(ACCEPTANCE_PIDS),  # --pids-limit/--read-only/--cap-drop ALL/no-new-privileges, shared with worker+export containers
         "--user", f"{uid}:{gid}",
-        "--read-only",
-        "--cap-drop", "ALL",
-        "--security-opt", "no-new-privileges",
         "--memory", ACCEPTANCE_MEMORY, "--memory-swap", ACCEPTANCE_MEMORY,
         "--cpus", ACCEPTANCE_CPUS,
-        "--pids-limit", str(ACCEPTANCE_PIDS),
         "--tmpfs", "/tmp:rw,exec,size=256m,mode=1777",
         "--mount", f"type=volume,src={volume},dst=/work",
         "-e", f"PATH={docker_args.PATH_ENV}",
@@ -222,8 +223,27 @@ def _harness_failures(counts: dict, status, final_message) -> dict:
 
 def run_one_bench_case(model: str, task: str, repeat: int, *, provider, base_url, stamp,
                        max_turns: int, timeout: int) -> dict:
-    bench_data = _bench_json(task)
-    repo_dir = _stage_repo(task)
+    wall_start = time.monotonic()
+
+    def bench_error(e: Exception) -> dict:
+        # One bad case degrades to a recorded row; the sweep continues (same
+        # contract as _run_acceptance's "never raises").
+        return {"stamp": stamp, "model": model, "task": task, "repeat": repeat,
+                "provider": provider, "base_url": base_url, "slug": None, "run_dir": None,
+                "status": "bench_error", "error": str(e), "turns": None,
+                "prompt_tokens": None, "completion_tokens": None,
+                "wall_s": round(time.monotonic() - wall_start, 1),
+                "acceptance": "skipped", "guardrail_blocks": 0, "sandbox_resets": 0,
+                "diff_stat": None, "harness": {}, "verdict": None, "review_seconds": None}
+
+    repo_dir = None
+    try:
+        bench_data = _bench_json(task)
+        repo_dir = _stage_repo(task)
+    except Exception as e:  # staging: bad bench.json, git missing/misconfigured, disk full
+        if repo_dir is not None:
+            shutil.rmtree(repo_dir, ignore_errors=True)
+        return bench_error(e)
     argv = ["run", bench_data["task"], "--repo", str(repo_dir), "--model", model,
             "--sandbox", "docker", "--keep-volume",
             "--max-turns", str(max_turns), "--timeout", str(timeout)]
@@ -232,18 +252,11 @@ def run_one_bench_case(model: str, task: str, repeat: int, *, provider, base_url
     if base_url:
         argv += ["--base-url", base_url]
 
-    wall_start = time.monotonic()
     try:
         payload = run_once(argv)
     except Exception as e:
         shutil.rmtree(repo_dir, ignore_errors=True)
-        return {"stamp": stamp, "model": model, "task": task, "repeat": repeat,
-                "provider": provider, "base_url": base_url, "slug": None, "run_dir": None,
-                "status": "bench_error", "error": str(e), "turns": None,
-                "prompt_tokens": None, "completion_tokens": None,
-                "wall_s": round(time.monotonic() - wall_start, 1),
-                "acceptance": "skipped", "guardrail_blocks": 0, "sandbox_resets": 0,
-                "diff_stat": None, "harness": {}, "verdict": None, "review_seconds": None}
+        return bench_error(e)
     wall_s = round(time.monotonic() - wall_start, 1)
 
     run_dir = Path(payload["run_dir"]) if payload.get("run_dir") else None

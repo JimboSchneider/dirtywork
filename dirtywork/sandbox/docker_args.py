@@ -106,7 +106,7 @@ def _label_args(slug: str, repo_label: str) -> list:
     ]
 
 
-def _security_args(pids_limit: int) -> list:
+def security_args(pids_limit: int) -> list:
     """Return security-related arguments for docker create/run."""
     return [
         "--pids-limit", str(pids_limit),
@@ -148,7 +148,7 @@ def worker_create_argv(cfg: DockerConfig, slug: str, image_ref: str, uid: int, g
         "--memory", cfg.memory,
         "--memory-swap", cfg.memory,
         "--cpus", cfg.cpus,
-        *(_security_args(cfg.pids_limit)),
+        *(security_args(cfg.pids_limit)),
         "--user", f"{uid}:{gid}",
         "--tmpfs", f"/tmp:rw,exec,size={cfg.tmp_size},mode=1777",
         "--tmpfs", f"/gitdir:rw,size={cfg.gitdir_size},mode=0700,uid={uid},gid={gid}",
@@ -178,7 +178,7 @@ def export_create_argv(cfg: DockerConfig, slug: str, image_ref: str, uid: int, g
         "--memory", cfg.memory,
         "--memory-swap", cfg.memory,
         "--cpus", cfg.cpus,
-        *(_security_args(256)),
+        *(security_args(256)),
         "--user", f"{uid}:{gid}",
         "--tmpfs", "/tmp:rw,exec,size=256m,mode=1777",
         "--tmpfs", f"/gitdir:rw,size=2g,mode=0700,uid={uid},gid={gid}",
