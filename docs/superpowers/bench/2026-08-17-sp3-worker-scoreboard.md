@@ -113,3 +113,13 @@ See run-split.md for the full table. Headline: at 131k the model sustains ~13k p
 5. **Workers report a subset as "the suite" when the suite times out** (bash tool default 120 s). The preamble now mandates `timeout: 600` and honest reporting; the controller re-runs the full suite at landing regardless.
 6. **Frontier usage shifted rather than dropped.** The SP3 day was the largest frontier day in the logs (Opus plan re-baseline + pre-flight scan ≈ 27% of it), but implementation tokens (~34M prompt) went local; the Max meter read 10% weekly after ~27 h of heavy use.
 7. **Metrics-as-you-go paid for itself in minutes:** the sampler + per-run rows + model/tool split found the crash cause, the volta tax and the cache thrash the same hour each appeared.
+
+## Final whole-branch review (workflow: 6 lenses — spec/behaviour/security on Opus, quality/docs/tests on Sonnet — 2 Sonnet skeptics per Critical/Important finding; 48 agents)
+21 confirmed, 0 refuted, 18 Minor. The confirmed set was entirely cross-task seams that per-task reviews structurally cannot see: the Anthropic serializer broke the runner's alternation invariant on both nudge paths (consecutive `user` turns after tool results; empty assistant content), `runs clean` deleted `--allow-commit` work without `--force` and force-deleted the branch/stash/run dir without the guards its sibling paths had, the toolchain-root passthrough (4eaa5ce) reopened `rm -rf "$CARGO_HOME"` past the guardrail denylist, `bench summarize`/`bench` dir hardening gaps, `runs export` limit flags, README missing the two new command families, and no docker-marked tests for the destructive paths. One fix wave (two Sonnet implementers on disjoint files) closed all 23 items; a two-seat re-review found one regression in the wave itself (the run-dir keep rule firing on the benign "already removed" outcome), fixed by the controller. Final gates: 797 unit / 14 docker (2 new end-to-end: `runs clean` label-match vs decoy, bench acceptance pass→gamed) / 3 live.
+
+## Frontier vs local — end of branch (per UTC day)
+| day (UTC) | frontier out tok | cache write | cache read | $eq | main / subagents | local runs | local prompt tok | local compl tok |
+|---|---|---|---|---|---|---|---|---|
+| 08-17 (SP2.5 + SP3 start) | 3,379,970 | 23,252,743 | 909,486,728 | ~1,467 | 1,076 / 390 | 44 | 46,996,717 | 316,207 |
+| 08-18 (SP3 finish, to 08:35 CDT) | 2,002,267 | 17,193,041 | 483,592,729 | ~578 | 314 / 264 (final-review workflow ≈ 3.2M subagent tokens) | 12 | 14,231,210 | 91,602 |
+Plan meter (Max 20x, Jim's screenshot 19:41 CDT): 5-h session 27%, weekly all-models 10%, Fable 11% after ~27 h covering SP2.5 + most of SP3.
