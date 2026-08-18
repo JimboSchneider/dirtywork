@@ -281,8 +281,12 @@ def cmd_export(args) -> int:
     if not worktree.is_dir():
         print(f"error: worktree {worktree} is missing; nothing to export into", file=sys.stderr)
         return 2
-    existing = list(worktree.iterdir())
-    if len(existing) != 1 or existing[0].name != ".git" or not existing[0].is_file():
+    try:
+        pristine = export.worktree_is_pristine(worktree)
+    except OSError as e:
+        print(f"error: cannot read worktree {worktree}: {e}", file=sys.stderr)
+        return 2
+    if not pristine:
         print(f"error: worktree {worktree} is not empty (it holds more than the .git file); "
               f"the export refuses to overwrite work already on disk", file=sys.stderr)
         return 2

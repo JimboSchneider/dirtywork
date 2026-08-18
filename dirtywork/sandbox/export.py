@@ -62,10 +62,17 @@ def _cleanup_to_dot_git_only(dest: Path) -> None:
                 pass
 
 
+def worktree_is_pristine(path: Path) -> bool:
+    """True when `path` holds exactly one entry, the linked-worktree `.git` FILE —
+    the only state the export may extract into (anything else is work on disk we
+    must not overwrite). Raises OSError if the directory cannot be listed."""
+    existing = list(Path(path).iterdir())
+    return len(existing) == 1 and existing[0].name == ".git" and existing[0].is_file()
+
+
 def extract_validated(stream, dest: Path, *, max_files: int, max_bytes: int) -> ExportReport:
     dest = Path(dest)
-    existing = list(dest.iterdir())
-    if len(existing) != 1 or existing[0].name != ".git" or not existing[0].is_file():
+    if not worktree_is_pristine(dest):
         raise ExportError("worktree not empty")
 
     dest_real = os.path.realpath(str(dest))
@@ -175,8 +182,7 @@ def export_run(cfg, *, slug, base_commit, worktree: Path, run_dir: Path, objects
     worktree_bytes = None
     worktree_files = None
 
-    existing = list(worktree.iterdir())
-    if len(existing) != 1 or existing[0].name != ".git" or not existing[0].is_file():
+    if not worktree_is_pristine(worktree):
         return RunArtifacts(export_status="export_failed: worktree not empty")
 
     name = f"{docker_args.container_name(slug)}-export"
