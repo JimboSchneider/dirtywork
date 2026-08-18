@@ -649,6 +649,44 @@ def test_clean_docker_daemon_failure_is_a_refusal_and_keeps_worktree_and_run_dir
     assert rc == 1
 
 
+@pytest.mark.parametrize("output", [
+    b"Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+    b"error during connect: Get \"http://%2Fvar%2Frun%2Fdocker.sock/v1.47/containers/x/json\": dial unix /var/run/docker.sock: connect: no such file or directory",
+    b"permission denied while trying to connect to the Docker daemon socket",
+])
+def test_clean_daemon_down_messages_are_refusals_even_when_they_say_no_such(tmp_path, repo, monkeypatch, capsys, output):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": None,
+        "container": "dw-slug1", "volume": None, "branch": None,
+    })
+    monkeypatch.setattr(runs.docker_cli, "run", lambda argv, timeout=None: FakeCaptured(1, output))
+    rc = runs.cmd_clean(_clean_args("slug1", force=True))
+    out = capsys.readouterr().out
+    assert "skip-container" in out and "absent-container" not in out
+    assert (tmp_path / "runs" / "slug1").exists()
+    assert rc == 1
+
+
+@pytest.mark.parametrize("output", [
+    b"Error: No such object: dw-slug1",
+    b"Error response from daemon: get dw-slug1-work: no such volume",
+    b"Error: No such container: dw-slug1",
+])
+def test_clean_object_level_no_such_is_absent(tmp_path, repo, monkeypatch, capsys, output):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": None,
+        "container": "dw-slug1", "volume": None, "branch": None,
+    })
+    monkeypatch.setattr(runs.docker_cli, "run", lambda argv, timeout=None: FakeCaptured(1, output))
+    rc = runs.cmd_clean(_clean_args("slug1"))
+    out = capsys.readouterr().out
+    assert "absent-container" in out
+    assert not (tmp_path / "runs" / "slug1").exists()
+    assert rc == 0
+
+
 def test_clean_already_gone_worktree_is_absent_not_a_refusal(tmp_path, repo, monkeypatch, capsys):
     # A worktree removed by hand (or by an earlier partial clean) must not strand
     # the run record: prune git's bookkeeping, drop dirtywork's own orphaned

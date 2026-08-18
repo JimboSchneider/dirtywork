@@ -58,6 +58,7 @@ def _iter_run_dirs(runs_dir: Path):
 
 
 _SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_DOCKER_ABSENT_RE = re.compile(r"no such (?:object|container|volume)\b", re.IGNORECASE)
 
 
 def _run_dir_for(slug: str) -> Path:
@@ -473,7 +474,11 @@ def _clean_docker_resource(kind: str, name: str, repo: str, slug: str, log: list
         return
     if cp.returncode != 0:
         text = cp.output.decode("utf-8", errors="replace").strip()
-        if "no such" in text.lower():
+        # Object-level "gone" only: `Error: No such object: <name>` (container),
+        # `... no such volume` (volume). A bare "no such" would also match a
+        # DAEMON-DOWN message ("dial unix /var/run/docker.sock: connect: no such
+        # file or directory") and misfile an outage as "already removed".
+        if _DOCKER_ABSENT_RE.search(text):
             # Not a refusal: a completed docker run already removed its container
             # and volume in sandbox.stop(), so this is the normal end state. It must
             # not count as "skipped" (exit 1 / run dir kept / --force needed).
@@ -577,7 +582,10 @@ def _delete_orphaned_branch(repo: str, branch, log: list) -> None:
     try:
         cp = subprocess.run(["git", "-C", str(repo), "worktree", "list", "--porcelain"],
                             capture_output=True, text=True, timeout=10)
-        if cp.returncode == 0 and f"branch refs/heads/{branch}\n" in cp.stdout + "\n":
+        if cp.returncode != 0:      # fail closed: cannot tell where the branch is checked out
+            log.append(("skip-branch", f"'{branch}': cannot list worktrees ({cp.stderr.strip() or 'git error'})"))
+            return
+        if f"branch refs/heads/{branch}\n" in cp.stdout + "\n":
             log.append(("skip-branch", f"'{branch}': still checked out in a worktree"))
             return
         br = subprocess.run(["git", "-C", str(repo), "branch", "-D", str(branch)],
