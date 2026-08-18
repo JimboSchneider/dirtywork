@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import sys
@@ -679,6 +681,25 @@ def _add_runs_parsers(sub) -> None:
     verdict_p.add_argument("--review-seconds", type=float, default=None)
 
 
+def _add_bench_parsers(sub) -> None:
+    """`dirtywork bench ...` (spec SP3 section 5). --provider/--base-url are
+    passed straight through to `dirtywork run`; leaving them unset means `run`'s
+    own defaults apply, and a per-model override uses the
+    `model[@provider][=base_url]` spec syntax."""
+    bench_p = sub.add_parser("bench", help="benchmark models against the fixture tasks")
+    bench_p.add_argument("--models", default=None,
+                         help="comma-separated model[@provider][=base_url] specs")
+    bench_p.add_argument("--provider", default=None, help="default provider for every model")
+    bench_p.add_argument("--base-url", default=None, help="default base URL for every model")
+    bench_p.add_argument("--repeats", type=_positive_int, default=1)
+    bench_p.add_argument("--tasks", default=None,
+                         help="comma-separated fixture names (default: all of bench/repos)")
+    bench_p.add_argument("--out", default=None,
+                         help="results JSONL path (default: ~/.dirtywork/bench/<stamp>.jsonl)")
+    bench_p.add_argument("--max-turns", type=_positive_int, default=40)
+    bench_p.add_argument("--timeout", type=_positive_int, default=1800)
+
+
 def _parse_args(argv):
     parser = argparse.ArgumentParser(prog="dirtywork")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -692,7 +713,32 @@ def _parse_args(argv):
     resume_p.add_argument("run", help="run slug (under ~/.dirtywork/runs) or a run directory path")
     _add_run_flags(resume_p, resume=True)
     _add_runs_parsers(sub)
+    _add_bench_parsers(sub)
     return parser.parse_args(argv)
+
+
+def run_once(argv: list) -> dict:
+    """Run one dirtywork invocation in-process and return its stdout JSON.
+    Relies on the machine contract -- exactly one JSON object on stdout after
+    preflight -- so `dirtywork bench` can drive many runs without paying for a
+    subprocess (and a fresh interpreter) per run. stderr is captured too, so a
+    preflight refusal shows up in the raised error rather than vanishing."""
+    out_buf, err_buf = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+        try:
+            rc = main(argv)
+        except SystemExit as e:
+            # argparse calls sys.exit() on a bad flag (e.g. an invalid --provider
+            # choice). SystemExit is a BaseException, not an Exception, so left
+            # uncaught it would escape run_one_bench_case's `except Exception` and
+            # abort the whole bench sweep instead of recording one bench_error row.
+            raise RuntimeError(f"dirtywork exited via SystemExit({e.code}): "
+                               f"{err_buf.getvalue().strip()}") from None
+    text = out_buf.getvalue()
+    if not text.strip():
+        raise RuntimeError(f"dirtywork produced no stdout JSON (exit {rc}): "
+                           f"{err_buf.getvalue().strip()}")
+    return json.loads(text)
 
 
 def main(argv: list | None = None) -> int:
@@ -700,6 +746,9 @@ def main(argv: list | None = None) -> int:
     if args.cmd == "runs":
         from . import runs as runs_mod
         return runs_mod.dispatch(args)
+    if args.cmd == "bench":
+        from . import bench as bench_mod
+        return bench_mod.dispatch(args)
     try:
         prior = _load_resume_target(args) if args.cmd == "resume" else None
         repo = Path(prior["repo"]) if prior else args.repo
