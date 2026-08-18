@@ -239,11 +239,21 @@ of whether the run is still going:
   - a run whose worktree was taken over by a later `resume`
     (`resumed_by` set) keeps its worktree and branch — they belong to the
     newest run in the chain; clean that run instead.
+  - only ever removes the worktree dirtywork itself created for the run
+    (`<repo>/.worktrees/dw-<slug>`, a linked worktree of the recorded repo)
+    — an edited `run.json` cannot point it at another worktree; a worktree
+    that is already gone is not a refusal (git bookkeeping is pruned and the
+    run's own `dirtywork/<slug>` branch removed if nothing has it checked out).
   - container/volume removal only ever touches a resource whose
     `dirtywork.run`/`dirtywork.repo` labels match this exact run (the SP2
-    collision rule); anything else is left alone and reported.
+    collision rule); anything else is left alone and reported. A resource
+    that is already gone ("no such object") is fine; any other `docker
+    inspect` failure (daemon down, permission denied) is a refusal, and then
+    the worktree, branch and run directory are left untouched too, so a
+    retry can still finish.
   - if anything above was refused, the run directory is kept too, so
     nothing it describes is lost before you can retry with `--force`.
+  - slugs are plain names (`[A-Za-z0-9._-]`); paths are rejected.
   - `--keep-transcript` keeps `run.json`/`transcript.jsonl` and removes
     the rest of the run directory.
 - `dirtywork runs verdict <slug> accept|reject|cleanup [--note TEXT] [--review-seconds N]` —

@@ -601,9 +601,97 @@ def test_clean_refuses_worktree_that_is_not_a_linked_worktree_of_the_repo(tmp_pa
     })
     rc = runs.cmd_clean(_clean_args("slug1", force=True))
     out = capsys.readouterr().out
-    assert "not a linked worktree" in out
+    assert "not a dirtywork-managed worktree" in out
     assert (stray / "precious.txt").exists()
     assert head_branch in _git(repo, "branch", "--list", head_branch).stdout
+    assert rc == 1
+
+
+def test_clean_refuses_another_linked_worktree_of_the_repo(tmp_path, repo, monkeypatch, capsys):
+    # A run.json edited to point at a linked worktree dirtywork did NOT create
+    # (here: <repo>/.worktrees/feature -- e.g. the operator's own worktree) must
+    # be refused even though it IS a linked worktree of the repo.
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    other = repo / ".worktrees" / "feature"
+    _git(repo, "worktree", "add", "-b", "feature", str(other), "HEAD")
+    (other / "work.txt").write_text("mine")
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": str(other),
+        "container": None, "volume": None, "branch": "feature",
+    })
+    rc = runs.cmd_clean(_clean_args("slug1", force=True))
+    out = capsys.readouterr().out
+    assert "not a dirtywork-managed worktree" in out
+    assert (other / "work.txt").exists()
+    assert "feature" in _git(repo, "branch", "--list", "feature").stdout
+    assert rc == 1
+
+
+def test_clean_docker_daemon_failure_is_a_refusal_and_keeps_worktree_and_run_dir(tmp_path, repo, monkeypatch, capsys):
+    # `docker inspect` failing for any reason other than "no such object"
+    # (daemon down, permission denied) means we could not verify the resource is
+    # gone: refuse, and remove NOTHING else, so a retry can still finish.
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = repo / ".worktrees" / "dw-slug1"
+    _git(repo, "worktree", "add", "-b", "dirtywork/slug1", str(wt), "HEAD")
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": str(wt),
+        "container": "dw-slug1", "volume": "dw-slug1-work", "branch": "dirtywork/slug1",
+    })
+    monkeypatch.setattr(runs.docker_cli, "run",
+                        lambda argv, timeout=None: FakeCaptured(1, b"Cannot connect to the Docker daemon at unix:///var/run/docker.sock"))
+    rc = runs.cmd_clean(_clean_args("slug1", force=True))
+    out = capsys.readouterr().out
+    assert "skip-container" in out and "cannot inspect" in out
+    assert "kept-worktree" in out and "kept-run-dir" in out
+    assert wt.exists()
+    assert (tmp_path / "runs" / "slug1").exists()
+    assert rc == 1
+
+
+def test_clean_already_gone_worktree_is_absent_not_a_refusal(tmp_path, repo, monkeypatch, capsys):
+    # A worktree removed by hand (or by an earlier partial clean) must not strand
+    # the run record: prune git's bookkeeping, drop dirtywork's own orphaned
+    # branch, remove the run dir, exit 0.
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = repo / ".worktrees" / "dw-slug1"
+    _git(repo, "worktree", "add", "-b", "dirtywork/slug1", str(wt), "HEAD")
+    shutil.rmtree(wt)
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": str(wt),
+        "container": None, "volume": None, "branch": "dirtywork/slug1",
+    })
+    rc = runs.cmd_clean(_clean_args("slug1"))
+    out = capsys.readouterr().out
+    assert "absent-worktree" in out
+    assert "removed-branch" in out
+    assert "dirtywork/slug1" not in _git(repo, "branch", "--list", "dirtywork/slug1").stdout
+    assert not (tmp_path / "runs" / "slug1").exists()
+    assert rc == 0
+
+
+@pytest.mark.parametrize("bad", ["../escape", "/etc", ".", "..", "a/b", "", "-x"])
+def test_open_run_rejects_slugs_that_are_not_plain_names(tmp_path, monkeypatch, bad):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    (tmp_path / "runs").mkdir()
+    (tmp_path / "escape").mkdir()
+    (tmp_path / "escape" / "run.json").write_text("{}")
+    with pytest.raises(runs.RunsError):
+        runs._open_run(bad)
+
+
+def test_clean_with_escaping_slug_touches_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    (tmp_path / "runs").mkdir()
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "run.json").write_text(json.dumps({"status": "completed", "repo": str(tmp_path),
+                                                 "worktree": None, "container": None,
+                                                 "volume": None, "branch": None}))
+    rc = runs.cmd_clean(_clean_args("../victim", force=True))
+    out = capsys.readouterr().out
+    assert "invalid run slug" in out
+    assert (victim / "run.json").exists()
     assert rc == 1
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -56,10 +57,30 @@ def _iter_run_dirs(runs_dir: Path):
             yield d
 
 
+_SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def _run_dir_for(slug: str) -> Path:
+    """`<RUNS_DIR>/<slug>` for a plain slug ONLY. A slug is data from the
+    command line (or a results file); it must never be able to name a path
+    outside RUNS_DIR (`../x`, `/etc`, `.`), so `runs clean --force <slug>`
+    can only ever operate on a managed run directory."""
+    if not _SLUG_RE.fullmatch(slug) or slug in (".", ".."):
+        raise RunsError(f"invalid run slug '{slug}'")
+    runs_dir = Path(rundir.RUNS_DIR)
+    run_dir = runs_dir / slug
+    try:
+        if run_dir.resolve().parent != runs_dir.resolve():
+            raise RunsError(f"invalid run slug '{slug}'")
+    except OSError as e:
+        raise RunsError(f"cannot resolve run '{slug}': {e}")
+    return run_dir
+
+
 def _open_run(slug: str):
     """(run_dir, run.json dict) or RunsError — the one lookup every single-run
     subcommand uses, so 'no such run' reads identically everywhere."""
-    run_dir = Path(rundir.RUNS_DIR) / slug
+    run_dir = _run_dir_for(slug)
     if not run_dir.is_dir():
         raise RunsError(f"no such run '{slug}' under {rundir.RUNS_DIR}")
     try:
@@ -451,10 +472,17 @@ def _clean_docker_resource(kind: str, name: str, repo: str, slug: str, log: list
         log.append((f"skip-{kind}", f"'{name}': cannot inspect: {e}"))
         return
     if cp.returncode != 0:
-        # Not a refusal: a completed docker run already removed its container and
-        # volume in sandbox.stop(), so this is the normal end state. It must not
-        # count as "skipped" (exit 1 / run dir kept / --force needed).
-        log.append((f"absent-{kind}", f"'{name}': not found (already removed)"))
+        text = cp.output.decode("utf-8", errors="replace").strip()
+        if "no such" in text.lower():
+            # Not a refusal: a completed docker run already removed its container
+            # and volume in sandbox.stop(), so this is the normal end state. It must
+            # not count as "skipped" (exit 1 / run dir kept / --force needed).
+            log.append((f"absent-{kind}", f"'{name}': not found (already removed)"))
+        else:
+            # Daemon down, permission denied, timeout... -- we could NOT verify the
+            # resource is gone, so nothing else may be removed either (see _clean_one).
+            first = text.splitlines()[0] if text else "docker inspect failed"
+            log.append((f"skip-{kind}", f"'{name}': cannot inspect: {first}"))
         return
     run_label, _, repo_label_value = cp.output.decode("utf-8", errors="replace").strip().partition("\t")
     if run_label != slug or repo_label_value != docker_args.repo_label(Path(repo)):
@@ -527,6 +555,38 @@ def _worktree_checked_out_branch(repo: str, worktree):
     return None
 
 
+def _is_dirtywork_worktree(worktree: str, repo: str) -> bool:
+    """True only for `<repo>/.worktrees/dw-<something>` (resolved), the shape
+    workspace.create_worktree produces. Fail closed on any OSError."""
+    try:
+        wt = Path(worktree).resolve()
+        managed = (Path(repo) / ".worktrees").resolve()
+    except OSError:
+        return False
+    return wt.parent == managed and wt.name.startswith("dw-")
+
+
+def _delete_orphaned_branch(repo: str, branch, log: list) -> None:
+    """After an already-gone worktree: delete the run's branch only when it is
+    dirtywork's own (`dirtywork/<slug>`) and no worktree has it checked out."""
+    if not branch:
+        return
+    if not str(branch).startswith("dirtywork/"):
+        log.append(("skip-branch", f"'{branch}': not a dirtywork/* branch -- left alone"))
+        return
+    try:
+        cp = subprocess.run(["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+                            capture_output=True, text=True, timeout=10)
+        if cp.returncode == 0 and f"branch refs/heads/{branch}\n" in cp.stdout + "\n":
+            log.append(("skip-branch", f"'{branch}': still checked out in a worktree"))
+            return
+        br = subprocess.run(["git", "-C", str(repo), "branch", "-D", str(branch)],
+                            capture_output=True, text=True, timeout=10)
+        log.append(("removed-branch" if br.returncode == 0 else "skip-branch", str(branch)))
+    except (OSError, subprocess.SubprocessError) as e:
+        log.append(("skip-branch", f"'{branch}': {e}"))
+
+
 def _clean_worktree_and_branch(data: dict, force: bool, log: list) -> bool:
     """Returns True when the worktree was actually removed. A run whose worktree
     was taken over by a later resume (resumed_by set) keeps both the worktree and
@@ -542,10 +602,25 @@ def _clean_worktree_and_branch(data: dict, force: bool, log: list) -> bool:
                     f"the worktree and branch belong to the newest run in the chain; "
                     f"run `dirtywork runs clean {resumed_by}` to remove them"))
         return False
-    # Same trust boundary as resume: only a linked worktree of the recorded repo
-    # (a `.git` FILE whose gitdir resolves under <repo>/.git) may be force-removed.
-    # run.json is data, not authority -- never point `git worktree remove --force`
-    # at a directory dirtywork did not create.
+    if not Path(worktree).exists():
+        # Already gone (removed by hand, or by an earlier partial clean): not a
+        # refusal. Prune git's bookkeeping and let the run finish cleaning up.
+        subprocess.run(["git", "-C", str(repo), "worktree", "prune"],
+                       capture_output=True, text=True, timeout=30)
+        log.append(("absent-worktree", f"'{worktree}': already gone"))
+        _delete_orphaned_branch(repo, data.get("branch"), log)
+        return True
+    # Same trust boundary as resume, tightened: run.json is data, not authority.
+    # `git worktree remove --force` may only ever target the worktree dirtywork
+    # itself created for a run: <repo>/.worktrees/dw-<slug> (create_worktree's
+    # naming) that is a linked worktree of the recorded repo (a `.git` FILE whose
+    # gitdir resolves under <repo>/.git). Any other linked worktree of the repo
+    # (the operator's own, or another tool's) is refused.
+    if not _is_dirtywork_worktree(worktree, repo):
+        log.append(("skip-worktree",
+                    f"'{worktree}': not a dirtywork-managed worktree "
+                    f"({repo}/.worktrees/dw-*) -- refusing to remove"))
+        return False
     if not worktree_belongs_to_repo(Path(worktree), Path(repo)):
         log.append(("skip-worktree",
                     f"'{worktree}': not a linked worktree of {repo} (refusing to remove)"))
@@ -667,6 +742,18 @@ def _clean_one(slug: str, *, keep_transcript: bool, force: bool) -> list:
         _clean_docker_resource("container", data["container"], repo, slug, log)
     if data.get("volume"):
         _clean_docker_resource("volume", data["volume"], repo, slug, log)
+    if any(action.startswith("skip") for action, _ in log):
+        # A container/volume we could not verify or remove: stop here. Removing
+        # the worktree now would leave a run dir that can never be cleaned (its
+        # worktree is gone, its docker resources are not) -- keep everything so
+        # a retry (daemon back up, or --force) can finish the job.
+        log.append(("kept-worktree",
+                    f"'{data.get('worktree')}': kept because a docker resource of this "
+                    f"run was not removed -- fix that first, then re-run"))
+        log.append(("kept-run-dir",
+                    f"{run_dir}: kept because a resource it describes was not removed "
+                    f"-- re-run with --force"))
+        return log
 
     worktree_removed = _clean_worktree_and_branch(data, force, log)
     _clean_stashes(data, slug, worktree_removed, force, log)
