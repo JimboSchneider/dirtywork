@@ -1595,19 +1595,15 @@ def test_build_system_prompt_allow_commit_replaces_the_no_commit_rule(tmp_path: 
 
 
 def test_allow_commit_with_docker_sandbox_exits_2_and_creates_nothing(tmp_path, monkeypatch, capsys):
-    import subprocess
     m = _install_host_harness(monkeypatch, tmp_path)
     repo = _host_repo(tmp_path)
-    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
-                    "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
-                   capture_output=True)
     rc = m.main(["run", "--repo", str(repo), "--sandbox", "docker", "--allow-commit", "t"])
     assert rc == 2
     err = capsys.readouterr().err
     assert "--allow-commit requires --sandbox none" in err
     assert "docker export carries files, not commits" in err
     assert not (tmp_path / "runs").exists()
+    assert not (repo / ".worktrees").exists()   # refused before any workspace was created
 
 
 def test_allow_commit_records_the_flag_and_switches_the_prompt(tmp_path, monkeypatch, capsys):
