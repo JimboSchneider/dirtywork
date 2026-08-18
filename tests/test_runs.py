@@ -457,6 +457,27 @@ def test_clean_force_removes_dirty_worktree_and_branch(tmp_path, repo, monkeypat
     assert "dirtywork/slug1" not in _git(repo, "branch", "--list", "dirtywork/slug1").stdout
 
 
+def test_clean_refuses_worktree_that_is_not_a_linked_worktree_of_the_repo(tmp_path, repo, monkeypatch, capsys):
+    # run.json is data, not authority: a recorded worktree that is not a linked
+    # worktree of the recorded repo (here: a plain directory with a file in it,
+    # e.g. a user's own checkout or a corrupted record) must never be force-removed.
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    stray = tmp_path / "not-a-worktree"
+    stray.mkdir()
+    (stray / "precious.txt").write_text("keep me")
+    head_branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    _write_run(tmp_path / "runs", "slug1", {
+        "status": "completed", "repo": str(repo), "worktree": str(stray),
+        "container": None, "volume": None, "branch": head_branch,
+    })
+    rc = runs.cmd_clean(_clean_args("slug1", force=True))
+    out = capsys.readouterr().out
+    assert "not a linked worktree" in out
+    assert (stray / "precious.txt").exists()
+    assert head_branch in _git(repo, "branch", "--list", head_branch).stdout
+    assert rc == 1
+
+
 def test_clean_removes_the_runs_pre_resume_stash(tmp_path, repo, monkeypatch, capsys):
     monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
     wt = repo / ".worktrees" / "dw-prior"

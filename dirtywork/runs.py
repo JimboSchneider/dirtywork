@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import rundir
-from .resume import find_stashes, pid_alive, stash_dir_for
+from .resume import find_stashes, pid_alive, stash_dir_for, worktree_belongs_to_repo
 from .sandbox import docker_args, docker_cli, export
 
 COLUMN_GAP = "  "
@@ -483,6 +483,14 @@ def _clean_worktree_and_branch(data: dict, force: bool, log: list) -> bool:
                     f"'{worktree}': shared with the later resume run '{resumed_by}' -- "
                     f"the worktree and branch belong to the newest run in the chain; "
                     f"run `dirtywork runs clean {resumed_by}` to remove them"))
+        return False
+    # Same trust boundary as resume: only a linked worktree of the recorded repo
+    # (a `.git` FILE whose gitdir resolves under <repo>/.git) may be force-removed.
+    # run.json is data, not authority -- never point `git worktree remove --force`
+    # at a directory dirtywork did not create.
+    if not worktree_belongs_to_repo(Path(worktree), Path(repo)):
+        log.append(("skip-worktree",
+                    f"'{worktree}': not a linked worktree of {repo} (refusing to remove)"))
         return False
     if _worktree_is_dirty(worktree) and not force:
         log.append(("skip-worktree",
