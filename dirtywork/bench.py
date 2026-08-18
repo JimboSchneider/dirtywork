@@ -351,9 +351,10 @@ def _verdict_for(row: dict) -> tuple:
         if run_dir.is_dir():
             try:
                 data = rundir.read_run_json(run_dir)
-                return data.get("verdict"), data.get("review_seconds")
             except (OSError, ValueError):
-                pass
+                data = None
+            if isinstance(data, dict):        # a corrupt/non-object run.json falls back to the row
+                return data.get("verdict"), data.get("review_seconds")
     return row.get("verdict"), row.get("review_seconds")
 
 

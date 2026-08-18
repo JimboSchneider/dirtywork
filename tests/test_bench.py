@@ -426,3 +426,14 @@ def test_run_one_bench_case_staging_failure_becomes_bench_error_row(monkeypatch)
     assert row["acceptance"] == "skipped"
     assert called == []
 
+
+def test_verdict_for_falls_back_when_run_json_is_not_an_object(tmp_path, monkeypatch):
+    # A corrupt/partially written run.json (valid JSON, wrong shape) must not
+    # take down `bench summarize`; the row's own verdict is the fallback.
+    monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs")
+    run_dir = tmp_path / "runs" / "slug1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text("[1, 2, 3]")
+    row = {"slug": "slug1", "verdict": "accept", "review_seconds": 12}
+    assert bench._verdict_for(row) == ("accept", 12)
+
