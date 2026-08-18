@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 
-from . import ChatResponse, ToolCall
+from . import ChatResponse, ToolCall, sanitize_usage
 from ..llm import LLMError, MalformedResponse, http_json
 
 DEFAULT_BASE_URL = "https://api.anthropic.com"
@@ -82,23 +81,12 @@ def _to_anthropic_messages(history: list):
     return system, messages
 
 
-def _sanitize_usage(raw) -> dict:
-    usage = {"prompt_tokens": 0, "completion_tokens": 0}
-    raw = raw if isinstance(raw, dict) else {}
-    for key, wire_key in (("prompt_tokens", "input_tokens"),
-                          ("completion_tokens", "output_tokens")):
-        v = raw.get(wire_key, 0)
-        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0:
-            usage[key] = int(v)
-    return usage
-
-
 class AnthropicClient:
     name = "anthropic"
 
     def __init__(self, base_url: str = DEFAULT_BASE_URL, timeout: int = 600, *,
                  http_json=http_json, api_key: str | None = None):
-        self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
+        self.base_url = (DEFAULT_BASE_URL if base_url is None else base_url).rstrip("/")
         self.timeout = timeout
         self._http_json = http_json
         # Read host-side, at construction. Never forwarded into the sandbox --
@@ -164,4 +152,4 @@ class AnthropicClient:
         raw_stop = body.get("stop_reason")
         return ChatResponse(text="".join(text_parts), tool_calls=tool_calls,
                             finish_reason=_STOP_REASON_MAP.get(raw_stop, raw_stop),
-                            usage=_sanitize_usage(body.get("usage")))
+                            usage=sanitize_usage(body.get("usage"), prompt_key="input_tokens", completion_key="output_tokens"))

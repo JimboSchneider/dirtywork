@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import json
-import math
 
-from . import ChatResponse, ToolCall
+from . import ChatResponse, ToolCall, sanitize_usage
 from ..llm import LLMError, MalformedResponse, http_json
 
 DEFAULT_BASE_URL = "http://localhost:1234/v1"
@@ -88,19 +87,6 @@ def _to_openai_messages(history: list) -> list:
     return messages
 
 
-def _sanitize_usage(raw) -> dict:
-    usage = {"prompt_tokens": 0, "completion_tokens": 0}
-    raw = raw if isinstance(raw, dict) else {}
-    for k in usage:
-        # usage is server-controlled: NaN/Infinity would survive json.loads and
-        # later emit invalid JSON on our stdout/transcript contract. Accept only
-        # finite, non-negative numbers.
-        v = raw.get(k, 0)
-        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0:
-            usage[k] = int(v)
-    return usage
-
-
 def parse_chat_response(body) -> ChatResponse:
     """Deserialize one OpenAI chat-completions body. Public because the CLI
     tests drive the runner with recorded wire bodies and must go through the
@@ -117,7 +103,7 @@ def parse_chat_response(body) -> ChatResponse:
         raw_calls = []
     text = msg.get("content") if isinstance(msg.get("content"), str) else ""
     return ChatResponse(text=text, tool_calls=_parse_tool_calls(raw_calls),
-                        finish_reason=finish_reason, usage=_sanitize_usage(body.get("usage")))
+                        finish_reason=finish_reason, usage=sanitize_usage(body.get("usage")))
 
 
 class OpenAICompatClient:

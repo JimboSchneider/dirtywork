@@ -7,6 +7,7 @@ knows which adapter a provider name maps to.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -84,3 +85,18 @@ def get_provider(name: str, base_url: str | None = None, timeout: int = 600) -> 
         from .anthropic import AnthropicClient
         return AnthropicClient(base_url=url, timeout=timeout)
     raise ValueError(f"unknown provider '{name}'. Available: {', '.join(PROVIDER_NAMES)}.")
+
+
+def sanitize_usage(raw, *, prompt_key: str = "prompt_tokens",
+                   completion_key: str = "completion_tokens") -> dict:
+    """Normalise a server-reported usage object to {prompt_tokens, completion_tokens}
+    ints. usage is server-controlled: NaN/Infinity survive json.loads and would later
+    emit invalid JSON on our stdout/transcript contract, so only finite, non-negative
+    numbers are accepted; anything else counts as 0. Adapters pass their wire key names."""
+    usage = {"prompt_tokens": 0, "completion_tokens": 0}
+    raw = raw if isinstance(raw, dict) else {}
+    for key, wire_key in (("prompt_tokens", prompt_key), ("completion_tokens", completion_key)):
+        v = raw.get(wire_key, 0)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0:
+            usage[key] = int(v)
+    return usage
