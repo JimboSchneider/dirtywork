@@ -94,3 +94,9 @@ def test_every_provider_name_is_constructible(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     for name in PROVIDER_NAMES:
         assert get_provider(name).name == name
+
+
+def test_provider_double_default_model_matches_the_cli():
+    import dirtywork.__main__ as m
+    from tests.provider_doubles import DEFAULT_MODEL
+    assert DEFAULT_MODEL == m.DEFAULT_MODEL

@@ -11,7 +11,8 @@ from pathlib import Path
 
 from . import __version__
 from .budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB
-from .llm import LLMError, LMStudioClient
+from .llm import LLMError
+from .providers import DEFAULT_BASE_URLS, PROVIDER_NAMES, get_provider
 from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json, write_run_json
 from .runner import DEFAULT_STALL_TURNS, Runner, resolve_context_window
 from .sandbox import SandboxError, docker_args, docker_cli
@@ -77,6 +78,7 @@ class RunContext:
     base_commit: str
     task: str
     sandbox_mode: str
+    provider: str
     image_ref: str | None
     image_digest: str | None
     image_pinned: bool
@@ -102,23 +104,36 @@ def _non_negative_int(text: str) -> int:
     return value
 
 
-def _preflight_llm(args) -> LMStudioClient:
-    client = LMStudioClient(base_url=args.base_url)
+_ENDPOINT_HINTS = {
+    "openai": "Is the OpenAI-compatible server running? Try: lms ps",
+    "anthropic": "Check ANTHROPIC_API_KEY and that api.anthropic.com is reachable.",
+}
+
+
+def _preflight_llm(args):
+    """Resolve --base-url against the chosen provider's default (recorded on
+    args so run_start/run.json report the endpoint actually used), then prove
+    the endpoint is reachable and the model is available."""
+    if args.base_url is None:
+        args.base_url = DEFAULT_BASE_URLS[args.provider]
+    provider = get_provider(args.provider, args.base_url)
     try:
-        models = client.list_models()
+        models = provider.list_models()
     except LLMError as e:
-        raise PreflightFailure(f"{e}\nIs LM Studio running? Try: lms ps")
+        raise PreflightFailure(f"{e}\n{_ENDPOINT_HINTS.get(args.provider, '')}")
     if args.model not in models:
+        hint = (f"Load it with: lms load {args.model}" if args.provider == "openai"
+                else "Pick one of the models listed above with --model.")
         raise PreflightFailure(
-            f"model '{args.model}' not loaded (loaded: {', '.join(models) or 'none'}). "
-            f"Load it with: lms load {args.model}")
-    return client
+            f"model '{args.model}' not loaded (loaded: {', '.join(models) or 'none'}). {hint}")
+    return provider
 
 
-def _resolve_context_window(args) -> int:
+def _resolve_context_window(args, provider=None) -> int:
     try:
         window, source = resolve_context_window(
-            args.model, args.context_window, os.environ.get("DIRTYWORK_CONTEXT_WINDOW"))
+            args.model, args.context_window, os.environ.get("DIRTYWORK_CONTEXT_WINDOW"),
+            provider)
     except ValueError as e:
         raise PreflightFailure(str(e))
     if source == "default":
@@ -150,7 +165,7 @@ def _workspace_new(args, repo: Path, context_window: int) -> RunContext:
     return RunContext(
         repo=repo, slug=slug, branch=branch, worktree=worktree,
         base_commit=worktree_base_commit(worktree), task=args.task,
-        sandbox_mode=args.sandbox, image_ref=image_ref, image_digest=image_digest,
+        sandbox_mode=args.sandbox, provider=args.provider, image_ref=image_ref, image_digest=image_digest,
         image_pinned=image_pinned, context_window=context_window, branch_from=args.branch_from,
     )
 
@@ -280,6 +295,7 @@ def _write_run_json_start(run_dir: Path, ctx: RunContext, args) -> None:
         "base_commit": ctx.base_commit,
         "task": ctx.task,
         "model": args.model,
+        "provider": args.provider,
         "context_window": ctx.context_window,
         "resumed_from": ctx.resumed_from,
         "container": docker_args.container_name(ctx.slug) if is_docker else None,
@@ -309,7 +325,7 @@ def _update_run_json(run_dir: Path, *, mark_ended: bool = True, **fields) -> Non
 
 
 def _emit_result(*, status: str, worktree: Path, branch: str, transcript_path: Path,
-                  run_dir: Path, turns, usage: dict, final_message: str, **extra) -> dict:
+                  run_dir: Path, turns, usage: dict, final_message: str, provider: str, **extra) -> dict:
     """The one place that shapes the stdout JSON contract — both the success
     path and every failure path funnel through here so the field set can
     never drift between them."""
@@ -322,6 +338,7 @@ def _emit_result(*, status: str, worktree: Path, branch: str, transcript_path: P
         "turns": turns,
         "usage": usage,
         "final_message": final_message,
+        "provider": provider,
         "run_dir": str(run_dir),
     }
     payload.update(extra)
@@ -391,7 +408,7 @@ def _fail_setup(e: Exception, ctx: RunContext, *, run_dir, transcript, transcrip
     print(json.dumps(_emit_result(
         status="sandbox_error", worktree=ctx.worktree, branch=ctx.branch, transcript_path=transcript_path,
         run_dir=run_dir, turns=None, usage={}, final_message=message, base_commit=ctx.base_commit,
-        resumed_from=ctx.resumed_from,
+        resumed_from=ctx.resumed_from, provider=ctx.provider,
     ), indent=2))
     return 1
 
@@ -435,7 +452,8 @@ def _fail_run(e: Exception, ctx: RunContext, *, sandbox, sandbox_started: bool, 
 
     print(json.dumps(_emit_result(
         status=fail_status, worktree=ctx.worktree, branch=ctx.branch, transcript_path=transcript_path,
-        run_dir=run_dir, turns=None, usage={}, final_message=message, **extra_fields,
+        run_dir=run_dir, turns=None, usage={}, final_message=message, provider=ctx.provider,
+        **extra_fields,
     ), indent=2))
     return 1
 
@@ -451,6 +469,15 @@ def _load_resume_target(args) -> dict:
         raise PreflightFailure(str(e))
     prior["run_dir"] = str(run_dir)
     args.sandbox = prior["sandbox"]
+    prior_provider = prior.get("provider") or "openai"
+    if args.provider is None:
+        args.provider = prior_provider
+    elif args.provider != prior_provider:
+        # Same rule as --sandbox (which resume does not expose at all): the
+        # prior run's history was shaped by that provider's wire format.
+        raise PreflightFailure(
+            f"run {prior['slug']} used provider '{prior_provider}'; resume it with that "
+            f"provider (drop --provider {args.provider}) or start a new run")
     if args.model is None:
         args.model = prior["model"]
     if args.image is None:
@@ -476,7 +503,7 @@ def _workspace_resume(args, prior: dict, context_window: int) -> RunContext:
     return RunContext(
         repo=repo, slug=slug, branch=prior["branch"], worktree=Path(prior["worktree"]),
         base_commit=prior["base_commit"], task=task, sandbox_mode=args.sandbox,
-        image_ref=image_ref, image_digest=image_digest, image_pinned=image_pinned,
+        provider=args.provider, image_ref=image_ref, image_digest=image_digest, image_pinned=image_pinned,
         context_window=context_window, resumed_from=prior["slug"],
         prior_run_dir=Path(prior["run_dir"]), seed_from_worktree=(args.sandbox == "docker"),
         owns_worktree=False,
@@ -539,7 +566,7 @@ def _execute(ctx: RunContext, args, client) -> int:
                 "repo": str(ctx.repo), "worktree": str(ctx.worktree), "branch": ctx.branch,
                 "branch_from": ctx.branch_from, "base_commit": ctx.base_commit,
                 "base_url": args.base_url, "dirtywork_version": __version__,
-                "temperature": args.temperature, "sandbox": sandbox_info, "provider": "openai",
+                "temperature": args.temperature, "sandbox": sandbox_info, "provider": ctx.provider,
                 "resumed_from": ctx.resumed_from,
             },
             finalize=finalize,
@@ -589,7 +616,7 @@ def _execute(ctx: RunContext, args, client) -> int:
         base_commit=ctx.base_commit, finalize_error=finalize_error,
         watchdog_violation=extra.get("watchdog_violation"),
         watchdog_violation_kind=extra.get("watchdog_violation_kind"),
-        resumed_from=ctx.resumed_from,
+        resumed_from=ctx.resumed_from, provider=ctx.provider,
     ), indent=2))
     return 0 if final_status == "completed" else 1
 
@@ -599,7 +626,11 @@ def _add_run_flags(p, *, resume: bool) -> None:
     p.add_argument("--max-turns", type=int, default=40)
     p.add_argument("--timeout", type=int, default=1800)
     p.add_argument("--temperature", type=float, default=None)
-    p.add_argument("--base-url", default="http://localhost:1234/v1")
+    p.add_argument("--provider", choices=list(PROVIDER_NAMES),
+                   default=None if resume else "openai",
+                   help="model provider (default: openai — any OpenAI-compatible endpoint)")
+    p.add_argument("--base-url", default=None,
+                   help="provider endpoint (default: the provider's own default)")
     p.add_argument("--stall-turns", type=_non_negative_int, default=DEFAULT_STALL_TURNS,
                    help="end the run as 'stalled' after N turns without progress (0 disables)")
     p.add_argument("--context-window", type=_positive_int, default=None,
@@ -640,7 +671,7 @@ def main(argv: list | None = None) -> int:
         repo = repo.expanduser().resolve()
         preflight_repo(repo)
         client = _preflight_llm(args)
-        context_window = _resolve_context_window(args)
+        context_window = _resolve_context_window(args, client)
         ctx = (_workspace_resume(args, prior, context_window) if prior
                else _workspace_new(args, repo, context_window))
     except (PreflightFailure, WorkspaceError) as e:
