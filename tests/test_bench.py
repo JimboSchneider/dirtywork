@@ -538,3 +538,61 @@ def test_python_m_dirtywork_bench_does_not_double_load_main(tmp_path):
     assert cp.returncode == 0, cp.stderr
     assert cp.stdout.strip().splitlines()[-1] == "SAME", cp.stdout + cp.stderr
 
+
+def test_summarize_compare_pairs_rows_and_shows_deltas(tmp_path, monkeypatch, capsys):
+    # Two sweeps of the same two tasks, plus one task only B ran. Rows carry
+    # slug=None so _verdict_for never touches the (monkeypatched) runs dir.
+    monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs")
+    a = tmp_path / "a.jsonl"
+    b = tmp_path / "b.jsonl"
+    a_rows = [
+        _result_row(model="m1", task="t1", turns=4, wall_s=2.0, slug=None),
+        _result_row(model="m1", task="t1", repeat=1, turns=6, wall_s=4.0,
+                    acceptance="fail", slug=None),
+        # a bench_error row: every numeric field is None and harness is {}
+        _result_row(model="m1", task="t2", status="bench_error", turns=None, wall_s=1.0,
+                    prompt_tokens=None, completion_tokens=None, acceptance="skipped",
+                    harness={}, slug=None),
+    ]
+    b_rows = [
+        _result_row(model="m1", task="t1", turns=2, wall_s=1.0, slug=None),
+        _result_row(model="m1", task="t1", repeat=1, turns=4, wall_s=3.0, slug=None),
+        _result_row(model="m1", task="t2", status="bench_error", turns=None, wall_s=1.0,
+                    prompt_tokens=None, completion_tokens=None, acceptance="skipped",
+                    harness={}, slug=None),
+        _result_row(model="m1", task="t3", turns=8, wall_s=5.0, slug=None),
+    ]
+    a.write_text("\n".join(json.dumps(r) for r in a_rows) + "\n")
+    b.write_text("\n".join(json.dumps(r) for r in b_rows) + "\n")
+
+    rc = bench.cmd_summarize(argparse.Namespace(file=str(a), compare=str(b)))
+    assert rc == 0
+    out = capsys.readouterr().out
+    # header names both files and states the delta direction
+    assert f"A = {a}" in out
+    assert f"B = {b}" in out
+    assert "Δ = B - A" in out
+    # m1/t1: mean turns 5.0 -> 3.0, mean wall 3.0 -> 2.0, acceptance 50% -> 100%
+    assert "5.0 -> 3.0 (-2.0)" in out
+    assert "3.0 -> 2.0 (-1.0)" in out
+    assert "50% -> 100% (+50%)" in out
+    # the bench_error row aggregates instead of crashing: no numbers on either side
+    assert "t2" in out
+    assert "- -> -" in out
+    # a key only B ran shows the dash on the A side
+    assert "t3" in out
+    assert "- -> 1" in out
+    # the per-model block is paired the same way
+    assert "per-model (A -> B):" in out
+    assert "MODEL" in out and "GAMED" in out
+
+
+def test_summarize_compare_missing_file_exits_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs")
+    a = tmp_path / "a.jsonl"
+    a.write_text(json.dumps(_result_row(slug=None)) + "\n")
+    rc = bench.cmd_summarize(argparse.Namespace(file=str(a),
+                                                compare=str(tmp_path / "nope.jsonl")))
+    assert rc == 2
+    assert "no such file" in capsys.readouterr().err
+

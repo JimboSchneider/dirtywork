@@ -264,7 +264,7 @@ of whether the run is still going:
     dirtywork bench --models 'model[@provider][=base_url],...' \
         [--provider openai] [--base-url URL] [--tasks name1,name2] \
         [--repeats N] [--out PATH] [--max-turns 40] [--timeout 1800]
-    dirtywork bench summarize <results.jsonl>
+    dirtywork bench summarize <results.jsonl> [--compare <other.jsonl>]
 
 Runs every (model × task × repeat) combination through the normal
 `dirtywork run --sandbox docker --keep-volume` path against the fixture
@@ -282,7 +282,9 @@ the sweep-wide `--provider`/`--base-url`, which in turn fall back to
 `~/.dirtywork/bench/<UTC-timestamp>.jsonl` (or `--out`); `dirtywork bench
 summarize <file>` prints a per-case table plus a per-model summary
 (completion/acceptance/verdict rates, gamed count, mean tokens/wall time,
-median review seconds).
+median review seconds). `--compare <other.jsonl>` prints one paired
+`A -> B (Δ)` table instead — keyed by model and task, deltas are B minus A,
+and a key only one sweep ran shows `-` on the other side.
 
 `bench` runs from a source checkout only — `bench/` and its fixture repos
 are not part of the installed package.
