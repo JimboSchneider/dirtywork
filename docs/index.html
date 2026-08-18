@@ -235,14 +235,14 @@
 
 <div class="wrap">
 <header>
-  <p class="eyebrow">dirtywork.run · <span class="beta">v0.5 beta</span> · MIT</p>
+  <p class="eyebrow">dirtywork.run · <span class="beta">v0.6 beta</span> · MIT</p>
   <h1>dirtywork<span class="dot">.</span></h1>
   <p class="tagline">
     <span class="think">Frontier models do the thinking.</span>
     <span class="dirty">Local models do the dirty work.</span>
   </p>
   <p class="install"><span class="p">$</span> pipx install dirtywork<span class="caret"></span></p>
-  <p class="sub-install">Python 3.9+, stdlib only · macOS/Linux · needs LM&nbsp;Studio (or any OpenAI-compatible server) with a tool-calling model · Docker Desktop / dockerd for the default sandbox (<code>--sandbox none</code> to run on the host)</p>
+  <p class="sub-install">Python 3.9+, stdlib only · macOS/Linux (developed on Apple Silicon; Windows unsupported) · needs LM&nbsp;Studio (or any OpenAI-compatible server) with a tool-calling model · Docker Desktop / dockerd for the default sandbox (<code>--sandbox none</code> to run on the host)</p>
 </header>
 
 <p class="flip">Most of the ecosystem is racing to <strong>replace</strong> frontier
@@ -258,9 +258,12 @@ free on your own machine, and <strong>nothing merges without review</strong>.</p
 <span class="who lo"></span> locked-down Docker container over an isolated worktree <span class="dim">(.worktrees/dw-…)</span>,
 <span class="who lo"></span> validated export, full JSONL transcript, no auto-commit — for $0;
 <span class="who lo"></span> ends the run with <span class="dim">finish(summary=…)</span>, is stopped when it stalls, and any run
-<span class="who lo"></span> can be picked up again with <span class="dim">dirtywork resume</span>
+<span class="who lo"></span> can be picked up again with <span class="dim">dirtywork resume</span>;
+<span class="who lo"></span> the model can be LM&nbsp;Studio's local server, or the Anthropic API <span class="dim">(--provider anthropic)</span>
 <span class="who fr">3 · you/ai</span> audit the transcript, review the diff, re-run the gates,
-<span class="who fr"></span> commit only what survives</pre>
+<span class="who fr"></span> commit only what survives
+<span class="who fr">4 · you/ai</span> afterwards, <span class="dim">dirtywork runs list|show|clean</span> inspects and
+<span class="who fr"></span> cleans up runs; <span class="dim">dirtywork bench</span> scores models on fixture repos</pre>
   </div>
   <p class="legend"><span class="fr">frontier / you — spends judgment</span>
   <span class="lo">local worker — spends electricity</span></p>
@@ -282,6 +285,7 @@ free on your own machine, and <strong>nothing merges without review</strong>.</p
   <div class="writing">
     <h3>Writing</h3>
     <ul>
+      <li><span class="date">2026-08-18</span><a href="what-the-meter-said.html">What the Meter Said</a></li>
       <li><span class="date">2026-08-17</span><a href="every-failure-was-the-harness.html">Every Failure Was the Harness</a></li>
       <li><span class="date">2026-08-14</span><a href="the-tool-renamed-itself.html">The Tool Renamed Itself</a></li>
       <li><span class="date">2026-08-14</span><a href="building-localagent.html">Building localagent</a></li>

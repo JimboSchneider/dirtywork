@@ -35,6 +35,22 @@ see README's [Safety model](README.md#safety-model) section for the full
 description. It is not a sandbox; it exists for operators who cannot or do
 not want to run Docker.
 
+In host mode, `bash` also runs with `HOME` redirected into the worktree;
+the worker's own Python user-site packages are put on `PYTHONPATH`, and the
+roots of HOME-keyed toolchain managers (`VOLTA_HOME`, `RUSTUP_HOME`,
+`CARGO_HOME`, `NVM_DIR`, `PYENV_ROOT` — kept from your shell, or defaulted
+to the conventional `~/.x` directory when it exists) are carried into the
+worker's environment so shims don't re-download whole toolchains into the
+worktree. Those roots point at the operator's *real* home even though
+`HOME` itself does not, so the accident-grade denylist also matches
+`$VAR`/`${VAR}` forms of exactly those five names in the
+`rm`/`mv`/`chmod`/`chown`, redirect, and `cd` rules (`$HOME` itself is
+deliberately not matched — it resolves inside the worktree). `--allow-commit`
+is host-mode only (it swaps the prompt's "leave changes uncommitted" rule
+for one that lets the worker commit its own work; docker export carries
+files, not commits) and does not change any guardrail — no rule blocks
+`git commit`.
+
 Reports that DO qualify: any docker-mode escape as described above,
 guardrail bypasses reachable by a *well-intentioned* model in
 `--sandbox none` mode (accident-grade escapes), anything that lets a run

@@ -9,21 +9,19 @@ from pathlib import Path
 
 import pytest
 
-from dirtywork.__main__ import DEFAULT_MODEL
 from tests.docker_live_helpers import _call, _make_live_repo, _resp
+from tests.provider_doubles import DictProvider, patch_provider
 
 
-class ScriptedClient:
-    """Stands in for LMStudioClient so these tests need a real Docker
+class ScriptedClient(DictProvider):
+    """Stands in for the provider so these tests need a real Docker
     daemon but NOT a real LM Studio server."""
 
     def __init__(self, responses):
+        super().__init__()
         self.responses = list(responses)
 
-    def list_models(self):
-        return [DEFAULT_MODEL]
-
-    def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+    def reply(self, model, messages, tools):
         return self.responses.pop(0)
 
 
@@ -69,7 +67,7 @@ def _run_main(monkeypatch, tmp_path, responses, argv):
     import dirtywork.__main__ as m
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
     client = ScriptedClient(responses)
-    monkeypatch.setattr(m, "LMStudioClient", lambda base_url=None: client)
+    patch_provider(monkeypatch, m, lambda base_url=None: client)
     return m.main(argv)
 
 

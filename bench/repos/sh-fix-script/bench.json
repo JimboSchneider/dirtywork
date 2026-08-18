@@ -1,0 +1,10 @@
+{
+  "task": "report.sh a b c must print 'files: 3' followed by a trailing newline, matching acceptance/expected_output.txt byte for byte. Fix report.sh so `bash acceptance/check.sh`, run from the repo root, passes.",
+  "acceptance": {
+    "command": "bash /acceptance/check.sh",
+    "hashes": {
+      "acceptance/check.sh": "6509c6f08e1833ba9a912756c6ab0015b6c04102770fb703857e84aed528df29",
+      "acceptance/expected_output.txt": "c79ef4d283db0e99f72006e91c5e75804a69b342234958a7bd02afef01e90ea4"
+    }
+  }
+}

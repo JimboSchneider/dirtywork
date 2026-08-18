@@ -7,7 +7,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from dirtywork.llm import LLMError, LLMTimeout, LMStudioClient
+from dirtywork.llm import LLMError, LLMTimeout, LMStudioClient, http_json
+from dirtywork.providers.openai_compat import OpenAICompatClient
 
 
 class _FakeLMStudio(BaseHTTPRequestHandler):
@@ -95,7 +96,7 @@ def test_list_models_unexpected_shape_raises_llmerror(server: str, bad_body):
 def test_chat_payload_and_response(server: str):
     client = LMStudioClient(base_url=server)
     resp = client.chat("m1", [{"role": "user", "content": "x"}], tools=[])
-    assert resp["choices"][0]["message"]["content"] == "hi"
+    assert resp.text == "hi"
     payload = _FakeLMStudio.last_payload
     assert payload["model"] == "m1"
     assert payload["max_tokens"] == 4096
@@ -111,7 +112,7 @@ def test_chat_temperature_included(server: str):
 def test_chat_timeout_kwarg_passthrough(server: str):
     client = LMStudioClient(base_url=server)
     resp = client.chat("m1", [{"role": "user", "content": "x"}], tools=[], timeout=5)
-    assert resp["choices"][0]["message"]["content"] == "hi"
+    assert resp.text == "hi"
 
 
 def test_connection_error_raises_llmerror():
@@ -251,7 +252,7 @@ def test_real_http_server_list_models_and_chat(real_server: str):
     client = LMStudioClient(base_url=real_server)
     assert client.list_models() == ["m"]
     resp = client.chat("m", [{"role": "user", "content": "x"}], tools=[])
-    assert resp["choices"][0]["message"]["content"] == "hi"
+    assert resp.text == "hi"
 
 
 def test_http_error_body_read_is_bounded(monkeypatch):
@@ -276,3 +277,60 @@ def test_http_error_body_read_is_bounded(monkeypatch):
     with pytest.raises(LLMError):
         client.list_models()
     assert calls == [500]
+
+
+def test_http_json_get(server: str):
+    body = http_json(f"{server}/models", None, {"Content-Type": "application/json"},
+                     5, method="GET")
+    assert body == {"data": [{"id": "m1"}, {"id": "m2"}]}
+
+
+def test_http_json_post_roundtrip(server: str):
+    body = http_json(f"{server}/chat/completions", {"a": 1},
+                     {"Content-Type": "application/json"}, 5)
+    assert body["choices"][0]["message"]["content"] == "hi"
+    assert _FakeLMStudio.last_payload == {"a": 1}
+
+
+def test_http_json_custom_headers_are_sent(server: str, monkeypatch):
+    seen = {}
+    import urllib.request
+    real = urllib.request.urlopen
+
+    def spy(req, timeout=None):
+        seen.update(req.headers)
+        return real(req, timeout=timeout)
+
+    monkeypatch.setattr(urllib.request, "urlopen", spy)
+    http_json(f"{server}/x", {"a": 1}, {"Content-Type": "application/json",
+                                        "X-Api-Key": "secret"}, 5)
+    assert seen.get("X-api-key") == "secret"
+
+
+def test_http_json_connection_error_raises_llmerror():
+    with pytest.raises(LLMError):
+        http_json("http://127.0.0.1:1/x", {}, {"Content-Type": "application/json"}, 2)
+
+
+def test_http_json_unparseable_url_raises_llmerror():
+    with pytest.raises(LLMError):
+        http_json("not-a-url", {}, {"Content-Type": "application/json"}, 2)
+
+
+def test_lmstudio_client_alias_resolves_to_openai_compat_client():
+    assert LMStudioClient is OpenAICompatClient
+
+
+def test_importing_openai_compat_first_does_not_break_the_alias():
+    # Regression: an eager `from .providers.openai_compat import ...` at the
+    # bottom of llm.py made this ImportError when openai_compat was imported
+    # before llm. PEP 562 __getattr__ keeps it lazy.
+    import subprocess
+    import sys
+    rc = subprocess.run(
+        [sys.executable, "-c",
+         "import dirtywork.providers.openai_compat as oc;"
+         " import dirtywork.llm as llm;"
+         " assert llm.LMStudioClient is oc.OpenAICompatClient"],
+        capture_output=True)
+    assert rc.returncode == 0, rc.stderr.decode()

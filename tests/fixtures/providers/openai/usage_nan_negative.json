@@ -1,0 +1,1 @@
+{"choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": NaN, "completion_tokens": -5}}

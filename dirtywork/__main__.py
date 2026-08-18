@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import sys
@@ -11,7 +13,8 @@ from pathlib import Path
 
 from . import __version__
 from .budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB
-from .llm import LLMError, LMStudioClient
+from .llm import LLMError
+from .providers import DEFAULT_BASE_URLS, PROVIDER_NAMES, get_provider
 from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json, write_run_json
 from .runner import DEFAULT_STALL_TURNS, Runner, resolve_context_window
 from .sandbox import SandboxError, docker_args, docker_cli
@@ -19,7 +22,7 @@ from .sandbox.docker import DockerSandbox
 from .sandbox.docker_args import DEFAULT_IMAGE, DockerConfig
 from .sandbox.docker_cli import DockerError, docker_version, resolve_image, validate_objects_dir
 from .sandbox.host import HostSandbox
-from .tools import ToolExecutor
+from .builtin_tools import default_registry
 from .transcript import Transcript
 from .resume import ResumeError, build_resume_task, check_resumable, load_prior_run, render_transcript_tail, resolve_run_dir
 from .workspace import (
@@ -38,12 +41,22 @@ DEFAULT_MODEL = "qwen/qwen3-coder-next"
 DOCKER_WORKDIR = "/work"
 
 
-def build_system_prompt(display_root, repo_context: str | None) -> str:
+def build_system_prompt(display_root, repo_context: str | None, *, allow_commit: bool = False) -> str:
     """`display_root` is what the model is told its files live at: the host
     worktree path in host mode, or the fixed in-container mount point
     (DOCKER_WORKDIR) in docker mode -- the model never sees a host path it
     cannot `cd` to (docker.py's `_rel()` rejects absolute paths outside the
-    container's own tree)."""
+    container's own tree).
+
+    `allow_commit` (host mode only, enforced in `_resolve_allow_commit`) swaps
+    the leave-it-uncommitted rule for a commit-as-you-go rule. Nothing else
+    changes: no guardrail ever blocked `git commit`, and `git push` stays
+    blocked by the denylist in both modes."""
+    if allow_commit:
+        commit_rule = ("- Commit your work in small conventional commits as you go (git add + git commit); "
+                       "stay on the current branch -- do not create branches and never run git push.")
+    else:
+        commit_rule = "- Do not run git commit or git branch commands; leave all changes uncommitted for review."
     prompt = f"""You are a coding agent. Your files live at {display_root} -- treat it as your working directory for every tool call.
 Complete the task, then reply with a plain-text summary of what you changed and what commands you ran.
 
@@ -52,7 +65,7 @@ Rules:
 - Paths are relative to {display_root}.
 - Explore before editing: use list_dir, grep, and read_file to understand the code first.
 - Verify your work: run the repo's tests or build via bash before declaring the task complete.
-- Do not run git commit or git branch commands; leave all changes uncommitted for review.
+{commit_rule}
 - When the task is complete, call finish(summary=...) with a short summary of what you did and anything left undone. A plain reply with no tool calls also ends the run."""
     if repo_context:
         prompt += f"\n\nRepository conventions (from the repo's own docs):\n\n{repo_context}"
@@ -77,6 +90,7 @@ class RunContext:
     base_commit: str
     task: str
     sandbox_mode: str
+    provider: str
     image_ref: str | None
     image_digest: str | None
     image_pinned: bool
@@ -102,29 +116,56 @@ def _non_negative_int(text: str) -> int:
     return value
 
 
-def _preflight_llm(args) -> LMStudioClient:
-    client = LMStudioClient(base_url=args.base_url)
+_ENDPOINT_HINTS = {
+    "openai": "Is the OpenAI-compatible server running? Try: lms ps",
+    "anthropic": "Check ANTHROPIC_API_KEY and that api.anthropic.com is reachable.",
+}
+
+
+def _preflight_llm(args):
+    """Resolve --base-url against the chosen provider's default (recorded on
+    args so run_start/run.json report the endpoint actually used), then prove
+    the endpoint is reachable and the model is available."""
+    if args.base_url is None:
+        args.base_url = DEFAULT_BASE_URLS[args.provider]
+    provider = get_provider(args.provider, args.base_url)
     try:
-        models = client.list_models()
+        models = provider.list_models()
     except LLMError as e:
-        raise PreflightFailure(f"{e}\nIs LM Studio running? Try: lms ps")
+        raise PreflightFailure(f"{e}\n{_ENDPOINT_HINTS.get(args.provider, '')}")
     if args.model not in models:
+        hint = (f"Load it with: lms load {args.model}" if args.provider == "openai"
+                else "Pick one of the models listed above with --model.")
         raise PreflightFailure(
-            f"model '{args.model}' not loaded (loaded: {', '.join(models) or 'none'}). "
-            f"Load it with: lms load {args.model}")
-    return client
+            f"model '{args.model}' not loaded (loaded: {', '.join(models) or 'none'}). {hint}")
+    return provider
 
 
-def _resolve_context_window(args) -> int:
+def _resolve_context_window(args, provider=None) -> int:
     try:
         window, source = resolve_context_window(
-            args.model, args.context_window, os.environ.get("DIRTYWORK_CONTEXT_WINDOW"))
+            args.model, args.context_window, os.environ.get("DIRTYWORK_CONTEXT_WINDOW"),
+            provider)
     except ValueError as e:
         raise PreflightFailure(str(e))
     if source == "default":
         print(f"warning: no known context window for '{args.model}'; assuming {window} tokens "
               f"(set --context-window or DIRTYWORK_CONTEXT_WINDOW)", file=sys.stderr)
     return window
+
+
+def _resolve_allow_commit(args) -> None:
+    """Normalize `--allow-commit` to a real bool on args and refuse the
+    combination that cannot work. The docker export builds a tree with
+    `git add -A` and streams `git archive` through a validator that refuses
+    every `.git` member (sandbox/export.py) -- a container's commits can never
+    reach the host, so honouring the flag there would change the prompt and
+    then silently discard the history it produced."""
+    if args.allow_commit and args.sandbox == "docker":
+        raise PreflightFailure(
+            "--allow-commit requires --sandbox none (host mode): docker export "
+            "carries files, not commits")
+    args.allow_commit = bool(args.allow_commit)
 
 
 def _workspace_new(args, repo: Path, context_window: int) -> RunContext:
@@ -150,7 +191,7 @@ def _workspace_new(args, repo: Path, context_window: int) -> RunContext:
     return RunContext(
         repo=repo, slug=slug, branch=branch, worktree=worktree,
         base_commit=worktree_base_commit(worktree), task=args.task,
-        sandbox_mode=args.sandbox, image_ref=image_ref, image_digest=image_digest,
+        sandbox_mode=args.sandbox, provider=args.provider, image_ref=image_ref, image_digest=image_digest,
         image_pinned=image_pinned, context_window=context_window, branch_from=args.branch_from,
     )
 
@@ -280,6 +321,7 @@ def _write_run_json_start(run_dir: Path, ctx: RunContext, args) -> None:
         "base_commit": ctx.base_commit,
         "task": ctx.task,
         "model": args.model,
+        "provider": args.provider,
         "context_window": ctx.context_window,
         "resumed_from": ctx.resumed_from,
         "container": docker_args.container_name(ctx.slug) if is_docker else None,
@@ -290,6 +332,7 @@ def _write_run_json_start(run_dir: Path, ctx: RunContext, args) -> None:
         "host_pid": os.getpid(),
         "started": datetime.now(timezone.utc).isoformat(),
         "sandbox": ctx.sandbox_mode,
+        "allow_commit": bool(args.allow_commit),
     })
 
 
@@ -309,7 +352,7 @@ def _update_run_json(run_dir: Path, *, mark_ended: bool = True, **fields) -> Non
 
 
 def _emit_result(*, status: str, worktree: Path, branch: str, transcript_path: Path,
-                  run_dir: Path, turns, usage: dict, final_message: str, **extra) -> dict:
+                  run_dir: Path, turns, usage: dict, final_message: str, provider: str, **extra) -> dict:
     """The one place that shapes the stdout JSON contract — both the success
     path and every failure path funnel through here so the field set can
     never drift between them."""
@@ -322,6 +365,7 @@ def _emit_result(*, status: str, worktree: Path, branch: str, transcript_path: P
         "turns": turns,
         "usage": usage,
         "final_message": final_message,
+        "provider": provider,
         "run_dir": str(run_dir),
     }
     payload.update(extra)
@@ -391,7 +435,7 @@ def _fail_setup(e: Exception, ctx: RunContext, *, run_dir, transcript, transcrip
     print(json.dumps(_emit_result(
         status="sandbox_error", worktree=ctx.worktree, branch=ctx.branch, transcript_path=transcript_path,
         run_dir=run_dir, turns=None, usage={}, final_message=message, base_commit=ctx.base_commit,
-        resumed_from=ctx.resumed_from,
+        resumed_from=ctx.resumed_from, provider=ctx.provider,
     ), indent=2))
     return 1
 
@@ -435,7 +479,8 @@ def _fail_run(e: Exception, ctx: RunContext, *, sandbox, sandbox_started: bool, 
 
     print(json.dumps(_emit_result(
         status=fail_status, worktree=ctx.worktree, branch=ctx.branch, transcript_path=transcript_path,
-        run_dir=run_dir, turns=None, usage={}, final_message=message, **extra_fields,
+        run_dir=run_dir, turns=None, usage={}, final_message=message, provider=ctx.provider,
+        **extra_fields,
     ), indent=2))
     return 1
 
@@ -451,10 +496,21 @@ def _load_resume_target(args) -> dict:
         raise PreflightFailure(str(e))
     prior["run_dir"] = str(run_dir)
     args.sandbox = prior["sandbox"]
+    prior_provider = prior.get("provider") or "openai"
+    if args.provider is None:
+        args.provider = prior_provider
+    elif args.provider != prior_provider:
+        # Same rule as --sandbox (which resume does not expose at all): the
+        # prior run's history was shaped by that provider's wire format.
+        raise PreflightFailure(
+            f"run {prior['slug']} used provider '{prior_provider}'; resume it with that "
+            f"provider (drop --provider {args.provider}) or start a new run")
     if args.model is None:
         args.model = prior["model"]
     if args.image is None:
         args.image = prior.get("image") or DEFAULT_IMAGE
+    if args.allow_commit is None:
+        args.allow_commit = bool(prior.get("allow_commit", False))
     return prior
 
 
@@ -476,7 +532,7 @@ def _workspace_resume(args, prior: dict, context_window: int) -> RunContext:
     return RunContext(
         repo=repo, slug=slug, branch=prior["branch"], worktree=Path(prior["worktree"]),
         base_commit=prior["base_commit"], task=task, sandbox_mode=args.sandbox,
-        image_ref=image_ref, image_digest=image_digest, image_pinned=image_pinned,
+        provider=args.provider, image_ref=image_ref, image_digest=image_digest, image_pinned=image_pinned,
         context_window=context_window, resumed_from=prior["slug"],
         prior_run_dir=Path(prior["run_dir"]), seed_from_worktree=(args.sandbox == "docker"),
         owns_worktree=False,
@@ -515,7 +571,7 @@ def _execute(ctx: RunContext, args, client) -> int:
         )
         sandbox_started = True
 
-        executor = ToolExecutor(sandbox, transcript=transcript)
+        registry = default_registry(transcript=transcript)
 
         def finalize():
             artifacts = sandbox.finalize()
@@ -533,20 +589,22 @@ def _execute(ctx: RunContext, args, client) -> int:
             }
 
         runner = Runner(
-            client, executor, transcript, model=args.model,
+            client, registry, sandbox, transcript, model=args.model,
             max_turns=args.max_turns, timeout=args.timeout, temperature=args.temperature,
             run_info={
                 "repo": str(ctx.repo), "worktree": str(ctx.worktree), "branch": ctx.branch,
                 "branch_from": ctx.branch_from, "base_commit": ctx.base_commit,
                 "base_url": args.base_url, "dirtywork_version": __version__,
-                "temperature": args.temperature, "sandbox": sandbox_info, "provider": "openai",
+                "temperature": args.temperature, "sandbox": sandbox_info, "provider": ctx.provider,
                 "resumed_from": ctx.resumed_from,
             },
             finalize=finalize,
             stall_turns=args.stall_turns, context_window=ctx.context_window,
         )
         display_root = DOCKER_WORKDIR if ctx.sandbox_mode == "docker" else str(ctx.worktree)
-        system_prompt = build_system_prompt(display_root, load_repo_context(ctx.repo, ctx.base_commit))
+        system_prompt = build_system_prompt(display_root,
+                                            load_repo_context(ctx.repo, ctx.base_commit),
+                                            allow_commit=bool(args.allow_commit))
         result = runner.run(system_prompt, ctx.task)
     except Exception as e:
         if not sandbox_started and isinstance(e, (SandboxError, WorkspaceError)):
@@ -589,7 +647,7 @@ def _execute(ctx: RunContext, args, client) -> int:
         base_commit=ctx.base_commit, finalize_error=finalize_error,
         watchdog_violation=extra.get("watchdog_violation"),
         watchdog_violation_kind=extra.get("watchdog_violation_kind"),
-        resumed_from=ctx.resumed_from,
+        resumed_from=ctx.resumed_from, provider=ctx.provider,
     ), indent=2))
     return 0 if final_status == "completed" else 1
 
@@ -599,7 +657,11 @@ def _add_run_flags(p, *, resume: bool) -> None:
     p.add_argument("--max-turns", type=int, default=40)
     p.add_argument("--timeout", type=int, default=1800)
     p.add_argument("--temperature", type=float, default=None)
-    p.add_argument("--base-url", default="http://localhost:1234/v1")
+    p.add_argument("--provider", choices=list(PROVIDER_NAMES),
+                   default=None if resume else "openai",
+                   help="model provider (default: openai — any OpenAI-compatible endpoint)")
+    p.add_argument("--base-url", default=None,
+                   help="provider endpoint (default: the provider's own default)")
     p.add_argument("--stall-turns", type=_non_negative_int, default=DEFAULT_STALL_TURNS,
                    help="end the run as 'stalled' after N turns without progress (0 disables)")
     p.add_argument("--context-window", type=_positive_int, default=None,
@@ -615,6 +677,65 @@ def _add_run_flags(p, *, resume: bool) -> None:
     p.add_argument("--min-free-mb", type=int, default=2048)
     p.add_argument("--keep-volume", action="store_true", default=False)
     p.add_argument("--max-patch-mb", type=int, default=10)
+    p.add_argument("--allow-commit", action="store_true", default=None,
+                   help="host mode only: tell the worker to commit its work as it goes "
+                        "(resume inherits this from the run it continues)")
+
+
+def _add_runs_parsers(sub) -> None:
+    """`dirtywork runs ...` (spec SP3 section 4). Every subcommand is
+    implemented in dirtywork/runs.py and routed by `runs.dispatch()`."""
+    runs_p = sub.add_parser("runs", help="inspect and manage dirtywork runs")
+    runs_sub = runs_p.add_subparsers(dest="runs_cmd", required=True)
+
+    list_p = runs_sub.add_parser("list", help="list every run under ~/.dirtywork/runs")
+    list_p.add_argument("--json", action="store_true", help="machine-readable output")
+
+    show_p = runs_sub.add_parser("show", help="show one run's summary, run.json and timeline")
+    show_p.add_argument("slug")
+    show_p.add_argument("--diff", action="store_true", help="also print the run's diff.patch")
+
+    export_p = runs_sub.add_parser("export", help="re-run the export flow for a run")
+    export_p.add_argument("slug")
+    export_p.add_argument("--max-patch-mb", type=int, default=10)
+    export_p.add_argument("--keep-volume", action="store_true", default=False)
+    export_p.add_argument("--max-worktree-mb", type=int, default=DEFAULT_MAX_WORKTREE_MB)
+    export_p.add_argument("--max-worktree-files", type=int, default=DEFAULT_MAX_WORKTREE_FILES)
+
+    clean_p = runs_sub.add_parser("clean", help="remove a run's container/volume/worktree/run dir")
+    clean_p.add_argument("slug", nargs="?", default=None)
+    clean_p.add_argument("--all", action="store_true", default=False)
+    clean_p.add_argument("--keep-transcript", action="store_true", default=False)
+    clean_p.add_argument("--force", action="store_true", default=False)
+
+    verdict_p = runs_sub.add_parser("verdict", help="record accept/reject/cleanup for a run")
+    verdict_p.add_argument("slug")
+    verdict_p.add_argument("verdict", choices=["accept", "reject", "cleanup"])
+    verdict_p.add_argument("--note", default=None)
+    verdict_p.add_argument("--review-seconds", type=float, default=None)
+
+
+def _add_bench_parsers(sub) -> None:
+    """`dirtywork bench ...` (spec SP3 section 5). --provider/--base-url are
+    passed straight through to `dirtywork run`; leaving them unset means `run`'s
+    own defaults apply, and a per-model override uses the
+    `model[@provider][=base_url]` spec syntax."""
+    bench_p = sub.add_parser("bench", help="benchmark models against the fixture tasks")
+    bench_p.add_argument("--models", default=None,
+                         help="comma-separated model[@provider][=base_url] specs")
+    bench_p.add_argument("--provider", default=None, help="default provider for every model")
+    bench_p.add_argument("--base-url", default=None, help="default base URL for every model")
+    bench_p.add_argument("--repeats", type=_positive_int, default=1)
+    bench_p.add_argument("--tasks", default=None,
+                         help="comma-separated fixture names (default: all of bench/repos)")
+    bench_p.add_argument("--out", default=None,
+                         help="results JSONL path (default: ~/.dirtywork/bench/<stamp>.jsonl)")
+    bench_p.add_argument("--max-turns", type=_positive_int, default=40)
+    bench_p.add_argument("--timeout", type=_positive_int, default=1800)
+
+    bench_sub = bench_p.add_subparsers(dest="bench_cmd")
+    summarize_p = bench_sub.add_parser("summarize", help="summarize a bench results file")
+    summarize_p.add_argument("file")
 
 
 def _parse_args(argv):
@@ -629,18 +750,51 @@ def _parse_args(argv):
     resume_p = sub.add_parser("resume", help="continue an earlier run on its worktree")
     resume_p.add_argument("run", help="run slug (under ~/.dirtywork/runs) or a run directory path")
     _add_run_flags(resume_p, resume=True)
+    _add_runs_parsers(sub)
+    _add_bench_parsers(sub)
     return parser.parse_args(argv)
+
+
+def run_once(argv: list) -> dict:
+    """Run one dirtywork invocation in-process and return its stdout JSON.
+    Relies on the machine contract -- exactly one JSON object on stdout after
+    preflight -- so `dirtywork bench` can drive many runs without paying for a
+    subprocess (and a fresh interpreter) per run. stderr is captured too, so a
+    preflight refusal shows up in the raised error rather than vanishing."""
+    out_buf, err_buf = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+        try:
+            rc = main(argv)
+        except SystemExit as e:
+            # argparse calls sys.exit() on a bad flag (e.g. an invalid --provider
+            # choice). SystemExit is a BaseException, not an Exception, so left
+            # uncaught it would escape run_one_bench_case's `except Exception` and
+            # abort the whole bench sweep instead of recording one bench_error row.
+            raise RuntimeError(f"dirtywork exited via SystemExit({e.code}): "
+                               f"{err_buf.getvalue().strip()}") from None
+    text = out_buf.getvalue()
+    if not text.strip():
+        raise RuntimeError(f"dirtywork produced no stdout JSON (exit {rc}): "
+                           f"{err_buf.getvalue().strip()}")
+    return json.loads(text)
 
 
 def main(argv: list | None = None) -> int:
     args = _parse_args(argv)
+    if args.cmd == "runs":
+        from . import runs as runs_mod
+        return runs_mod.dispatch(args)
+    if args.cmd == "bench":
+        from . import bench as bench_mod
+        return bench_mod.dispatch(args)
     try:
         prior = _load_resume_target(args) if args.cmd == "resume" else None
         repo = Path(prior["repo"]) if prior else args.repo
         repo = repo.expanduser().resolve()
         preflight_repo(repo)
+        _resolve_allow_commit(args)
         client = _preflight_llm(args)
-        context_window = _resolve_context_window(args)
+        context_window = _resolve_context_window(args, client)
         ctx = (_workspace_resume(args, prior, context_window) if prior
                else _workspace_new(args, repo, context_window))
     except (PreflightFailure, WorkspaceError) as e:

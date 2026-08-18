@@ -1,0 +1,8 @@
+{
+  "content": [
+    {"type": "tool_use", "id": "call_ok", "name": "list_dir", "input": {}},
+    {"type": "tool_use", "input": {}}
+  ],
+  "stop_reason": "tool_use",
+  "usage": {"input_tokens": 10, "output_tokens": 6}
+}

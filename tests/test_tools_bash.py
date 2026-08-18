@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
 import pytest
 
-from dirtywork.sandbox.host import HostSandbox
-from dirtywork.tools import TOOL_SCHEMAS, ToolExecutor, bash, grep
-from dirtywork.transcript import Transcript
+from dirtywork.tools import bash, grep
 
 
 @pytest.fixture()
@@ -54,91 +51,9 @@ def test_bash_env_is_minimal(wt: Path, monkeypatch):
     assert "MY_SECRET" not in out  # parent env not inherited wholesale
 
 
-def test_schemas_shape():
-    names = {s["function"]["name"] for s in TOOL_SCHEMAS}
-    assert names == {"read_file", "write_file", "edit_file", "list_dir", "grep", "bash", "finish"}
-    for s in TOOL_SCHEMAS:
-        assert s["type"] == "function"
-        assert "parameters" in s["function"]
-
-
-def test_executor_dispatch_and_unknown(wt: Path):
-    ex = ToolExecutor(HostSandbox(wt))
-    assert "hi" in ex.execute("read_file", {"path": "hello.txt"})
-    with pytest.raises(KeyError):
-        ex.execute("format_disk", {})
-
-
-def test_executor_drops_unknown_tool_args(wt: Path):
-    # qwen/other local models attach e.g. Claude Code's `description` to bash
-    # calls; that must not become a TypeError (3 in a row aborts the run).
-    ex = ToolExecutor(HostSandbox(wt))
-    out = ex.execute("bash", {"command": "echo ok", "description": "say ok"})
-    assert "ok" in out and "ERROR" not in out
-    assert "hi" in ex.execute("read_file", {"path": "hello.txt", "reason": "x"})
-
-
-def test_executor_still_raises_on_missing_required_arg(wt: Path):
-    ex = ToolExecutor(HostSandbox(wt))
-    with pytest.raises(TypeError):
-        ex.execute("bash", {"description": "no command"})
-
-
-def test_executor_deadline_exceeded_blocks_execution(wt: Path):
-    ex = ToolExecutor(HostSandbox(wt))
-    ex.deadline = time.monotonic() - 1
-    out = ex.execute("bash", {"command": "touch created.txt"})
-    assert "deadline exceeded" in out.lower()
-    assert not (wt / "created.txt").exists()
-
-
-def test_executor_clamps_bash_timeout_to_remaining_deadline(wt: Path):
-    captured = {}
-
-    def fake_bash(command, timeout=120):
-        captured["timeout"] = timeout
-        return "exit code: 0\n"
-
-    ex = ToolExecutor(HostSandbox(wt))
-    ex._table["bash"] = fake_bash
-    ex.deadline = time.monotonic() + 3
-
-    ex.execute("bash", {"command": "true", "timeout": 600})
-
-    assert captured["timeout"] <= 3
-    assert captured["timeout"] >= 1
-
-
 def test_grep_timeout_kwarg_works(wt: Path):
     out = grep(wt, "hi", timeout=5)
     assert "hello.txt" in out
-
-
-def test_executor_clamps_grep_timeout_to_remaining_deadline(wt: Path):
-    captured = {}
-
-    def fake_grep(pattern, path=".", glob=None, timeout=30):
-        captured["timeout"] = timeout
-        return "No matches found."
-
-    ex = ToolExecutor(HostSandbox(wt))
-    ex._table["grep"] = fake_grep
-    ex.deadline = time.monotonic() + 3
-
-    ex.execute("grep", {"pattern": "hi"})
-
-    assert captured["timeout"] <= 3
-    assert captured["timeout"] >= 1
-
-
-def test_executor_logs_guardrail_block(wt: Path, tmp_path: Path):
-    t = Transcript(tmp_path / "log.jsonl")
-    ex = ToolExecutor(HostSandbox(wt), transcript=t)
-    out = ex.execute("bash", {"command": "git push"})
-    t.close()
-    assert out.startswith("BLOCKED:")
-    events = [json.loads(l) for l in (tmp_path / "log.jsonl").read_text().splitlines()]
-    assert any(e["event"] == "guardrail_block" for e in events)
 
 
 def test_bash_output_is_capped(wt: Path):
@@ -170,19 +85,6 @@ def test_bash_timeout_reaps_process_tree(wt: Path):
     assert not (wt / "survived.txt").exists()  # killpg reaped the whole group
 
 
-def test_executor_raises_budget_exceeded_over_file_limit(wt: Path):
-    from dirtywork.budget import BudgetExceeded
-    sb = HostSandbox(wt, max_worktree_files=3)
-    ex = ToolExecutor(sb)
-    # wt already has 1 entry (hello.txt from the fixture). Each write adds
-    # one more; the check runs AFTER the write, so it must succeed through
-    # exactly 3 total entries and only raise once a 4th is created.
-    ex.execute("write_file", {"path": "a.txt", "content": "x"})
-    ex.execute("write_file", {"path": "b.txt", "content": "x"})
-    with pytest.raises(BudgetExceeded):
-        ex.execute("write_file", {"path": "c.txt", "content": "x"})
-
-
 def test_bash_popen_failure_returns_error_prefix(wt: Path, monkeypatch):
     import dirtywork.procs
     original_popen = dirtywork.procs.subprocess.Popen
@@ -194,10 +96,3 @@ def test_bash_popen_failure_returns_error_prefix(wt: Path, monkeypatch):
     out = bash(wt, "true")
     assert out.startswith("ERROR: bash failed:")
     assert "boom" in out
-
-
-def test_bash_schema_mentions_reset_behavior():
-    schema = next(s for s in TOOL_SCHEMAS if s["function"]["name"] == "bash")
-    description = schema["function"]["description"]
-    assert "reset" in description.lower()
-    assert "index" in description.lower() or "git state" in description.lower()

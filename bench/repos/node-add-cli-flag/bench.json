@@ -1,0 +1,9 @@
+{
+  "task": "Add a --loud flag to greet.js: when passed, the printed greeting must be uppercased. `node acceptance/greet.test.js`, run from the repo root, must pass.",
+  "acceptance": {
+    "command": "node /acceptance/greet.test.js",
+    "hashes": {
+      "acceptance/greet.test.js": "cd0d5706648ecdd0fc1c87c86de2261e4decac195302712ea20b256690c1c9a0"
+    }
+  }
+}

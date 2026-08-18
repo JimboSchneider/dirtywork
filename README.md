@@ -25,6 +25,9 @@ a shell is a shell — read [Security & trust](#security--trust) before pointing
 at a model or repo you don't trust. Parallelism comes from launching multiple
 processes — LM Studio serves 4 concurrent requests per model.
 
+Developed and benchmarked on macOS/Apple Silicon; CI-tested on Linux and
+macOS (Windows unsupported — see below).
+
 ## Security & trust
 
 > **Docker mode protects host integrity and host execution, not
@@ -104,6 +107,19 @@ machine. Read the transcript and diff before you merge — that review is
 still the real gate for *what a run produced*, even though docker mode now
 also gates *what a run could do to your host while producing it*.
 
+## Platform support
+
+| Tier | Platform | What it means |
+|---|---|---|
+| Developed & benchmarked | macOS on Apple Silicon (M-series, unified memory) with LM Studio | all worker/bench numbers and model-sizing guidance in `docs/superpowers/bench/` were measured here |
+| CI-tested | Linux x86_64 (Ubuntu, Python 3.9 + 3.13) and macOS | unit suite on every push; the Docker sandbox live tests run on Linux in CI |
+| Unsupported | Windows | until a Windows integration suite passes (see the note in [Security & trust](#security--trust)) |
+
+Other OpenAI-compatible servers (Ollama, vLLM, llama.cpp) should work via
+`--base-url`/`--provider`; only LM Studio and the Anthropic API adapter
+(`--provider anthropic`, recorded-fixture tests, no live tests) are
+exercised by the test suites.
+
 ## Requirements
 
 - macOS/Linux, Python 3.9+ (stdlib only — no venv, no pip deps)
@@ -115,12 +131,15 @@ also gates *what a run could do to your host while producing it*.
   `localhost:1234` with a tool-calling-capable model loaded. Verified
   working: `qwen/qwen3-coder-next` (65k context, default) and
   `mistralai/devstral-small-2-2512` (32k context)
+- `--provider anthropic` needs the `ANTHROPIC_API_KEY` environment variable
+  set; the default (`--provider openai`, LM Studio or any OpenAI-compatible
+  server) needs no key.
 - The target repo must be a git repo with at least one commit
 
 **Other servers:** anything speaking the OpenAI chat-completions API with tool
 calling should work via `--base-url` (e.g. Ollama at
-`http://localhost:11434/v1`) — but only LM Studio is tested today. Reports
-welcome.
+`http://localhost:11434/v1`) — see [Platform support](#platform-support) for
+what's actually exercised by the test suites. Reports welcome.
 
 ## Install
 
@@ -152,8 +171,9 @@ The launcher is self-locating, so this works from any clone location.
 - **Review a run:** `git -C <worktree> diff`, read the transcript, run the
   repo's tests — then commit the branch or discard it. (The worktree is
   only populated after the run ends, once the export step completes.)
-- **Discard a run:**
-  `git -C <repo> worktree remove --force <worktree> && git -C <repo> branch -D dirtywork/<slug>`
+- **Clean up a run:** `dirtywork runs clean <slug>` — see
+  [Inspecting, cleaning up and re-exporting runs](#inspecting-cleaning-up-and-re-exporting-runs)
+  for the safety rules and the rest of the `runs` subcommands.
 
 - **All flags, stdout JSON, exit codes, transcript events:** see
   [Machine contract](#machine-contract).
@@ -183,6 +203,89 @@ Docker-mode limit: export stores files, not the worker's in-container
 commits, so a resumed docker worker sees the earlier work as uncommitted
 changes against the base commit — not as its old commit history. Host mode
 (`--sandbox none`) keeps the real commits.
+
+## Inspecting, cleaning up and re-exporting runs
+
+Every run leaves a directory under `~/.dirtywork/runs/<slug>/` (`run.json`,
+`transcript.jsonl`, and in docker mode `diff.patch`); the `runs` subcommands
+work from that directory (plus best-effort docker/git lookups) independently
+of whether the run is still going:
+
+- `dirtywork runs list [--json]` — every run under `~/.dirtywork/runs`: slug,
+  status, when it started, its place in a resume chain, branch, whether the
+  worktree still exists, and container/volume state.
+- `dirtywork runs show <slug> [--diff]` — the run's summary fields, its full
+  `run.json`, and a timeline reconstructed from the transcript; `--diff`
+  also prints `diff.patch`.
+- `dirtywork runs export <slug> [--max-worktree-mb 2048] [--max-worktree-files 200000] [--max-patch-mb 10] [--keep-volume]` —
+  re-runs the docker export into the worktree for a run whose volume still
+  exists (after `export_failed`, or a crash before the export ran); refuses
+  a non-empty worktree, a still-running run, or a non-docker-sandbox run.
+  `--max-worktree-mb`/`--max-worktree-files` default to the same limits as
+  `dirtywork run` — raise them here to retry an export that failed because
+  the tree was too big.
+- `dirtywork runs clean <slug>|--all [--force] [--keep-transcript]` —
+  remove a run's container, volume, worktree, branch, and run directory.
+  Every refusal is printed and makes the command exit 1:
+  - refuses a worktree with uncommitted changes, or a branch that has
+    commits beyond the run's recorded base commit — both are what make
+    `--allow-commit` runs safe to clean; `--force` removes them anyway.
+  - refuses a run that's still marked `running` with a live (or
+    unconfirmable) host process — not overridable; once the process is
+    confirmed dead, `--force` is required to confirm the cleanup.
+  - never deletes a branch unless it's still the one actually checked out
+    in the worktree (protects against deleting the wrong branch if you
+    checked out something else there by hand).
+  - a run whose worktree was taken over by a later `resume`
+    (`resumed_by` set) keeps its worktree and branch — they belong to the
+    newest run in the chain; clean that run instead.
+  - only ever removes the worktree dirtywork itself created for the run
+    (`<repo>/.worktrees/dw-<slug>`, a linked worktree of the recorded repo)
+    — an edited `run.json` cannot point it at another worktree; a worktree
+    that is already gone is not a refusal (git bookkeeping is pruned and the
+    run's own `dirtywork/<slug>` branch removed if nothing has it checked out).
+  - container/volume removal only ever touches a resource whose
+    `dirtywork.run`/`dirtywork.repo` labels match this exact run (the SP2
+    collision rule); anything else is left alone and reported. A resource
+    that is already gone ("no such object") is fine; any other `docker
+    inspect` failure (daemon down, permission denied) is a refusal, and then
+    the worktree, branch and run directory are left untouched too, so a
+    retry can still finish.
+  - if anything above was refused, the run directory is kept too, so
+    nothing it describes is lost before you can retry with `--force`.
+  - slugs are plain names (`[A-Za-z0-9._-]`); paths are rejected.
+  - `--keep-transcript` keeps `run.json`/`transcript.jsonl` and removes
+    the rest of the run directory.
+- `dirtywork runs verdict <slug> accept|reject|cleanup [--note TEXT] [--review-seconds N]` —
+  record the operator's verdict on a run into its `run.json`.
+
+## Benchmarking
+
+    dirtywork bench --models 'model[@provider][=base_url],...' \
+        [--provider openai] [--base-url URL] [--tasks name1,name2] \
+        [--repeats N] [--out PATH] [--max-turns 40] [--timeout 1800]
+    dirtywork bench summarize <results.jsonl>
+
+Runs every (model × task × repeat) combination through the normal
+`dirtywork run --sandbox docker --keep-volume` path against the fixture
+repos under `bench/repos/` (each with a `bench.json` of expected file
+hashes plus an acceptance command), then scores the result: a fresh
+acceptance container mounts the run's volume at `/work` and the fixture's
+own `bench/repos/<task>/acceptance/` read-only at `/acceptance`, hashes the
+worker's copy of `acceptance/` to catch tampering (marked `gamed`), and
+runs the acceptance command from the read-only mount to get `pass`/`fail`.
+Each row also records harness-failure counts (nudges by kind, stalls,
+`max_turns`, `sandbox_error`, aborts). `--models` takes comma-separated
+`model[@provider][=base_url]` specs — anything a spec omits falls back to
+the sweep-wide `--provider`/`--base-url`, which in turn fall back to
+`dirtywork run`'s own defaults. Results append to
+`~/.dirtywork/bench/<UTC-timestamp>.jsonl` (or `--out`); `dirtywork bench
+summarize <file>` prints a per-case table plus a per-model summary
+(completion/acceptance/verdict rates, gamed count, mean tokens/wall time,
+median review seconds).
+
+`bench` runs from a source checkout only — `bench/` and its fixture repos
+are not part of the installed package.
 
 ## How a run works
 
@@ -291,6 +394,8 @@ In August 2026 the project was renamed **dirtywork** — same tool, a name that 
   and `curl -s localhost:1234/v1/models`.
 - **exit 2, "model not loaded"** — `lms load <model>` (the error names the
   loaded models).
+- **exit 2, "ANTHROPIC_API_KEY is not set"** — set that environment variable
+  before running with `--provider anthropic`.
 - **status `max_turns` / `timeout`** — the worktree is kept; read the
   transcript to see where it stalled, salvage what's useful, or re-run with
   higher limits.
@@ -303,9 +408,12 @@ In August 2026 the project was renamed **dirtywork** — same tool, a name that 
   `HOME` set to the worktree on purpose (so `~/.ssh` and friends are out of
   reach), which is where `$HOME`-keyed caches and `pip install --user` land.
   The operator's own user-site packages stay importable (they are put on
-  `PYTHONPATH`); if a tool still cannot be found, install it system-wide or in
-  the project's virtualenv rather than with `pip install --user` from inside a
-  run.
+  `PYTHONPATH`), and the roots of `$HOME`-keyed toolchain managers are carried
+  over (`VOLTA_HOME`, `RUSTUP_HOME`, `CARGO_HOME`, `NVM_DIR`, `PYENV_ROOT` —
+  kept when set in your shell, else defaulted to `~/.volta`-style directories
+  that exist) so `node`/`cargo` shims do not re-download toolchains into the
+  worktree; if a tool still cannot be found, install it system-wide or in the
+  project's virtualenv rather than with `pip install --user` from inside a run.
 - **status `context_exhausted`** — the task needed more context than the
   model's window; split the task or use the larger-context model.
 - **status `budget_exceeded`** — the worktree grew past
@@ -331,12 +439,14 @@ In August 2026 the project was renamed **dirtywork** — same tool, a name that 
   overall `status` if the agent loop itself otherwise completed)** — the
   worker's tree could not be validated/exported (e.g. it exceeded
   `--max-worktree-mb`/`--max-worktree-files`). The Docker volume
-  `dw-<slug>-work` is kept (unless it was already going to be removed) —
-  there is no automated recovery command in this release. Either inspect
-  it directly (`docker run --rm -v dw-<slug>-work:/work <image> ...`) to
-  salvage the tree by hand, or discard it with
-  `docker volume rm dw-<slug>-work` once you're done, and re-run the task
-  with a higher `--max-worktree-mb`/`--max-worktree-files`.
+  `dw-<slug>-work` is kept (unless it was already going to be removed).
+  Retry the export in place with `dirtywork runs export <slug>
+  --max-worktree-mb <n> --max-worktree-files <n>` after raising the limit
+  that tripped it (see [Inspecting, cleaning up and re-exporting
+  runs](#inspecting-cleaning-up-and-re-exporting-runs)). To salvage the
+  tree by hand instead, inspect the volume directly (`docker run --rm -v
+  dw-<slug>-work:/work <image> ...`), or discard it with `docker volume rm
+  dw-<slug>-work` once you're done.
 
 ## Machine contract
 
@@ -354,11 +464,13 @@ dirtywork run --repo <path> "<task>"
     [--context-window <tokens>]       # default: built-in table, else 32768 (+ stderr warning)
     [--timeout 1800]                  # whole-run wall clock, seconds
     [--temperature <f>]               # omitted by default → server preset
-    [--base-url http://localhost:1234/v1]  # LM Studio's OpenAI-compatible endpoint
+    [--provider openai|anthropic]     # default: openai; anthropic needs ANTHROPIC_API_KEY
+    [--base-url <url>]                # default depends on --provider (LM Studio for openai,
+                                       # https://api.anthropic.com for anthropic)
     [--max-worktree-mb 2048]
     [--max-worktree-files 200000]
     [--sandbox docker|none]           # default: docker
-    [--image ghcr.io/jimboschneider/dirtywork-worker:0.5]  # docker mode only
+    [--image ghcr.io/jimboschneider/dirtywork-worker:0.6]  # docker mode only
     [--allow-network]                 # docker mode only; default --network none
     [--memory 4g]                     # docker mode only
     [--cpus 2]                        # docker mode only
@@ -367,6 +479,7 @@ dirtywork run --repo <path> "<task>"
     [--min-free-mb 2048]              # docker mode only; host free-space floor
     [--keep-volume]                   # docker mode only; skip volume cleanup
     [--max-patch-mb 10]               # docker mode only; diff.patch cap
+    [--allow-commit]                  # host mode only; worker commits its own work
 ```
 
 ```
@@ -382,6 +495,14 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   then a built-in table for the known LM Studio models, then 32768 (with a
   warning on stderr).
 
+- `--allow-commit` (host mode only) — replaces the prompt's "leave all changes
+  uncommitted for review" rule with "commit your work in small conventional
+  commits as you go", so the run's branch comes back as real history instead of
+  a dirty worktree. Rejected in preflight with `--sandbox docker`: the export
+  carries files, not commits (its archive can never contain a `.git` entry), so
+  a container's commits could not reach the host anyway. `dirtywork resume`
+  inherits the setting from the run it continues.
+
 **stdout:** on any run that gets past preflight, exactly one JSON object is
 printed to stdout (nothing else goes to stdout):
 
@@ -395,6 +516,7 @@ printed to stdout (nothing else goes to stdout):
   "turns": 7,
   "usage": {"prompt_tokens": 0, "completion_tokens": 0},
   "final_message": "...",
+  "provider": "openai",
   "run_dir": "/home/you/.dirtywork/runs/<slug>",
   "base_commit": "abc123...",
   "resumed_from": null,
@@ -414,7 +536,8 @@ transcript can't be created), or any other exception escapes the run
 still populated so the worktree and run directory can be located for
 salvage.
 
-`base_commit` is present on every post-preflight payload. `resumed_from` is
+`base_commit` and `provider` (`"openai"` or `"anthropic"`) are present on
+every post-preflight payload. `resumed_from` is
 the slug of the run this one continued, or `null` if this was a fresh run.
 `finalize_error`, `watchdog_violation`, and `watchdog_violation_kind` are added on the normal
 end-of-run path — i.e. whenever `runner.run()` returns a result, `completed`
@@ -441,6 +564,9 @@ during that exception recovery.
 
 All progress (transcript path, worktree path, `error:`-prefixed messages) is
 written to stderr; watch a live run with `tail -f` on the transcript path.
+
+Full field-by-field schema, including every v1→v2 addition and the
+`run.json` field list: [`docs/transcript-schema.md`](docs/transcript-schema.md).
 
 **Transcript events** (JSONL, one per line): `run_start` (task, repo, model,
 config, `schema_version: 2`, plus provenance: `worktree`, `base_commit`,

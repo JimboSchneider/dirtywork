@@ -1,0 +1,7 @@
+{
+  "content": [
+    {"type": "tool_use", "id": "call_badargs", "name": "write_file"}
+  ],
+  "stop_reason": "max_tokens",
+  "usage": {"input_tokens": 4, "output_tokens": 2}
+}

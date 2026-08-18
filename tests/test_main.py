@@ -10,6 +10,9 @@ import pytest
 from dirtywork.__main__ import build_system_prompt, main
 from dirtywork.sandbox.docker_cli import DockerError
 
+from .provider_doubles import (DictProvider, PreflightProvider, patch_provider,
+                               text_body, tool_call_body)
+
 
 def test_main_docker_preflight_failure_exits_2_with_hint(tmp_path, monkeypatch, capsys):
     import subprocess
@@ -21,7 +24,7 @@ def test_main_docker_preflight_failure_exits_2_with_hint(tmp_path, monkeypatch, 
                     "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
                    capture_output=True)
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
-    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+    patch_provider(monkeypatch, m, PreflightProvider)
 
     def boom(*a, **k):
         raise DockerError("Cannot connect to the Docker daemon")
@@ -51,7 +54,7 @@ def test_main_docker_preflight_image_failure_exits_2_with_image_hint(tmp_path, m
                     "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
                    capture_output=True)
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
-    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+    patch_provider(monkeypatch, m, PreflightProvider)
     monkeypatch.setattr(m, "docker_version", lambda *a, **k: "29.7.2")  # daemon IS reachable
 
     def boom(*a, **k):
@@ -141,15 +144,8 @@ def test_main_docker_mode_happy_path_with_fake_sandbox(tmp_path, monkeypatch, ca
 
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
-    class WritingFakeClient:
-        def __init__(self, base_url=None):
-            self.calls = 0
-
-        def list_models(self):
-            return [m.DEFAULT_MODEL]
-
-        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
-            self.calls += 1
+    class WritingFakeClient(DictProvider):
+        def reply(self, model, messages, tools):
             if self.calls == 1:
                 return {"choices": [{"message": {
                     "role": "assistant", "content": None,
@@ -161,7 +157,7 @@ def test_main_docker_mode_happy_path_with_fake_sandbox(tmp_path, monkeypatch, ca
             return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
-    monkeypatch.setattr(m, "LMStudioClient", WritingFakeClient)
+    patch_provider(monkeypatch, m, lambda base_url=None: WritingFakeClient(base_url))
 
     rc = m.main(["run", "--repo", str(repo), "some task"])  # --sandbox defaults to docker
 
@@ -205,7 +201,7 @@ def _docker_mode_scaffold(tmp_path, monkeypatch):
                     "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
                    capture_output=True)
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
-    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+    patch_provider(monkeypatch, m, PreflightProvider)
     monkeypatch.setattr(m, "docker_version", lambda *a, **k: "29.7.2")
     monkeypatch.setattr(m, "resolve_image", lambda *a, **k: "dirtywork/worker@sha256:" + "a" * 64)
     monkeypatch.setattr(m, "validate_objects_dir", lambda repo: repo / ".git" / "objects")
@@ -271,18 +267,14 @@ def test_main_docker_build_sandbox_passes_preflight_image_ref(tmp_path, monkeypa
 
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
-    class ImmediateDoneClient:
-        def __init__(self, base_url=None):
-            pass
+    class ImmediateDoneClient(DictProvider):
 
-        def list_models(self):
-            return [m.DEFAULT_MODEL]
 
-        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+        def reply(self, model, messages, tools):
             return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
-    monkeypatch.setattr(m, "LMStudioClient", ImmediateDoneClient)
+    patch_provider(monkeypatch, m, ImmediateDoneClient)
 
     rc = m.main(["run", "--repo", str(repo), "some task"])
 
@@ -346,18 +338,14 @@ def _install_immediate_done_docker_fakes(m, monkeypatch, *, constructed_with=Non
 
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
-    class ImmediateDoneClient:
-        def __init__(self, base_url=None):
-            pass
+    class ImmediateDoneClient(DictProvider):
 
-        def list_models(self):
-            return [m.DEFAULT_MODEL]
 
-        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+        def reply(self, model, messages, tools):
             return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
-    monkeypatch.setattr(m, "LMStudioClient", ImmediateDoneClient)
+    patch_provider(monkeypatch, m, ImmediateDoneClient)
 
 
 def test_main_docker_custom_image_skips_pinning(tmp_path, monkeypatch, capsys):
@@ -521,14 +509,8 @@ def test_main_docker_sandbox_error_mid_run_exits_1(tmp_path, monkeypatch, capsys
     FakeDockerSandbox.bash = boom_bash
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
-    class OneBashCallClient:
-        def __init__(self, base_url=None):
-            pass
-
-        def list_models(self):
-            return [m.DEFAULT_MODEL]
-
-        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+    class OneBashCallClient(DictProvider):
+        def reply(self, model, messages, tools):
             return {"choices": [{"message": {
                 "role": "assistant", "content": None,
                 "tool_calls": [{"id": "c1", "type": "function",
@@ -536,7 +518,7 @@ def test_main_docker_sandbox_error_mid_run_exits_1(tmp_path, monkeypatch, capsys
                                               "arguments": json.dumps({"command": "echo hi"})}}],
             }}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
-    monkeypatch.setattr(m, "LMStudioClient", OneBashCallClient)
+    patch_provider(monkeypatch, m, OneBashCallClient)
 
     rc = m.main(["run", "--repo", str(repo), "some task"])
 
@@ -625,15 +607,8 @@ def test_main_docker_llm_error_after_start_finalizes_before_stop(tmp_path, monke
     FakeDockerSandbox = _fake_docker_sandbox_class(RealDockerSandbox, finalize=finalize)
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
-    class FlakyClient:
-        def __init__(self, base_url=None):
-            self.calls = 0
-
-        def list_models(self):
-            return [m.DEFAULT_MODEL]
-
-        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
-            self.calls += 1
+    class FlakyClient(DictProvider):
+        def reply(self, model, messages, tools):
             if self.calls == 1:
                 return {"choices": [{"message": {
                     "role": "assistant", "content": None,
@@ -644,7 +619,7 @@ def test_main_docker_llm_error_after_start_finalizes_before_stop(tmp_path, monke
                 }}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
             raise LLMError("connection dropped")
 
-    monkeypatch.setattr(m, "LMStudioClient", FlakyClient)
+    patch_provider(monkeypatch, m, FlakyClient)
 
     rc = m.main(["run", "--repo", str(repo), "some task"])
 
@@ -674,18 +649,14 @@ def test_main_docker_export_failed_status_from_finalize_result(tmp_path, monkeyp
     FakeDockerSandbox = _fake_docker_sandbox_class(RealDockerSandbox, finalize=finalize)
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
-    class ImmediateDoneClient:
-        def __init__(self, base_url=None):
-            pass
+    class ImmediateDoneClient(DictProvider):
 
-        def list_models(self):
-            return [m.DEFAULT_MODEL]
 
-        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+        def reply(self, model, messages, tools):
             return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
-    monkeypatch.setattr(m, "LMStudioClient", ImmediateDoneClient)
+    patch_provider(monkeypatch, m, ImmediateDoneClient)
 
     rc = m.main(["run", "--repo", str(repo), "some task"])
 
@@ -718,18 +689,14 @@ def test_main_docker_watchdog_violation_status_from_finalize_result(tmp_path, mo
     FakeDockerSandbox = _fake_docker_sandbox_class(RealDockerSandbox, finalize=finalize)
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
-    class ImmediateDoneClient:
-        def __init__(self, base_url=None):
-            pass
+    class ImmediateDoneClient(DictProvider):
 
-        def list_models(self):
-            return [m.DEFAULT_MODEL]
 
-        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+        def reply(self, model, messages, tools):
             return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
-    monkeypatch.setattr(m, "LMStudioClient", ImmediateDoneClient)
+    patch_provider(monkeypatch, m, ImmediateDoneClient)
 
     rc = m.main(["run", "--repo", str(repo), "some task"])
 
@@ -768,18 +735,14 @@ def test_main_docker_watchdog_violation_sandbox_error_kind_status(tmp_path, monk
     FakeDockerSandbox = _fake_docker_sandbox_class(RealDockerSandbox, finalize=finalize)
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
-    class ImmediateDoneClient:
-        def __init__(self, base_url=None):
-            pass
+    class ImmediateDoneClient(DictProvider):
 
-        def list_models(self):
-            return [m.DEFAULT_MODEL]
 
-        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+        def reply(self, model, messages, tools):
             return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
-    monkeypatch.setattr(m, "LMStudioClient", ImmediateDoneClient)
+    patch_provider(monkeypatch, m, ImmediateDoneClient)
 
     rc = m.main(["run", "--repo", str(repo), "some task"])
 
@@ -809,18 +772,14 @@ def test_main_docker_export_failed_status_from_finalize_exception(tmp_path, monk
     FakeDockerSandbox = _fake_docker_sandbox_class(RealDockerSandbox, finalize=finalize)
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
-    class ImmediateDoneClient:
-        def __init__(self, base_url=None):
-            pass
+    class ImmediateDoneClient(DictProvider):
 
-        def list_models(self):
-            return [m.DEFAULT_MODEL]
 
-        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+        def reply(self, model, messages, tools):
             return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
-    monkeypatch.setattr(m, "LMStudioClient", ImmediateDoneClient)
+    patch_provider(monkeypatch, m, ImmediateDoneClient)
 
     rc = m.main(["run", "--repo", str(repo), "some task"])
 
@@ -862,14 +821,8 @@ def test_main_docker_export_failed_with_budget_exceeded_status(tmp_path, monkeyp
     FakeDockerSandbox.bash = boom_bash
     monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
 
-    class BashCallingClient:
-        def __init__(self, base_url=None):
-            pass
-
-        def list_models(self):
-            return [m.DEFAULT_MODEL]
-
-        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+    class BashCallingClient(DictProvider):
+        def reply(self, model, messages, tools):
             return {"choices": [{"message": {
                 "role": "assistant", "content": None,
                 "tool_calls": [{"id": "c1", "type": "function",
@@ -877,7 +830,7 @@ def test_main_docker_export_failed_with_budget_exceeded_status(tmp_path, monkeyp
                                               "arguments": json.dumps({"command": "echo hi"})}}],
             }}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
-    monkeypatch.setattr(m, "LMStudioClient", BashCallingClient)
+    patch_provider(monkeypatch, m, BashCallingClient)
 
     rc = m.main(["run", "--repo", str(repo), "some task"])
 
@@ -943,7 +896,7 @@ def test_transcript_closed_even_on_unexpected_error(tmp_path, monkeypatch, capsy
             super().close()
     monkeypatch.setattr(m, "Transcript", SpyTranscript)
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
-    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+    patch_provider(monkeypatch, m, PreflightProvider)
     def boom(self, system_prompt, task):
         raise RuntimeError("boom")
     monkeypatch.setattr(m.Runner, "run", boom)
@@ -981,7 +934,7 @@ def test_transcript_construction_failure_still_prints_json(tmp_path, monkeypatch
 
     monkeypatch.setattr(m, "Transcript", BrokenTranscript)
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
-    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+    patch_provider(monkeypatch, m, PreflightProvider)
 
     rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "some task"])
 
@@ -1011,7 +964,7 @@ def test_load_repo_context_uses_worktree_not_caller_checkout(tmp_path, monkeypat
     (repo / "CLAUDE.md").write_text("CONVENTIONS-DIRTY")
 
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
-    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+    patch_provider(monkeypatch, m, PreflightProvider)
 
     captured = {}
 
@@ -1038,7 +991,7 @@ def test_llm_error_during_run_prints_model_error_json(tmp_path, monkeypatch, cap
                     "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
                    capture_output=True)
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
-    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+    patch_provider(monkeypatch, m, PreflightProvider)
 
     def boom(self, system_prompt, task):
         raise LLMError("boom")
@@ -1068,18 +1021,14 @@ def test_run_start_has_all_provenance_fields(tmp_path, monkeypatch):
                    capture_output=True)
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
 
-    class ImmediateDoneClient:
-        def __init__(self, base_url=None):
-            pass
+    class ImmediateDoneClient(DictProvider):
 
-        def list_models(self):
-            return [m.DEFAULT_MODEL]
 
-        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+        def reply(self, model, messages, tools):
             return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
-    monkeypatch.setattr(m, "LMStudioClient", ImmediateDoneClient)
+    patch_provider(monkeypatch, m, ImmediateDoneClient)
 
     rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "some task"])
     assert rc == 0
@@ -1107,15 +1056,8 @@ def test_run_end_has_diff_stat_after_writing_tracked_file(tmp_path, monkeypatch)
                    capture_output=True)
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
 
-    class WritingFakeClient:
-        def __init__(self, base_url=None):
-            self.calls = 0
-
-        def list_models(self):
-            return [m.DEFAULT_MODEL]
-
-        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
-            self.calls += 1
+    class WritingFakeClient(DictProvider):
+        def reply(self, model, messages, tools):
             if self.calls == 1:
                 return {"choices": [{"message": {
                     "role": "assistant", "content": None,
@@ -1127,7 +1069,7 @@ def test_run_end_has_diff_stat_after_writing_tracked_file(tmp_path, monkeypatch)
             return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
-    monkeypatch.setattr(m, "LMStudioClient", WritingFakeClient)
+    patch_provider(monkeypatch, m, WritingFakeClient)
 
     rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "some task"])
     assert rc == 0
@@ -1155,15 +1097,8 @@ def test_run_end_has_untracked_after_writing_new_file(tmp_path, monkeypatch):
                    capture_output=True)
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
 
-    class WritingFakeClient:
-        def __init__(self, base_url=None):
-            self.calls = 0
-
-        def list_models(self):
-            return [m.DEFAULT_MODEL]
-
-        def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
-            self.calls += 1
+    class WritingFakeClient(DictProvider):
+        def reply(self, model, messages, tools):
             if self.calls == 1:
                 return {"choices": [{"message": {
                     "role": "assistant", "content": None,
@@ -1175,7 +1110,7 @@ def test_run_end_has_untracked_after_writing_new_file(tmp_path, monkeypatch):
             return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
-    monkeypatch.setattr(m, "LMStudioClient", WritingFakeClient)
+    patch_provider(monkeypatch, m, WritingFakeClient)
 
     rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "some task"])
     assert rc == 0
@@ -1198,7 +1133,7 @@ def test_rundir_error_exits_2(tmp_path, monkeypatch):
                    capture_output=True)
     runs_dir = tmp_path / "runs"
     monkeypatch.setattr(m, "RUNS_DIR", runs_dir)
-    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+    patch_provider(monkeypatch, m, PreflightProvider)
     monkeypatch.setattr(m, "make_slug", lambda task, now: "fixed-slug")
     runs_dir.mkdir(parents=True)
     (runs_dir / "fixed-slug").mkdir()  # pre-existing run dir collides
@@ -1220,7 +1155,7 @@ def test_rundir_error_removes_orphaned_worktree(tmp_path, monkeypatch):
                    capture_output=True)
     runs_dir = tmp_path / "runs"
     monkeypatch.setattr(m, "RUNS_DIR", runs_dir)
-    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+    patch_provider(monkeypatch, m, PreflightProvider)
     monkeypatch.setattr(m, "make_slug", lambda task, now: "fixed-slug")
     runs_dir.mkdir(parents=True)
     (runs_dir / "fixed-slug").mkdir()  # pre-existing run dir collides
@@ -1248,7 +1183,7 @@ def test_stdout_json_has_run_dir_and_base_commit(tmp_path, monkeypatch, capsys):
                     "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
                    capture_output=True)
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
-    monkeypatch.setattr(m.LMStudioClient, "list_models", lambda self: [m.DEFAULT_MODEL])
+    patch_provider(monkeypatch, m, PreflightProvider)
     monkeypatch.setattr(m.Runner, "run", lambda self, sp, t: RunResult("completed", 1, "ok", {}))
 
     rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "some task"])
@@ -1272,33 +1207,32 @@ def _host_repo(tmp_path):
     return repo
 
 
-class _ScriptedClient:
-    """LMStudioClient stand-in driven by a list of chat responses; the last
+def _install_host_harness(monkeypatch, tmp_path, responses=None):
+    import dirtywork.__main__ as m
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
+    patch_provider(monkeypatch, m,
+                        lambda base_url=None: _ScriptedClient(base_url, responses))
+    return m
+
+
+class _ScriptedClient(DictProvider):
+    """Provider stand-in driven by a list of OpenAI chat bodies; the last
     response repeats so a run can never underflow."""
     instances = []
 
     def __init__(self, base_url=None, responses=None):
-        self.responses = list(responses or [
-            {"choices": [{"message": {"role": "assistant", "content": "done"}}],
-             "usage": {"prompt_tokens": 1, "completion_tokens": 1}}])
+        super().__init__(base_url)
+        self.responses = list(responses or [text_body()])
         _ScriptedClient.instances.append(self)
 
     def list_models(self):
         import dirtywork.__main__ as m
         return [m.DEFAULT_MODEL, "other/model"]
 
-    def chat(self, model, messages, tools, temperature=None, max_tokens=4096, timeout=None):
+    def reply(self, model, messages, tools):
         if len(self.responses) > 1:
             return self.responses.pop(0)
         return self.responses[0]
-
-
-def _install_host_harness(monkeypatch, tmp_path, responses=None):
-    import dirtywork.__main__ as m
-    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
-    monkeypatch.setattr(m, "LMStudioClient",
-                        lambda base_url=None: _ScriptedClient(base_url, responses))
-    return m
 
 
 def _read_only_run_json(tmp_path):
@@ -1390,7 +1324,7 @@ def test_resume_host_mode_reuses_worktree_and_links_runs(tmp_path, monkeypatch, 
     assert first["status"] == "max_turns"
     first_run_dir = Path(first["run_dir"])
 
-    monkeypatch.setattr(m, "LMStudioClient",
+    patch_provider(monkeypatch, m,
                         lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
     rc = m.main(["resume", first_run_dir.name])
     out = json.loads(capsys.readouterr().out)
@@ -1455,7 +1389,7 @@ def test_resume_rejects_sandbox_flag_and_unknown_run(tmp_path, monkeypatch, caps
 def test_resume_uses_prior_model_unless_overridden(tmp_path, monkeypatch, capsys):
     m, repo, rc = _first_run(monkeypatch, tmp_path, None)
     first = json.loads(capsys.readouterr().out)
-    monkeypatch.setattr(m, "LMStudioClient",
+    patch_provider(monkeypatch, m,
                         lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
     rc = m.main(["resume", "--model", "other/model", Path(first["run_dir"]).name])
     out = json.loads(capsys.readouterr().out)
@@ -1565,3 +1499,174 @@ def test_resume_docker_mode_seeds_and_keeps_branch(tmp_path, monkeypatch, capsys
     assert second_json["sandbox"] == "docker"
     assert second_json["image"] == first_json["image"]
     assert second_json["container"] != first_json["container"]
+
+
+def test_main_unknown_provider_rejected_by_argparse(tmp_path):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["run", "--repo", str(tmp_path), "--provider", "bogus", "do things"])
+    assert exc_info.value.code == 2
+
+
+def test_base_url_defaults_per_provider(tmp_path, monkeypatch, capsys):
+    import dirtywork.__main__ as m
+    from dirtywork.runner import RunResult
+    repo = _host_repo(tmp_path)
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
+    seen = {}
+
+    def factory(base_url=None):
+        seen["base_url"] = base_url
+        return PreflightProvider(base_url)
+
+    patch_provider(monkeypatch, m, factory)
+    monkeypatch.setattr(m.Runner, "run", lambda self, sp, task: RunResult("completed", 1, "ok", {}))
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "task"])
+    assert rc == 0
+    assert seen["base_url"] == "http://localhost:1234/v1"
+
+
+def test_run_json_and_stdout_record_the_provider(tmp_path, monkeypatch, capsys):
+    import dirtywork.__main__ as m
+    m2 = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    rc = m2.main(["run", "--repo", str(repo), "--sandbox", "none", "task"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["provider"] == "openai"
+    run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert run_json["provider"] == "openai"
+    transcript = (Path(payload["run_dir"]) / "transcript.jsonl").read_text().splitlines()
+    run_start = next(json.loads(l) for l in transcript if json.loads(l)["event"] == "run_start")
+    assert run_start["provider"] == "openai"
+    assert run_start["base_url"] == "http://localhost:1234/v1"
+
+
+def test_resume_refuses_a_provider_switch(tmp_path, monkeypatch, capsys):
+    import dirtywork.__main__ as m
+    m2 = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m2.main(["run", "--repo", str(repo), "--sandbox", "none", "task"]) == 0
+    slug = json.loads(capsys.readouterr().out)["run_dir"].rsplit("/", 1)[-1]
+    rc = m2.main(["resume", str(tmp_path / "runs" / slug), "--provider", "anthropic"])
+    assert rc == 2
+    assert "provider 'openai'" in capsys.readouterr().err
+
+
+def test_resume_inherits_the_prior_provider(tmp_path, monkeypatch, capsys):
+    import dirtywork.__main__ as m
+    m2 = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m2.main(["run", "--repo", str(repo), "--sandbox", "none", "task"]) == 0
+    slug = json.loads(capsys.readouterr().out)["run_dir"].rsplit("/", 1)[-1]
+    assert m2.main(["resume", str(tmp_path / "runs" / slug)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["provider"] == "openai"
+
+
+def test_runs_list_dispatches_to_cmd_list(tmp_path, monkeypatch, capsys):
+    import dirtywork.__main__ as m
+    from dirtywork import rundir
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    rc = m.main(["runs", "list", "--json"])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "[]"
+
+
+def test_runs_show_unknown_slug_exits_2(tmp_path, monkeypatch, capsys):
+    import dirtywork.__main__ as m
+    from dirtywork import rundir
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    (tmp_path / "runs").mkdir()
+    rc = m.main(["runs", "show", "nope"])
+    assert rc == 2
+    assert "no such run" in capsys.readouterr().err
+
+
+def test_build_system_prompt_allow_commit_replaces_the_no_commit_rule(tmp_path: Path):
+    default = build_system_prompt(tmp_path, None)
+    assert "Do not run git commit" in default
+    assert "leave all changes uncommitted for review" in default
+
+    allowed = build_system_prompt(tmp_path, None, allow_commit=True)
+    assert "Do not run git commit" not in allowed
+    assert "small conventional commits" in allowed
+    assert "git push" in allowed          # pushing stays forbidden, guardrail and prompt alike
+    assert "finish(summary=...)" in allowed
+
+
+def test_allow_commit_with_docker_sandbox_exits_2_and_creates_nothing(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "docker", "--allow-commit", "t"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--allow-commit requires --sandbox none" in err
+    assert "docker export carries files, not commits" in err
+    assert not (tmp_path / "runs").exists()
+    assert not (repo / ".worktrees").exists()   # refused before any workspace was created
+
+
+def test_allow_commit_records_the_flag_and_switches_the_prompt(tmp_path, monkeypatch, capsys):
+    from dirtywork.runner import RunResult
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    captured = {}
+
+    def fake_run(self, system_prompt, task):
+        captured["prompt"] = system_prompt
+        return RunResult("completed", 1, "done", {"prompt_tokens": 0, "completion_tokens": 0})
+
+    monkeypatch.setattr(m.Runner, "run", fake_run)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--allow-commit", "t"])
+    assert rc == 0
+    assert _read_only_run_json(tmp_path)["allow_commit"] is True
+    assert "small conventional commits" in captured["prompt"]
+
+
+def test_without_allow_commit_run_json_records_false(tmp_path, monkeypatch, capsys):
+    from dirtywork.runner import RunResult
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    captured = {}
+
+    def fake_run(self, system_prompt, task):
+        captured["prompt"] = system_prompt
+        return RunResult("completed", 1, "done", {"prompt_tokens": 0, "completion_tokens": 0})
+
+    monkeypatch.setattr(m.Runner, "run", fake_run)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "t"])
+    assert rc == 0
+    assert _read_only_run_json(tmp_path)["allow_commit"] is False
+    assert "Do not run git commit" in captured["prompt"]
+
+
+def test_resume_inherits_allow_commit_from_the_prior_run(tmp_path, monkeypatch, capsys):
+    import json
+    # One tool-call response (which repeats) so the first run ends `max_turns`
+    # instead of completing on turn 1 -- the shape the shipped resume tests use.
+    write_once = [
+        {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "w1", "type": "function", "function": {"name": "write_file",
+             "arguments": json.dumps({"path": "new.txt", "content": "from run 1\n"})}}]}}],
+         "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+    ]
+    m = _install_host_harness(monkeypatch, tmp_path, write_once)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+                 "--allow-commit", "add a file"])
+    assert rc == 1                      # max_turns
+    first = json.loads(capsys.readouterr().out)
+    assert json.loads((Path(first["run_dir"]) / "run.json").read_text())["allow_commit"] is True
+
+    captured = {}
+    real_build = m.build_system_prompt
+
+    def spy_build(display_root, repo_context, **kwargs):
+        captured.update(kwargs)
+        return real_build(display_root, repo_context, **kwargs)
+
+    monkeypatch.setattr(m, "build_system_prompt", spy_build)
+    rc = m.main(["resume", Path(first["run_dir"]).name, "--max-turns", "1"])  # no --allow-commit
+    second = json.loads(capsys.readouterr().out)
+    assert captured["allow_commit"] is True
+    assert json.loads((Path(second["run_dir"]) / "run.json").read_text())["allow_commit"] is True

@@ -66,10 +66,20 @@ BLOCKED = [
     # test_cd_worktree_parent_escape_blocked below): "cd /wt/../x" rewrites
     # to "cd ./../x", and the escape target must still match past the "./".
     "cd ./../etc",
+    # $HOME and the toolchain-root vars build_env() passes through unredirected
+    # (VOLTA_HOME/RUSTUP_HOME/CARGO_HOME/NVM_DIR/PYENV_ROOT) point at the
+    # OPERATOR's real home, not the worktree -- these must be caught even
+    # though a blanket leading `$` is not matched.
+    "rm -rf \"$CARGO_HOME\"",
+    "rm -rf ${VOLTA_HOME}/tools",
+    "echo x > $RUSTUP_HOME/settings.toml",
+    "cd $NVM_DIR && rm -rf .",
+    "rm -rf $PYENV_ROOT",
 ]
 
 ALLOWED = [
     "ls -la",
+    "rm -rf $HOME/.cache",   # $HOME is the worktree in host mode: in-worktree cleanup
     "npm rm leftpad",                # 'rm' subword, no absolute target
     "rm -rf node_modules",           # relative path
     "git status && git diff",
@@ -91,10 +101,10 @@ ALLOWED = [
     "git reflog",                     # viewing history is fine; expire/delete blocked
     "git -C sub status",              # -C with a read-only subcommand is fine
     "git -c color.ui=false log",      # -c with a read-only subcommand is fine
-    # $VAR idioms — HOME is relocated into the worktree, so these stay confined
+    # $VAR idioms for a var NOT on the tracked list stay confined/allowed
     "rm -rf \"$BUILD_DIR\"",
+    "rm -rf ./target",
     "chmod +x \"$SCRIPT\"",
-    "rm -rf $HOME/.cache",
     "cd \"$dir\" && make",
     "make > \"$LOG\" 2>&1",
 ]
@@ -121,7 +131,28 @@ def test_build_env_relocates_home(tmp_path, monkeypatch):
     assert env["HOME"] != os.environ.get("HOME")
     assert "AWS_SECRET_ACCESS_KEY" not in env
     for key in env:
-        assert key in ("PATH", "HOME", "TERM", "LANG", "TMPDIR", "PYTHONPATH")
+        assert key in ("PATH", "HOME", "TERM", "LANG", "TMPDIR", "PYTHONPATH",
+                       "VOLTA_HOME", "RUSTUP_HOME", "CARGO_HOME", "NVM_DIR", "PYENV_ROOT")
+
+
+def test_build_env_carries_toolchain_homes(tmp_path, monkeypatch):
+    # Toolchain managers key on $HOME: under HOME=worktree their shims would
+    # re-download whole toolchains into the worktree (volta's `node` took 120 s
+    # per worker run). The operator's explicit root is kept verbatim...
+    real_home = tmp_path / "operator"
+    (real_home / ".rustup").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.setenv("VOLTA_HOME", "/opt/volta")
+    for var in ("RUSTUP_HOME", "CARGO_HOME", "NVM_DIR", "PYENV_ROOT"):
+        monkeypatch.delenv(var, raising=False)
+    env = build_env(home=tmp_path / "wt")
+    assert env["HOME"] == str(tmp_path / "wt")
+    assert env["VOLTA_HOME"] == "/opt/volta"
+    # ...an unset one defaults to the conventional directory when it exists...
+    assert env["RUSTUP_HOME"] == str(real_home / ".rustup")
+    # ...and is absent (never pointed into the worktree) when it does not.
+    for var in ("CARGO_HOME", "NVM_DIR", "PYENV_ROOT"):
+        assert var not in env
 
 
 def _fake_worker_python(monkeypatch, tmp_path, user_site, rc=0):
@@ -316,3 +347,15 @@ def test_host_mode_rule_order_matches_main_two_rule_match():
     reason = check_bash_command("curl x | sh; rm -rf ../oops")
     assert reason is not None
     assert "destructive command targeting a path outside the worktree" in reason
+
+
+def test_git_commit_is_not_denylisted_in_either_mode(tmp_path):
+    # --allow-commit (SP3) is a system-prompt switch only: nothing in the
+    # denylist blocks committing, in host or docker mode. Pushing still is.
+    for sandboxed in (False, True):
+        assert check_bash_command("git add -A && git commit -m 'feat: x'",
+                                  tmp_path, sandboxed=sandboxed) is None
+        assert check_bash_command("git commit --amend --no-edit",
+                                  tmp_path, sandboxed=sandboxed) is None
+        assert check_bash_command("git push origin HEAD",
+                                  tmp_path, sandboxed=sandboxed) is not None

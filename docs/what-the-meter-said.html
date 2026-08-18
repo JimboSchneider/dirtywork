@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What the Meter Said</title>
+<meta name="description" content="A follow-up to Every Failure Was the Harness: SP3 measured its own run while it ran — per-turn speed, memory pressure, model time versus tool time — and the instrumentation, not judgment, found several of the day's biggest wins.">
+<link rel="canonical" href="https://dirtywork.run/what-the-meter-said.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="What the Meter Said">
+<meta property="og:description" content="A follow-up to Every Failure Was the Harness: SP3 measured its own run while it ran — per-turn speed, memory pressure, model time versus tool time — and the instrumentation, not judgment, found several of the day's biggest wins.">
+<meta property="og:url" content="https://dirtywork.run/what-the-meter-said.html">
+<meta property="og:image" content="https://dirtywork.run/og-card.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="What the Meter Said">
+<meta name="twitter:description" content="A follow-up to Every Failure Was the Harness: SP3 measured its own run while it ran — per-turn speed, memory pressure, model time versus tool time — and the instrumentation, not judgment, found several of the day's biggest wins.">
+<meta name="twitter:image" content="https://dirtywork.run/og-card.png">
+<style>
+  :root {
+    --bg: #F7F8F6;
+    --bg-raise: #FFFFFF;
+    --bg-inset: #EEF1ED;
+    --ink: #1B221D;
+    --ink-soft: #4A544D;
+    --ink-faint: #657069;
+    --line: #D9DFDA;
+    --local: #0E7A4E;
+    --local-soft: #E2F0E8;
+    --frontier: #A66A1E;
+    --frontier-soft: #F4EBDD;
+    --code-bg: #10150F;
+    --code-ink: #D6E2D6;
+    --code-accent: #7FC79E;
+    --code-dim: #7C8A7D;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111611;
+      --bg-raise: #171D17;
+      --bg-inset: #1C231C;
+      --ink: #E4EAE4;
+      --ink-soft: #A7B2A8;
+      --ink-faint: #828E84;
+      --line: #2A322A;
+      --local: #4EC58C;
+      --local-soft: #17251D;
+      --frontier: #D9A468;
+      --frontier-soft: #272015;
+      --code-bg: #0B0F0B;
+      --code-ink: #CFDCCF;
+      --code-accent: #7FC79E;
+      --code-dim: #6E7B6F;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111611;
+    --bg-raise: #171D17;
+    --bg-inset: #1C231C;
+    --ink: #E4EAE4;
+    --ink-soft: #A7B2A8;
+    --ink-faint: #828E84;
+    --line: #2A322A;
+    --local: #4EC58C;
+    --local-soft: #17251D;
+    --frontier: #D9A468;
+    --frontier-soft: #272015;
+    --code-bg: #0B0F0B;
+    --code-ink: #CFDCCF;
+    --code-accent: #7FC79E;
+    --code-dim: #6E7B6F;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Charter", "Iowan Old Style", Georgia, "Times New Roman", serif;
+    font-size: 1.0625rem;
+    line-height: 1.65;
+  }
+  .wrap { max-width: 44rem; margin: 0 auto; padding: 0 1.25rem 6rem; }
+
+  .display, h1, h2, h3 {
+    font-family: "Avenir Next", "Avenir", "Segoe UI", "Helvetica Neue", sans-serif;
+  }
+  h1, h2, h3 { text-wrap: balance; }
+  .mono, code, pre, .stat-num { font-family: ui-monospace, "SF Mono", "Menlo", "Cascadia Mono", monospace; }
+
+  header { padding: 4.5rem 0 2.5rem; }
+  .eyebrow {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--local);
+    margin: 0 0 1.1rem;
+  }
+  h1 {
+    font-size: clamp(2.2rem, 6vw, 3.1rem);
+    font-weight: 700;
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    margin: 0 0 1.2rem;
+  }
+  .standfirst {
+    font-size: 1.2rem;
+    line-height: 1.55;
+    color: var(--ink-soft);
+    margin: 0 0 2.2rem;
+    max-width: 38rem;
+  }
+  .standfirst strong { color: var(--ink); font-weight: 600; }
+
+  .terminal {
+    background: var(--code-bg);
+    border-radius: 8px;
+    padding: 1.1rem 1.25rem 1.2rem;
+    overflow-x: auto;
+    box-shadow: 0 1px 0 var(--line);
+  }
+  .terminal pre {
+    margin: 0;
+    color: var(--code-ink);
+    font-size: 0.82rem;
+    line-height: 1.6;
+  }
+  .terminal .c { color: var(--code-dim); }
+  .terminal .k { color: var(--code-accent); }
+  .terminal .err { color: #E08A8A; }
+  .term-cap {
+    font-size: 0.8rem;
+    color: var(--ink-faint);
+    margin: 0.6rem 0 0;
+    font-style: italic;
+  }
+
+  section { margin-top: 3.6rem; }
+  .sec-mark {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    border-top: 1px solid var(--line);
+    padding-top: 1.6rem;
+  }
+  .sec-mark .n {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.78rem;
+    color: var(--local);
+    letter-spacing: 0.08em;
+  }
+  h2 { font-size: 1.5rem; font-weight: 600; margin: 0; }
+  h3 { font-size: 1.05rem; font-weight: 600; margin: 2rem 0 0.6rem; }
+  p { margin: 1rem 0; }
+  a { color: var(--local); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--local); outline-offset: 2px; border-radius: 2px; }
+  ul, ol { padding-left: 1.4rem; margin: 1rem 0; }
+  li { margin: 0.45rem 0; }
+  li::marker { color: var(--ink-faint); }
+  strong { font-weight: 600; }
+  em { font-style: italic; }
+
+  code {
+    background: var(--bg-inset);
+    border-radius: 4px;
+    padding: 0.1em 0.35em;
+    font-size: 0.86em;
+  }
+
+  blockquote {
+    margin: 1.4rem 0;
+    padding: 0.1rem 0 0.1rem 1.1rem;
+    border-left: 3px solid var(--local);
+    color: var(--ink-soft);
+    font-style: italic;
+  }
+
+  .tiers { display: grid; grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr)); gap: 1rem; margin: 1.5rem 0; }
+  @media (max-width: 560px) { .tiers { grid-template-columns: 1fr; } }
+  .tier {
+    border-radius: 8px;
+    padding: 1.1rem 1.2rem 1.2rem;
+    border: 1px solid var(--line);
+    background: var(--bg-raise);
+  }
+  .tier .who {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin: 0 0 0.5rem;
+  }
+  .tier.frontier .who { color: var(--frontier); }
+  .tier.local .who { color: var(--local); }
+  .tier.human .who { color: var(--ink-faint); }
+  .tier .role { font-size: 0.9rem; color: var(--ink-soft); margin: 0; }
+  .tier .cost {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.76rem;
+    margin: 0.8rem 0 0;
+  }
+  .tier.frontier .cost { color: var(--frontier); }
+  .tier.local .cost { color: var(--local); }
+  .tier.human .cost { color: var(--ink-faint); }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 1.6rem 0;
+  }
+  .stat { background: var(--bg-raise); padding: 0.95rem 1rem 1rem; }
+  .stat-num {
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: var(--local);
+    font-variant-numeric: tabular-nums;
+    display: block;
+  }
+  .stat.amber .stat-num { color: var(--frontier); }
+  .stat-cap { font-size: 0.78rem; color: var(--ink-faint); line-height: 1.35; display: block; margin-top: 0.15rem;
+    font-family: "Avenir Next", "Avenir", "Segoe UI", sans-serif; }
+
+  .tblwrap { overflow-x: auto; margin: 1.5rem 0; border: 1px solid var(--line); border-radius: 8px; }
+  table.runs { width: 100%; border-collapse: collapse; font-size: 0.82rem; background: var(--bg-raise); }
+  table.runs caption { display: none; }
+  table.runs th, table.runs td { padding: 0.55rem 0.75rem; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  table.runs th {
+    font-family: "Avenir Next", "Avenir", "Segoe UI", sans-serif;
+    font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--ink-faint); background: var(--bg-inset);
+  }
+  table.runs td.review { white-space: normal; color: var(--ink-soft); min-width: 16rem; }
+  table.runs td.num { font-family: ui-monospace, "SF Mono", "Menlo", monospace; font-variant-numeric: tabular-nums; }
+  table.runs tr.totals td { font-weight: 600; border-top: 2px solid var(--line); background: var(--bg-inset); }
+  table.runs tr:last-child td { border-bottom: none; }
+
+  .footnote {
+    margin-top: 4rem;
+    border-top: 1px solid var(--line);
+    padding-top: 1.3rem;
+    font-size: 0.88rem;
+    color: var(--ink-faint);
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">Session postmortem · 2026-08-17 → 08-18 · part four</p>
+  <h1>What the Meter Said</h1>
+  <p class="standfirst">A follow-up to <a href="every-failure-was-the-harness.html">Every Failure Was the Harness</a>. Same bet, one sub-project later: a frontier model planned, reviewed, and ruled; a free local model did the typing; I decided what merges. The difference this time is that we measured the run <em>while it was running</em> — per-turn speed, memory pressure, model time versus tool time — and several of the day's biggest wins came out of the instrumentation rather than out of anybody's judgment.</p>
+</header>
+
+<section>
+  <div class="sec-mark"><span class="n">01</span><h2>First: the plan was stale</h2></div>
+  <p>SP3 is the extensibility pass: a tool registry, provider adapters (including the Anthropic API), the <code>runs</code> command family, <code>dirtywork bench</code>, and <code>--allow-commit</code>. Sixteen tasks, 39 commits, built with dirtywork itself. Everything below comes from the run's own record, linked at the bottom.</p>
+  <p>The SP3 plan was written on the 16th, against pre-SP2.5 code. Then SP2.5 shipped as 0.5.0/0.5.1 and rewrote <code>runner.py</code> and <code>__main__.py</code> underneath it. Two tasks in the plan mandated "full rewrites" of exactly those files. Executing the plan as written would have deleted shipped behaviour.</p>
+  <p>So the plan got re-baselined before Task 1: two Opus revision agents (one on the header and Tasks 1–8, one on Tasks 9–15 plus a new Task 16 for <code>--allow-commit</code>), spliced and committed as docs. Then a pre-flight scan over the revised plan: 53 plan-vs-code pairs across 16 tasks, <strong>0 shipped-code drift misses, 3 blockers, 10 defects, 9 notes</strong>. The blockers were small — an empty <code>base_url</code> handled as falsy instead of <code>None</code>, two shipped tests the rewrite block didn't know existed. Cheap to fix in a document. Not cheap to fix after a local model has faithfully typed the wrong thing.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">02</span><h2>The scoreboard</h2></div>
+  <p>Twenty qwen runs with a surviving <code>run.json</code> — 13 completed, 5 max_turns, 1 context_exhausted, 1 model_error — plus the crashed first attempt at task-6c, whose record its own retry overwrote. It's in the table below anyway. 981 turns, 167.3 minutes of wall clock, 33.7M prompt tokens, 233,795 completion tokens, all local, all free.</p>
+
+  <div class="tblwrap">
+  <table class="runs">
+  <caption>SP3 worker scoreboard, all recorded runs</caption>
+  <thead><tr><th>Run</th><th>Status</th><th>Turns</th><th>Wall</th></tr></thead>
+  <tbody>
+  <tr><td>smoke</td><td>completed</td><td class="num">2</td><td class="num">0.1m</td></tr>
+  <tr><td>task-1</td><td>completed</td><td class="num">6</td><td class="num">0.9m</td></tr>
+  <tr><td>task-2</td><td>completed</td><td class="num">11</td><td class="num">1.8m</td></tr>
+  <tr><td>task-3</td><td>max_turns</td><td class="num">80</td><td class="num">4.5m</td></tr>
+  <tr><td>task-4</td><td>completed</td><td class="num">24</td><td class="num">2.3m</td></tr>
+  <tr><td>task-5</td><td>completed</td><td class="num">29</td><td class="num">3.1m</td></tr>
+  <tr><td>task-6 (run 1)</td><td>max_turns</td><td class="num">120</td><td class="num">29.4m</td></tr>
+  <tr><td>task-6a</td><td>context_exhausted</td><td class="num">119</td><td class="num">32.9m</td></tr>
+  <tr><td>task-6b</td><td>max_turns</td><td class="num">120</td><td class="num">5.3m</td></tr>
+  <tr><td>task-7</td><td>completed</td><td class="num">27</td><td class="num">2.4m</td></tr>
+  <tr><td>task-6c (run 1)</td><td>model_error</td><td class="num">13</td><td class="num">0.9m</td></tr>
+  <tr><td>task-13 (run 1)</td><td>model_error</td><td class="num">29</td><td class="num">7.7m</td></tr>
+  <tr><td>task-6c (run 2)</td><td>max_turns</td><td class="num">100</td><td class="num">6.8m</td></tr>
+  <tr><td>task-8</td><td>completed</td><td class="num">64</td><td class="num">7.1m</td></tr>
+  <tr><td>task-9</td><td>completed</td><td class="num">20</td><td class="num">3.9m</td></tr>
+  <tr><td>task-10</td><td>completed</td><td class="num">30</td><td class="num">6.9m</td></tr>
+  <tr><td>task-11</td><td>completed</td><td class="num">37</td><td class="num">7.9m</td></tr>
+  <tr><td>task-12</td><td>completed</td><td class="num">28</td><td class="num">6.0m</td></tr>
+  <tr><td>task-14</td><td>completed</td><td class="num">41</td><td class="num">13.7m</td></tr>
+  <tr><td>task-15</td><td>max_turns</td><td class="num">60</td><td class="num">18.4m</td></tr>
+  <tr><td>task-16</td><td>completed</td><td class="num">63</td><td class="num">6.3m</td></tr>
+  </tbody>
+  </table>
+  </div>
+
+  <p>Two of those statuses are less alarming than they look: <code>max_turns</code> on task-3 and task-15 meant the work was done in substance and the turn cap was too tight. Nine of the twenty runs were landed by controller commit rather than by the worker committing its own. The two <code>model_error</code> rows are the same failure, and I'll get to it.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">03</span><h2>Task 6 ate the context window twice</h2></div>
+  <p>Task 6 was the runner's switch to a provider-neutral history. Its brief was 1,084 lines.</p>
+  <p>qwen never finished it. Run 1: 120 turns, 29.4 minutes, 5.6M prompt tokens — and at the end, <code>runner.py</code> was syntactically broken and there were eight scratch patch scripts lying around. The worker had made 66 bash calls and 48 <code>read_file</code> calls and had not called <code>edit_file</code> or <code>write_file</code> once. The brief plus its own re-reads exceeded its working context; it reset and retried and ran out of room again. I split the task into 6a/6b/6c. 6a came back <code>context_exhausted</code> after 119 turns and 32.9 minutes.</p>
+  <p>That's two failed runs and about an hour of wall clock spent proving the brief was too big, not that the model was too small.</p>
+  <p>Then we reloaded qwen at 131,072 context instead of 65,536, and the shape of the whole day changed:</p>
+
+  <div class="tblwrap">
+  <table class="runs">
+  <caption>Local model throughput at 65k vs 131k context</caption>
+  <thead><tr><th>Context</th><th>Model time per turn</th><th>Prompt tok/s (model time)</th><th>The runs</th></tr></thead>
+  <tbody>
+  <tr><td class="num">65k</td><td class="num">14.4–16.5 s</td><td class="num">~2,700–3,300</td><td class="review">task-6 (120 turns, 29.4m), task-6a (119, 32.9m)</td></tr>
+  <tr><td class="num">131k</td><td class="num">2.6–3.8 s</td><td class="num">~13,300–13,900</td><td class="review">task-6b (120, 5.3m), task-6c run 2 (100, 6.8m)</td></tr>
+  </tbody>
+  </table>
+  </div>
+
+  <p>Same model, same machine, same tasks — roughly 3–5× the per-turn speed. The cause is prompt-cache thrash: at 65k the context trimmer was evicting history nearly every turn, which invalidates the cache, which means re-processing the prompt from scratch. Task 6b did 120 turns in 5.3 minutes. Task 6 run 1 did 120 turns in 29.4.</p>
+  <p>The greed had a limit. Two 131k slots running concurrently (Task 7 alongside Task 13) worked at first — about 10% per-worker slowdown for ~1.9× aggregate throughput. Then the sampler caught the memory walking up: 51.9 GB wired and 13.8 GB free a minute in; 55.9 GB wired and 1.2 GB free fifteen seconds before LM Studio crashed and took both in-flight runs down with it. Those are the two <code>model_error</code> rows. One slot at 131k peaks around 66 GB wired on this box, which is the configuration that survives.</p>
+  <p>Two pieces of Task 6 still needed Sonnet to finish the last mile: 6b (qwen switched the runner and got 65 of 71 tests green; the remaining six were SP2.5 reply-classification semantics) and 6c (36 of 40 <code>test_main</code> green). Sonnet closed both, 6.1 and 11.7 minutes. Two of sixteen tasks needed an escalation. I'd rather write that down than round it off.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">04</span><h2>Tool time, not model time</h2></div>
+  <p>Halfway through the back half, the model-versus-tool split said something I didn't expect: for tasks 8 through 14, <strong>57–81% of wall-clock was tool time, not model time.</strong> The slowest individual calls were pytest runs at 121, 183, 276, 277 seconds. The same suite took about 30 seconds on the host.</p>
+  <p>Reproducing it took one command. Host mode sets <code>HOME</code> to the worktree by design, and that dropped <code>VOLTA_HOME</code> — so the <code>node</code> shim on <code>PATH</code> resolved to volta, volta found no toolchain under the new <code>HOME</code>, and re-downloaded Node into the worktree. Every single run. (That also explained the <code>.volta/</code> junk that had been appearing in worker trees since Task 13, which I'd noticed and not chased.)</p>
+  <p>The fix is on this branch: <code>VOLTA_HOME</code>, <code>RUSTUP_HOME</code>, <code>CARGO_HOME</code>, <code>NVM_DIR</code> and <code>PYENV_ROOT</code> are carried into the worker environment when set. The worker-env full suite went from 276 seconds to 36. It's the same lesson as SP2.5's <code>PYTHONPATH</code> fix, one category up: HOME-keyed toolchain managers have to be pointed home. Workers still launched from the released 0.5.1 for the rest of the run, so Tasks 15 and 16 paid the tax anyway — that's why their walls look the way they do in the table.</p>
+  <p>A new macOS update was also lurking in the shadows, mocking us. I'll let that one stand without further investigation.</p>
+  <p>None of this was found by thinking hard. It was found because the run was instrumented and somebody read the numbers in the same hour they were produced.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">05</span><h2>What review caught</h2></div>
+  <p>Each task was reviewed by a two-lens workflow with skeptic agents verifying every Critical and Important finding, plus scoped Haiku re-reviews after fixes. The largest category of Important findings, by a distance, was <strong>defects the plan mandated</strong>:</p>
+  <ul>
+    <li><code>runs export</code> and <code>runs clean</code> each re-implemented a "is this worktree pristine?" check that already existed — three copies before it became one predicate.</li>
+    <li><code>runs clean</code> removed a worktree and branch without the <code>worktree_belongs_to_repo</code> guard that its sibling code path already had.</li>
+    <li><code>bench</code> duplicated the security flags that <code>docker_args</code> already assembles, and staged repos outside the per-case <code>try</code>, so one git failure would abort the whole sweep and leak a temp directory.</li>
+  </ul>
+  <p>In each case the worker typed exactly what the plan told it to type. The review gate doesn't know who wrote the flawed instruction, which is the entire reason it works: the plan's authorship doesn't get to grade the plan's output.</p>
+  <p>The final whole-branch review was six lenses — spec, behaviour and security on Opus; quality, docs and tests on Sonnet — with two skeptics per finding. 48 agents, 21 findings confirmed, 0 refuted, 18 Minor. What's notable is that the confirmed set was <em>entirely</em> cross-task seams, the kind no per-task review can see:</p>
+  <ul>
+    <li>The new Anthropic serializer broke the runner's message-alternation invariant on both nudge paths — consecutive <code>user</code> turns after tool results, and empty assistant content. Task 7 built a correct adapter; SP2.5 built a correct nudge; together they were wrong.</li>
+    <li><code>runs clean</code> would happily delete a branch full of committed work from an <code>--allow-commit</code> run without <code>--force</code> — two features that shipped in the same branch and had never been considered in the same sentence.</li>
+    <li>The toolchain-root passthrough from the section above — the fix I'm most pleased with — reopened <code>rm -rf "$CARGO_HOME"</code> past the guardrail denylist. The fix opened the hole.</li>
+  </ul>
+  <p>One fix wave (two Sonnet implementers on disjoint files) closed all 23 items. The re-review then caught a regression <em>in the fix wave</em>: the new run-directory keep rule fired on the benign "container already removed" outcome, which would have made every routine cleanup demand <code>--force</code>. Fixed. Final gates: 797 unit tests, 14 docker tests, 3 live.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">06</span><h2>The meter</h2></div>
+  <p>Here's the part I keep having to explain: <strong>the frontier tokens did not go down.</strong></p>
+  <p>The SP3 day was the largest frontier day in these logs — about 3.4M output tokens, 23.3M cache writes, 909M cache reads on 08-17. The Opus plan re-baseline plus the pre-flight scan was roughly 27% of it by API-list-equivalent weighting. Against that, about 47M prompt tokens went to the local model on the same day — that figure covers the tail of SP2.5 as well as SP3, which between them account for 44 local runs on the 17th.</p>
+  <p>What changed isn't the volume. It's what the volume buys. Frontier tokens moved out of implementation and into planning, orchestration and review — six-lens reviews and skeptic verification are not cheap, and they're where the 21 confirmed findings came from. The local model absorbed the typing.</p>
+  <p>On the subscription side: the meter at 19:41 CDT read 27% of the 5-hour session window, 10% weekly across all models, 11% weekly on Fable — after about 27 hours covering SP2.5 and most of SP3. I'm not going to convert that into a dollar saving, because I don't pay per token and I'd be making the number up. The honest framing is the same one as last time: what gets rationed is frontier attention, and this is a tool for spending it carefully.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">07</span><h2>What changed, and what's next</h2></div>
+  <p>Things this run put into the harness, mostly because the run found them:</p>
+  <ul>
+    <li>Toolchain roots carried into the worker environment (and then guarded, after the final review noticed what that opened).</li>
+    <li><code>--allow-commit</code>, host mode only, so a run's branch comes back as real history instead of a dirty worktree — plus the <code>runs clean</code> refusals that make it safe to clean up.</li>
+    <li>Provider adapters and <code>--provider</code>, with the Anthropic API as the second implementation that proved the seam was real.</li>
+    <li><code>dirtywork runs list/show/export/clean/verdict</code>, and <code>dirtywork bench</code> — which means the next version of the table above can build itself.</li>
+  </ul>
+  <p>The branch is complete: 39 commits, gates green, 0.6.0 proposed and not yet applied. The PR and the release are mine to call, and I haven't called them yet.</p>
+  <p>If you want to check the arithmetic, it's all in the repo. The per-run scoreboard and metrics are in <a href="https://github.com/JimboSchneider/dirtywork/blob/main/docs/superpowers/bench/2026-08-17-sp3-worker-scoreboard.md">superpowers/bench/2026-08-17-sp3-worker-scoreboard.md</a>, the decision-by-decision ledger in <a href="https://github.com/JimboSchneider/dirtywork/blob/main/docs/superpowers/bench/2026-08-17-sp3-sdd-ledger.md">superpowers/bench/2026-08-17-sp3-sdd-ledger.md</a>, the model-versus-tool split in <a href="https://github.com/JimboSchneider/dirtywork/blob/main/docs/superpowers/bench/2026-08-17-sp3-run-split.md">superpowers/bench/2026-08-17-sp3-run-split.md</a>, and the previous sub-project's numbers — same model, same box, at 65k — in <a href="https://github.com/JimboSchneider/dirtywork/blob/main/docs/superpowers/bench/2026-08-17-sp2.5-worker-scoreboard.md">superpowers/bench/2026-08-17-sp2.5-worker-scoreboard.md</a>. Or skip the reading and run <code>dirtywork bench</code> against your own models on your own box. That's what it's for.</p>
+</section>
+
+<p>One caveat, same as always: this is one machine — an Apple M5 Max with 128&nbsp;GB of unified memory — running one plan with one local model family. It is a record, not a benchmark. The 65k-versus-131k numbers in particular are a property of this box's memory, and yours will differ.</p>
+
+<p>A frontier model planned, reviewed, and ruled. A free local model did 981 turns of typing. I decided what merges. Every number here came from that run's own record, which is still the only way I know to ask you to believe it.</p>
+
+<p><strong>Previous:</strong> <a href="every-failure-was-the-harness.html">Every Failure Was the Harness</a> —
+part three, the Docker sandbox build.</p>
+
+<p class="footnote">Claude (Fable 5) planned, reviewed, and ruled on this session, and drafted
+this post from the session record linked above. Jim edited it. Same process as the three
+earlier posts. Source:
+<a href="https://github.com/JimboSchneider/dirtywork">github.com/JimboSchneider/dirtywork</a> ·
+install: <span class="mono">pipx install dirtywork</span> ·
+<a href="https://dirtywork.run">dirtywork.run</a></p>
+</div>
+
+</body>
+</html>

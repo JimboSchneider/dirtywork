@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from dirtywork.rundir import RunDirError, create_run_dir, ensure_runs_dir, read_run_json, write_run_json
+from dirtywork.rundir import (RunDirError, create_run_dir, ensure_bench_dir, ensure_runs_dir,
+                              read_run_json, write_run_json)
 
 
 def test_ensure_runs_dir_creates_0700_dirs(tmp_path: Path):
@@ -67,6 +68,24 @@ def test_ensure_runs_dir_tightens_loose_perms(tmp_path: Path):
 
     assert stat.S_IMODE(dirtywork_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE(runs.stat().st_mode) == 0o700
+
+
+def test_ensure_bench_dir_creates_0700_dirs(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    bench = home / ".dirtywork" / "bench"
+    result = ensure_bench_dir(bench)
+    assert result == bench
+    assert stat.S_IMODE((home / ".dirtywork").stat().st_mode) == 0o700
+    assert stat.S_IMODE(bench.stat().st_mode) == 0o700
+
+
+def test_ensure_bench_dir_idempotent(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    bench = home / ".dirtywork" / "bench"
+    ensure_bench_dir(bench)
+    ensure_bench_dir(bench)  # second call must not raise
 
 
 def test_create_run_dir(tmp_path: Path):

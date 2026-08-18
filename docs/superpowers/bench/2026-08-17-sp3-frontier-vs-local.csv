@@ -1,0 +1,3 @@
+day_utc,frontier_out_tok,frontier_cache_write,frontier_cache_read,frontier_usd_equiv,usd_main,usd_subagents,usd_fable,usd_opus,usd_sonnet,usd_haiku,local_runs,local_prompt_tok,local_compl_tok
+2026-08-17,3379970,23252743,909486728,1467,1076,390,934,389,141,2,44,46996717,316207
+2026-08-18,2002267,17193041,483592729,578,314,264,267,159,149,2,12,14231210,91602
