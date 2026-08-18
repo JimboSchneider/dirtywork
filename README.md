@@ -291,8 +291,11 @@ summarize <file>` prints a per-case table plus a per-model summary
 (completion/acceptance/verdict rates, gamed count, mean tokens/wall time,
 median review seconds). `--compare <other.jsonl>` prints two paired
 `A -> B (Δ)` tables instead — the per-(model, task) table and the paired
-per-model summary — deltas are B minus A, and a key only one sweep ran shows
-`-` on the other side.
+per-model summary — deltas are B minus A, a key only one sweep ran shows
+`-` on the other side, the per-(model, task) table's `outcomes` column
+breaks the acceptance rate down as `pass/fail/gamed/skipped` per side, and
+its `harness` column reads `-` for a side whose rows never ran the harness
+(bench_error only) or is suffixed `*` when only some of that side's rows did.
 
 `bench` runs from a source checkout only — `bench/` and its fixture repos
 are not part of the installed package.

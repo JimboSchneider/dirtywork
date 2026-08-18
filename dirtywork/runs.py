@@ -370,9 +370,21 @@ def _md_timeline(events: list) -> list:
             text = str(event.get("text") or "").strip()
             if text:
                 lines += [_balance_fences(text), ""]
-            tools = ", ".join(f"`{tc.get('name')}`" for tc in (event.get("tool_calls") or [])
-                              if isinstance(tc, dict))
-            lines += [f"_tool calls: {tools}_" if tools else "_text reply, no tool calls_", ""]
+            tool_calls = [tc for tc in (event.get("tool_calls") or []) if isinstance(tc, dict)]
+            if tool_calls:
+                # One bullet per call, independent of whether a matching
+                # tool_result was ever recorded: a run that aborts mid-call
+                # (budget/sandbox error, model_error after a malformed call)
+                # loses the <details> block that would normally carry the
+                # command -- this is the only place it survives.
+                for tc in tool_calls:
+                    tool = tc.get("name") or "(unnamed tool)"
+                    arguments = tc.get("arguments")
+                    args_text = "-" if arguments is None else _md_inline(arguments, MD_ARGS_CHARS)
+                    lines.append(f"- `{tool}` — {args_text}")
+                lines.append("")
+            else:
+                lines += ["_text reply, no tool calls_", ""]
             continue
         lines += _md_event_lines(event)
     if len(lines) == 2:   # nothing was appended after the '## Timeline' heading

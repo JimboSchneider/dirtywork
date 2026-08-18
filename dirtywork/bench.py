@@ -425,12 +425,21 @@ def _summarize_model(rows: list, verdicts: list, review_seconds: list) -> dict:
     tokens = [(r.get("prompt_tokens") or 0) + (r.get("completion_tokens") or 0)
               for r in rows if r.get("prompt_tokens") is not None
               or r.get("completion_tokens") is not None]
-    harness = [r.get("harness") or {} for r in rows]
+    # P2-2: a bench_error row (docker/staging failure before the harness ever
+    # ran) carries an empty `harness` dict -- it must not be counted as zero
+    # nudges/stalls/max_turns among rows that DID run the harness.
+    harness_dicts = [r.get("harness") for r in rows
+                     if isinstance(r.get("harness"), dict) and r.get("harness")]
+    outcomes = {"pass": 0, "fail": 0, "gamed": 0, "skipped": 0}
+    for r in rows:
+        acceptance = r.get("acceptance")
+        outcomes[acceptance if acceptance in outcomes else "skipped"] += 1
     return {
         "runs": n,
         "completion_rate": completed / n if n else 0.0,
         "acceptance_rate": accepted / n if n else 0.0,
         "gamed": gamed,
+        "outcomes": outcomes,
         "mean_tokens": _mean(tokens),
         "mean_wall_s": _mean(_numbers(rows, "wall_s")),
         "verdict_rate": (verdicts.count("accept") / len(verdicts)) if verdicts else None,
@@ -439,15 +448,16 @@ def _summarize_model(rows: list, verdicts: list, review_seconds: list) -> dict:
         "mean_turns": _mean(_numbers(rows, "turns")),
         "mean_prompt_tokens": _mean(_numbers(rows, "prompt_tokens")),
         "mean_completion_tokens": _mean(_numbers(rows, "completion_tokens")),
-        "nudges": sum((h.get(f"nudge_{kind}") or 0) for h in harness for kind in NUDGE_KINDS),
-        "stalled": sum(1 for h in harness if h.get("stalled")),
-        "max_turns": sum(1 for h in harness if h.get("max_turns")),
+        "harness_rows": len(harness_dicts),
+        "nudges": sum((h.get(f"nudge_{kind}") or 0) for h in harness_dicts for kind in NUDGE_KINDS),
+        "stalled": sum(1 for h in harness_dicts if h.get("stalled")),
+        "max_turns": sum(1 for h in harness_dicts if h.get("max_turns")),
     }
 
 
 MISSING = "-"
 COMPARE_COLUMNS = ("model", "task", "runs", "turns", "wall_s", "prompt", "completion",
-                   "accept", "verdict", "harness")
+                   "accept", "outcomes", "verdict", "harness")
 COMPARE_MODEL_COLUMNS = ("model", "runs", "completion", "accept", "gamed", "tokens",
                          "wall_s", "verdict", "review_s")
 
@@ -545,10 +555,39 @@ def _stat(summary, key: str):
 
 
 def _harness_cell(summary) -> str:
-    """nudges/stalled/max_turns for one side, compact."""
+    """nudges/stalled/max_turns for one side, compact. MISSING when none of
+    this side's rows carried a harness dict (bench_error rows only -- P2-2);
+    suffixed with `*` when only SOME of them did, so partial knowledge is
+    visible instead of silently reading like a clean zero."""
+    if summary is None or summary["harness_rows"] == 0:
+        return MISSING
+    cell = f"{summary['nudges']}/{summary['stalled']}/{summary['max_turns']}"
+    if summary["harness_rows"] < summary["runs"]:
+        cell += "*"
+    return cell
+
+
+def _outcomes_cell(summary) -> str:
+    """pass/fail/gamed/skipped for one side, compact (P2-3)."""
     if summary is None:
         return MISSING
-    return f"{summary['nudges']}/{summary['stalled']}/{summary['max_turns']}"
+    o = summary["outcomes"]
+    return f"{o['pass']}/{o['fail']}/{o['gamed']}/{o['skipped']}"
+
+
+def _harness_partial_footnote(agg_a: dict, agg_b: dict):
+    """`* harness data present for N of M runs`, or None when no side of any
+    key in the table has partial harness coverage. N/M are summed across
+    every summary (either file) that has SOME but not all rows carrying a
+    harness dict -- one line covering every `*` in the table rather than one
+    line per cell."""
+    partial = [s for s in list(agg_a.values()) + list(agg_b.values())
+              if 0 < s["harness_rows"] < s["runs"]]
+    if not partial:
+        return None
+    n = sum(s["harness_rows"] for s in partial)
+    m = sum(s["runs"] for s in partial)
+    return f"* harness data present for {n} of {m} runs"
 
 
 def _compare_rows(agg_a: dict, agg_b: dict) -> list:
@@ -568,6 +607,7 @@ def _compare_rows(agg_a: dict, agg_b: dict) -> list:
                                         _stat(b, "mean_completion_tokens")),
             "accept": _compare_cell(_stat(a, "acceptance_rate"),
                                     _stat(b, "acceptance_rate"), "pct"),
+            "outcomes": f"{_outcomes_cell(a)} -> {_outcomes_cell(b)}",
             "verdict": _compare_cell(_stat(a, "verdict_rate"),
                                      _stat(b, "verdict_rate"), "pct"),
             "harness": f"{_harness_cell(a)} -> {_harness_cell(b)}",
@@ -599,15 +639,19 @@ def _compare_model_rows(agg_a: dict, agg_b: dict) -> list:
 
 
 def _print_comparison(path_a: Path, rows_a: list, path_b: Path, rows_b: list) -> int:
+    agg_a = _aggregate(rows_a, _model_task_key)
+    agg_b = _aggregate(rows_b, _model_task_key)
     print(f"A = {path_a}")
     print(f"B = {path_b}")
     print("cells: A -> B (Δ); Δ = B - A; "
-          f"'{MISSING}' = no rows for that key in that file")
+          f"'{MISSING}' = no rows for that key in that file; "
+          "outcomes = pass/fail/gamed/skipped")
     print("harness: nudges/stalled/max_turns")
     print()
-    print(format_table(COMPARE_COLUMNS,
-                       _compare_rows(_aggregate(rows_a, _model_task_key),
-                                     _aggregate(rows_b, _model_task_key))))
+    print(format_table(COMPARE_COLUMNS, _compare_rows(agg_a, agg_b)))
+    footnote = _harness_partial_footnote(agg_a, agg_b)
+    if footnote:
+        print(footnote)
     print()
     print("per-model (A -> B):")
     print(format_table(COMPARE_MODEL_COLUMNS,

@@ -949,6 +949,8 @@ def test_cmd_show_markdown_renders_document(tmp_path, monkeypatch, capsys):
     # tool calls become collapsible blocks with the result in a fenced block,
     # where text is literal and therefore NOT html-escaped
     assert "<details>" in out and "</details>" in out
+    assert "- `bash` — {}" in out         # assistant tool-call bullet (P2-1)
+    assert "- `finish` — {}" in out
     assert "<summary>bash(" in out
     assert "BLOCKED: refusing <destructive> command" in out
     assert FENCE in out
@@ -1045,6 +1047,33 @@ def test_md_timeline_auto_closes_unbalanced_fence_before_next_turn():
     assert text.count("```") == 2   # the opener plus the auto-added closer
     assert "_[fence auto-closed by the exporter]_" in text
     assert text.index("_[fence auto-closed by the exporter]_") < text.index("### Turn 2")
+
+
+def test_md_timeline_assistant_tool_call_without_result_renders_args_bullet():
+    # A run that aborts mid-call (budget/sandbox error, model_error after a
+    # malformed call) never writes a matching tool_result -- the transcript
+    # ends right after the assistant event (or run_end follows directly).
+    # The bullet is the only place the command survives.
+    events = [
+        {"ts": "t1", "event": "assistant", "text": "",
+         "tool_calls": [{"name": "bash", "arguments": "{\"command\": \"ls -la\"}"}]},
+        {"ts": "t2", "event": "run_end", "status": "budget_exceeded", "turns": 1},
+    ]
+    lines = runs._md_timeline(events)
+    text = "\n".join(lines)
+    assert "- `bash` — {\"command\": \"ls -la\"}" in text
+    assert "<details>" not in text        # nothing to collapse -- no tool_result recorded
+
+
+def test_md_timeline_assistant_tool_call_null_or_missing_arguments_renders_dash():
+    events = [
+        {"event": "assistant", "text": "",
+         "tool_calls": [{"name": "bash", "arguments": None}, {"name": "finish"}]},
+    ]
+    lines = runs._md_timeline(events)
+    text = "\n".join(lines)
+    assert "- `bash` — -" in text
+    assert "- `finish` — -" in text
 
 
 def test_md_event_lines_sandbox_reset_callout_escapes_reason():
