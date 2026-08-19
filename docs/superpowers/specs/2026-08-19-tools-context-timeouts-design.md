@@ -1,7 +1,7 @@
 # 0.9 — apply_edits, context sizing & server-reported windows, louder timeouts, Windows advisory CI
 
 **Date:** 2026-08-19
-**Status:** Approved design, v3.1 (owner approved v3 for planning/execution 2026-08-19 12:37 CDT
+**Status:** Approved design, v3.2 (v3.1 + plan-time ruling on the i=1 wording) (owner approved v3 for planning/execution 2026-08-19 12:37 CDT
 with three amendments, folded in here: §4.2 DockerError scope covers `grep` too; §1.4 cap scope;
 §1.3 extra-key policy). v2 addressed the owner's conditional-approval review; v3 folded in a
 three-lens red-team of v2 against the code.
@@ -66,7 +66,7 @@ replacements applied to ONE file.
 |---|---|
 | `edits` missing / not a list / empty / > 100 / an item not an object / `old`/`new` missing or not strings / input over the §1.4 cap | registry `bad_args` (§1.3/§1.4): `ERROR: bad arguments for apply_edits: <validation message>` |
 | edit *i* has empty `old` | `ERROR: edit i of N: old text is empty; no edits applied` |
-| edit *i*'s `old` occurs 0 times | `ERROR: edit i of N: old text occurs 0 times in <path>; it must occur exactly once (after edits 1..i-1 are applied); no edits applied` |
+| edit *i*'s `old` occurs 0 times | `ERROR: edit i of N: old text occurs 0 times in <path>; it must occur exactly once (after edits 1..i-1 are applied); no edits applied` — the parenthetical is present only for i ≥ 2 (for the first edit: `…it must occur exactly once; no edits applied`) |
 | edit *i*'s `old` occurs k>1 times | `ERROR: edit i of N: old text occurs k times in <path>; it must occur exactly once. Include more surrounding context to make it unique; no edits applied` |
 | result over the write cap | `ERROR: result is <n> bytes, over the <MAX_WRITE_BYTES>-byte write limit; nothing was written` (§1.5, both backends, all four in-place tools) |
 | file unreadable / not UTF-8 / oversized read / escapes the worktree / symlink / non-regular target | **each backend's existing `_transform_file`/`_read_raw`/path wording, unchanged and deliberately NOT unified here** (host: `ERROR: cannot read '<path>': …`, `ERROR: <path> is not valid UTF-8 text; apply_edits only works on text files`; docker: `ERROR: '<path>' exceeds 5242880 bytes; refusing to read`, `ERROR: '<path>' is not valid UTF-8; refusing to edit`, …). Wording parity for these is issue #41. |

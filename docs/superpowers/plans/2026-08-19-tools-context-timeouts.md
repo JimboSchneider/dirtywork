@@ -629,7 +629,7 @@ git commit -m "feat(registry): nested parameter schemas, recursive validation an
   - `Sandbox.apply_edits(path: str, edits: list) -> str` on the Protocol, `HostSandbox` and `DockerSandbox`
   - `builtin_tools.MAX_APPLY_EDITS = 100`, `builtin_tools.MAX_APPLY_EDITS_INPUT_BYTES = 2 * 1024 * 1024`, `builtin_tools.APPLY_EDITS_SPEC`
 - Decision (recorded, spec is silent): both new constants live in `builtin_tools.py` next to `TOOL_OUTPUT_CAP`/`BASH_OUTPUT_CAP`, not in `tools.py`. They are wire/registry caps (`maxItems` and `Caps.max_input_bytes`), not filesystem limits, and `tools.py` never reads them — `MAX_APPLY_EDITS` is enforced entirely by the schema's `maxItems`, which Task 1's validator already honours.
-- Decision (spec-exact, looks odd on purpose): the 0-match message renders `(after edits 1..0 are applied)` for the first edit. §1.2 mandates the literal `1..i-1`; do not "fix" it.
+- Controller ruling (spec v3.2): the 0-match message carries the parenthetical `(after edits 1..i-1 are applied)` ONLY for i ≥ 2; for the first edit it is omitted (`…it must occur exactly once; no edits applied`) — `1..0` is not a range anyone should read.
 
 - [ ] **Step 1: Write the failing host tool tests**
 
@@ -765,10 +765,13 @@ def _apply_edits_once(path: str, edits: list):
                               f"no edits applied")
             count = new_text.count(old)
             if count == 0:
+                # The "after edits 1..i-1" qualifier only makes sense from the
+                # second edit on (spec §1.2, v3.2 ruling).
+                applied = (f" (after edits 1..{index - 1} are applied)"
+                           if index > 1 else "")
                 return None, (
                     f"ERROR: edit {index} of {total}: old text occurs 0 times in {path}; "
-                    f"it must occur exactly once (after edits 1..{index - 1} are "
-                    f"applied); no edits applied"
+                    f"it must occur exactly once{applied}; no edits applied"
                 )
             if count > 1:
                 return None, (
