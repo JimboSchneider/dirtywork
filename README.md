@@ -169,8 +169,10 @@ stdout JSON and exit codes: [docs/machine-contract.md](https://github.com/JimboS
    `edit_file`/`apply_edits`/`write_file`/`insert_*` result
    echoes a capped unified diff of what actually changed, so a replace that
    silently deleted a line is visible to the worker in the same turn.
-   Context is budgeted per model (oldest tool results get
-   trimmed first); three consecutive tool failures of one kind (malformed
+   Context is budgeted per model — dirtywork asks the server what window it
+   actually loaded and reports both the value and its source, and the payload's
+   `trimmed_turns` says on how many turns the oldest tool results had to be
+   dropped to fit. Three consecutive tool failures of one kind (malformed
    call, malformed arguments, unknown tool, bad arguments, empty reply) or
    six in total abort the run. The model ends a run by calling the
    `finish(summary=...)` tool (a plain reply with no tool call also ends it);

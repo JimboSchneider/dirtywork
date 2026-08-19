@@ -183,6 +183,7 @@ run-level fields that are known even when the agent loop never started).
 `base_commit`, `resumed_from`, `finalize_error`, `watchdog_violation`,
 `watchdog_violation_kind`, `stuck_on`, `files_changed`,
 `files_changed_truncated`, `last_tool_result`, `last_assistant_text`, `verify`,
+`trimmed_turns`, `timeouts`, `context_window_source`,
 and `export_status` on the exception-recovery path.
 Per this project's compatibility rule the stdout JSON may only gain fields,
 never lose or rename `status`, `worktree`, `branch`, `transcript`, `turns`,

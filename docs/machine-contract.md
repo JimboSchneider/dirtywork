@@ -25,7 +25,7 @@ dirtywork run --repo <path> "<task>"
     [--max-worktree-mb 2048]
     [--max-worktree-files 200000]
     [--sandbox docker|none]           # default: docker
-    [--image ghcr.io/jimboschneider/dirtywork-worker:0.8]  # docker mode only
+    [--image ghcr.io/jimboschneider/dirtywork-worker:0.9]  # docker mode only
     [--allow-network]                 # docker mode only; default --network none
     [--memory 4g]                     # docker mode only
     [--cpus 2]                        # docker mode only
@@ -59,19 +59,19 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   the same worktree.
 
 - `--image REF` (docker mode) — the worker image, default
-  `ghcr.io/jimboschneider/dirtywork-worker:0.8`. The image is the worker's
+  `ghcr.io/jimboschneider/dirtywork-worker:0.9`. The image is the worker's
   whole toolchain: with `--network none` and no host mounts, nothing can be
   installed during a run. To add a tool, derive an image once:
 
   ```Dockerfile
-  FROM ghcr.io/jimboschneider/dirtywork-worker:0.8
+  FROM ghcr.io/jimboschneider/dirtywork-worker:0.9
   USER root
   RUN apt-get update && apt-get install -y --no-install-recommends <packages> \
       && rm -rf /var/lib/apt/lists/*
   USER worker
   ```
 
-  then `docker build -t my-worker:0.8 .` and `--image my-worker:0.8`. A custom
+  then `docker build -t my-worker:0.9 .` and `--image my-worker:0.9`. A custom
   `--image` is never digest-pinned — `PINNED_DIGEST` protects the maintained
   default image only.
 
@@ -189,16 +189,24 @@ printed to stdout (nothing else goes to stdout):
     "output_tail": "exit code: 0\n12 passing",
     "rounds": 1,
     "passed": true
-  }
+  },
+  "trimmed_turns": 0,
+  "timeouts": 0,
+  "context_window_source": "provider:openai:server"
 }
 ```
 
-The last six keys are 0.8 additions (`stuck_on`, `files_changed`,
+Six of those keys are 0.8 additions (`stuck_on`, `files_changed`,
 `files_changed_truncated`, `last_tool_result`, `last_assistant_text`,
-`verify`). Every one of them is present on every payload — `null` when it
-does not apply, `[]`/`false` for the list and its flag — including the two
-paths where `runner.run()` never returns (see below), where they carry those
-same null/empty defaults rather than being omitted.
+`verify`) and the last three are 0.9's (`trimmed_turns`, `timeouts`,
+`context_window_source`). Every one of them is present on every payload —
+`null` when it does not apply, `[]`/`false` for the list and its flag, `0` for
+the two counters — including the two paths where `runner.run()` never returns
+(see below), where they carry those same defaults rather than being omitted.
+`trimmed_turns` is how many turns had to drop tool results to fit the context
+budget, `timeouts` how many `bash` calls never finished, and
+`context_window_source` which precedence step produced `context_window`
+(`flag` | `env` | `provider:<name>:server` | `provider:<name>` | `default`).
 
 `status` is one of: `completed`, `max_turns`, `timeout`, `stalled`, `stuck`,
 `verify_failed`, `context_exhausted`, `model_error`, `interrupted`,
@@ -217,10 +225,11 @@ the slug of the run this one continued, or `null` if this was a fresh run.
 added on the normal end-of-run path — i.e. whenever `runner.run()` returns a
 result, `completed` or not — normally `null`; see `run_end` below for what
 each means. `stuck_on`, `files_changed`, `files_changed_truncated`,
-`last_tool_result`, `last_assistant_text` and `verify` are present on
-**every** payload (`null`/`[]`/`false` when they do not apply) — including
+`last_tool_result`, `last_assistant_text`, `verify`, `trimmed_turns`,
+`timeouts` and `context_window_source` are present on
+**every** payload (`null`/`[]`/`false`/`0` when they do not apply) — including
 the two paths below where `runner.run()` never returns, where they carry
-those same defaults rather than being omitted. The last four of these six
+those same defaults rather than being omitted. Four of those 0.8 keys
 are there so a run that ends with an empty `final_message` is still
 triageable without opening the transcript: what it changed, what it last ran
 and what it last said. On a `completed` run they are just as useful — "the
@@ -230,7 +239,9 @@ The two
 paths where `runner.run()` never returns (sandbox setup fails before it
 starts, or an exception escapes the loop and is caught in `main()`) report
 `base_commit` and `resumed_from`, the six 0.8 evidence keys above (as their
-null/empty defaults), plus `export_status` too if a docker `finalize()` ran
+null/empty defaults) **and** the three 0.9 contract keys — `trimmed_turns` and
+`timeouts` as `0`, `context_window_source` as the value preflight actually
+resolved — plus `export_status` too if a docker `finalize()` ran
 during that exception recovery — `finalize_error`, `watchdog_violation` and
 `watchdog_violation_kind` are not present on these two paths, since they
 never got far enough to know.
