@@ -30,15 +30,15 @@ macOS (Windows unsupported — see below).
 
 ## Documentation
 
-- **[Operating guide](docs/operating.md)** — running a task, resuming,
+- **[Operating guide](https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md)** — running a task, resuming,
   reviewing, the `runs` subcommands, benchmarking, troubleshooting.
-- **[Machine contract](docs/machine-contract.md)** — every flag, the stdout
+- **[Machine contract](https://github.com/JimboSchneider/dirtywork/blob/main/docs/machine-contract.md)** — every flag, the stdout
   JSON schema, exit codes, transcript events.
-- **[Security](docs/security.md)** — the Docker containment model, known
+- **[Security](https://github.com/JimboSchneider/dirtywork/blob/main/docs/security.md)** — the Docker containment model, known
   exposures, and `--sandbox none`'s host-mode caveats.
-- **[Transcript schema](docs/transcript-schema.md)** — the full
+- **[Transcript schema](https://github.com/JimboSchneider/dirtywork/blob/main/docs/transcript-schema.md)** — the full
   field-by-field JSONL/`run.json` reference.
-- **[Worker image](docker/README.md)** — building, publishing, and
+- **[Worker image](https://github.com/JimboSchneider/dirtywork/blob/main/docker/README.md)** — building, publishing, and
   deriving the sandbox's Docker image.
 
 ## Security & trust
@@ -52,7 +52,7 @@ process-count/per-file-size limits, and no host path mounted in except the
 parent repository's read-only git object store.
 
 Full model, known exposures and the host-mode caveats:
-[docs/security.md](docs/security.md).
+[docs/security.md](https://github.com/JimboSchneider/dirtywork/blob/main/docs/security.md).
 
 ## Platform support
 
@@ -60,7 +60,7 @@ Full model, known exposures and the host-mode caveats:
 |---|---|---|
 | Developed & benchmarked | macOS on Apple Silicon (M-series, unified memory) with LM Studio | all worker/bench numbers and model-sizing guidance in `docs/superpowers/bench/` were measured here |
 | CI-tested | Linux x86_64 (Ubuntu, Python 3.9 + 3.13) and macOS | unit suite on every push; the Docker sandbox live tests run on Linux in CI |
-| Unsupported | Windows | until a Windows integration suite passes (see the note in [Security & trust](docs/security.md#security--trust)) |
+| Unsupported | Windows | until a Windows integration suite passes (see the note in [Security & trust](https://github.com/JimboSchneider/dirtywork/blob/main/docs/security.md#security--trust)) |
 
 Other OpenAI-compatible servers (Ollama, vLLM, llama.cpp) should work via
 `--base-url`/`--provider`; only LM Studio and the Anthropic API adapter
@@ -137,8 +137,8 @@ clone explicitly when testing unreleased changes.
   comes back to the worker as a fix round before the run ends.
 
 Everything else — resuming, the `runs` subcommands, benchmarking,
-troubleshooting: [docs/operating.md](docs/operating.md); every flag, the
-stdout JSON and exit codes: [docs/machine-contract.md](docs/machine-contract.md).
+troubleshooting: [docs/operating.md](https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md); every flag, the
+stdout JSON and exit codes: [docs/machine-contract.md](https://github.com/JimboSchneider/dirtywork/blob/main/docs/machine-contract.md).
 
 ## How a run works
 
@@ -198,7 +198,7 @@ scoreboard, and a release gate that runs on real Docker. The postmortems:
 [building localagent](https://dirtywork.run/building-localagent.html),
 [the tool renamed itself](https://dirtywork.run/the-tool-renamed-itself.html),
 and the process record for the sandbox work in
-[`docs/superpowers/bench/`](docs/superpowers/bench/).
+[`docs/superpowers/bench/`](https://github.com/JimboSchneider/dirtywork/tree/main/docs/superpowers/bench/).
 
 In August 2026 the project was renamed **dirtywork** — same tool, a name that says what it does.
 
