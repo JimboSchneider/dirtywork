@@ -32,6 +32,28 @@ Day-to-day usage once dirtywork is installed: running a task, reviewing and resu
 - **All flags, stdout JSON, exit codes, transcript events:** see
   [Machine contract](machine-contract.md#machine-contract).
 
+#### Editing files
+
+The worker changes files only through tools — `write_file`, `edit_file`,
+`apply_edits`, `insert_before`, `insert_after` — never through `bash`. When a
+brief lists several exact replacements in one file, say so and expect one
+`apply_edits` call rather than a run of `edit_file` calls: the edits are applied
+**in order on the running text** (edit 3 may depend on what edit 1 produced),
+each `old` must match exactly once at its turn, and the whole batch is
+all-or-nothing before the write — the first failure writes nothing and the
+result names it. That is one turn instead of five, and one prompt-cache hit
+instead of five, which is most of the difference on a small local model.
+
+> **In-place edits are atomic *before* the write, not *through* it.** Every
+> refusal — validation, a non-matching `old`, an unreadable or non-UTF-8 file,
+> a result over the 5 MB write limit — happens before the file is opened, so
+> the file is untouched. Once the write starts, an I/O error or a kill can
+> still leave the file truncated; that is true of `edit_file`, `insert_*` and
+> `write_file` too and is unchanged in 0.9. The worktree is a scratch branch,
+> so the recovery is `git -C <worktree> checkout -- <path>`. A temp-file/rename
+> primitive was considered and deferred: done naively it re-opens the
+> final-component symlink race that the current `O_NOFOLLOW` write closes.
+
 #### Verifying a run
 
     dirtywork run --repo ~/repos/someproject --verify 'npm test' "Add a unit test for X"

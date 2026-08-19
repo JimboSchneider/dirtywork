@@ -1382,3 +1382,59 @@ def test_insert_before_refuses_a_repeated_anchor(started):
     out = sb.insert_before("dup.txt", "aa", "x")
     assert out.startswith("ERROR: anchor occurs 2 times in dup.txt")
     assert not [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+
+
+def test_apply_edits_reads_then_writes(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], [_ok(b"one\ntwo\n"), _ok()])
+    out = sb.apply_edits("batch.txt", [{"old": "one", "new": "1"},
+                                       {"old": "two", "new": "2"}])
+    assert out.startswith("Applied 2 edits to batch.txt: ")
+    heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
+    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    assert len(heads) == 1 and len(writes) == 1        # one read, one write, per batch
+    assert writes[0][2] == b"1\n2\n"                    # the batch's final text
+
+
+def test_apply_edits_rollback_never_writes(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok(b"one\ntwo\n"))
+    out = sb.apply_edits("batch.txt", [{"old": "one", "new": "1"},
+                                       {"old": "nope", "new": "x"}])
+    # Byte-identical to the host's text (spec §1.8 parity), and no write exec.
+    assert out == ("ERROR: edit 2 of 2: old text occurs 0 times in batch.txt; it must "
+                   "occur exactly once (after edits 1..1 are applied); no edits applied")
+    assert not [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+
+
+def test_apply_edits_matches_the_host_text_for_success_and_every_refusal(started, tmp_path):
+    """Spec §1.8: host/docker parity scoped to matching, success and rollback."""
+    from dirtywork import tools
+    sb, fake, run_dir = started
+    wt = tmp_path / "parity"
+    wt.mkdir()
+    cases = [
+        ("one\ntwo\n", [{"old": "one", "new": "1"}, {"old": "two", "new": "2"}]),
+        ("one\ntwo\n", [{"old": "one", "new": "1"}, {"old": "nope", "new": "x"}]),
+        ("one\ntwo\n", [{"old": "", "new": "x"}]),
+        ("aa\naa\n", [{"old": "aa", "new": "b"}]),
+    ]
+    for content, edits in cases:
+        (wt / "f.txt").write_text(content)
+        host_out = tools.apply_edits(wt, "f.txt", edits)
+        fake.script(["exec"], [_ok(content.encode("utf-8")), _ok()])
+        docker_out = sb.apply_edits("f.txt", edits)
+        assert docker_out == host_out
+
+
+def test_transform_result_over_the_write_cap_is_refused(started):
+    from dirtywork.tools import MAX_WRITE_BYTES
+    sb, fake, run_dir = started
+    huge = "x" * (MAX_WRITE_BYTES + 1)
+    expected = (f"ERROR: result is {MAX_WRITE_BYTES + 2} bytes, over the "
+                f"{MAX_WRITE_BYTES}-byte write limit; nothing was written")
+    fake.script(["exec"], _ok(b"seed\n"))
+    assert sb.edit_file("grow.txt", "seed", huge) == expected
+    fake.script(["exec"], _ok(b"seed\n"))
+    assert sb.apply_edits("grow.txt", [{"old": "seed", "new": huge}]) == expected
+    assert not [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]

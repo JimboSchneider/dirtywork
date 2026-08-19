@@ -106,6 +106,44 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   a container's commits could not reach the host anyway. `dirtywork resume`
   inherits the setting from the run it continues.
 
+**Tools:** the worker is advertised exactly ten tools, in this order. They are
+not configurable; a run's tool surface is the same in host and docker mode.
+
+- `read_file(path, offset=0, limit=400)` — numbered lines; files over ~5 MB and
+  non-regular files are refused.
+- `write_file(path, content)` — create or overwrite; parent directories are
+  created. The result echoes a capped unified diff (a new file reports its byte
+  and line count instead).
+- `edit_file(path, old_string, new_string)` — one exact replacement;
+  `old_string` must occur exactly once.
+- `apply_edits(path, edits)` — several exact replacements to ONE file in one
+  call, applied **in order on the running text** (edit *i* sees the text after
+  edits 1…*i−1*), each `old` matching exactly once at its turn. All-or-nothing
+  before the write: the first failure writes nothing and the result names it
+  (`ERROR: edit i of N: …`). At most 100 edits and 2 MiB of argument text per
+  call. This is the tool for a brief's numbered edit list.
+- `insert_before(path, anchor, text)` / `insert_after(path, anchor, text)` —
+  insert whole line(s) around the line holding a unique `anchor`, never
+  modifying the anchor's own line.
+- `list_dir(path=".")` — entries, directories suffixed `/`.
+- `grep(pattern, path=".", glob=None)` — regex search (ripgrep when the image
+  has it, `grep -rn` otherwise).
+- `bash(command, timeout=120)` — a shell command in the worktree; 600 s
+  maximum. A command that hits its timeout returns
+  `ERROR: command timed out after <n>s — it did not finish and its result is
+  unknown. …` with **no partial output**, the `tool_result` event carries
+  `timed_out: true`, and the run's `timeouts` counter rises.
+- `finish(summary)` — ends the run.
+
+The four in-place tools (`edit_file`, `apply_edits`, `insert_before`,
+`insert_after`) share one read→transform→write path per backend, so they refuse
+an oversized result with the same string
+(`ERROR: result is <n> bytes, over the <limit>-byte write limit; nothing was
+written`) and produce byte-identical success text on the host and in the
+container. "Nothing was written" covers every failure **before** the write
+begins; a failure *during* the write (I/O error, kill) can still leave a
+truncated file — see `docs/operating.md`.
+
 **stdout:** on any run that gets past preflight, exactly one JSON object is
 printed to stdout (nothing else goes to stdout):
 

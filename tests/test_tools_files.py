@@ -414,3 +414,80 @@ def test_insert_keeps_the_edit_file_guardrails(wt: Path):
     (wt / "bin3.dat").write_bytes(b"\xff\xfe\x00\x01")
     assert tools.edit_file(wt, "bin3.dat", "x", "y") == (
         "ERROR: bin3.dat is not valid UTF-8 text; edit_file only works on text files")
+
+
+# --- spec §1.1/§1.2/§1.5: apply_edits and the shared write cap.
+
+def test_apply_edits_applies_in_order(wt: Path):
+    (wt / "seq.txt").write_text("alpha\nbeta\n")
+    out = tools.apply_edits(wt, "seq.txt", [
+        {"old": "alpha", "new": "gamma"},
+        {"old": "gamma\nbeta", "new": "gamma\ndelta"},   # only matches after edit 1
+    ])
+    assert out.startswith("Applied 2 edits to seq.txt: ")
+    assert (wt / "seq.txt").read_text() == "gamma\ndelta\n"
+
+
+def test_apply_edits_singular_verb_for_one_edit(wt: Path):
+    out = tools.apply_edits(wt, "src/app.py", [{"old": "return 42", "new": "return 43"}])
+    assert out.startswith("Applied 1 edit to src/app.py: ")
+    assert "return 43" in (wt / "src" / "app.py").read_text()
+
+
+def test_apply_edits_rolls_back_when_a_later_edit_does_not_match(wt: Path):
+    before = (wt / "src" / "app.py").read_text()
+    out = tools.apply_edits(wt, "src/app.py", [
+        {"old": "return 42", "new": "return 43"},
+        {"old": "not here", "new": "x"},
+    ])
+    assert out == ("ERROR: edit 2 of 2: old text occurs 0 times in src/app.py; it must "
+                   "occur exactly once (after edits 1..1 are applied); no edits applied")
+    assert (wt / "src" / "app.py").read_text() == before   # byte-identical: nothing written
+
+
+def test_apply_edits_rejects_an_empty_old(wt: Path):
+    before = (wt / "src" / "app.py").read_text()
+    out = tools.apply_edits(wt, "src/app.py", [{"old": "", "new": "x"}])
+    assert out == "ERROR: edit 1 of 1: old text is empty; no edits applied"
+    assert (wt / "src" / "app.py").read_text() == before
+
+
+def test_apply_edits_rejects_a_repeated_old(wt: Path):
+    (wt / "dup.txt").write_text("aa\naa\n")
+    out = tools.apply_edits(wt, "dup.txt", [{"old": "aa", "new": "bb"}])
+    assert out == ("ERROR: edit 1 of 1: old text occurs 2 times in dup.txt; it must occur "
+                   "exactly once. Include more surrounding context to make it unique; "
+                   "no edits applied")
+    assert (wt / "dup.txt").read_text() == "aa\naa\n"
+
+
+def test_apply_edits_result_carries_the_unified_diff(wt: Path):
+    out = tools.apply_edits(wt, "src/app.py", [{"old": "return 42", "new": "return 43"}])
+    lines = out.splitlines()
+    assert lines[0] == "Applied 1 edit to src/app.py: +1 -1 (removed 1 non-blank line)"
+    assert "--- a/src/app.py" in out and "+++ b/src/app.py" in out
+    assert "-    return 42" in out and "+    return 43" in out
+
+
+def test_apply_edits_result_over_the_write_cap_is_refused(wt: Path):
+    # The file holds "seed\n"; replacing "seed" leaves the trailing newline, so
+    # the result is exactly MAX_WRITE_BYTES + 2 bytes.
+    (wt / "grow.txt").write_text("seed\n")
+    huge = "x" * (tools.MAX_WRITE_BYTES + 1)
+    expected = tools.MAX_WRITE_BYTES + 2
+    out = tools.apply_edits(wt, "grow.txt", [{"old": "seed", "new": huge}])
+    assert out == (f"ERROR: result is {expected} bytes, over the "
+                   f"{tools.MAX_WRITE_BYTES}-byte write limit; nothing was written")
+    assert (wt / "grow.txt").read_text() == "seed\n"
+
+
+def test_edit_file_result_over_the_write_cap_is_refused(wt: Path):
+    # Spec §1.5: the cap lives in the SHARED transform path, so edit_file gets
+    # the identical refusal -- it had none at all before 0.9.
+    (wt / "grow.txt").write_text("seed\n")
+    huge = "x" * (tools.MAX_WRITE_BYTES + 1)
+    expected = tools.MAX_WRITE_BYTES + 2
+    out = tools.edit_file(wt, "grow.txt", "seed", huge)
+    assert out == (f"ERROR: result is {expected} bytes, over the "
+                   f"{tools.MAX_WRITE_BYTES}-byte write limit; nothing was written")
+    assert (wt / "grow.txt").read_text() == "seed\n"

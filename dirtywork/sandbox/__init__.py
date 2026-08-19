@@ -48,7 +48,7 @@ class Sandbox(Protocol):
     DockerSandbox (dirtywork.sandbox.docker) both implement it; ToolExecutor
     never knows which one it holds.
 
-    Tool methods (read_file/write_file/edit_file/insert_before/insert_after/list_dir/grep/bash) may raise BudgetExceeded (worktree over budget) or SandboxError (backend failure); the runner catches both."""
+    Tool methods (read_file/write_file/edit_file/apply_edits/insert_before/insert_after/list_dir/grep/bash) may raise BudgetExceeded (worktree over budget) or SandboxError (backend failure); the runner catches both."""
 
     def start(self, worktree: Path, repo: Path, slug: str, base_commit: str, *, branch: str | None = None, seed_from_worktree: bool = False) -> None: ...
 
@@ -57,6 +57,8 @@ class Sandbox(Protocol):
     def write_file(self, path: str, content: str) -> str: ...
 
     def edit_file(self, path: str, old_string: str, new_string: str) -> str: ...
+
+    def apply_edits(self, path: str, edits: list) -> str: ...
 
     def insert_before(self, path: str, anchor: str, text: str) -> str: ...
 

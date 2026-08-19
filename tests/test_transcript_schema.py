@@ -53,10 +53,10 @@ def test_doc_documents_schema_version_v1_v2_statuses_and_nudge_kinds():
         assert field in tokens, f"run_end field '{field}' is not documented"
 
 
-def test_doc_documents_the_finish_tool_and_the_nine_tools():
+def test_doc_documents_the_finish_tool_and_the_ten_tools():
     tokens = _doc_tokens()
-    for name in ("read_file", "write_file", "edit_file", "insert_before", "insert_after",
-                 "list_dir", "grep", "bash", "finish"):
+    for name in ("read_file", "write_file", "edit_file", "apply_edits", "insert_before",
+                 "insert_after", "list_dir", "grep", "bash", "finish"):
         assert name in tokens, f"tool '{name}' is not documented"
 
 

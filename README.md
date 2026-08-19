@@ -44,9 +44,9 @@ macOS (Windows unsupported — see below).
 ## Security & trust
 
 **Docker is the default sandbox as of 0.4 — a breaking change from 0.2.**
-Every tool call (`read_file`/`write_file`/`edit_file`/`insert_before`/
-`insert_after`/`list_dir`/`grep`/`bash`) runs inside a locked-down
-container: `--network none` by default,
+Every tool call (`read_file`/`write_file`/`edit_file`/`apply_edits`/
+`insert_before`/`insert_after`/`list_dir`/`grep`/`bash`) runs inside a
+locked-down container: `--network none` by default,
 `--read-only` root filesystem, `--cap-drop ALL`, kernel-enforced memory/CPU/
 process-count/per-file-size limits, and no host path mounted in except the
 parent repository's read-only git object store.
@@ -153,12 +153,17 @@ stdout JSON and exit codes: [docs/machine-contract.md](https://github.com/JimboS
    `.git/info/exclude` automatically. If the repo has a `CLAUDE.md` or
    `AGENTS.md` at its base commit, its content is injected into the
    worker's system prompt so it inherits your conventions.
-3. **The loop** — the model gets nine tools (`read_file`, `write_file`,
-   `edit_file`, `insert_before`, `insert_after`, `list_dir`, `grep`, `bash`,
-   `finish`) via OpenAI function-calling. `insert_before`/`insert_after` add
+3. **The loop** — the model gets ten tools (`read_file`, `write_file`,
+   `edit_file`, `apply_edits`, `insert_before`, `insert_after`, `list_dir`,
+   `grep`, `bash`, `finish`) via OpenAI function-calling.
+   `insert_before`/`insert_after` add
    whole lines around a unique anchor without touching the anchor's own line
    — the primitive for "add a line here", which `edit_file` could only express
-   as a replace. Every successful `edit_file`/`write_file`/`insert_*` result
+   as a replace. `apply_edits` takes a brief's whole numbered list of exact
+   replacements to one file in a single call, applied in order, all-or-nothing:
+   if any `old` does not match exactly once at its turn, nothing is written and
+   the result names the first failure. Every successful
+   `edit_file`/`apply_edits`/`write_file`/`insert_*` result
    echoes a capped unified diff of what actually changed, so a replace that
    silently deleted a line is visible to the worker in the same turn.
    Context is budgeted per model (oldest tool results get

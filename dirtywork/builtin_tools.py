@@ -1,4 +1,4 @@
-"""The nine tools dirtywork ships, declared as ToolSpecs.
+"""The ten tools dirtywork ships, declared as ToolSpecs.
 
 Each `fn` receives the Sandbox as its first argument and forwards to the
 matching Sandbox method, so a tool never knows whether it is running on the
@@ -18,6 +18,14 @@ from .tools import MAX_BASH_CHARS, MAX_RESULT_CHARS
 # and change shipped output, so it sits one note-length above it.
 TOOL_OUTPUT_CAP = MAX_RESULT_CHARS + 512
 BASH_OUTPUT_CAP = MAX_BASH_CHARS + 512
+# Spec §1.1/§1.4: apply_edits' own limits. MAX_APPLY_EDITS is enforced entirely
+# by the wire schema's `maxItems` -- the registry's recursive validator honours
+# it, so there is no second runtime check to keep in step. The input cap bounds
+# `path` plus every `old`/`new` the model sent (the FILE is separately capped at
+# tools.MAX_READ_BYTES, 5 MB); it is the only Caps.max_input_bytes any built-in
+# sets, so no other tool's behaviour changes.
+MAX_APPLY_EDITS = 100
+MAX_APPLY_EDITS_INPUT_BYTES = 2 * 1024 * 1024
 
 
 def _read_file(sandbox, path, offset=0, limit=400):
@@ -30,6 +38,10 @@ def _write_file(sandbox, path, content):
 
 def _edit_file(sandbox, path, old_string, new_string):
     return sandbox.edit_file(path, old_string, new_string)
+
+
+def _apply_edits(sandbox, path, edits):
+    return sandbox.apply_edits(path, edits)
 
 
 def _insert_before(sandbox, path, anchor, text):
@@ -98,6 +110,39 @@ EDIT_FILE_SPEC = ToolSpec(
     required=("path", "old_string", "new_string"),
     fn=_edit_file,
     caps=Caps(fs="write", max_output_chars=TOOL_OUTPUT_CAP, transcript="preview"),
+)
+
+APPLY_EDITS_SPEC = ToolSpec(
+    name="apply_edits",
+    description="Apply several exact old→new replacements to one file in one "
+                "call, in order: every `old` must occur exactly once (in the "
+                "file as it stands after the edits before it); if any does "
+                "not, nothing is written and the result names the first "
+                "failure. Prefer this over a run of edit_file calls when a "
+                "brief lists several edits to the same file.",
+    params={
+        "path": ParamSpec(type="string"),
+        "edits": ParamSpec(
+            type="array",
+            description="Replacements in order; each old must occur exactly once in "
+                        "the file as it stands after the previous edits.",
+            schema={
+                "type": "array",
+                "minItems": 1,
+                "maxItems": MAX_APPLY_EDITS,
+                "items": {
+                    "type": "object",
+                    "properties": {"old": {"type": "string"},
+                                   "new": {"type": "string"}},
+                    "required": ["old", "new"],
+                    "additionalProperties": False,
+                },
+            }),
+    },
+    required=("path", "edits"),
+    fn=_apply_edits,
+    caps=Caps(fs="write", max_input_bytes=MAX_APPLY_EDITS_INPUT_BYTES,
+              max_output_chars=TOOL_OUTPUT_CAP, transcript="preview"),
 )
 
 INSERT_BEFORE_SPEC = ToolSpec(
@@ -194,8 +239,9 @@ FINISH_SPEC = ToolSpec(
 
 # Registration order is the order the tools are advertised to the model and the
 # order the unknown-tool error lists them in. Do not reorder.
-BUILTIN_SPECS = (READ_FILE_SPEC, WRITE_FILE_SPEC, EDIT_FILE_SPEC, INSERT_BEFORE_SPEC,
-                 INSERT_AFTER_SPEC, LIST_DIR_SPEC, GREP_SPEC, BASH_SPEC, FINISH_SPEC)
+BUILTIN_SPECS = (READ_FILE_SPEC, WRITE_FILE_SPEC, EDIT_FILE_SPEC, APPLY_EDITS_SPEC,
+                 INSERT_BEFORE_SPEC, INSERT_AFTER_SPEC, LIST_DIR_SPEC, GREP_SPEC,
+                 BASH_SPEC, FINISH_SPEC)
 
 
 def default_registry(transcript=None) -> ToolRegistry:

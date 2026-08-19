@@ -30,6 +30,10 @@ class FakeSandbox:
         self.calls.append(("edit_file", path, old_string, new_string))
         return f"edited:{path}"
 
+    def apply_edits(self, path, edits):
+        self.calls.append(("apply_edits", path, edits))
+        return f"applied:{path}:{len(edits)}"
+
     def insert_before(self, path, anchor, text):
         self.calls.append(("insert_before", path, anchor, text))
         return f"inserted-before:{path}"
@@ -73,11 +77,28 @@ def test_schemas_match_the_frozen_wire_fixture():
 def test_schemas_shape():
     schemas = default_registry().schemas()
     names = {s["function"]["name"] for s in schemas}
-    assert names == {"read_file", "write_file", "edit_file", "insert_before", "insert_after",
-                     "list_dir", "grep", "bash", "finish"}
+    assert names == {"read_file", "write_file", "edit_file", "apply_edits", "insert_before",
+                     "insert_after", "list_dir", "grep", "bash", "finish"}
     for s in schemas:
         assert s["type"] == "function"
         assert "parameters" in s["function"]
+
+
+def test_apply_edits_dispatches_and_declares_its_caps():
+    sandbox = FakeSandbox()
+    registry = default_registry()
+    result = registry.execute(
+        "apply_edits", {"path": "a.py", "edits": [{"old": "x", "new": "y"}]},
+        sandbox=sandbox, deadline=None)
+    assert result.kind == "ok" and result.text == "applied:a.py:1"
+    assert sandbox.calls == [("apply_edits", "a.py", [{"old": "x", "new": "y"}])]
+    caps = registry.spec("apply_edits").caps
+    assert caps.fs == "write"
+    assert caps.max_input_bytes == 2 * 1024 * 1024
+    assert caps.transcript == "preview"
+    # order is significant and documented in BUILTIN_SPECS
+    names = registry.names()
+    assert names[names.index("edit_file") + 1] == "apply_edits"
 
 
 def test_bash_schema_mentions_reset_behavior():

@@ -54,6 +54,11 @@ class HostSandbox:
         self._check_budget()
         return result
 
+    def apply_edits(self, path: str, edits: list) -> str:
+        result = tools.apply_edits(self.worktree, path, edits)
+        self._check_budget()
+        return result
+
     def insert_before(self, path: str, anchor: str, text: str) -> str:
         result = tools.insert_before(self.worktree, path, anchor, text)
         self._check_budget()
