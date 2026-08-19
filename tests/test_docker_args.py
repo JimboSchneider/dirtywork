@@ -20,10 +20,10 @@ from dirtywork.sandbox.docker_args import (
 
 def test_default_image_and_pinned_digest():
     assert DEFAULT_IMAGE == "ghcr.io/jimboschneider/dirtywork-worker:0.8"
-    # Unset for 0.8.0: the :0.8 image is first published by the v0.8.0
-    # release itself, so the pin follows in 0.8.1 (docker/README.md
-    # documents how to resolve and re-pin it whenever :0.8 is re-pushed).
-    assert PINNED_DIGEST is None
+    # Pinned in 0.8.1 to the :0.8 multi-arch index digest published by the
+    # v0.8.0 release (docker/README.md documents how to re-resolve it
+    # whenever :0.8 is re-pushed).
+    assert PINNED_DIGEST == "sha256:d8ca51c169cd93b53120485cbcf3c092363587285a06b43ca97df8bd625495d8"
 
 
 def test_path_env_is_standard_unix_path():
