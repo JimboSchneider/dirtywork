@@ -179,7 +179,8 @@ def _bash_fingerprint(command, result: str) -> str:
 def parse_exit_code(result):
     """The integer after 'exit code: ' on a bash result's first line, or None
     for an ERROR:/BLOCKED: result that never produced an exit status at all.
-    The same first-line rule RepeatTracker._failed uses, read for its value."""
+    RepeatTracker.note_bash calls this to tell a passing rerun from a failing
+    one."""
     if not isinstance(result, str):
         return None
     head = result.split("\n", 1)[0]

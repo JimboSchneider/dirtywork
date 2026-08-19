@@ -1982,6 +1982,7 @@ def test_branch_from_refuses_a_still_running_prior_run_and_snapshots_nothing(
     err = capsys.readouterr().err
     assert rc == 2
     assert "still in progress" in err
+    assert "before snapshotting" in err                  # action="snapshot", not "resume"
     assert "snapshot " not in err                       # no snapshot was taken
 
     branch_log_after = subprocess.run(

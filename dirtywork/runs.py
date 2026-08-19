@@ -82,12 +82,22 @@ def _run_dir_for(slug: str) -> Path:
     return run_dir
 
 
-def _open_run(slug: str):
-    """(run_dir, run.json dict) or RunsError — the one lookup every single-run
-    subcommand uses, so 'no such run' reads identically everywhere."""
+def _existing_run_dir(slug: str) -> Path:
+    """`_run_dir_for(slug)`, but also requires the directory to exist — the
+    'no such run' RunsError every single-run subcommand raises, worded
+    identically everywhere (including `cmd_snapshot`, which can't use
+    `_open_run` below because it needs `resume.load_prior_run`'s stricter
+    validation instead of `_open_run`'s bare "is a dict")."""
     run_dir = _run_dir_for(slug)
     if not run_dir.is_dir():
         raise RunsError(f"no such run '{slug}' under {rundir.RUNS_DIR}")
+    return run_dir
+
+
+def _open_run(slug: str):
+    """(run_dir, run.json dict) or RunsError — the one lookup every single-run
+    subcommand uses, so 'no such run' reads identically everywhere."""
+    run_dir = _existing_run_dir(slug)
     try:
         data = rundir.read_run_json(run_dir)
     except (OSError, ValueError) as e:
@@ -739,15 +749,12 @@ def cmd_snapshot(args) -> int:
     validates only "is a dict"): `preflight_run_worktree` indexes
     `prior["worktree"]`/`["repo"]`/`["slug"]` directly, so a malformed
     run.json must be refused with a clean RunsError/ResumeError message
-    BEFORE that, not surfaced as a bare KeyError traceback. `_run_dir_for`
-    still does the slug-shape/containment validation `_open_run` uses."""
+    BEFORE that, not surfaced as a bare KeyError traceback. `_existing_run_dir`
+    still does the slug-shape/containment/existence validation `_open_run` uses."""
     try:
-        run_dir = _run_dir_for(args.slug)
+        run_dir = _existing_run_dir(args.slug)
     except RunsError as e:
         print(f"error: {e}", file=sys.stderr)
-        return 2
-    if not run_dir.is_dir():
-        print(f"error: no such run '{args.slug}' under {rundir.RUNS_DIR}", file=sys.stderr)
         return 2
     try:
         data = load_prior_run(run_dir)
@@ -760,7 +767,9 @@ def cmd_snapshot(args) -> int:
     except ResumeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    branch = data.get("branch") or ""
+    # load_prior_run already required "branch" to be a str (_REQUIRED_STR_KEYS);
+    # only the empty-string case still needs a check here.
+    branch = data["branch"]
     if not branch:
         print(f"error: run.json for '{args.slug}' records no branch", file=sys.stderr)
         return 2
