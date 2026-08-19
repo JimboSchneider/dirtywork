@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import time
 from pathlib import Path
 
 import pytest
@@ -258,6 +260,48 @@ def test_describe_change_truncates_a_huge_diff():
     assert len(body.splitlines()) <= tools.MAX_DIFF_LINES + 1     # + the marker line
     assert body.splitlines()[-1].startswith("[diff truncated: ")
     assert body.splitlines()[-1].endswith(" more lines]")
+
+
+def test_describe_change_header_counts_match_the_diff_body_with_popular_repeated_lines():
+    # >200 lines with a "popular" repeated line: with autojunk=False the header's
+    # SequenceMatcher pass treats the popular line as an ordinary match and reports
+    # far fewer +/- than unified_diff (which always uses the default autojunk=True)
+    # actually prints in the body. They must agree.
+    old_lines, new_lines = [], []
+    for i in range(250):
+        if i % 5 == 0:
+            old_lines.append(f"unique-old-{i}")
+            new_lines.append(f"unique-new-{i}")
+        else:
+            old_lines.append("popular")
+            new_lines.append("popular")
+    old = "\n".join(old_lines) + "\n"
+    new = "\n".join(new_lines) + "\n"
+    out = tools.describe_change("big.txt", old, new, verb="Edited")
+    head = out.splitlines()[0]
+    m = re.match(r"Edited big\.txt: \+(\d+) -(\d+)", head)
+    assert m, head
+    added, deleted = int(m.group(1)), int(m.group(2))
+    # With autojunk fixed (matching unified_diff's default), the popular
+    # repeated line is treated the same way in the header pass as in the
+    # diff body: both see it as junk and can't anchor a match around it, so
+    # the whole 250-line sequence reads as changed. Before the fix (header
+    # pinned to autojunk=False) the header undercounted this as +50 -50
+    # while unified_diff's body — always autojunk=True — printed 250/250:
+    # the two disagreed. They must not.
+    assert added == deleted == 250
+
+
+def test_describe_change_omits_the_diff_for_a_huge_file():
+    old = "\n".join(f"line {i}" for i in range(tools.DESCRIBE_DIFF_MAX_LINES + 1))
+    new = old + "\nextra"
+    new_line_count = len(new.splitlines())
+    start = time.monotonic()
+    out = tools.describe_change("huge.txt", old, new, verb="Edited")
+    elapsed = time.monotonic() - start
+    assert elapsed < 5, f"describe_change took {elapsed:.1f}s on a huge file"
+    assert out == f"Edited huge.txt: {new_line_count} lines (diff omitted: file too large)"
+    assert "\n" not in out
 
 
 def test_describe_write_new_file_keeps_the_byte_count():

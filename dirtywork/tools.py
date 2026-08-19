@@ -17,6 +17,10 @@ MAX_RESULT_CHARS = 8000
 # instead sees that in the tool result rather than at review time.
 MAX_DIFF_LINES = 40
 MAX_DIFF_CHARS = 3000
+# describe_change's SequenceMatcher/unified_diff are quadratic-ish on files
+# with popular repeated lines; above this many lines (either side) the diff
+# is omitted entirely rather than risk a multi-minute, uninterruptible call.
+DESCRIBE_DIFF_MAX_LINES = 20000
 # Refuse to load a file larger than this into memory. read_file/edit_file read
 # the whole file (offset/limit only window the result), so an unbounded read is a
 # memory-DoS; a non-regular file (FIFO/device) would also block read_text forever.
@@ -112,7 +116,7 @@ def _line_counts(old_lines: list, new_lines: list) -> tuple:
     'did I delete content I did not mean to delete', and a replace deletes
     before it inserts."""
     added = deleted = removed_non_blank = 0
-    matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
+    matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag in ("delete", "replace"):
             deleted += i2 - i1
@@ -128,6 +132,10 @@ def describe_change(path: str, old_text: str, new_text: str, *, verb: str) -> st
     the container backend produce byte-identical text for identical content."""
     old_lines = old_text.splitlines()
     new_lines = new_text.splitlines()
+    if max(len(old_lines), len(new_lines)) > DESCRIBE_DIFF_MAX_LINES:
+        # SequenceMatcher/unified_diff are omitted entirely: even the O(n)
+        # line-count pass is skipped so this stays cheap regardless of content.
+        return f"{verb} {path}: {len(new_lines)} lines (diff omitted: file too large)"
     added, deleted, removed_non_blank = _line_counts(old_lines, new_lines)
     head = f"{verb} {path}: +{added} -{deleted}"
     if removed_non_blank > 0:

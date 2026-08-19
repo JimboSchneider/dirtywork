@@ -1763,6 +1763,70 @@ def test_verify_is_null_without_the_flag_and_resume_inherits_the_command(
     assert second["verify"]["command"] == "true"      # inherited from the prior run.json
 
 
+def test_resume_after_a_non_completed_end_inherits_verify_command_rounds_and_timeout(
+        tmp_path, monkeypatch, capsys):
+    # A run that never reaches the verify step (max_turns here; also stalled/
+    # stuck/timeout/budget_exceeded) must still hand its gate on to resume:
+    # the `verify` RESULT field stays null on these paths (verify never ran),
+    # so the command/rounds/timeout must come from run.json's own
+    # verify_command/verify_rounds/verify_timeout, recorded at run START.
+    write_then_loop = [
+        {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "w1", "type": "function", "function": {"name": "write_file",
+             "arguments": json.dumps({"path": "new.txt", "content": "from run 1\n"})}}]}}],
+         "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+    ]
+    m = _install_host_harness(monkeypatch, tmp_path, write_then_loop)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+                 "--verify", "true", "--verify-rounds", "3", "--verify-timeout", "45",
+                 "add a file"])
+    assert rc == 1
+    first = json.loads(capsys.readouterr().out)
+    assert first["status"] == "max_turns"
+    assert first["verify"] is None                    # verify never ran
+    start_run_json = json.loads((Path(first["run_dir"]) / "run.json").read_text())
+    assert start_run_json["verify_command"] == "true"
+    assert start_run_json["verify_rounds"] == 3
+    assert start_run_json["verify_timeout"] == 45
+
+    patch_provider(monkeypatch, m,
+                        lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
+    assert m.main(["resume", Path(first["run_dir"]).name]) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["verify"]["command"] == "true"
+    second_run_json = json.loads((Path(second["run_dir"]) / "run.json").read_text())
+    assert second_run_json["verify_command"] == "true"
+    assert second_run_json["verify_rounds"] == 3
+    assert second_run_json["verify_timeout"] == 45
+
+
+def test_resume_explicit_verify_rounds_overrides_the_inherited_value(
+        tmp_path, monkeypatch, capsys):
+    write_then_loop = [
+        {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "w1", "type": "function", "function": {"name": "write_file",
+             "arguments": json.dumps({"path": "new.txt", "content": "from run 1\n"})}}]}}],
+         "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+    ]
+    m = _install_host_harness(monkeypatch, tmp_path, write_then_loop)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+                 "--verify", "true", "--verify-rounds", "3", "--verify-timeout", "45",
+                 "add a file"])
+    assert rc == 1
+    first = json.loads(capsys.readouterr().out)
+
+    patch_provider(monkeypatch, m,
+                        lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
+    assert m.main(["resume", Path(first["run_dir"]).name,
+                   "--verify-rounds", "0", "--verify-timeout", "30"]) == 0
+    second = json.loads(capsys.readouterr().out)
+    second_run_json = json.loads((Path(second["run_dir"]) / "run.json").read_text())
+    assert second_run_json["verify_rounds"] == 0
+    assert second_run_json["verify_timeout"] == 30
+
+
 def test_runs_snapshot_dispatches(tmp_path, monkeypatch, capsys):
     import dirtywork.__main__ as m
     from dirtywork import rundir as rundir_mod

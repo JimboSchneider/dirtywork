@@ -68,7 +68,7 @@ One per tool call executed, plus one per malformed tool-call entry discarded.
 |---|---|---|---|---|
 | `tool` | ✓ | ✓ | string | tool name — one of `read_file`, `write_file`, `edit_file`, `insert_before`, `insert_after`, `list_dir`, `grep`, `bash`, `finish` (`insert_before`/`insert_after` are v2, added in 0.8); `""` for a discarded malformed entry |
 | `args` | ✓ | ✓ | string | the raw JSON argument string, capped at 500 chars; `""` for a discarded malformed entry |
-| `result` | ✓ | ✓ | string | the tool's result, trimmed per the tool's `Caps.transcript` setting. All built-in tools declare `preview`, which caps the record at 2000 chars; the registry also supports `full` and `none`, unused by any shipped tool. Since 0.8 a successful `edit_file`/`write_file` result is `<Verb> <path>: +A -D [(removed N non-blank lines)]` followed by a unified diff (capped at 40 lines / 3000 chars, then `[diff truncated: N more lines]`); `write_file` on a new file returns `Wrote N bytes to <path> (new file, M lines)` with no diff |
+| `result` | ✓ | ✓ | string | the tool's result, trimmed per the tool's `Caps.transcript` setting. All built-in tools declare `preview`, which caps the record at 2000 chars; the registry also supports `full` and `none`, unused by any shipped tool. Since 0.8 a successful `edit_file`/`write_file` result is `<Verb> <path>: +A -D [(removed N non-blank lines)]` followed by a unified diff (capped at 40 lines / 3000 chars, then `[diff truncated: N more lines]`); `write_file` on a new file returns `Wrote N bytes to <path> (new file, M lines)` with no diff. When either side of the edit exceeds 20000 lines, the diff itself is never computed (it is quadratic-ish on files with popular repeated lines) — the result is just `<Verb> <path>: <N> lines (diff omitted: file too large)` |
 
 A `finish(summary=…)` call is an ordinary tool call: it appears in the
 `assistant` event's `tool_calls` and produces a `tool_result` whose `result` is
@@ -204,6 +204,9 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `resumed_by` | — | written onto the **prior** run's `run.json` when a resume starts |
 | `branch_from_run` | start | 0.8: the slug `--branch-from @<slug>` named, or null. The resolved branch itself is `run_start.branch_from` |
 | `feedback` | start | 0.8: `resume --feedback`/`--feedback-file` text, or null |
+| `verify_command` | start | 0.8: `--verify` as given, or null. `dirtywork resume` inherits this (and `verify_rounds`/`verify_timeout` below) when not given, so the gate survives a run that ended before verify ever ran (`max_turns`/`stalled`/`stuck`/`timeout`/`budget_exceeded`) |
+| `verify_rounds` | start | 0.8: `--verify-rounds` as given, else `1` |
+| `verify_timeout` | start | 0.8: `--verify-timeout` as given (clamped to 1-600 by the runner), else `600` |
 | `container` | start | Docker mode container name, else null |
 | `volume` | start | Docker mode volume name, else null |
 | `image` | start | `--image` as given (Docker mode), else null |
@@ -229,7 +232,7 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `files_changed_truncated` | end, export | 0.8: true when the 1000-path cap cut the list |
 | `last_tool_result` | end | 0.8: `{tool, args, result}` for the last non-`finish` tool call, or null |
 | `last_assistant_text` | end | 0.8: the last non-empty assistant text (≤2000 chars), or null |
-| `verify` | end | 0.8: `{command, exit_code, output_tail, rounds, passed}` for the last `--verify` execution, or null. `dirtywork resume` reads `verify.command` back out of here to inherit the gate |
+| `verify` | end | 0.8: `{command, exit_code, output_tail, rounds, passed}` for the last `--verify` execution, or null (null whenever verify never ran, even if `--verify` was given — see `verify_command` above, which `dirtywork resume` reads from instead) |
 | `allow_commit` | start | (bool) records whether the run's system prompt told the worker to commit as it went (`--allow-commit`, host mode only — see the README). A run that predates the flag has no such key. |
 | `verdict` | verdict | written by `dirtywork runs verdict`: `"accept"` \| `"reject"` \| `"cleanup"` |
 | `note` | verdict | `--note` text, or null |

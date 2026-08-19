@@ -97,6 +97,13 @@ carried, unchanged.
   `~/.dirtywork/runs/<slug>/diff.patch` instead (the container-computed
   patch — no host git ever touches worker content for that path) or with
   `GIT_CONFIG_GLOBAL=/dev/null`.
+- `dirtywork runs snapshot`'s own commit runs no filter or hook (plumbing
+  only, `--no-filters`). But two callers that decide *whether* to snapshot —
+  `--branch-from @<slug>`'s dirty check and `runs clean`'s dirty-worktree
+  guard — run host `git status` on the exported worktree, where a repo-LOCAL
+  clean filter (e.g. `git lfs install --local`) still applies even with
+  `GIT_CONFIG_GLOBAL=/dev/null`: the same exposure as running `git status`
+  there yourself.
 - A malicious target repo's `CLAUDE.md`/`AGENTS.md` (read from the base
   commit via git, not the filesystem — symlinks and oversized files are
   rejected) is injected into the worker's prompt; treat untrusted repos'
@@ -661,8 +668,11 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
 - `--verify CMD` / `--verify-rounds N` / `--verify-timeout S` — see
   [Verifying a run](#verifying-a-run). `--verify-rounds` counts **fix rounds
   after a failed verify** — the command may run N+1 times; `0` verifies once and
-  ends the run either way. `dirtywork resume` inherits the command (not the rounds or the
-  timeout, which `run.json` does not record) from the run it continues.
+  ends the run either way. `dirtywork resume` inherits all three — the command,
+  the rounds, and the timeout — from the run it continues (recorded in `run.json`
+  at run start, so this works even when the prior run ended before verify ever
+  ran, e.g. `max_turns`/`stalled`/`stuck`/`timeout`/`budget_exceeded`); an
+  explicit flag on `resume` overrides the inherited value.
 - `--context-window TOKENS` — the model's context window, used to size the
   transcript trimming budget. Precedence: flag, then `DIRTYWORK_CONTEXT_WINDOW`,
   then a built-in table for the known LM Studio models, then 32768 (with a

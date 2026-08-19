@@ -1149,6 +1149,11 @@ def test_show_renders_end_of_run_evidence(tmp_path, monkeypatch, capsys):
     assert "> I could not get the suite green." in md
 
 
+def test_summary_value_renders_an_empty_files_changed_list_as_a_dash():
+    assert runs._summary_value("files_changed", {"files_changed": []}) == "-"
+    assert runs._summary_value("files_changed", {"files_changed": ["a.ts"]}) == "1 (a.ts)"
+
+
 def test_show_renders_verify(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
     _write_run(tmp_path / "runs", "ver1", {
@@ -1180,6 +1185,7 @@ def test_cmd_snapshot_commits_the_worktree_on_the_run_branch(
     _write_run(tmp_path / "runs", "snap1", {
         "slug": "snap1", "status": "max_turns", "repo": str(repo),
         "worktree": str(wt), "branch": "dirtywork/snap1", "host_pid": None,
+        "base_commit": "deadbeef", "sandbox": "none", "task": "do it", "model": "m",
     })
     rc = runs.cmd_snapshot(argparse.Namespace(slug="snap1"))
     out = capsys.readouterr().out
@@ -1201,9 +1207,12 @@ def test_cmd_snapshot_refuses_a_live_run_and_a_foreign_worktree(
     _write_run(tmp_path / "runs", "snap2", {
         "slug": "snap2", "status": "running", "repo": str(repo),
         "worktree": str(wt), "branch": "dirtywork/snap2", "host_pid": os.getpid(),
+        "base_commit": "deadbeef", "sandbox": "none", "task": "do it", "model": "m",
     })
     assert runs.cmd_snapshot(argparse.Namespace(slug="snap2")) == 2
-    assert "still in progress" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "still in progress" in err
+    assert "before snapshotting" in err   # M15: cmd_snapshot's own wording, not "resuming"
 
     # A plain clone (a directory `.git`, not the FILE a linked worktree has)
     # is a foreign directory dirtywork did not create — must be refused, not
@@ -1215,6 +1224,7 @@ def test_cmd_snapshot_refuses_a_live_run_and_a_foreign_worktree(
     _write_run(tmp_path / "runs", "snap3", {
         "slug": "snap3", "status": "stalled", "repo": str(repo),
         "worktree": str(outside), "branch": "dirtywork/snap3", "host_pid": None,
+        "base_commit": "deadbeef", "sandbox": "none", "task": "do it", "model": "m",
     })
     assert runs.cmd_snapshot(argparse.Namespace(slug="snap3")) == 2
     assert "not a linked worktree" in capsys.readouterr().err
@@ -1236,9 +1246,24 @@ def test_cmd_snapshot_refuses_a_worktree_the_export_never_populated(
     _write_run(tmp_path / "runs", "snap4", {
         "slug": "snap4", "status": "sandbox_error", "repo": str(repo),
         "worktree": str(wt), "branch": "dirtywork/snap4", "host_pid": None,
+        "base_commit": "deadbeef", "sandbox": "none", "task": "do it", "model": "m",
     })
     assert runs.cmd_snapshot(argparse.Namespace(slug="snap4")) == 2
     assert "empty tree" in capsys.readouterr().err
+
+
+def test_cmd_snapshot_refuses_a_malformed_run_json_cleanly(tmp_path, monkeypatch, capsys):
+    # A run.json missing required keys (e.g. hand-edited, or from a crashed
+    # write) must not reach preflight_run_worktree's prior["worktree"]/
+    # ["repo"] indexing at all -- that raises a bare KeyError/traceback
+    # instead of a clean, exit-2 error message.
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "x1", {"slug": "x1", "status": "max_turns"})
+    rc = runs.cmd_snapshot(argparse.Namespace(slug="x1"))
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert err.startswith("error: ")
+    assert "repo" in err
 
 
 def test_cmd_snapshot_reports_skipped_non_regular_entries(
@@ -1250,8 +1275,26 @@ def test_cmd_snapshot_reports_skipped_non_regular_entries(
     _write_run(tmp_path / "runs", "snap5", {
         "slug": "snap5", "status": "max_turns", "repo": str(repo),
         "worktree": str(wt), "branch": "dirtywork/snap5", "host_pid": None,
+        "base_commit": "deadbeef", "sandbox": "none", "task": "do it", "model": "m",
     })
     rc = runs.cmd_snapshot(argparse.Namespace(slug="snap5"))
     out = capsys.readouterr().out
     assert rc == 0, out
-    assert "(1 non-regular entries skipped)" in out
+    assert "(1 non-regular entry skipped)" in out
+
+
+def test_cmd_snapshot_pluralizes_skipped_entries_correctly(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = _linked_worktree(repo, "snap6")
+    (wt / "new.txt").write_text("x\n")
+    os.mkfifo(wt / "fifo1")
+    os.mkfifo(wt / "fifo2")
+    _write_run(tmp_path / "runs", "snap6", {
+        "slug": "snap6", "status": "max_turns", "repo": str(repo),
+        "worktree": str(wt), "branch": "dirtywork/snap6", "host_pid": None,
+        "base_commit": "deadbeef", "sandbox": "none", "task": "do it", "model": "m",
+    })
+    rc = runs.cmd_snapshot(argparse.Namespace(slug="snap6"))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "(2 non-regular entries skipped)" in out

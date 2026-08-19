@@ -1072,6 +1072,16 @@ def test_last_tool_result_reflects_a_malformed_entry(parts):
     assert result.extra["last_tool_result"]["result"].startswith("ERROR: ")
 
 
+def test_verify_timeout_is_clamped_to_the_bash_tools_range(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    over = Runner(FakeProvider([]), registry, sandbox, transcript, model="m",
+                  verify_timeout=99999)
+    assert over.verify_timeout == 600
+    under = Runner(FakeProvider([]), registry, sandbox, transcript, model="m",
+                   verify_timeout=0)
+    assert under.verify_timeout == 1
+
+
 def test_verify_passes_and_the_run_completes(parts):
     wt, registry, sandbox, transcript, tmp = parts
     provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "done"})])])
@@ -1128,6 +1138,36 @@ def test_verify_failure_with_a_round_left_feeds_back_and_retries(parts, tmp_path
     assert any("test -e fixed" in m["content"] for m in feedback)
     verify_events = [e for e in _events(tmp) if e["event"] == "verify"]
     assert [e["passed"] for e in verify_events] == [False, True]
+
+
+def test_a_verify_feedback_round_clears_a_stuck_latch_from_the_same_turn(parts, tmp_path):
+    # Regression for the `stuck` latch outliving the turn it was set in: a
+    # worker whose bash retries went stuck IN THE SAME TURN it also called
+    # finish must get the verify feedback round it earned, not have the NEXT
+    # turn's unrelated work summarily ended as "stuck" on stale state.
+    wt, registry, sandbox, transcript, tmp = parts
+    marker = wt / "fixed"
+    provider = FakeProvider([
+        _resp(tool_calls=[
+            _call("b1", "bash", {"command": "false"}),
+            _call("b2", "bash", {"command": "false"}),
+            _call("b3", "bash", {"command": "false"}),
+            _call("b4", "bash", {"command": "false"}),      # latches `stuck` mid-turn
+            _call("f1", "finish", {"summary": "first try"}),
+        ]),
+        _resp(tool_calls=[_call("w1", "write_file", {"path": "fixed", "content": "y"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "second try"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m",
+               verify="test -e fixed", verify_rounds=1, stuck_repeats=4)
+    result = r.run("s", "t")
+    transcript.close()
+    assert marker.is_file()
+    assert result.status == "completed"
+    assert result.final_message == "second try"
+    assert result.extra["stuck_on"] is None
+    assert result.extra["verify"]["rounds"] == 2
+    assert result.extra["verify"]["passed"] is True
 
 
 def test_verify_on_a_plain_answer_completion_and_error_passthrough(parts):

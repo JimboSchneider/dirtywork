@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -571,6 +572,37 @@ def test_snapshot_worktree_refuses_a_path_containing_a_carriage_return(tmp_path:
     assert "control character" in str(excinfo.value)
 
 
+def test_snapshot_worktree_refuses_a_path_ending_in_a_carriage_return(tmp_path: Path):
+    # The exploitable shape the docstring above describes: `hash-object
+    # --stdin-paths` strips a TRAILING \r from a line before opening the
+    # file, so a name ENDING in \r (not just containing one) would hash a
+    # different path than the one _walk_worktree actually recorded.
+    from dirtywork.workspace import snapshot_worktree
+    repo, wt = _snapshot_repo(tmp_path)
+    (wt / "trailing\r").write_text("x")
+    with pytest.raises(WorkspaceError) as excinfo:
+        snapshot_worktree(wt, "dirtywork/snap", "wip: trailing cr")
+    assert "control character" in str(excinfo.value)
+
+
+def test_snapshot_worktree_refuses_an_undecodable_filename(tmp_path: Path):
+    # A filename with bytes that are not valid UTF-8 round-trips through
+    # os.walk as a str with surrogate-escaped code points (os.fsdecode) --
+    # every ord(c) >= 32, so the control-character guard lets it through, and
+    # _git's text=True stdin encoding would then raise UnicodeEncodeError
+    # itself (not a WorkspaceError) instead of a clean refusal.
+    from dirtywork.workspace import snapshot_worktree
+    repo, wt = _snapshot_repo(tmp_path)
+    bad_name = os.fsdecode(b"bad\xffname.txt")
+    try:
+        (wt / bad_name).write_bytes(b"x")
+    except (OSError, UnicodeEncodeError):
+        pytest.skip("filesystem refuses an undecodable filename")
+    with pytest.raises(WorkspaceError) as excinfo:
+        snapshot_worktree(wt, "dirtywork/snap", "wip: undecodable name")
+    assert "not valid UTF-8" in str(excinfo.value)
+
+
 def test_snapshot_worktree_records_a_literal_quote_and_escape_in_a_filename(tmp_path: Path):
     # `git update-index --index-info` C-unquotes a path that STARTS with `"`:
     # without -z, a file literally named `"src\057main.py"` on disk gets
@@ -683,3 +715,17 @@ def test_host_worktree_dirty_sees_untracked_and_modified_and_fails_closed(tmp_pa
     snapshot_worktree(wt, "dirtywork/snap3", "wip: clean it")
     assert host_worktree_dirty(wt) is False        # the snapshot made it clean
     assert host_worktree_dirty(tmp_path / "not-a-repo") is True   # fail closed
+
+
+def test_host_worktree_dirty_fails_closed_on_a_timeout(tmp_path: Path, monkeypatch):
+    # runs._worktree_is_dirty (the destructive `runs clean` gate this replaced)
+    # had timeout=10 and treated TimeoutExpired as dirty; host_worktree_dirty's
+    # own _git call must too, so a hung host git process cannot hang a
+    # destructive path.
+    import dirtywork.workspace as workspace_mod
+
+    def _hangs(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0] if args else "git", timeout=10)
+
+    monkeypatch.setattr(workspace_mod.subprocess, "run", _hangs)
+    assert workspace_mod.host_worktree_dirty(tmp_path) is True

@@ -37,13 +37,17 @@ class WorkspaceError(Exception):
 
 
 def _git(repo: Path, *args: str, env: dict | None = None,
-         stdin_text: str | None = None) -> subprocess.CompletedProcess:
+         stdin_text: str | None = None,
+         timeout: float | None = None) -> subprocess.CompletedProcess:
     """`stdin_text` is how the snapshot plumbing feeds path lists and index
     lines to git (hash-object --stdin-paths, update-index --index-info);
-    None keeps today's behaviour of inheriting stdin."""
+    None keeps today's behaviour of inheriting stdin. `timeout` is passed
+    straight to subprocess.run (None: no timeout, today's behaviour); callers
+    on a destructive path (e.g. host_worktree_dirty) pass one so a hung git
+    process cannot hang them."""
     return subprocess.run(
         ["git", "-C", str(repo), *args], capture_output=True, text=True, env=env,
-        input=stdin_text
+        input=stdin_text, timeout=timeout
     )
 
 
@@ -328,7 +332,7 @@ def host_worktree_dirty(worktree) -> bool:
     ONE dirty check in the codebase: `runs._worktree_is_dirty` delegates here."""
     try:
         res = _git(Path(worktree), *GIT_NEUTRAL_FLAGS, "status", "--porcelain",
-                   "--untracked-files=normal", env=git_env())
+                   "--untracked-files=normal", env=git_env(), timeout=10)
     except (OSError, subprocess.SubprocessError):
         return True
     return res.returncode != 0 or bool(res.stdout.strip())
@@ -460,6 +464,20 @@ def snapshot_worktree(worktree: Path, branch: str, message: str,
                 f"cannot snapshot {worktree}: path {rel!r} contains a control character, "
                 f"which git's stdin path protocols cannot carry safely"
             )
+        try:
+            rel.encode("utf-8")
+        except UnicodeEncodeError:
+            # An undecodable filename (surrogate-escaped by os.fsdecode) is
+            # ord(c) >= 32 for every char, so the guard above lets it through;
+            # _git's text=True calls below would then raise UnicodeEncodeError
+            # themselves (not a WorkspaceError) trying to encode it for git's
+            # stdin. Refuse it here with the same error type every other
+            # unsafe path in this function raises.
+            raise WorkspaceError(
+                f"cannot snapshot {worktree}: path {rel!r} is not valid UTF-8 "
+                f"(undecodable filename), which git's stdin path protocols "
+                f"cannot carry safely"
+            )
 
     head_res = _git(worktree, *GIT_NEUTRAL_FLAGS, "rev-parse", "--verify", "--quiet",
                     f"refs/heads/{branch}", env=env)
@@ -494,7 +512,7 @@ def snapshot_worktree(worktree: Path, branch: str, message: str,
         for (rel, is_exec), sha in zip(files, shas):
             entries.append(f"{'100755' if is_exec else '100644'} {sha}\t{rel}")
     for rel, target in links:
-        res = _git(worktree, *GIT_NEUTRAL_FLAGS, "hash-object", "-w", "--stdin",
+        res = _git(worktree, *GIT_NEUTRAL_FLAGS, "hash-object", "-w", "--no-filters", "--stdin",
                    env=env, stdin_text=target)
         _check(res, f"hash-object for symlink {rel}", worktree)
         entries.append(f"120000 {res.stdout.strip()}\t{rel}")

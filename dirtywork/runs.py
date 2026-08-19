@@ -22,8 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import rundir
-from .resume import (ResumeError, find_stashes, pid_alive, preflight_run_worktree,
-                      stash_dir_for, worktree_belongs_to_repo)
+from .resume import (ResumeError, find_stashes, load_prior_run, pid_alive,
+                      preflight_run_worktree, stash_dir_for, worktree_belongs_to_repo)
 from .sandbox import docker_args, docker_cli, export
 from .workspace import WorkspaceError, host_worktree_dirty, snapshot_worktree
 
@@ -211,7 +211,7 @@ def _export_status_update(previous: str, export_status: str) -> str:
 
 def _summary_value(key: str, data: dict) -> str:
     value = data.get(key)
-    if value is None or value == "":
+    if value is None or value == "" or value == []:
         return "-"
     # Structured end-of-run evidence: the plain view shows the one thing an
     # operator scans for, not the whole object (the JSON dump below has it all).
@@ -732,15 +732,30 @@ def cmd_snapshot(args) -> int:
     applies before touching a prior run's worktree, and Task 8's
     `--branch-from @<slug>` is the third caller. The empty-tree guard lives
     inside `snapshot_worktree` itself, since that function has callers (Task
-    8) that never pass through this CLI guard at all."""
+    8) that never pass through this CLI guard at all.
+
+    Reads run.json via `resume.load_prior_run` rather than `_open_run` (which
+    validates only "is a dict"): `preflight_run_worktree` indexes
+    `prior["worktree"]`/`["repo"]`/`["slug"]` directly, so a malformed
+    run.json must be refused with a clean RunsError/ResumeError message
+    BEFORE that, not surfaced as a bare KeyError traceback. `_run_dir_for`
+    still does the slug-shape/containment validation `_open_run` uses."""
     try:
-        run_dir, data = _open_run(args.slug)
+        run_dir = _run_dir_for(args.slug)
     except RunsError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if not run_dir.is_dir():
+        print(f"error: no such run '{args.slug}' under {rundir.RUNS_DIR}", file=sys.stderr)
+        return 2
+    try:
+        data = load_prior_run(run_dir)
+    except ResumeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
     try:
-        preflight_run_worktree(data)
+        preflight_run_worktree(data, action="snapshot")
     except ResumeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -760,7 +775,8 @@ def cmd_snapshot(args) -> int:
     line = f"snapshot {sha} on {branch}" if sha else "nothing to snapshot"
     skipped = report.get("skipped", 0)
     if skipped:
-        line += f" ({skipped} non-regular entries skipped)"
+        noun = "entry" if skipped == 1 else "entries"
+        line += f" ({skipped} non-regular {noun} skipped)"
     print(line)
     return 0
 

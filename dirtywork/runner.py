@@ -263,29 +263,27 @@ class RepeatTracker:
         self.output = None
         self._fingerprint = None
 
-    @staticmethod
-    def _failed(result) -> bool:
-        """Anything whose first line is not exactly 'exit code: 0'. That makes
-        'exit code: N', 'ERROR: command timed out ...', 'ERROR: bash failed ...'
-        and 'BLOCKED: ...' all failures, which is the intent."""
-        if not isinstance(result, str):
-            return True
-        return result.split("\n", 1)[0] != "exit code: 0"
+    def reset(self) -> None:
+        """Start a new episode: the same field resets a passing rerun of the
+        current command applies, also used when a verify feedback round
+        begins (spec §4.2's retry is a fresh start, not a continuation of
+        whatever the worker was stuck on before calling finish/answering)."""
+        self.repeats = 0
+        self._fingerprint = None
+        self.command = None
+        self.output = None
 
     def note_bash(self, command, result):
         if self.limit <= 0:
             return None
-        if not self._failed(result):
+        if parse_exit_code(result) == 0:
             # Only the SAME command going green ends the episode. A passing run
             # of some other command (git status, cat, ls ...) neither counts nor
             # resets -- exactly like a non-bash tool call in between -- so the
             # reads a model interleaves with its edit->test loop cannot hide an
             # unchanged failure.
             if command == self.command:
-                self.repeats = 0
-                self._fingerprint = None
-                self.command = None
-                self.output = None
+                self.reset()
             return None
         text = result if isinstance(result, str) else ""
         fingerprint = _bash_fingerprint(command, text)
@@ -505,6 +503,7 @@ class Runner:
             answer — go through this one function, so they can never disagree
             about what verifying means. BudgetExceeded/SandboxError end the run
             with the same statuses a tool call would."""
+            nonlocal stuck
             if not self.verify:
                 return finish("completed", final), None
             try:
@@ -514,6 +513,13 @@ class Runner:
             except SandboxError as e:
                 return finish("sandbox_error", str(e)), None
             if feedback is not None:
+                # A feedback round is a fresh episode: the worker is retrying
+                # against new instructions, so whatever bash streak was latched
+                # (possibly in THIS SAME turn, before it called finish) must not
+                # end the next turn as "stuck" for a check that no longer
+                # reflects what the worker is doing.
+                stuck = None
+                repeats.reset()
                 return None, feedback
             if verify_state["passed"]:
                 return finish("completed", final), None

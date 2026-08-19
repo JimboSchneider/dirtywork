@@ -396,6 +396,9 @@ def _write_run_json_start(run_dir: Path, ctx: RunContext, args) -> None:
         "branch_from_run": ctx.branch_from_run,
         "feedback": ctx.feedback,
         "resumed_from": ctx.resumed_from,
+        "verify_command": args.verify,
+        "verify_rounds": args.verify_rounds,
+        "verify_timeout": args.verify_timeout,
         "container": docker_args.container_name(ctx.slug) if is_docker else None,
         "volume": docker_args.volume_name(ctx.slug) if is_docker else None,
         "image": args.image if is_docker else None,
@@ -604,12 +607,23 @@ def _load_resume_target(args) -> dict:
     if args.allow_commit is None:
         args.allow_commit = bool(prior.get("allow_commit", False))
     if getattr(args, "verify", None) is None:
-        # run.json records the verify RESULT object (spec §4.3), which carries
-        # the command; rounds/timeout are not recorded, so they keep their own
-        # defaults unless this invocation passes them.
-        prior_verify = prior.get("verify")
-        if isinstance(prior_verify, dict) and prior_verify.get("command"):
-            args.verify = prior_verify["command"]
+        # run.json records verify_command/verify_rounds/verify_timeout at run
+        # START (from the args given, null/defaults otherwise) so a run that
+        # never reached the verify step (max_turns/stalled/stuck/timeout/
+        # budget_exceeded — the statuses people actually resume) still hands
+        # its gate on. Fall back to the verify RESULT object's command for
+        # run.json files written before this field existed.
+        verify_command = prior.get("verify_command")
+        if verify_command is None:
+            prior_verify = prior.get("verify")
+            if isinstance(prior_verify, dict):
+                verify_command = prior_verify.get("command")
+        if verify_command:
+            args.verify = verify_command
+    if getattr(args, "verify_rounds", None) is None:
+        args.verify_rounds = prior.get("verify_rounds", DEFAULT_VERIFY_ROUNDS)
+    if getattr(args, "verify_timeout", None) is None:
+        args.verify_timeout = prior.get("verify_timeout", DEFAULT_VERIFY_TIMEOUT)
     # Last, so the earlier refusals (still running, missing worktree, provider
     # switch) keep their own messages when they apply too.
     args.feedback_text = _load_feedback(args)
@@ -797,11 +811,15 @@ def _add_run_flags(p, *, resume: bool) -> None:
                    help="run CMD in the sandbox when the worker declares itself done; a "
                         "non-zero exit ends the run as 'verify_failed' (resume inherits the "
                         "command from the run it continues)")
-    p.add_argument("--verify-rounds", type=_non_negative_int, default=DEFAULT_VERIFY_ROUNDS,
+    p.add_argument("--verify-rounds", type=_non_negative_int,
+                   default=None if resume else DEFAULT_VERIFY_ROUNDS,
                    help="fix rounds after a failed --verify (default 1: the first failure goes "
-                        "back to the worker once; 0 verifies once and ends the run either way)")
-    p.add_argument("--verify-timeout", type=_positive_int, default=DEFAULT_VERIFY_TIMEOUT,
-                   help="seconds for the --verify command (default 600, clamped to 1-600)")
+                        "back to the worker once; 0 verifies once and ends the run either way; "
+                        "resume inherits this from the run it continues)")
+    p.add_argument("--verify-timeout", type=_positive_int,
+                   default=None if resume else DEFAULT_VERIFY_TIMEOUT,
+                   help="seconds for the --verify command (default 600, clamped to 1-600; "
+                        "resume inherits this from the run it continues)")
     p.add_argument("--context-window", type=_positive_int, default=None,
                    help="model context window in tokens (default: built-in table, else 32768)")
     p.add_argument("--max-worktree-mb", type=int, default=DEFAULT_MAX_WORKTREE_MB)
