@@ -274,3 +274,59 @@ def test_edit_and_write_echo_their_diff(wt: Path):
     over = tools.write_file(wt, "src/app.py", "def main():\n    return 44\n")
     assert over.startswith("Wrote src/app.py: ")
     assert "+    return 44" in over
+
+
+def test_insert_text_places_whole_lines_around_the_anchor_line():
+    text = "alpha\nbeta\ngamma\n"
+    assert tools.insert_text(text, "beta", "NEW\n", "before") == "alpha\nNEW\nbeta\ngamma\n"
+    assert tools.insert_text(text, "beta", "NEW\n", "after") == "alpha\nbeta\nNEW\ngamma\n"
+    # a multi-line anchor: 'before' the first line, 'after' the last
+    assert tools.insert_text(text, "beta\ngamma", "NEW\n", "before") == (
+        "alpha\nNEW\nbeta\ngamma\n")
+    assert tools.insert_text(text, "beta\ngamma", "NEW\n", "after") == (
+        "alpha\nbeta\ngamma\nNEW\n")
+    # an anchor in the middle of a line never splits that line
+    assert tools.insert_text("x = f(1)\ny\n", "f(1", "NEW\n", "before") == (
+        "NEW\nx = f(1)\ny\n")
+
+
+def test_insert_text_adds_the_missing_newlines():
+    # insert without a trailing newline gets one
+    assert tools.insert_text("a\nb\n", "a", "NEW", "after") == "a\nNEW\nb\n"
+    # a file with no final newline gets one before the appended line
+    assert tools.insert_text("a\nb", "b", "NEW\n", "after") == "a\nb\nNEW\n"
+    # inserting before the first line needs no leading newline
+    assert tools.insert_text("a\nb\n", "a", "NEW\n", "before") == "NEW\na\nb\n"
+
+
+def test_insert_before_and_after_write_the_file_and_echo_a_diff(wt: Path):
+    (wt / "cfg.txt").write_text("alpha\nbeta\ngamma\n")
+    out = tools.insert_after(wt, "cfg.txt", "beta", "beta-plus")
+    assert out.startswith("Inserted into cfg.txt: +1 -0")
+    assert "+beta-plus" in out
+    assert (wt / "cfg.txt").read_text() == "alpha\nbeta\nbeta-plus\ngamma\n"
+    out = tools.insert_before(wt, "cfg.txt", "gamma", "pre-gamma\n")
+    assert out.startswith("Inserted into cfg.txt: +1 -0")
+    assert (wt / "cfg.txt").read_text() == "alpha\nbeta\nbeta-plus\npre-gamma\ngamma\n"
+
+
+def test_insert_requires_a_unique_anchor(wt: Path):
+    (wt / "dup.txt").write_text("aa\naa\n")
+    out = tools.insert_before(wt, "dup.txt", "aa", "x")
+    assert out.startswith("ERROR: anchor occurs 2 times in dup.txt")
+    assert "it must occur exactly once" in out
+    assert (wt / "dup.txt").read_text() == "aa\naa\n"      # nothing written
+    missing = tools.insert_after(wt, "dup.txt", "zz", "x")
+    assert missing.startswith("ERROR: anchor occurs 0 times in dup.txt")
+
+
+def test_insert_keeps_the_edit_file_guardrails(wt: Path):
+    assert tools.insert_before(wt, "../../etc/passwd", "root", "x").startswith("ERROR:")
+    assert tools.insert_before(wt, "nope.py", "x", "y").startswith("ERROR: cannot read")
+    (wt / "bin2.dat").write_bytes(b"\xff\xfe\x00\x01")
+    binary = tools.insert_after(wt, "bin2.dat", "x", "y")
+    assert binary == "ERROR: bin2.dat is not valid UTF-8 text; insert_after only works on text files"
+    # edit_file's own message is unchanged
+    (wt / "bin3.dat").write_bytes(b"\xff\xfe\x00\x01")
+    assert tools.edit_file(wt, "bin3.dat", "x", "y") == (
+        "ERROR: bin3.dat is not valid UTF-8 text; edit_file only works on text files")

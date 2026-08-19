@@ -18,8 +18,9 @@ from ..tools import (
     MAX_READ_BYTES,
     MAX_WRITE_BYTES,
     _cap,
+    _insert_once,
     _number_lines,
-    describe_change,
+    _replace_once,
     describe_write,
 )
 from . import SandboxError
@@ -453,21 +454,32 @@ class DockerSandbox:
             return err
         return describe_write(path, old_text, content, len(encoded))
 
-    def edit_file(self, path: str, old_string: str, new_string: str) -> str:
+    def _transform_file(self, path: str, transform) -> str:
+        """Read → transform → write inside the container: the same shape as
+        tools._transform_file, over the same transforms, so edit_file,
+        insert_before and insert_after are three transforms over ONE path per
+        backend (spec §3.2) and the two backends can never disagree about an
+        anchor rule or an error string. The UTF-8 refusal comes from
+        _read_raw(strict=True), which is why no `tool` name is needed here."""
         text, err = self._read_raw(path, strict=True)
         if err:
             return err
-        count = text.count(old_string)
-        if count != 1:
-            return (
-                f"ERROR: old_string occurs {count} times in {path}; it must occur "
-                f"exactly once. Include more surrounding context to make it unique."
-            )
-        new_text = text.replace(old_string, new_string, 1)
+        new_text, result = transform(text)
+        if new_text is None:
+            return result
         err = self._write_raw(path, new_text.encode("utf-8"))
         if err:
             return err
-        return describe_change(path, text, new_text, verb="Edited")
+        return result
+
+    def edit_file(self, path: str, old_string: str, new_string: str) -> str:
+        return self._transform_file(path, _replace_once(path, old_string, new_string))
+
+    def insert_before(self, path: str, anchor: str, text: str) -> str:
+        return self._transform_file(path, _insert_once(path, anchor, text, "before"))
+
+    def insert_after(self, path: str, anchor: str, text: str) -> str:
+        return self._transform_file(path, _insert_once(path, anchor, text, "after"))
 
     def _probe(self, attr: str, argv: list) -> bool:
         """Probe once per sandbox instance for an optional in-image tool; cached on self."""

@@ -61,7 +61,7 @@ One per tool call executed, plus one per malformed tool-call entry discarded.
 
 | Field | v1 | v2 | Type | Notes |
 |---|---|---|---|---|
-| `tool` | ✓ | ✓ | string | tool name — one of `read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `bash`, `finish`; `""` for a discarded malformed entry |
+| `tool` | ✓ | ✓ | string | tool name — one of `read_file`, `write_file`, `edit_file`, `insert_before`, `insert_after`, `list_dir`, `grep`, `bash`, `finish` (`insert_before`/`insert_after` are v2, added in 0.8); `""` for a discarded malformed entry |
 | `args` | ✓ | ✓ | string | the raw JSON argument string, capped at 500 chars; `""` for a discarded malformed entry |
 | `result` | ✓ | ✓ | string | the tool's result, trimmed per the tool's `Caps.transcript` setting. All built-in tools declare `preview`, which caps the record at 2000 chars; the registry also supports `full` and `none`, unused by any shipped tool. Since 0.8 a successful `edit_file`/`write_file` result is `<Verb> <path>: +A -D [(removed N non-blank lines)]` followed by a unified diff (capped at 40 lines / 3000 chars, then `[diff truncated: N more lines]`); `write_file` on a new file returns `Wrote N bytes to <path> (new file, M lines)` with no diff |
 

@@ -1362,3 +1362,23 @@ def test_edit_file_echoes_a_diff(started):
     out = sb.edit_file("src/app.py", "return 42", "return 43")
     assert out.startswith("Edited src/app.py: +1 -1 (removed 1 non-blank line)")
     assert "--- a/src/app.py" in out and "+++ b/src/app.py" in out
+
+
+def test_insert_after_reads_then_writes(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], [_ok(b"alpha\nbeta\ngamma\n"), _ok()])
+    out = sb.insert_after("cfg.txt", "beta", "beta-plus")
+    assert out.startswith("Inserted into cfg.txt: +1 -0")
+    heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
+    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    assert len(heads) == 1
+    assert len(writes) == 1
+    assert writes[0][2] == b"alpha\nbeta\nbeta-plus\ngamma\n"
+
+
+def test_insert_before_refuses_a_repeated_anchor(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok(b"aa\naa\n"))
+    out = sb.insert_before("dup.txt", "aa", "x")
+    assert out.startswith("ERROR: anchor occurs 2 times in dup.txt")
+    assert not [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]

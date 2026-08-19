@@ -123,7 +123,7 @@ DEFAULT_STALL_TURNS = 12
 STALL_NUDGE = ("No progress in the last {n} turns: no file changed and no command produced "
                "new output. If the task is complete, commit (if asked) and call "
                "finish(summary=...); otherwise change your approach.")
-_MUTATING_TOOLS = ("write_file", "edit_file")
+_MUTATING_TOOLS = ("write_file", "edit_file", "insert_before", "insert_after")
 # Tokens that change between otherwise-identical runs of the same command:
 # durations ("in 24.51s", "0.39s", "12 ms"), clock times / ISO timestamps,
 # and long hex ids (git shas, container ids — at least one a-f letter, so a

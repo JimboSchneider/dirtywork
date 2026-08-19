@@ -162,6 +162,30 @@ def describe_write(path: str, old_text, new_text: str, byte_count: int) -> str:
     return describe_change(path, old_text, new_text, verb="Wrote")
 
 
+def insert_text(text: str, anchor: str, insert: str, where: str) -> str:
+    """Spec §3.2: place `insert` as WHOLE LINES relative to the line(s) holding
+    `anchor`, never modifying the anchor's own line. `where` is 'before' (just
+    before the start of the line holding the anchor's first character) or
+    'after' (just after the end of the line holding its last character — the
+    anchor may span lines). The caller has already proved the anchor occurs
+    exactly once. Pure: both backends call this with the text they read."""
+    start = text.index(anchor)
+    end = start + len(anchor)
+    if not insert.endswith("\n"):
+        insert = insert + "\n"
+    if where == "before":
+        line_start = text.rfind("\n", 0, start) + 1
+        return text[:line_start] + insert + text[line_start:]
+    last = max(start, end - 1)
+    newline = text.find("\n", last)
+    if newline == -1:
+        # the anchor sits on a final line with no trailing newline: give the
+        # file one so the inserted text starts on a line of its own
+        head = text + "\n" if text and not text.endswith("\n") else text
+        return head + insert
+    return text[:newline + 1] + insert + text[newline + 1:]
+
+
 def _read_text_for_diff(path: Path):
     """The file's current text for describe_write, or None when there is none
     to read (missing, a symlink, a FIFO/device, over the read limit, or not
@@ -236,7 +260,13 @@ def write_file(worktree: Path, path: str, content: str) -> str:
     return describe_write(path, old_text, content, len(encoded))
 
 
-def edit_file(worktree: Path, path: str, old_string: str, new_string: str) -> str:
+def _transform_file(worktree: Path, path: str, transform, *, tool: str) -> str:
+    """Read → transform → write for every in-place file tool (spec §3.2).
+    `transform(text) -> (new_text_or_None, result)`: a None new_text means the
+    transform refused and `result` (an 'ERROR: …' string) is returned without
+    writing anything. Every check edit_file used to perform itself lives here,
+    unchanged: worktree containment, the regular-file/symlink refusals, the
+    5 MB read limit, UTF-8 validation, and the O_NOFOLLOW write."""
     try:
         p = resolve_in_worktree(path, worktree, writing=True)
     except GuardrailError as e:
@@ -252,14 +282,10 @@ def edit_file(worktree: Path, path: str, old_string: str, new_string: str) -> st
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
-        return f"ERROR: {path} is not valid UTF-8 text; edit_file only works on text files"
-    count = text.count(old_string)
-    if count != 1:
-        return (
-            f"ERROR: old_string occurs {count} times in {path}; it must occur exactly "
-            f"once. Include more surrounding context to make it unique."
-        )
-    new_text = text.replace(old_string, new_string, 1)
+        return f"ERROR: {path} is not valid UTF-8 text; {tool} only works on text files"
+    new_text, result = transform(text)
+    if new_text is None:
+        return result
     write_target = _worktree_candidate(path, worktree)
     try:
         wfh = _open_regular(write_target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
@@ -276,7 +302,53 @@ def edit_file(worktree: Path, path: str, old_string: str, new_string: str) -> st
         wfh.write(new_text.encode("utf-8"))
     finally:
         wfh.close()
-    return describe_change(path, text, new_text, verb="Edited")
+    return result
+
+
+def _replace_once(path: str, old_string: str, new_string: str):
+    """edit_file's transform. Defined here (not in a backend) so the host and
+    the container share one uniqueness rule and one error string."""
+    def transform(text: str):
+        count = text.count(old_string)
+        if count != 1:
+            return None, (
+                f"ERROR: old_string occurs {count} times in {path}; it must occur exactly "
+                f"once. Include more surrounding context to make it unique."
+            )
+        new_text = text.replace(old_string, new_string, 1)
+        return new_text, describe_change(path, text, new_text, verb="Edited")
+    return transform
+
+
+def _insert_once(path: str, anchor: str, insert: str, where: str):
+    """insert_before/insert_after's transform — the same uniqueness rule and
+    the same error shape as _replace_once, with `anchor` in place of
+    `old_string`."""
+    def transform(text: str):
+        count = text.count(anchor)
+        if count != 1:
+            return None, (
+                f"ERROR: anchor occurs {count} times in {path}; it must occur exactly "
+                f"once. Include more surrounding context to make it unique."
+            )
+        new_text = insert_text(text, anchor, insert, where)
+        return new_text, describe_change(path, text, new_text, verb="Inserted into")
+    return transform
+
+
+def edit_file(worktree: Path, path: str, old_string: str, new_string: str) -> str:
+    return _transform_file(worktree, path, _replace_once(path, old_string, new_string),
+                           tool="edit_file")
+
+
+def insert_before(worktree: Path, path: str, anchor: str, text: str) -> str:
+    return _transform_file(worktree, path, _insert_once(path, anchor, text, "before"),
+                           tool="insert_before")
+
+
+def insert_after(worktree: Path, path: str, anchor: str, text: str) -> str:
+    return _transform_file(worktree, path, _insert_once(path, anchor, text, "after"),
+                           tool="insert_after")
 
 
 def list_dir(worktree: Path, path: str = ".") -> str:

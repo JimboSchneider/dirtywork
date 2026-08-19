@@ -30,6 +30,14 @@ class FakeSandbox:
         self.calls.append(("edit_file", path, old_string, new_string))
         return f"edited:{path}"
 
+    def insert_before(self, path, anchor, text):
+        self.calls.append(("insert_before", path, anchor, text))
+        return f"inserted-before:{path}"
+
+    def insert_after(self, path, anchor, text):
+        self.calls.append(("insert_after", path, anchor, text))
+        return f"inserted-after:{path}"
+
     def list_dir(self, path):
         self.calls.append(("list_dir", path))
         return f"listing:{path}"
@@ -59,7 +67,8 @@ def test_schemas_match_the_frozen_v051_wire_contract():
 def test_schemas_shape():
     schemas = default_registry().schemas()
     names = {s["function"]["name"] for s in schemas}
-    assert names == {"read_file", "write_file", "edit_file", "list_dir", "grep", "bash", "finish"}
+    assert names == {"read_file", "write_file", "edit_file", "insert_before", "insert_after",
+                     "list_dir", "grep", "bash", "finish"}
     for s in schemas:
         assert s["type"] == "function"
         assert "parameters" in s["function"]
@@ -238,3 +247,21 @@ def test_budget_exceeded_propagates_over_file_limit(wt: Path):
     registry.execute("write_file", {"path": "b.txt", "content": "x"}, sandbox=sb, deadline=None)
     with pytest.raises(BudgetExceeded):
         registry.execute("write_file", {"path": "c.txt", "content": "x"}, sandbox=sb, deadline=None)
+
+
+def test_insert_before_dispatches():
+    sandbox = FakeSandbox()
+    result = default_registry().execute(
+        "insert_before", {"path": "a.txt", "anchor": "x", "text": "y"},
+        sandbox=sandbox, deadline=None)
+    assert result.kind == "ok"
+    assert sandbox.calls == [("insert_before", "a.txt", "x", "y")]
+
+
+def test_insert_after_dispatches():
+    sandbox = FakeSandbox()
+    result = default_registry().execute(
+        "insert_after", {"path": "a.txt", "anchor": "x", "text": "y"},
+        sandbox=sandbox, deadline=None)
+    assert result.kind == "ok"
+    assert sandbox.calls == [("insert_after", "a.txt", "x", "y")]

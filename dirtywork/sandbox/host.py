@@ -54,6 +54,16 @@ class HostSandbox:
         self._check_budget()
         return result
 
+    def insert_before(self, path: str, anchor: str, text: str) -> str:
+        result = tools.insert_before(self.worktree, path, anchor, text)
+        self._check_budget()
+        return result
+
+    def insert_after(self, path: str, anchor: str, text: str) -> str:
+        result = tools.insert_after(self.worktree, path, anchor, text)
+        self._check_budget()
+        return result
+
     def list_dir(self, path: str = ".") -> str:
         return tools.list_dir(self.worktree, path)
 

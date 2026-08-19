@@ -70,7 +70,7 @@ def build_system_prompt(display_root, repo_context: str | None, *, allow_commit:
 Complete the task, then reply with a plain-text summary of what you changed and what commands you ran.
 
 Rules:
-- Use edit_file or write_file for ALL file changes. Never modify files via bash (no sed -i, no echo redirects, no heredocs).
+- Use edit_file, insert_before, insert_after or write_file for ALL file changes. Never modify files via bash (no sed -i, no echo redirects, no heredocs).
 - Paths are relative to {display_root}.
 - Explore before editing: use list_dir, grep, and read_file to understand the code first.
 - Verify your work: run the repo's tests or build via bash before declaring the task complete.

@@ -43,8 +43,9 @@ macOS (Windows unsupported — see below).
 > `core.symlinks=false`, `core.longpaths`.
 
 **Docker is the default sandbox as of 0.4 — a breaking change from 0.2.**
-Every tool call (`read_file`/`write_file`/`edit_file`/`list_dir`/`grep`/
-`bash`) runs inside a locked-down container: `--network none` by default,
+Every tool call (`read_file`/`write_file`/`edit_file`/`insert_before`/
+`insert_after`/`list_dir`/`grep`/`bash`) runs inside a locked-down
+container: `--network none` by default,
 `--read-only` root filesystem, `--cap-drop ALL`, kernel-enforced memory/CPU/
 process-count/per-file-size limits, and no host path mounted in except the
 parent repository's read-only git object store. The worker's tree lives on
@@ -323,9 +324,15 @@ are not part of the installed package.
    `.git/info/exclude` automatically. If the repo has a `CLAUDE.md` or
    `AGENTS.md` at its base commit, its content is injected into the
    worker's system prompt so it inherits your conventions.
-3. **The loop** — the model gets seven tools (`read_file`, `write_file`,
-   `edit_file`, `list_dir`, `grep`, `bash`, `finish`) via OpenAI
-   function-calling. Context is budgeted per model (oldest tool results get
+3. **The loop** — the model gets nine tools (`read_file`, `write_file`,
+   `edit_file`, `insert_before`, `insert_after`, `list_dir`, `grep`, `bash`,
+   `finish`) via OpenAI function-calling. `insert_before`/`insert_after` add
+   whole lines around a unique anchor without touching the anchor's own line
+   — the primitive for "add a line here", which `edit_file` could only express
+   as a replace. Every successful `edit_file`/`write_file`/`insert_*` result
+   echoes a capped unified diff of what actually changed, so a replace that
+   silently deleted a line is visible to the worker in the same turn.
+   Context is budgeted per model (oldest tool results get
    trimmed first); three consecutive tool failures of one kind (malformed
    call, malformed arguments, unknown tool, bad arguments, empty reply) or
    six in total abort the run. The model ends a run by calling the

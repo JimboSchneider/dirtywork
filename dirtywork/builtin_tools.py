@@ -1,4 +1,4 @@
-"""The seven tools dirtywork ships, declared as ToolSpecs.
+"""The nine tools dirtywork ships, declared as ToolSpecs.
 
 Each `fn` receives the Sandbox as its first argument and forwards to the
 matching Sandbox method, so a tool never knows whether it is running on the
@@ -30,6 +30,14 @@ def _write_file(sandbox, path, content):
 
 def _edit_file(sandbox, path, old_string, new_string):
     return sandbox.edit_file(path, old_string, new_string)
+
+
+def _insert_before(sandbox, path, anchor, text):
+    return sandbox.insert_before(path, anchor, text)
+
+
+def _insert_after(sandbox, path, anchor, text):
+    return sandbox.insert_after(path, anchor, text)
 
 
 def _list_dir(sandbox, path="."):
@@ -89,6 +97,40 @@ EDIT_FILE_SPEC = ToolSpec(
     },
     required=("path", "old_string", "new_string"),
     fn=_edit_file,
+    caps=Caps(fs="write", max_output_chars=TOOL_OUTPUT_CAP, transcript="preview"),
+)
+
+INSERT_BEFORE_SPEC = ToolSpec(
+    name="insert_before",
+    description="Insert text as whole new line(s) immediately BEFORE the line "
+                "containing anchor. anchor must occur exactly once — include "
+                "surrounding context. The anchor's own line is never modified; "
+                "use this instead of edit_file when you mean to add a line, not "
+                "replace one.",
+    params={
+        "path": ParamSpec(type="string"),
+        "anchor": ParamSpec(type="string"),
+        "text": ParamSpec(type="string"),
+    },
+    required=("path", "anchor", "text"),
+    fn=_insert_before,
+    caps=Caps(fs="write", max_output_chars=TOOL_OUTPUT_CAP, transcript="preview"),
+)
+
+INSERT_AFTER_SPEC = ToolSpec(
+    name="insert_after",
+    description="Insert text as whole new line(s) immediately AFTER the line "
+                "containing anchor. anchor must occur exactly once — include "
+                "surrounding context. The anchor's own line is never modified; "
+                "use this instead of edit_file when you mean to add a line, not "
+                "replace one.",
+    params={
+        "path": ParamSpec(type="string"),
+        "anchor": ParamSpec(type="string"),
+        "text": ParamSpec(type="string"),
+    },
+    required=("path", "anchor", "text"),
+    fn=_insert_after,
     caps=Caps(fs="write", max_output_chars=TOOL_OUTPUT_CAP, transcript="preview"),
 )
 
@@ -152,8 +194,8 @@ FINISH_SPEC = ToolSpec(
 
 # Registration order is the order the tools are advertised to the model and the
 # order the unknown-tool error lists them in. Do not reorder.
-BUILTIN_SPECS = (READ_FILE_SPEC, WRITE_FILE_SPEC, EDIT_FILE_SPEC, LIST_DIR_SPEC,
-                 GREP_SPEC, BASH_SPEC, FINISH_SPEC)
+BUILTIN_SPECS = (READ_FILE_SPEC, WRITE_FILE_SPEC, EDIT_FILE_SPEC, INSERT_BEFORE_SPEC,
+                 INSERT_AFTER_SPEC, LIST_DIR_SPEC, GREP_SPEC, BASH_SPEC, FINISH_SPEC)
 
 
 def default_registry(transcript=None) -> ToolRegistry:
