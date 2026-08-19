@@ -169,3 +169,10 @@ def test_stdout_contract_fields_never_disappear(tmp_path, monkeypatch, capsys):
     for key in ("status", "worktree", "branch", "transcript", "turns", "usage",
                 "final_message"):
         assert key in payload
+
+
+def test_version_is_in_step_with_pyproject():
+    import dirtywork
+    pyproject = (Path(__file__).parent.parent / "pyproject.toml").read_text(encoding="utf-8")
+    assert dirtywork.__version__ == "0.8.0"
+    assert f'version = "{dirtywork.__version__}"' in pyproject

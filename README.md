@@ -695,9 +695,30 @@ printed to stdout (nothing else goes to stdout):
   "resumed_from": null,
   "finalize_error": null,
   "watchdog_violation": null,
-  "watchdog_violation_kind": null
+  "watchdog_violation_kind": null,
+  "stuck_on": null,
+  "files_changed": ["web/src/lib/api.ts", "web/src/lib/api.test.ts"],
+  "files_changed_truncated": false,
+  "last_tool_result": {
+    "tool": "bash",
+    "args": "{\"command\": \"npm test\"}",
+    "result": "exit code: 0\n12 passing"
+  },
+  "last_assistant_text": "Added the retry and a test for it.",
+  "verify": {
+    "command": "npm test",
+    "exit_code": 0,
+    "output_tail": "exit code: 0\n12 passing",
+    "rounds": 1,
+    "passed": true
+  }
 }
 ```
+
+The last six keys are 0.8 additions (`stuck_on`, `files_changed`,
+`files_changed_truncated`, `last_tool_result`, `last_assistant_text`,
+`verify`). Every one of them is present on every normal end-of-run payload:
+`null` when it does not apply, `[]`/`false` for the list and its flag.
 
 `status` is one of: `completed`, `max_turns`, `timeout`, `stalled`, `stuck`,
 `verify_failed`, `context_exhausted`, `model_error`, `interrupted`,

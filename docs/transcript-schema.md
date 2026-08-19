@@ -3,20 +3,24 @@
 `dirtywork` writes one JSON object per line to
 `~/.dirtywork/runs/<slug>/transcript.jsonl` (`tail -f` friendly — each line is
 flushed immediately). Every line has at least `ts` (UTC ISO-8601) and `event`
-(one of the seven event names below). `schema_version` marks the overall
+(one of the eight event names below). `schema_version` marks the overall
 version and appears once, on `run_start`, and again in the CLI's stdout JSON
 and in `run.json` — not on every line.
 
 **v1** is the pre-hardening shape (dirtywork ≤ 0.2.0, host-only execution, no
 `schema_version` field at all — its absence *is* the v1 marker). **v2** (0.3.0
-and later, including the 0.4.x Docker sandbox and the 0.5.x harness-robustness
-releases) adds Docker-sandbox provenance, provider identity, resume lineage,
-four new terminal statuses, the `nudge` and `sandbox_reset` events, and richer
-`run_end` fields from the export validator. A v1 reader that ignores unknown
+and later, including the 0.4.x Docker sandbox, the 0.5.x harness-robustness
+releases and the 0.8 run-evidence release) adds Docker-sandbox provenance,
+provider identity, resume lineage, six new terminal statuses, the `nudge`,
+`sandbox_reset` and `verify` events, richer `run_end` fields from the export
+validator, and 0.8's end-of-run evidence (`files_changed`,
+`files_changed_truncated`, `last_tool_result`, `last_assistant_text`,
+`stuck_on`, `verify`). A v1 reader that ignores unknown
 fields keeps working unmodified against v2 output: every v2 addition is a new
 field, a new event, or a new enum value — never a removed or renamed one. That
 is the same compatibility rule the stdout JSON contract follows, for the same
-reason.
+reason. **0.8 keeps `schema_version` at 2** for exactly that reason: everything
+it adds is additive.
 
 ## Events
 
