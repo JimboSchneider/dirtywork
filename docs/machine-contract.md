@@ -21,7 +21,7 @@ dirtywork run --repo <path> "<task>"
     [--temperature <f>]               # omitted by default → server preset
     [--provider openai|anthropic]     # default: openai; anthropic needs ANTHROPIC_API_KEY
     [--base-url <url>]                # default depends on --provider (LM Studio for openai,
-                                       # https://api.anthropic.com for anthropic)
+                                      # https://api.anthropic.com for anthropic)
     [--max-worktree-mb 2048]
     [--max-worktree-files 200000]
     [--sandbox docker|none]           # default: docker

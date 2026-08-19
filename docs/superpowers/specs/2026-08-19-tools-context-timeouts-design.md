@@ -347,8 +347,10 @@ assertion would pass on either branch); a new regression test covers `grep` with
 - **Nudge kind `timeout`:** when a turn contained ≥1 timed-out bash result, exactly ONE `nudge` event
   `{"event":"nudge","kind":"timeout","turn":N}` is written and the text below is merged into the next
   user message with any other nudge text through the existing `_join_nudges`. Like the `stall` nudge,
-  it is only emitted on turns that continue — a turn that ends the run (`finish`, `stuck`, an abort)
-  writes no nudge; the `timeouts` counter is unaffected by that.
+  it is only emitted on turns that continue — a turn that ends the run (`finish` whose verify passes or
+  is exhausted, `stuck`, an abort) writes no nudge, while a `finish` that continues into a verify
+  fix round does (the nudge text rides in that feedback message); the `timeouts` counter is
+  unaffected by that.
 
   ```
   A command timed out and did not finish; its result is unknown. Re-run it with a larger timeout (up to 600 seconds) or split it into smaller commands. Do not report it as passed.
