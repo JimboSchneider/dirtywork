@@ -555,4 +555,103 @@ def test_snapshot_worktree_refuses_a_path_containing_a_newline(tmp_path: Path):
     (wt / "we\nird.txt").write_text("x")
     with pytest.raises(WorkspaceError) as excinfo:
         snapshot_worktree(wt, "dirtywork/snap", "wip: newline")
-    assert "newline" in str(excinfo.value)
+    assert "control character" in str(excinfo.value)
+
+
+def test_snapshot_worktree_refuses_a_path_containing_a_carriage_return(tmp_path: Path):
+    # `hash-object --stdin-paths` strips a trailing \r from a line before
+    # opening the file, so a name ending in \r would hash a DIFFERENT path (or
+    # fail outright) rather than the file that was actually walked — refused
+    # for the same reason as \n, by the same control-character guard.
+    from dirtywork.workspace import snapshot_worktree
+    repo, wt = _snapshot_repo(tmp_path)
+    (wt / "weird\rname.txt").write_text("x")
+    with pytest.raises(WorkspaceError) as excinfo:
+        snapshot_worktree(wt, "dirtywork/snap", "wip: carriage return")
+    assert "control character" in str(excinfo.value)
+
+
+def test_snapshot_worktree_records_a_literal_quote_and_escape_in_a_filename(tmp_path: Path):
+    # `git update-index --index-info` C-unquotes a path that STARTS with `"`:
+    # without -z, a file literally named `"src\057main.py"` on disk gets
+    # recorded in the tree as `src/main.py` (verified against git 2.48.1).
+    # `snapshot_worktree` must use `-z`/NUL-delimited update-index so the
+    # literal on-disk name round-trips untouched, and the real `src/main.py`
+    # (a different file) must be unaffected.
+    from dirtywork.workspace import snapshot_worktree
+    repo, wt = _snapshot_repo(tmp_path)
+    weird_name = '"src\\057main.py"'
+    (wt / weird_name).write_text("quoted name content\n")
+    (wt / "src").mkdir()
+    (wt / "src" / "main.py").write_text("real main\n")
+
+    sha = snapshot_worktree(wt, "dirtywork/snap", "wip: quoted name")
+    assert sha is not None
+
+    raw = _git(repo, "ls-tree", "-r", "-z", sha)
+    entries = {}
+    for record in raw.split("\0"):
+        if not record:
+            continue
+        meta, _, name = record.partition("\t")
+        _mode, _kind, blob = meta.split()
+        entries[name] = blob
+    assert weird_name in entries
+    assert "src/main.py" in entries
+    assert _git(repo, "cat-file", "-p", entries[weird_name]) == "quoted name content\n"
+    assert _git(repo, "cat-file", "-p", entries["src/main.py"]) == "real main\n"
+
+
+def test_snapshot_worktree_refuses_when_worktree_is_on_a_different_branch(tmp_path: Path):
+    # `update-ref` moves `refs/heads/<branch>` while `host_read_tree` reads
+    # HEAD — without this guard, a worktree switched to another branch would
+    # get its content committed onto `branch` and its index reset to HEAD's
+    # tree, out from under whatever the worktree is actually on.
+    from dirtywork.workspace import snapshot_worktree
+    repo, wt = _snapshot_repo(tmp_path)
+    orig = _git(repo, "rev-parse", "dirtywork/snap").strip()
+    _git(wt, "checkout", "-b", "dirtywork/other")
+    with pytest.raises(WorkspaceError) as excinfo:
+        snapshot_worktree(wt, "dirtywork/snap", "wip: wrong branch")
+    message = str(excinfo.value)
+    assert "dirtywork/other" in message and "dirtywork/snap" in message
+    assert _git(repo, "rev-parse", "dirtywork/snap").strip() == orig  # ref untouched
+
+
+def test_snapshot_worktree_refuses_to_commit_an_empty_tree_over_a_nonempty_head(tmp_path: Path):
+    # entries built from a fully-emptied worktree write the canonical empty
+    # tree; comparing that against a NON-empty branch head would look like a
+    # real change and commit "delete everything onto branch" — refused
+    # instead. This guard lives inside snapshot_worktree (not just the CLI)
+    # because Task 8 calls snapshot_worktree directly.
+    from dirtywork.workspace import snapshot_worktree
+    repo = tmp_path / "repo2"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "f.txt").write_text("content\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "init")
+    wt = tmp_path / "wt2"
+    _git(repo, "worktree", "add", "-b", "dirtywork/snap2", str(wt))
+    orig = _git(repo, "rev-parse", "dirtywork/snap2").strip()
+    (wt / "f.txt").unlink()
+
+    with pytest.raises(WorkspaceError) as excinfo:
+        snapshot_worktree(wt, "dirtywork/snap2", "wip: empty")
+    assert "empty tree" in str(excinfo.value)
+    assert _git(repo, "rev-parse", "dirtywork/snap2").strip() == orig  # ref untouched
+
+
+def test_snapshot_worktree_reports_skipped_non_regular_entries(tmp_path: Path):
+    import os
+    from dirtywork.workspace import snapshot_worktree
+    repo, wt = _snapshot_repo(tmp_path)
+    os.mkfifo(wt / "fifo")
+    report: dict = {}
+
+    sha = snapshot_worktree(wt, "dirtywork/snap", "wip: fifo", report=report)
+    assert sha is not None
+    assert report["skipped"] == 1
+    assert "fifo" not in _git(repo, "ls-tree", "-r", "--name-only", sha)

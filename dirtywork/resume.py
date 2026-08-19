@@ -135,7 +135,14 @@ def pid_alive(pid) -> bool:
     return True
 
 
-def check_resumable(prior: dict, *, alive=pid_alive) -> None:
+def preflight_run_worktree(prior: dict, *, alive=pid_alive) -> None:
+    """The four guards a run's worktree must clear before dirtywork touches its
+    content again: a live host process, a missing worktree, a worktree that is
+    not a linked worktree of the run's repo, and a pre-resume stash still
+    parked beside it. Shared by `check_resumable` (resume) and
+    `runs.cmd_snapshot` (`dirtywork runs snapshot`) — both act on a prior
+    run's worktree and must refuse the same unsafe states the same way.
+    Raises ResumeError; the message says why."""
     if prior.get("status") == "running" and alive(prior.get("host_pid")):
         raise ResumeError(f"run {prior['slug']} is still in progress (pid {prior['host_pid']}); "
                           f"wait for it or stop it before resuming")
@@ -153,6 +160,10 @@ def check_resumable(prior: dict, *, alive=pid_alive) -> None:
             f"{listing}; that stash holds the worktree content from before that resume. Move "
             f"its contents back into {worktree} (or delete the stash if you no longer need it) "
             f"before resuming again")
+
+
+def check_resumable(prior: dict, *, alive=pid_alive) -> None:
+    preflight_run_worktree(prior, alive=alive)
 
 
 def _render_event(event: dict) -> str | None:

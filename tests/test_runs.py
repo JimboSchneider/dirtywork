@@ -1203,10 +1203,14 @@ def test_cmd_snapshot_refuses_a_live_run_and_a_foreign_worktree(
         "worktree": str(wt), "branch": "dirtywork/snap2", "host_pid": os.getpid(),
     })
     assert runs.cmd_snapshot(argparse.Namespace(slug="snap2")) == 2
-    assert "still running" in capsys.readouterr().err
+    assert "still in progress" in capsys.readouterr().err
 
+    # A plain clone (a directory `.git`, not the FILE a linked worktree has)
+    # is a foreign directory dirtywork did not create — must be refused, not
+    # just "missing" (it exists and has SOME `.git`).
     outside = tmp_path / "outside"
     outside.mkdir()
+    _git(outside, "init")
     (outside / "f.txt").write_text("x\n")
     _write_run(tmp_path / "runs", "snap3", {
         "slug": "snap3", "status": "stalled", "repo": str(repo),
@@ -1218,11 +1222,36 @@ def test_cmd_snapshot_refuses_a_live_run_and_a_foreign_worktree(
 
 def test_cmd_snapshot_refuses_a_worktree_the_export_never_populated(
         tmp_path, repo, monkeypatch, capsys):
+    # A `--no-checkout` worktree off a NON-empty branch: the branch has real
+    # content, but nothing was ever checked out into this worktree (the
+    # docker export never landed) — snapshot_worktree's empty-tree guard must
+    # refuse rather than commit "delete everything" onto the branch.
     monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
-    wt = _linked_worktree(repo, "snap4")     # the repo fixture's HEAD is an empty commit
+    (repo / "f.txt").write_text("content\n")
+    _git(repo, "add", "f.txt")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "add f")
+    wt = repo / ".worktrees" / "dw-snap4"
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    _git(repo, "worktree", "add", "--no-checkout", "-b", "dirtywork/snap4", str(wt))
     _write_run(tmp_path / "runs", "snap4", {
         "slug": "snap4", "status": "sandbox_error", "repo": str(repo),
         "worktree": str(wt), "branch": "dirtywork/snap4", "host_pid": None,
     })
     assert runs.cmd_snapshot(argparse.Namespace(slug="snap4")) == 2
-    assert "nothing to snapshot" in capsys.readouterr().err
+    assert "empty tree" in capsys.readouterr().err
+
+
+def test_cmd_snapshot_reports_skipped_non_regular_entries(
+        tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = _linked_worktree(repo, "snap5")
+    (wt / "new.txt").write_text("x\n")
+    os.mkfifo(wt / "fifo")
+    _write_run(tmp_path / "runs", "snap5", {
+        "slug": "snap5", "status": "max_turns", "repo": str(repo),
+        "worktree": str(wt), "branch": "dirtywork/snap5", "host_pid": None,
+    })
+    rc = runs.cmd_snapshot(argparse.Namespace(slug="snap5"))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "(1 non-regular entries skipped)" in out

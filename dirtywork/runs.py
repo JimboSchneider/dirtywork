@@ -22,7 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import rundir
-from .resume import find_stashes, pid_alive, stash_dir_for, worktree_belongs_to_repo
+from .resume import (ResumeError, find_stashes, pid_alive, preflight_run_worktree,
+                      stash_dir_for, worktree_belongs_to_repo)
 from .sandbox import docker_args, docker_cli, export
 from .workspace import WorkspaceError, snapshot_worktree
 
@@ -725,55 +726,42 @@ def cmd_snapshot(args) -> int:
     branch, using plumbing that never runs a filter, a hook or an ignore rule.
     Plumbing-only by design — the review→fix loop needs a commit to branch from
     (`--branch-from @<slug>`) without asking the operator for a manual wip
-    commit that their own git config would have filtered."""
+    commit that their own git config would have filtered. The live-pid,
+    missing/foreign-worktree and pre-resume-stash guards are
+    `resume.preflight_run_worktree` — the same guards `dirtywork resume`
+    applies before touching a prior run's worktree, and Task 8's
+    `--branch-from @<slug>` is the third caller. The empty-tree guard lives
+    inside `snapshot_worktree` itself, since that function has callers (Task
+    8) that never pass through this CLI guard at all."""
     try:
         run_dir, data = _open_run(args.slug)
     except RunsError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
-    if data.get("status") == "running" and pid_alive(data.get("host_pid")):
-        print(f"error: run '{args.slug}' is still running (pid {data.get('host_pid')}); "
-              f"wait for it to finish before snapshotting", file=sys.stderr)
+    try:
+        preflight_run_worktree(data)
+    except ResumeError as e:
+        print(f"error: {e}", file=sys.stderr)
         return 2
     branch = data.get("branch") or ""
     if not branch:
         print(f"error: run.json for '{args.slug}' records no branch", file=sys.stderr)
         return 2
     worktree = Path(data.get("worktree", ""))
-    if not worktree.is_dir():
-        print(f"error: worktree {worktree} is missing; nothing to snapshot", file=sys.stderr)
-        return 2
-    if not worktree_belongs_to_repo(worktree, Path(data.get("repo", ""))):
-        print(f"error: worktree {worktree} is not a linked worktree of "
-              f"{data.get('repo')}; refusing to snapshot a directory dirtywork did "
-              f"not create", file=sys.stderr)
-        return 2
-    stashes = find_stashes(worktree)
-    if stashes:
-        listing = ", ".join(str(p) for p in stashes)
-        print(f"error: a pre-resume stash exists beside {worktree} ({listing}); the "
-              f"worktree does not hold this run's content until you move it back or "
-              f"delete it", file=sys.stderr)
-        return 2
-    try:
-        pristine = export.worktree_is_pristine(worktree)
-    except OSError as e:
-        print(f"error: cannot read worktree {worktree}: {e}", file=sys.stderr)
-        return 2
-    if pristine:
-        # Committing an empty tree here would record "delete everything" on the
-        # run's branch. A docker run whose export never landed is the case.
-        print(f"error: worktree {worktree} holds only its .git file; there is "
-              f"nothing to snapshot (the export never populated it)", file=sys.stderr)
-        return 2
 
+    report: dict = {}
     try:
-        sha = snapshot_worktree(worktree, branch, f"wip: dirtywork run {args.slug}")
+        sha = snapshot_worktree(worktree, branch, f"wip: dirtywork run {args.slug}",
+                                report=report)
     except WorkspaceError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    print(f"snapshot {sha} on {branch}" if sha else "nothing to snapshot")
+    line = f"snapshot {sha} on {branch}" if sha else "nothing to snapshot"
+    skipped = report.get("skipped", 0)
+    if skipped:
+        line += f" ({skipped} non-regular entries skipped)"
+    print(line)
     return 0
 
 
