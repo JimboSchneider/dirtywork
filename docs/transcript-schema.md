@@ -28,7 +28,7 @@ One per run, always the first line.
 |---|---|---|---|---|
 | `ts` | ✓ | ✓ | string | UTC ISO-8601 |
 | `event` | ✓ | ✓ | `"run_start"` | |
-| `task` | ✓ | ✓ | string | the task text; on a resumed run it also carries the `--- RESUMED RUN ---` block |
+| `task` | ✓ | ✓ | string | the task text; on a resumed run it also carries the `--- RESUMED RUN ---` block, or the `--- RESUMED RUN: REVIEW FEEDBACK ---` block when `--feedback` was given. Both markers are stripped from the prior task before a new block is built, so resuming a resume never stacks them |
 | `model` | ✓ | ✓ | string | |
 | `max_turns` | ✓ | ✓ | integer | |
 | `timeout` | ✓ | ✓ | integer | seconds, whole-run wall clock |
@@ -44,6 +44,7 @@ One per run, always the first line.
 | `temperature` | | ✓ | number \| null | omitted from the request when null |
 | `provider` | | ✓ | `"openai"` \| `"anthropic"` | |
 | `resumed_from` | | ✓ | string \| null | slug of the run this one continues |
+| `feedback` | | ✓ | string \| null | 0.8: `resume --feedback`/`--feedback-file` text, verbatim (max 64 000 chars); null on a fresh run or a resume without feedback |
 | `sandbox` | | ✓ | `"none"` \| object | `"none"` in host mode; in Docker mode `{backend, image, image_digest, image_pinned, network, memory, cpus, pids_limit, tmp_size, gitdir_size, max_worktree_mb, max_worktree_files, user}` |
 
 ### `assistant`
@@ -198,6 +199,7 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `resumed_from` | start | slug of the run this one continues, or null |
 | `resumed_by` | — | written onto the **prior** run's `run.json` when a resume starts |
 | `branch_from_run` | start | 0.8: the slug `--branch-from @<slug>` named, or null. The resolved branch itself is `run_start.branch_from` |
+| `feedback` | start | 0.8: `resume --feedback`/`--feedback-file` text, or null |
 | `container` | start | Docker mode container name, else null |
 | `volume` | start | Docker mode volume name, else null |
 | `image` | start | `--image` as given (Docker mode), else null |

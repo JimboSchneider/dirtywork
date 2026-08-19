@@ -11,6 +11,11 @@ from .rundir import read_run_json
 
 RESUME_TAIL_CHARS = 12_000
 RESUME_MARKER = "\n\n--- RESUMED RUN ---\n"
+# Spec §6.3: a resume that carries a reviewer's instructions gets its own
+# marker, so the two block shapes never mix — and BOTH are stripped from a
+# prior task before a new block is built, so re-resuming never accumulates.
+RESUME_FEEDBACK_MARKER = "\n\n--- RESUMED RUN: REVIEW FEEDBACK ---\n"
+MAX_FEEDBACK_CHARS = 64_000
 PRE_RESUME_SUFFIX = ".pre-resume"
 _REQUIRED_STR_KEYS = ("slug", "repo", "worktree", "branch", "base_commit", "sandbox", "status")
 
@@ -199,17 +204,33 @@ def render_transcript_tail(transcript_path: Path, max_chars: int = RESUME_TAIL_C
     return "\n".join(reversed(kept))
 
 
-def build_resume_task(prior_task: str, prior_status: str, prior_turns, transcript_tail: str) -> str:
-    prior_task = prior_task.split(RESUME_MARKER, 1)[0]
+def build_resume_task(prior_task: str, prior_status: str, prior_turns, transcript_tail: str,
+                      feedback: str | None = None) -> str:
+    prior_task = prior_task.split(RESUME_MARKER, 1)[0].split(RESUME_FEEDBACK_MARKER, 1)[0]
     turns_text = str(prior_turns) if isinstance(prior_turns, int) else "unknown"
-    return (
-        f"{prior_task}{RESUME_MARKER}"
+    # Shared by both block shapes (plain resume vs. resume-with-feedback): only
+    # the marker and the middle instructions paragraph differ between them.
+    status_line = (
         f"This run continues an earlier run that ended with status '{prior_status}' after "
         f"{turns_text} turns.\n"
-        "The worktree already contains that run's work: inspect it with `git status` and "
-        "`git diff` before doing anything else, and continue from there — do not start over "
-        "or revert prior work.\n"
+    )
+    tail_block = (
         "The last events of the earlier run were:\n"
         f"{transcript_tail}\n"
         "When the task is complete, call finish(summary=...)."
     )
+    if feedback:
+        instructions = (
+            "A reviewer read that run's work and sent this feedback:\n\n"
+            f"{feedback}\n\n"
+            "The worktree already contains the earlier run's work: inspect it with "
+            "`git status` and\n"
+            "`git diff` first, then apply the feedback. Make no other changes.\n"
+        )
+        return f"{prior_task}{RESUME_FEEDBACK_MARKER}{status_line}{instructions}{tail_block}"
+    instructions = (
+        "The worktree already contains that run's work: inspect it with `git status` and "
+        "`git diff` before doing anything else, and continue from there — do not start over "
+        "or revert prior work.\n"
+    )
+    return f"{prior_task}{RESUME_MARKER}{status_line}{instructions}{tail_block}"

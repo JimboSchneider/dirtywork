@@ -348,7 +348,8 @@ def test_docker_live_resume_seeds_worktree_keeps_branch_and_exports(tmp_path, mo
         _resp(tool_calls=[_call("r2", "write_file", {"path": "second.txt", "content": "from run 2\n"})]),
         _resp(tool_calls=[_call("r3", "finish", {"summary": "resumed"})]),
     ]
-    rc = _run_main(monkeypatch, tmp_path, second_responses, ["resume", Path(first["run_dir"]).name])
+    rc = _run_main(monkeypatch, tmp_path, second_responses,
+                   ["resume", Path(first["run_dir"]).name, "--feedback", "keep going"])
     second = json.loads(capsys.readouterr().out)
     assert rc == 0, second
     _assert_status(second, "completed")

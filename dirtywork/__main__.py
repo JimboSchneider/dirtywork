@@ -40,8 +40,9 @@ from .sandbox.docker_cli import DockerError, docker_version, resolve_image, vali
 from .sandbox.host import HostSandbox
 from .builtin_tools import default_registry
 from .transcript import Transcript
-from .resume import (ResumeError, build_resume_task, check_resumable, load_prior_run,
-                     preflight_run_worktree, render_transcript_tail, resolve_run_dir)
+from .resume import (MAX_FEEDBACK_CHARS, ResumeError, build_resume_task, check_resumable,
+                     load_prior_run, preflight_run_worktree, render_transcript_tail,
+                     resolve_run_dir)
 from .workspace import (
     WorkspaceError,
     commit_exists,
@@ -116,6 +117,7 @@ class RunContext:
     context_window: int
     branch_from: str | None = None
     branch_from_run: str | None = None   # the @<slug> --branch-from named, if any
+    feedback: str | None = None          # resume only: the reviewer's instructions
     resumed_from: str | None = None
     prior_run_dir: Path | None = None
     seed_from_worktree: bool = False
@@ -392,6 +394,7 @@ def _write_run_json_start(run_dir: Path, ctx: RunContext, args) -> None:
         "provider": args.provider,
         "context_window": ctx.context_window,
         "branch_from_run": ctx.branch_from_run,
+        "feedback": ctx.feedback,
         "resumed_from": ctx.resumed_from,
         "container": docker_args.container_name(ctx.slug) if is_docker else None,
         "volume": docker_args.volume_name(ctx.slug) if is_docker else None,
@@ -554,6 +557,26 @@ def _fail_run(e: Exception, ctx: RunContext, *, sandbox, sandbox_started: bool, 
     return 1
 
 
+def _load_feedback(args):
+    """Spec §6.3: --feedback / --feedback-file, mutually exclusive, UTF-8,
+    capped. Returns the text or None. Raises PreflightFailure (exit 2)."""
+    text = getattr(args, "feedback", None)
+    path = getattr(args, "feedback_file", None)
+    if text is not None and path is not None:
+        raise PreflightFailure("--feedback and --feedback-file are mutually exclusive")
+    if path is not None:
+        try:
+            text = Path(path).expanduser().read_text(encoding="utf-8")
+        except (OSError, ValueError) as e:
+            raise PreflightFailure(f"cannot read feedback file '{path}': {e}")
+    if text is None:
+        return None
+    if len(text) > MAX_FEEDBACK_CHARS:
+        raise PreflightFailure(
+            f"feedback is {len(text)} chars, over the {MAX_FEEDBACK_CHARS}-char limit")
+    return text
+
+
 def _load_resume_target(args) -> dict:
     """Spec §5 lookup + refusals; also applies the prior run's defaults to
     args (sandbox mode always; model/image unless given on the command line)."""
@@ -587,6 +610,13 @@ def _load_resume_target(args) -> dict:
         prior_verify = prior.get("verify")
         if isinstance(prior_verify, dict) and prior_verify.get("command"):
             args.verify = prior_verify["command"]
+    # Last, so the earlier refusals (still running, missing worktree, provider
+    # switch) keep their own messages when they apply too.
+    args.feedback_text = _load_feedback(args)
+    if prior.get("status") == "completed" and not args.feedback_text:
+        raise PreflightFailure(
+            f"run '{prior['slug']}' ended 'completed'; pass --feedback to continue it "
+            f"with new instructions")
     return prior
 
 
@@ -604,12 +634,14 @@ def _workspace_resume(args, prior: dict, context_window: int) -> RunContext:
         except SandboxError as e:
             raise PreflightFailure(str(e))
     tail = render_transcript_tail(Path(prior["run_dir"]) / "transcript.jsonl")
-    task = build_resume_task(prior["task"], prior["status"], prior.get("turns"), tail)
+    feedback = getattr(args, "feedback_text", None)
+    task = build_resume_task(prior["task"], prior["status"], prior.get("turns"), tail,
+                             feedback)
     return RunContext(
         repo=repo, slug=slug, branch=prior["branch"], worktree=Path(prior["worktree"]),
         base_commit=prior["base_commit"], task=task, sandbox_mode=args.sandbox,
         provider=args.provider, image_ref=image_ref, image_digest=image_digest, image_pinned=image_pinned,
-        context_window=context_window, resumed_from=prior["slug"],
+        context_window=context_window, resumed_from=prior["slug"], feedback=feedback,
         prior_run_dir=Path(prior["run_dir"]), seed_from_worktree=(args.sandbox == "docker"),
         owns_worktree=False,
     )
@@ -674,7 +706,7 @@ def _execute(ctx: RunContext, args, client) -> int:
                 "branch_from": ctx.branch_from, "base_commit": ctx.base_commit,
                 "base_url": args.base_url, "dirtywork_version": __version__,
                 "temperature": args.temperature, "sandbox": sandbox_info, "provider": ctx.provider,
-                "resumed_from": ctx.resumed_from,
+                "resumed_from": ctx.resumed_from, "feedback": ctx.feedback,
             },
             finalize=finalize,
             stall_turns=args.stall_turns, context_window=ctx.context_window,
@@ -872,6 +904,12 @@ def _parse_args(argv):
     _add_run_flags(run_p, resume=False)
     resume_p = sub.add_parser("resume", help="continue an earlier run on its worktree")
     resume_p.add_argument("run", help="run slug (under ~/.dirtywork/runs) or a run directory path")
+    resume_p.add_argument("--feedback", default=None, metavar="TEXT",
+                          help="reviewer instructions for this resume; the resumed task tells "
+                               "the worker to inspect the earlier work and apply exactly this "
+                               "and nothing else. Required to resume a 'completed' run")
+    resume_p.add_argument("--feedback-file", default=None, metavar="PATH",
+                          help="read --feedback from a UTF-8 file instead (max 64000 chars)")
     _add_run_flags(resume_p, resume=True)
     _add_runs_parsers(sub)
     _add_bench_parsers(sub)

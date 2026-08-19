@@ -1391,7 +1391,8 @@ def test_resume_uses_prior_model_unless_overridden(tmp_path, monkeypatch, capsys
     first = json.loads(capsys.readouterr().out)
     patch_provider(monkeypatch, m,
                         lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
-    rc = m.main(["resume", "--model", "other/model", Path(first["run_dir"]).name])
+    rc = m.main(["resume", "--model", "other/model", "--feedback", "keep going",
+                 Path(first["run_dir"]).name])
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert json.loads((Path(out["run_dir"]) / "run.json").read_text())["model"] == "other/model"
@@ -1410,7 +1411,7 @@ def test_resume_setup_failure_keeps_worktree(tmp_path, monkeypatch, capsys):
             raise SandboxError("boom at start")
 
     monkeypatch.setattr(m, "HostSandbox", ExplodingHost)
-    rc = m.main(["resume", Path(first["run_dir"]).name])
+    rc = m.main(["resume", Path(first["run_dir"]).name, "--feedback", "keep going"])
     out = json.loads(capsys.readouterr().out)
     assert rc == 1 and out["status"] == "sandbox_error"
     assert Path(first["worktree"]).is_dir()            # prior work preserved
@@ -1487,7 +1488,7 @@ def test_resume_docker_mode_seeds_and_keeps_branch(tmp_path, monkeypatch, capsys
     assert start_calls[0]["seed_from_worktree"] is False
     assert start_calls[0]["branch"] == first["branch"]
 
-    rc = m.main(["resume", Path(first["run_dir"]).name])
+    rc = m.main(["resume", Path(first["run_dir"]).name, "--feedback", "keep going"])
     second = json.loads(capsys.readouterr().out)
     assert rc == 0, second
     assert len(start_calls) == 2
@@ -1558,7 +1559,7 @@ def test_resume_inherits_the_prior_provider(tmp_path, monkeypatch, capsys):
     repo = _host_repo(tmp_path)
     assert m2.main(["run", "--repo", str(repo), "--sandbox", "none", "task"]) == 0
     slug = json.loads(capsys.readouterr().out)["run_dir"].rsplit("/", 1)[-1]
-    assert m2.main(["resume", str(tmp_path / "runs" / slug)]) == 0
+    assert m2.main(["resume", str(tmp_path / "runs" / slug), "--feedback", "keep going"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["provider"] == "openai"
 
@@ -1746,7 +1747,6 @@ def test_verify_flag_records_the_gate_and_can_fail_the_run(tmp_path, monkeypatch
     assert data["verify"]["exit_code"] == 4
 
 
-@pytest.mark.skip(reason="needs resume --feedback (Task 9); unskipped there")
 def test_verify_is_null_without_the_flag_and_resume_inherits_the_command(
         tmp_path, monkeypatch, capsys):
     m = _install_host_harness(monkeypatch, tmp_path)
@@ -1876,3 +1876,61 @@ def test_branch_from_refuses_a_still_running_prior_run_and_snapshots_nothing(
         capture_output=True, text=True).stdout
     assert branch_log_after == branch_log_before         # no snapshot commit was made
     assert len(list((tmp_path / "runs").iterdir())) == 1  # nothing new created
+
+
+def test_resume_feedback_reaches_the_task_run_json_and_run_start(
+        tmp_path, monkeypatch, capsys):
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    assert first["status"] == "completed"
+    patch_provider(monkeypatch, m,
+                        lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
+    rc = m.main(["resume", Path(first["run_dir"]).name,
+                 "--feedback", "You removed the null check; restore it."])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0, out
+    data = json.loads((Path(out["run_dir"]) / "run.json").read_text())
+    assert data["feedback"] == "You removed the null check; restore it."
+    assert "--- RESUMED RUN: REVIEW FEEDBACK ---" in data["task"]
+    assert "You removed the null check; restore it." in data["task"]
+    start = next(e for e in (json.loads(l) for l in
+                             Path(out["transcript"]).read_text().splitlines())
+                 if e["event"] == "run_start")
+    assert start["feedback"] == "You removed the null check; restore it."
+
+
+def test_resume_of_a_completed_run_without_feedback_is_refused(tmp_path, monkeypatch, capsys):
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    slug = Path(first["run_dir"]).name
+    assert m.main(["resume", slug]) == 2
+    err = capsys.readouterr().err
+    assert f"run '{slug}' ended 'completed'" in err
+    assert "--feedback" in err
+    assert len(list((tmp_path / "runs").iterdir())) == 1     # nothing created
+
+
+def test_resume_feedback_file_and_its_refusals(tmp_path, monkeypatch, capsys):
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    slug = Path(first["run_dir"]).name
+
+    assert m.main(["resume", slug, "--feedback", "a", "--feedback-file", "b"]) == 2
+    assert "mutually exclusive" in capsys.readouterr().err
+
+    assert m.main(["resume", slug, "--feedback-file", str(tmp_path / "nope.txt")]) == 2
+    assert "cannot read feedback file" in capsys.readouterr().err
+
+    big = tmp_path / "big.txt"
+    big.write_text("x" * 64_001, encoding="utf-8")
+    assert m.main(["resume", slug, "--feedback-file", str(big)]) == 2
+    assert "over the 64000-char limit" in capsys.readouterr().err
+
+    note = tmp_path / "note.txt"
+    note.write_text("Restore the retry loop.\n", encoding="utf-8")
+    patch_provider(monkeypatch, m,
+                        lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
+    assert m.main(["resume", slug, "--feedback-file", str(note)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert json.loads((Path(out["run_dir"]) / "run.json").read_text())["feedback"] == (
+        "Restore the retry loop.\n")

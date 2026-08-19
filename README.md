@@ -241,6 +241,23 @@ resume is killed mid-export, that stash (`<worktree>.pre-resume-<slug>`, next to
 worktree) still holds the pre-resume content; `resume` refuses to run again until you
 move it back or delete it, and never deletes a stash it did not create.
 
+**Sending review feedback.** `--feedback TEXT` (or `--feedback-file PATH`, a
+UTF-8 file, max 64 000 chars; the two are mutually exclusive) turns a resume
+into a review round: the resumed task keeps the original brief, then tells the
+worker that a reviewer read its work and sent *this*, and to inspect the
+worktree with `git status`/`git diff` and apply the feedback and nothing else.
+
+    dirtywork resume <slug> --feedback "You dropped the null check in api.ts; restore it."
+
+Resuming a run that ended `completed` **requires** feedback — without it the
+command refuses (exit 2, nothing created), because a completed run that is
+continued with its own original brief just re-does work it already declared
+done. Every other status resumes with or without feedback, as before. The
+feedback text is recorded in the new run's `run.json` (`feedback`) and its
+`run_start` event; both resume markers (`--- RESUMED RUN ---` and
+`--- RESUMED RUN: REVIEW FEEDBACK ---`) are stripped from the prior task before
+a new block is built, so resuming a resume never accumulates preambles.
+
 Docker-mode limit: export stores files, not the worker's in-container
 commits, so a resumed docker worker sees the earlier work as uncommitted
 changes against the base commit — not as its old commit history. Host mode
@@ -595,6 +612,8 @@ dirtywork run --repo <path> "<task>"
 ```
 dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch-from/--sandbox/<task>;
     [--model <m>]                     # defaults to the earlier run's model; --image defaults to its image
+    [--feedback "<text>"]             # reviewer instructions; REQUIRED to resume a `completed` run
+    [--feedback-file <path>]          # same, read from a UTF-8 file (max 64000 chars)
 ```
 
 - `--branch-from @<slug>` — start the new run from the branch an earlier run

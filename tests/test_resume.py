@@ -222,3 +222,28 @@ def test_stash_helpers(tmp_path):
     (tmp_path / "dw-abc.pre-resume-s0").mkdir()
     (tmp_path / "dw-abcd.pre-resume-s9").mkdir()   # a different worktree's stash
     assert find_stashes(wt) == [tmp_path / "dw-abc.pre-resume-s0", tmp_path / "dw-abc.pre-resume-s1"]
+
+
+def test_build_resume_task_with_feedback_uses_the_feedback_block():
+    text = build_resume_task("Fix the bug", "completed", 12, "run_end: completed",
+                             feedback="You deleted the retry loop; put it back.")
+    assert text.startswith("Fix the bug\n\n--- RESUMED RUN: REVIEW FEEDBACK ---\n")
+    assert "--- RESUMED RUN ---" not in text
+    assert "ended with status 'completed' after 12 turns" in text
+    assert "A reviewer read that run's work and sent this feedback:" in text
+    assert "You deleted the retry loop; put it back." in text
+    assert "apply the feedback. Make no other changes." in text
+    assert text.endswith("When the task is complete, call finish(summary=...).")
+
+
+def test_build_resume_task_strips_both_markers_so_blocks_never_stack():
+    plain = build_resume_task("Fix the bug", "max_turns", 40, "run_end: max_turns")
+    with_feedback = build_resume_task(plain, "stalled", 12, "run_end: stalled",
+                                      feedback="try again")
+    assert with_feedback.count("--- RESUMED RUN ---") == 0
+    assert with_feedback.count("--- RESUMED RUN: REVIEW FEEDBACK ---") == 1
+    assert with_feedback.startswith("Fix the bug\n\n--- RESUMED RUN")
+    back_to_plain = build_resume_task(with_feedback, "max_turns", 3, "run_end: max_turns")
+    assert back_to_plain.count("--- RESUMED RUN: REVIEW FEEDBACK ---") == 0
+    assert back_to_plain.count("--- RESUMED RUN ---") == 1
+    assert back_to_plain.startswith("Fix the bug\n\n--- RESUMED RUN ---")
