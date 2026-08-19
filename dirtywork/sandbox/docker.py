@@ -443,14 +443,10 @@ class DockerSandbox:
 
     def write_file(self, path: str, content: str) -> str:
         encoded = content.encode("utf-8")
-        too_big = _oversized(encoded)
-        if too_big:
-            return too_big
-        rel, err = _rel(path, writing=True)
-        if err:
-            return err
         # Best-effort 'before' picture for the echoed diff (spec §3.1); an
         # unreadable/missing file yields None and reads as a new file.
+        # _oversized/_rel checks are owned by _write_raw (DRY) — one extra
+        # `head` exec on an oversized/invalid-path write is acceptable.
         old_text, _unused = self._read_raw(path, strict=True)
         err = self._write_raw(path, encoded)
         if err:

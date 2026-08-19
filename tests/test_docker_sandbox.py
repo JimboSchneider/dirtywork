@@ -387,7 +387,11 @@ def test_write_file_refuses_dot_git(started):
     sb, fake, run_dir = started
     out = sb.write_file(".git/hooks/pre-commit", "#!/bin/sh")
     assert out.startswith("ERROR:")
-    assert not fake.calls
+    # write_file's best-effort pre-read runs before _write_raw's checks (DRY:
+    # _write_raw owns the checks), so one harmless `head` exec is expected —
+    # but never the actual write.
+    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    assert not writes
 
 
 def test_write_file_refuses_oversized_content(started):
@@ -395,7 +399,8 @@ def test_write_file_refuses_oversized_content(started):
     sb, fake, run_dir = started
     out = sb.write_file("big.txt", "x" * (MAX_WRITE_BYTES + 1))
     assert out.startswith("ERROR:")
-    assert not fake.calls
+    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    assert not writes
 
 
 def test_edit_file_reads_then_writes(started):
