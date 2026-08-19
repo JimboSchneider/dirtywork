@@ -1670,3 +1670,32 @@ def test_resume_inherits_allow_commit_from_the_prior_run(tmp_path, monkeypatch, 
     second = json.loads(capsys.readouterr().out)
     assert captured["allow_commit"] is True
     assert json.loads((Path(second["run_dir"]) / "run.json").read_text())["allow_commit"] is True
+
+
+def test_stuck_repeats_flag_reaches_the_runner_and_stuck_on_lands_everywhere(
+        tmp_path, monkeypatch, capsys):
+    failing = {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "b1", "type": "function", "function": {"name": "bash",
+         "arguments": json.dumps({"command": "exit 7"})}}]}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    m = _install_host_harness(monkeypatch, tmp_path, [failing])
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                 "--stuck-repeats", "2", "--max-turns", "9", "grind"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1, payload
+    assert payload["status"] == "stuck"
+    assert payload["stuck_on"]["command"] == "exit 7"
+    assert payload["stuck_on"]["repeats"] == 2
+    data = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert data["status"] == "stuck"
+    assert data["stuck_on"]["command"] == "exit 7"
+
+
+def test_stuck_on_is_null_on_an_ordinary_run(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "t"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stuck_on"] is None
+    assert json.loads((Path(payload["run_dir"]) / "run.json").read_text())["stuck_on"] is None

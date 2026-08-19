@@ -127,6 +127,7 @@ case it carries `status` and `error` only).
 | `watchdog_violation` | | ✓ | string \| null | Docker mode: the reason the watchdog killed the container, when that happened after the last tool call returned |
 | `watchdog_violation_kind` | | ✓ | string \| null | `"budget"` (worktree-size or host-disk-floor breach) or `"sandbox_error"` (the watchdog's own sampling exec failed twice); meaningful only alongside `watchdog_violation` |
 | `finalize_error` | | ✓ | string \| null | set when the finalize/export step itself raised after the agent loop finished; the run's own status is unaffected except that `completed` becomes `export_failed` |
+| `stuck_on` | | ✓ | object \| null | 0.8: `{command, output, repeats}` for the failing bash call that ended the run as `stuck` (`output` capped at 4000 chars); `null` on every other status |
 
 ## Statuses
 
@@ -139,6 +140,7 @@ case it carries `status` and `error` only).
 | `model_error` | ✓ | ✓ | repeated malformed replies/tool calls, an unreadable response body, or any exception the CLI caught |
 | `interrupted` | ✓ | ✓ | Ctrl-C during the loop |
 | `stalled` | | ✓ | `--stall-turns` consecutive turns with no progress (no new tool call, no successful write, no new command output) |
+| `stuck` | | ✓ | 0.8: the same **failing** bash command ran `--stuck-repeats` times in a row (fingerprint as the stall detector's: timings/shas stripped); edits in between do not reset the streak, a passing run does |
 | `budget_exceeded` | | ✓ | worktree size/file budget or host disk floor breached |
 | `sandbox_error` | | ✓ | the sandbox backend failed in a way the run cannot continue past |
 | `export_failed` | | ✓ | the run itself completed, but the validated export of the worker's files did not |
@@ -150,7 +152,8 @@ case it carries `status` and `error` only).
 section). Its fields: `schema_version`, `status`, `worktree`, `branch`,
 `transcript`, `turns`, `usage`, `final_message`, `run_dir`, `provider`,
 `base_commit`, `resumed_from`, `finalize_error`, `watchdog_violation`,
-`watchdog_violation_kind`, and `export_status` on the exception-recovery path.
+`watchdog_violation_kind`, `stuck_on`, and `export_status` on the
+exception-recovery path.
 Per this project's compatibility rule the stdout JSON may only gain fields,
 never lose or rename `status`, `worktree`, `branch`, `transcript`, `turns`,
 `usage`, `final_message`.
@@ -195,6 +198,7 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `finalize_error` | end | |
 | `watchdog_violation` | end | |
 | `watchdog_violation_kind` | end | |
+| `stuck_on` | end | 0.8: `{command, output, repeats}` when the run ended `stuck`, else null |
 | `allow_commit` | start | (bool) records whether the run's system prompt told the worker to commit as it went (`--allow-commit`, host mode only — see the README). A run that predates the flag has no such key. |
 | `verdict` | verdict | written by `dirtywork runs verdict`: `"accept"` \| `"reject"` \| `"cleanup"` |
 | `note` | verdict | `--note` text, or null |

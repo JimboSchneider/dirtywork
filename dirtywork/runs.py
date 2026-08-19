@@ -29,7 +29,8 @@ COLUMN_GAP = "  "
 LIST_COLUMNS = ("slug", "status", "started", "resumed", "branch", "worktree",
                 "container", "volume")
 SHOW_FIELDS = ("slug", "status", "sandbox", "task", "model", "provider", "turns",
-               "resumed_from", "resumed_by", "branch", "worktree", "started", "ended")
+               "resumed_from", "resumed_by", "branch", "worktree", "started", "ended",
+               "stuck_on")
 TASK_PREVIEW_CHARS = 200
 
 
@@ -210,6 +211,10 @@ def _summary_value(key: str, data: dict) -> str:
     value = data.get(key)
     if value is None or value == "":
         return "-"
+    # Structured end-of-run evidence: the plain view shows the one thing an
+    # operator scans for, not the whole object (the JSON dump below has it all).
+    if key == "stuck_on" and isinstance(value, dict):
+        return str(value.get("command") or "-")
     text = str(value)
     if key == "task" and len(text) > TASK_PREVIEW_CHARS:
         text = text[:TASK_PREVIEW_CHARS].replace("\n", " ") + " ... (full text below)"
@@ -429,6 +434,12 @@ def _md_result(data: dict, events: list) -> list:
         if value not in (None, ""):
             lines.append(f"- **{key}:** {str(value).splitlines()[0]}")
     lines.append("")
+    stuck_on = data.get("stuck_on") or end.get("stuck_on")
+    if isinstance(stuck_on, dict):
+        lines += [f"**stuck on** — the same failing command ran "
+                  f"{stuck_on.get('repeats')} times in a row", ""]
+        lines += _md_block(str(stuck_on.get("command") or ""))
+        lines += _md_block(str(stuck_on.get("output") or ""))
     diff_stat = data.get("diff_stat") or end.get("diff_stat")
     if diff_stat:
         lines += ["**diff_stat**", ""] + _md_block(str(diff_stat))

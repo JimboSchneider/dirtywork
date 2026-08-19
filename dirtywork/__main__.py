@@ -25,7 +25,7 @@ from .budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB
 from .llm import LLMError
 from .providers import DEFAULT_BASE_URLS, PROVIDER_NAMES, get_provider
 from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json, write_run_json
-from .runner import DEFAULT_STALL_TURNS, Runner, resolve_context_window
+from .runner import DEFAULT_STALL_TURNS, DEFAULT_STUCK_REPEATS, Runner, resolve_context_window
 from .sandbox import SandboxError, docker_args, docker_cli
 from .sandbox.docker import DockerSandbox
 from .sandbox.docker_args import DEFAULT_IMAGE, DockerConfig
@@ -609,6 +609,7 @@ def _execute(ctx: RunContext, args, client) -> int:
             },
             finalize=finalize,
             stall_turns=args.stall_turns, context_window=ctx.context_window,
+            stuck_repeats=getattr(args, "stuck_repeats", DEFAULT_STUCK_REPEATS),
         )
         display_root = DOCKER_WORKDIR if ctx.sandbox_mode == "docker" else str(ctx.worktree)
         system_prompt = build_system_prompt(display_root,
@@ -647,6 +648,7 @@ def _execute(ctx: RunContext, args, client) -> int:
         finalize_error=finalize_error,
         watchdog_violation=extra.get("watchdog_violation"),
         watchdog_violation_kind=extra.get("watchdog_violation_kind"),
+        stuck_on=extra.get("stuck_on"),
         turns=result.turns,
     )
 
@@ -656,6 +658,7 @@ def _execute(ctx: RunContext, args, client) -> int:
         base_commit=ctx.base_commit, finalize_error=finalize_error,
         watchdog_violation=extra.get("watchdog_violation"),
         watchdog_violation_kind=extra.get("watchdog_violation_kind"),
+        stuck_on=extra.get("stuck_on"),
         resumed_from=ctx.resumed_from, provider=ctx.provider,
     ), indent=2))
     return 0 if final_status == "completed" else 1
@@ -673,6 +676,9 @@ def _add_run_flags(p, *, resume: bool) -> None:
                    help="provider endpoint (default: the provider's own default)")
     p.add_argument("--stall-turns", type=_non_negative_int, default=DEFAULT_STALL_TURNS,
                    help="end the run as 'stalled' after N turns without progress (0 disables)")
+    p.add_argument("--stuck-repeats", type=_non_negative_int, default=DEFAULT_STUCK_REPEATS,
+                   help="end the run as 'stuck' after the same failing bash command runs N "
+                        "times in a row (0 disables); independent of --stall-turns")
     p.add_argument("--context-window", type=_positive_int, default=None,
                    help="model context window in tokens (default: built-in table, else 32768)")
     p.add_argument("--max-worktree-mb", type=int, default=DEFAULT_MAX_WORKTREE_MB)

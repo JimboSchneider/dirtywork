@@ -358,7 +358,7 @@ def test_finalize_merges_into_run_end_and_result_extra(parts):
               finalize=lambda: {"diff_stat": " 1 file changed"})
     result = r.run("s", "t")
     transcript.close()
-    assert result.extra == {"diff_stat": " 1 file changed"}
+    assert result.extra == {"stuck_on": None, "diff_stat": " 1 file changed"}
     events = _events(tmp)
     run_end = next(e for e in events if e["event"] == "run_end")
     assert run_end["diff_stat"] == " 1 file changed"
@@ -934,3 +934,77 @@ def test_runner_context_window_zero_is_not_replaced_by_the_provider(parts):
     r = Runner(FakeProvider([], context_window=65536), registry, sandbox, transcript,
                model="qwen/qwen3-coder-next", context_window=0)
     assert r.context_window == 0
+
+
+def test_repeat_tracker_counts_only_identical_failures():
+    from dirtywork.runner import RepeatTracker
+    t = RepeatTracker(limit=3)
+    assert t.note_bash("pytest", "exit code: 1\n1 failed in 2.10s") is None
+    # a timing-only difference is the SAME failure (existing _bash_fingerprint)
+    assert t.note_bash("pytest", "exit code: 1\n1 failed in 2.44s") is None
+    assert t.repeats == 2
+    assert t.note_bash("pytest", "exit code: 1\n1 failed in 2.99s") == "stuck"
+    assert t.stuck_on() == {"command": "pytest",
+                            "output": "exit code: 1\n1 failed in 2.99s",
+                            "repeats": 3}
+    # a different failure restarts the streak at 1
+    assert t.note_bash("pytest", "exit code: 2\ncollection error") is None
+    assert t.repeats == 1
+    # ERROR: and BLOCKED: results are failures too
+    t2 = RepeatTracker(limit=2)
+    assert t2.note_bash("sleep 999", "ERROR: command timed out after 120s.") is None
+    assert t2.note_bash("sleep 999", "ERROR: command timed out after 120s.") == "stuck"
+
+
+def test_only_the_same_command_passing_resets_the_stuck_streak():
+    from dirtywork.runner import RepeatTracker
+    t = RepeatTracker(limit=3)
+    assert t.note_bash("pytest", "exit code: 1\nfailed") is None
+    # a passing run of ANOTHER command (git status, cat, ls ...) neither counts
+    # nor resets -- exactly like a non-bash tool call in between
+    assert t.note_bash("git status", "exit code: 0\nclean") is None
+    assert t.repeats == 1
+    assert t.note_bash("pytest", "exit code: 1\nfailed") is None
+    assert t.repeats == 2
+    # the SAME command going green ends the episode: the streak restarts
+    assert t.note_bash("pytest", "exit code: 0\n3 passed") is None
+    assert t.repeats == 0
+    assert t.note_bash("pytest", "exit code: 1\nfailed") is None
+    assert t.note_bash("pytest", "exit code: 1\nfailed") is None
+    assert t.note_bash("pytest", "exit code: 1\nfailed") == "stuck"
+
+
+def test_repeat_tracker_limit_zero_disables():
+    from dirtywork.runner import RepeatTracker
+    t = RepeatTracker(limit=0)
+    for _ in range(10):
+        assert t.note_bash("pytest", "exit code: 1\nfailed") is None
+    assert t.repeats == 0
+
+
+def test_stuck_status_ends_the_run_and_reports_stuck_on(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    failing = _resp(tool_calls=[_call("c", "bash", {"command": "exit 7"})])
+    provider = FakeProvider([failing] * 5)
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_turns=10,
+               stuck_repeats=3)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "stuck"
+    assert result.turns == 3
+    assert result.extra["stuck_on"]["command"] == "exit 7"
+    assert result.extra["stuck_on"]["repeats"] == 3
+    assert result.extra["stuck_on"]["output"].startswith("exit code: 7")
+    end = [e for e in _events(tmp) if e["event"] == "run_end"][-1]
+    assert end["status"] == "stuck"
+    assert end["stuck_on"]["command"] == "exit 7"
+
+
+def test_stuck_on_is_null_on_every_other_status(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(content="all done")])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.extra["stuck_on"] is None

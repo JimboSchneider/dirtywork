@@ -19,11 +19,12 @@ EVENT_NAMES = ["run_start", "assistant", "tool_result", "guardrail_block", "nudg
                "sandbox_reset", "run_end"]
 NUDGE_KINDS = ["truncated", "empty", "text_tool_call", "stall"]
 STATUSES = ["completed", "max_turns", "timeout", "context_exhausted", "model_error",
-            "interrupted", "stalled", "budget_exceeded", "sandbox_error", "export_failed"]
+            "interrupted", "stalled", "stuck", "budget_exceeded", "sandbox_error",
+            "export_failed"]
 RUN_END_FIELDS = ["diff_stat", "untracked", "patch_path", "escaping_symlinks",
                   "dropped_git_entries", "worktree_bytes", "worktree_files",
                   "export_status", "watchdog_violation", "watchdog_violation_kind",
-                  "finalize_error"]
+                  "finalize_error", "stuck_on"]
 
 
 def _doc_tokens():

@@ -433,6 +433,13 @@ In August 2026 the project was renamed **dirtywork** — same tool, a name that 
   and no new command output; the worktree is kept. Usually the work is
   done but the model never called `finish` — inspect the worktree, or
   `dirtywork resume <slug>`.
+- **status `stuck`** — the same failing `bash` command ran `--stuck-repeats`
+  times in a row (default 4) with output that differed only in timing; the
+  worktree is kept. The payload's `stuck_on` names the command, its output and
+  the repeat count. Usually the worker cannot run the repo's gate at all (a
+  missing dependency in docker mode) or is re-running a test it has no way to
+  pass — read `stuck_on`, fix the environment or the brief, then
+  `dirtywork resume <slug> --feedback "..."`. `--stuck-repeats 0` disables it.
 - **host mode (`--sandbox none`): "No module named pytest", or a
   `Library/`/`.cache/` directory appears in the worktree** — bash runs with
   `HOME` set to the worktree on purpose (so `~/.ssh` and friends are out of
@@ -508,6 +515,7 @@ dirtywork run --repo <path> "<task>"
     [--branch-from <ref>]             # default: repo HEAD
     [--max-turns 40]
     [--stall-turns 12]                # end as `stalled` after N no-progress turns; 0 disables
+    [--stuck-repeats 4]               # end as `stuck` after N identical failing bash runs; 0 disables
     [--context-window <tokens>]       # default: built-in table, else 32768 (+ stderr warning)
     [--timeout 1800]                  # whole-run wall clock, seconds
     [--temperature <f>]               # omitted by default → server preset
@@ -537,6 +545,14 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
 - `--stall-turns N` (default 12) — end the run with status `stalled` after N
   consecutive turns that changed no file and produced no new command output;
   the model gets one nudge halfway. `0` disables.
+- `--stuck-repeats N` (default 4) — end the run with status `stuck` after the
+  same **failing** `bash` command has run N times in a row. "Same" uses the
+  stall detector's own fingerprint (command plus output with timings, clock
+  times and git shas stripped), so a rerun that differs only in duration
+  counts; a passing run (`exit code: 0`) resets the streak to zero. Edits
+  between the reruns do **not** reset it — that is the loop `--stall-turns`
+  cannot see, since every `edit_file` counts as progress. No nudge is sent:
+  the point is to stop paying for turns. `0` disables.
 - `--context-window TOKENS` — the model's context window, used to size the
   transcript trimming budget. Precedence: flag, then `DIRTYWORK_CONTEXT_WINDOW`,
   then a built-in table for the known LM Studio models, then 32768 (with a
@@ -573,7 +589,7 @@ printed to stdout (nothing else goes to stdout):
 }
 ```
 
-`status` is one of: `completed`, `max_turns`, `timeout`, `stalled`,
+`status` is one of: `completed`, `max_turns`, `timeout`, `stalled`, `stuck`,
 `context_exhausted`, `model_error`, `interrupted`, `budget_exceeded`,
 `sandbox_error`, `export_failed`. When the run fails before a `RunResult`
 exists — the LLM client raises, post-worktree setup fails (e.g. the
@@ -598,8 +614,8 @@ during that exception recovery.
 
 - `0` — `completed`.
 - `1` — any non-`completed` status (`max_turns`, `timeout`, `stalled`,
-  `context_exhausted`, `model_error`, `interrupted`, `budget_exceeded`,
-  `sandbox_error`, `export_failed`); the worktree and branch are kept for
+  `stuck`, `context_exhausted`, `model_error`, `interrupted`,
+  `budget_exceeded`, `sandbox_error`, `export_failed`); the worktree and branch are kept for
   salvage/review. `main` catches every `Exception` the run raises (not
   just ones the runner itself converts to a status) and reports
   it as `model_error` via the same JSON contract, so a post-preflight run

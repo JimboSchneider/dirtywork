@@ -120,6 +120,12 @@ def classify_text_reply(content, finish_reason) -> str:
 
 
 DEFAULT_STALL_TURNS = 12
+# Spec §1: independent of the stall detector. The stall detector never fires on
+# edit -> test -> edit -> test (every edit_file counts as progress), so a worker
+# grinding on a check it cannot pass burns every remaining turn. This ends the
+# run instead. No nudge: the point is to stop paying for turns.
+DEFAULT_STUCK_REPEATS = 4
+STUCK_OUTPUT_CHARS = 4000
 STALL_NUDGE = ("No progress in the last {n} turns: no file changed and no command produced "
                "new output. If the task is complete, commit (if asked) and call "
                "finish(summary=...); otherwise change your approach.")
@@ -200,6 +206,68 @@ class ProgressTracker:
         return None
 
 
+class RepeatTracker:
+    """Spec §1.1: the same FAILING bash call, N times in a row.
+
+    Fed only bash calls, from the same place ProgressTracker.note_call is fed.
+    A non-bash call neither counts nor resets: edit -> test -> edit -> test
+    with an unchanged failure is exactly the loop this catches. Identity is the
+    EXISTING _bash_fingerprint (command + volatile-token-stripped output), so a
+    timing-only difference is not a different result — but a changed test
+    count, a new line, or a changed exit status is. A passing result (first
+    line exactly 'exit code: 0') of the SAME command resets the streak to zero
+    -- so a diligent worker re-running a green typecheck after every edit is
+    never 'stuck' -- while passing runs of other commands neither count nor
+    reset. limit <= 0 disables the tracker entirely."""
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.repeats = 0
+        self.command = None
+        self.output = None
+        self._fingerprint = None
+
+    @staticmethod
+    def _failed(result) -> bool:
+        """Anything whose first line is not exactly 'exit code: 0'. That makes
+        'exit code: N', 'ERROR: command timed out ...', 'ERROR: bash failed ...'
+        and 'BLOCKED: ...' all failures, which is the intent."""
+        if not isinstance(result, str):
+            return True
+        return result.split("\n", 1)[0] != "exit code: 0"
+
+    def note_bash(self, command, result):
+        if self.limit <= 0:
+            return None
+        if not self._failed(result):
+            # Only the SAME command going green ends the episode. A passing run
+            # of some other command (git status, cat, ls ...) neither counts nor
+            # resets -- exactly like a non-bash tool call in between -- so the
+            # reads a model interleaves with its edit->test loop cannot hide an
+            # unchanged failure.
+            if command == self.command:
+                self.repeats = 0
+                self._fingerprint = None
+                self.command = None
+                self.output = None
+            return None
+        text = result if isinstance(result, str) else ""
+        fingerprint = _bash_fingerprint(command, text)
+        if fingerprint == self._fingerprint:
+            self.repeats += 1
+        else:
+            self._fingerprint = fingerprint
+            self.repeats = 1
+        self.command = command
+        self.output = text
+        return "stuck" if self.repeats >= self.limit else None
+
+    def stuck_on(self) -> dict:
+        return {"command": self.command,
+                "output": (self.output or "")[:STUCK_OUTPUT_CHARS],
+                "repeats": self.repeats}
+
+
 def resolve_context_window(model: str, flag_value, env_value, provider=None) -> tuple:
     """Precedence: --context-window > DIRTYWORK_CONTEXT_WINDOW > the provider's
     own table for this model > DEFAULT_WINDOW. Returns (tokens, source) with
@@ -269,7 +337,8 @@ class Runner:
                  run_info: dict | None = None,
                  finalize: Callable[[], dict] | None = None,
                  stall_turns: int = DEFAULT_STALL_TURNS,
-                 context_window: int | None = None):
+                 context_window: int | None = None,
+                 stuck_repeats: int = DEFAULT_STUCK_REPEATS):
         self.provider = provider
         self.registry = registry
         self.sandbox = sandbox
@@ -281,6 +350,7 @@ class Runner:
         self.run_info = run_info
         self.finalize = finalize
         self.stall_turns = stall_turns
+        self.stuck_repeats = stuck_repeats
         # An explicit 0 is honoured (it is how a test forces context_exhausted);
         # only None means "ask the provider".
         self.context_window = (context_window if context_window is not None
@@ -300,11 +370,15 @@ class Runner:
         turns = 0
         failures = FailureTracker()
         progress = ProgressTracker(self.stall_turns)
+        repeats = RepeatTracker(self.stuck_repeats)
+        stuck = None            # spec §1.2: set once, read by finish() below
         start = time.monotonic()
         deadline = start + self.timeout
 
         def finish(status: str, final: str) -> RunResult:
-            extra: dict = {}
+            # stuck_on rides on EVERY result (null unless the run ended 'stuck'),
+            # so a consumer never has to branch on status to read the field.
+            extra: dict = {"stuck_on": stuck}
             finalize_error = None
             if self.finalize is not None:
                 try:
@@ -456,6 +530,10 @@ class Runner:
                         except SandboxError as e:
                             return finish("sandbox_error", str(e))
                     progress.note_call(name, self.registry.canonical_args(name, args), result)
+                    if name == "bash":
+                        command = args.get("command") if isinstance(args, dict) else None
+                        if repeats.note_bash(command, result) == "stuck":
+                            stuck = repeats.stuck_on()
                     self.transcript.write("tool_result", tool=name,
                                           args=raw_args[:500],
                                           result=self.registry.transcript_preview(name, result))
@@ -465,6 +543,15 @@ class Runner:
 
                 if pending_finish is not None:
                     return finish("completed", pending_finish)
+
+                # Same rule as `finish` in a mixed turn: the turn's remaining
+                # tool calls have already run. `finish` still wins — a worker
+                # that declared itself done did so with full knowledge of the
+                # failure it had just seen.
+                if stuck is not None:
+                    return finish("stuck",
+                                  f"the same failing command ran {stuck['repeats']} "
+                                  f"times in a row")
 
                 stalled, stall_text = check_progress()
                 if stalled is not None:

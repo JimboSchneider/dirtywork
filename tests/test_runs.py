@@ -1107,3 +1107,20 @@ def test_render_markdown_diff_fallback_note_is_plain_text_not_fenced():
     doc = runs.render_markdown("slug1", {}, [], diff=runs.NO_PATCH_NOTE)
     assert runs.NO_PATCH_NOTE in doc
     assert "```diff" not in doc
+
+
+def test_show_renders_stuck_on_plain_and_markdown(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "stuck1", {
+        "slug": "stuck1", "status": "stuck", "task": "grind",
+        "stuck_on": {"command": "npm test", "output": "exit code: 1\n3 failing",
+                     "repeats": 4},
+    })
+    assert runs.cmd_show(argparse.Namespace(slug="stuck1", diff=False)) == 0
+    out = capsys.readouterr().out
+    assert "stuck_on: npm test" in out
+
+    assert runs.cmd_show(argparse.Namespace(slug="stuck1", diff=False, markdown=True)) == 0
+    md = capsys.readouterr().out
+    assert "**stuck on**" in md
+    assert "npm test" in md and "3 failing" in md
