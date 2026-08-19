@@ -1,9 +1,10 @@
 # 0.9 — apply_edits, context sizing & server-reported windows, louder timeouts, Windows advisory CI
 
 **Date:** 2026-08-19
-**Status:** Revised design, v3 — v2 addressed the owner's conditional-approval review (2026-08-19
-11:52 CDT); v3 folds in a three-lens red-team of v2 against the code (tools/atomic writes;
-runner/contract/bench; provider/context/CI). Awaiting owner approval.
+**Status:** Approved design, v3.1 (owner approved v3 for planning/execution 2026-08-19 12:37 CDT
+with three amendments, folded in here: §4.2 DockerError scope covers `grep` too; §1.4 cap scope;
+§1.3 extra-key policy). v2 addressed the owner's conditional-approval review; v3 folded in a
+three-lens red-team of v2 against the code.
 **Origin:** GitHub issues #20 (`apply_edits`), #21 (brief-size/context guidance), #22 (auto-detect the
 loaded model's context length), #23 (louder tool timeouts), #24 (Windows: integration suite before
 support). All four harness issues come from the SP3 build record
@@ -92,15 +93,18 @@ it for free. `apply_edits.edits` declares:
 
 `_validate_args` validates a `schema`-bearing parameter **recursively** with a minimal built-in
 validator (not a JSON-Schema library): `type` (array/object/string/integer/number/boolean),
-`minItems`/`maxItems`, `items`, `properties`, `required`. `additionalProperties: false` is declared on
-the wire; at runtime the validator **returns a rebuilt value** containing only the declared properties
-(extra keys inside an edit object are dropped, mirroring the registry's top-level policy of dropping
-unknown keys), and `call_args["edits"]` is that rebuilt list — `_apply_edits_once` may rely on every
-item being exactly `{"old": str, "new": str}`. Violations raise `ToolValidationError` with a
-path-qualified message (`edits[2].new must be string, got int`; `edits must have at least 1 item(s)`;
-`edits must have at most 100 item(s)`; `edits[0] must be an object`; `edits[1] is missing required
-property 'old'`) and surface as `bad_args`. Scalar coercion (`_coerce_numeric_string`) applies to
-nested integer/number leaves as it does at the top level.
+`minItems`/`maxItems`, `items`, `properties`, `required`, `additionalProperties`. The nested policy
+is **what the wire schema says**: `additionalProperties: false` is enforced at runtime too — an edit
+object with an extra key is rejected (`edits[1] has unexpected property 'note'`), consistently with the
+wire contract, rather than silently dropped. (The registry's *top-level* drop-unknown-keys policy is
+unchanged: it exists because local models attach stray top-level parameters from other harnesses'
+schemas; nested objects are authored per call and get the strict rule.) The validated value is
+returned as-is; `_apply_edits_once` may rely on every item being exactly `{"old": str, "new": str}`.
+Violations raise `ToolValidationError` with a path-qualified message (`edits[2].new must be string,
+got int`; `edits must have at least 1 item(s)`; `edits must have at most 100 item(s)`; `edits[0] must
+be an object`; `edits[1] is missing required property 'old'`; `edits[1] has unexpected property
+'note'`) and surface as `bad_args`. Scalar coercion (`_coerce_numeric_string`) applies to nested
+integer/number leaves as it does at the top level.
 
 Fixture: the frozen wire fixture is regenerated. Since it now tracks HEAD rather than 0.5.1, the
 file is renamed `tests/fixtures/tool_schemas.json` and the test `test_schemas_match_the_frozen_wire_
@@ -110,12 +114,14 @@ gain `apply_edits`.
 ### 1.4 Input-size accounting: recursive, and an explicit cap for `apply_edits`
 
 `ToolRegistry.execute`'s `max_input_bytes` check (`toolspec.py:242-244`, today `sum(len(v) for
-top-level str values)`) becomes a recursive walk counting the UTF-8 length of every `str` **value**
-found inside lists and dicts (dict keys and non-string scalars are not counted). No existing built-in
-sets `max_input_bytes` (they are all `None`, so the check is skipped for them — unchanged).
-`APPLY_EDITS_SPEC` sets `Caps(fs="write", max_input_bytes=MAX_APPLY_EDITS_INPUT_BYTES,
-max_output_chars=TOOL_OUTPUT_CAP, transcript="preview")` with `MAX_APPLY_EDITS_INPUT_BYTES = 2 *
-1024 * 1024` (2 MiB of `old`+`new` text; the file itself is capped at 5 MB). Over the cap → the
+top-level str values)`) becomes a recursive walk over `call_args` counting the UTF-8 length of every
+`str` **value** — top-level string parameters (so `path` IS counted, as it is today for any tool that
+sets a cap) and strings nested inside lists and dicts (every `old` and `new`); dict **keys** and
+non-string scalars are **not** counted. No existing built-in sets `max_input_bytes` (they are all
+`None`, so the check is skipped for them — unchanged). `APPLY_EDITS_SPEC` sets `Caps(fs="write",
+max_input_bytes=MAX_APPLY_EDITS_INPUT_BYTES, max_output_chars=TOOL_OUTPUT_CAP,
+transcript="preview")` with `MAX_APPLY_EDITS_INPUT_BYTES = 2 * 1024 * 1024` (2 MiB of `path` +
+`old` + `new` text; the file itself is capped at 5 MB). Over the cap → the
 registry's existing `ERROR: bad arguments for apply_edits: input is <n> bytes, over the <cap>-byte
 limit.` `edit_file` does not gain a cap (no behaviour change).
 
@@ -181,8 +187,9 @@ text; **host/docker parity scoped to the matching/success/rollback results** (id
 text, identical `ERROR: edit i of N: …` text); output-cap parity (a transform whose output exceeds
 `MAX_WRITE_BYTES` returns the identical §1.5 string on both backends, for `edit_file` as well as
 `apply_edits`). `tests/test_toolspec.py`: nested-schema rendering incl. description merge, recursive
-validation messages (empty list, >100, non-object item, non-string `new`, missing `old`), the
-rebuilt-value drop of extra keys, recursive `max_input_bytes` (nested strings counted, keys not).
+validation messages (empty list, >100, non-object item, non-string `new`, missing `old`, an
+unexpected extra key inside an edit → `bad_args`), recursive `max_input_bytes` (`path` + nested
+strings counted, keys not).
 `tests/test_builtin_tools.py`: fixture regenerated/renamed and matched; name set; `FakeSandbox`.
 `tests/test_transcript_schema.py`: the hand-maintained tool list (`:56-60`) gains `apply_edits`.
 
@@ -318,10 +325,18 @@ existing catcher constructs/reads it positionally, so this is backward compatibl
 sets it `True` on its expired-timeout path — the only place it raises for a timeout.
 `DockerSandbox.bash` returns the §4.1 text **only** when `e.timed_out`; any other `DockerError` returns
 `ERROR: bash failed: {message}` (the host's existing wording for a non-timeout failure), so an
-ordinary docker failure is never rendered as a timeout. The existing test
+ordinary docker failure is never rendered as a timeout. **The same distinction applies to
+`DockerSandbox.grep`** (`docker.py:568-569` today renders every `DockerError` as `ERROR: grep timed
+out after {timeout}s — narrow the pattern or path.`): `e.timed_out` → that existing grep-timeout
+text (unchanged wording; `grep` timeouts are not `bash` timeouts and do not count toward `timeouts`
+or the `timeout` nudge, which are about commands the worker ran); any other `DockerError` → `ERROR:
+grep failed: {message}` (the wording the non-zero-exit branch already uses). These are the only two
+`DockerSandbox` methods that convert a `DockerError` into a tool result; every other catch site
+re-raises/propagates as `sandbox_error` and is unchanged. The existing test
 `test_bash_timeout_returns_text_not_raise` (`tests/test_docker_sandbox.py`) must construct
 `DockerError(..., timed_out=True)` and assert the **full** canonical text (its current substring
-assertion would pass on either branch).
+assertion would pass on either branch); a new regression test covers `grep` with a generic
+`DockerError` → `ERROR: grep failed: …` and with `timed_out=True` → the grep-timeout text.
 
 ### 4.3 Transcript, nudge, counters
 
@@ -369,7 +384,7 @@ Tools subsection); `docs/transcript-schema.md`: `tool_result.timed_out`, nudge k
 
 `tests/test_tools_bash.py`: the exact canonical text, no partial output. `tests/test_docker_sandbox.py`:
 `DockerError(timed_out=True)` → canonical text; a generic `DockerError` → `ERROR: bash failed: …`
-(and the rewritten existing test, §4.2). `tests/test_runner.py`: `timed_out: true` on the event and
+(and the rewritten existing test, §4.2); the `grep` pair from §4.2. `tests/test_runner.py`: `timed_out: true` on the event and
 absent on a normal bash result; one `timeout` nudge per turn even with two timeouts in the turn;
 merged text with another nudge; no nudge when the turn ends the run; `timeouts` count; a `--verify`
 timeout not counted. `tests/test_runs.py`: `"timed out"` class and `[timed out]` in plain and
