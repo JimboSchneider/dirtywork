@@ -233,6 +233,10 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 Rows marked *verdict* are added post hoc by `dirtywork runs verdict <slug> …`
 (a merge-update; no existing key is dropped) and are absent until then.
 
+`dirtywork runs snapshot <slug>` writes no `run.json` field: it reads `branch`,
+`worktree`, `repo`, `status` and `host_pid` and commits the worktree's current
+content onto that branch with git plumbing only. The run directory is unchanged.
+
 `dirtywork runs show <slug>` prints this file alongside a tool-call timeline
 reconstructed from the transcript. `dirtywork runs show <slug> --markdown
 [--out FILE]` exports those same two sources as one Markdown document —

@@ -5,6 +5,7 @@ import re
 import secrets
 import stat
 import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -35,9 +36,14 @@ class WorkspaceError(Exception):
     """Raised when the target repo or worktree operation is unusable."""
 
 
-def _git(repo: Path, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
+def _git(repo: Path, *args: str, env: dict | None = None,
+         stdin_text: str | None = None) -> subprocess.CompletedProcess:
+    """`stdin_text` is how the snapshot plumbing feeds path lists and index
+    lines to git (hash-object --stdin-paths, update-index --index-info);
+    None keeps today's behaviour of inheriting stdin."""
     return subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True, env=env
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, env=env,
+        input=stdin_text
     )
 
 
@@ -317,3 +323,147 @@ def host_files_changed(worktree: Path, base_commit: str, cap: int = MAX_FILES_CH
 def commit_exists(repo: Path, sha: str) -> bool:
     """True when `sha` names a commit reachable in the operator's repo."""
     return _git(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode == 0
+
+
+SNAPSHOT_AUTHOR = ("dirtywork", "dirtywork@localhost")
+
+
+def _walk_worktree(worktree: Path) -> tuple:
+    """(files, links, skipped) for everything under `worktree`.
+
+    `files` is [(repo-relative path, is_executable)], `links` is
+    [(repo-relative path, link target string)], `skipped` counts entries that
+    are neither (FIFOs, sockets, devices, unreadable entries). The TOP-LEVEL
+    `.git` entry is skipped and NOTHING else is: ignore rules are deliberately
+    not applied, because a wip snapshot is a snapshot. Symlinks — including
+    symlinked directories — are recorded by their target string and never
+    followed or descended into (os.lstat/os.readlink only)."""
+    files, links, skipped = [], [], 0
+    for root, dirnames, filenames in os.walk(worktree, followlinks=False):
+        root_path = Path(root)
+        rel_root = root_path.relative_to(worktree)
+        if root_path == worktree:
+            dirnames[:] = [d for d in dirnames if d != ".git"]
+        for name in list(dirnames):
+            entry = root_path / name
+            if os.path.islink(entry):
+                dirnames.remove(name)
+                try:
+                    links.append(((rel_root / name).as_posix(), os.readlink(entry)))
+                except OSError:
+                    skipped += 1
+        for name in filenames:
+            if root_path == worktree and name == ".git":
+                continue
+            entry = root_path / name
+            rel = (rel_root / name).as_posix()
+            try:
+                st = os.lstat(entry)
+            except OSError:
+                skipped += 1
+                continue
+            if stat.S_ISLNK(st.st_mode):
+                try:
+                    links.append((rel, os.readlink(entry)))
+                except OSError:
+                    skipped += 1
+            elif stat.S_ISREG(st.st_mode):
+                files.append((rel, bool(st.st_mode & 0o111)))
+            else:
+                skipped += 1
+    files.sort()
+    links.sort()
+    return files, links, skipped
+
+
+def snapshot_worktree(worktree: Path, branch: str, message: str):
+    """Spec §6.1: commit the worktree's CURRENT content onto `branch` using
+    nothing but git plumbing — no `git add`, no `git commit`, so no clean
+    filter, no `.gitattributes` rule and no hook can ever execute on the host
+    against content a worker wrote. Returns the new commit sha, or None when
+    the resulting tree equals the branch head's tree (nothing to snapshot).
+    Raises WorkspaceError.
+
+    `hash-object -w --no-filters` is load-bearing: the filter that would
+    otherwise run is configured REPO-locally, which GIT_CONFIG_GLOBAL=/dev/null
+    does not disable (verified, git 2.48.1). Paths reach it over stdin, so a
+    filename containing a newline is refused outright rather than mis-hashed."""
+    worktree = Path(worktree)
+    env = git_env()
+    files, links, _skipped = _walk_worktree(worktree)
+    for rel in [r for r, _ in files] + [r for r, _ in links]:
+        if "\n" in rel:
+            raise WorkspaceError(
+                f"cannot snapshot {worktree}: path {rel!r} contains a newline, which "
+                f"`git hash-object --stdin-paths` cannot address"
+            )
+
+    entries = []
+    if files:
+        paths = "".join(str(worktree / rel) + "\n" for rel, _ in files)
+        res = _git(worktree, *GIT_NEUTRAL_FLAGS, "hash-object", "-w", "--no-filters",
+                   "--stdin-paths", env=env, stdin_text=paths)
+        if res.returncode != 0:
+            raise WorkspaceError(
+                f"git hash-object failed in {worktree}: {res.stderr.strip()}")
+        shas = res.stdout.split()
+        if len(shas) != len(files):
+            raise WorkspaceError(
+                f"git hash-object returned {len(shas)} hashes for {len(files)} files "
+                f"in {worktree}")
+        for (rel, is_exec), sha in zip(files, shas):
+            entries.append(f"{'100755' if is_exec else '100644'} {sha}\t{rel}")
+    for rel, target in links:
+        res = _git(worktree, *GIT_NEUTRAL_FLAGS, "hash-object", "-w", "--stdin",
+                   env=env, stdin_text=target)
+        if res.returncode != 0:
+            raise WorkspaceError(
+                f"git hash-object failed for symlink {rel} in {worktree}: "
+                f"{res.stderr.strip()}")
+        entries.append(f"120000 {res.stdout.strip()}\t{rel}")
+
+    head_res = _git(worktree, *GIT_NEUTRAL_FLAGS, "rev-parse", "--verify", "--quiet",
+                    f"refs/heads/{branch}", env=env)
+    if head_res.returncode != 0:
+        raise WorkspaceError(f"branch {branch} does not exist in {worktree}")
+    head = head_res.stdout.strip()
+
+    with tempfile.TemporaryDirectory(prefix="dirtywork-snapshot-") as tmpdir:
+        index_env = dict(env)
+        index_env["GIT_INDEX_FILE"] = str(Path(tmpdir) / "index")
+        res = _git(worktree, *GIT_NEUTRAL_FLAGS, "update-index", "--index-info",
+                   env=index_env, stdin_text="".join(e + "\n" for e in entries))
+        if res.returncode != 0:
+            raise WorkspaceError(
+                f"git update-index failed in {worktree}: {res.stderr.strip()}")
+        res = _git(worktree, *GIT_NEUTRAL_FLAGS, "write-tree", env=index_env)
+        if res.returncode != 0:
+            raise WorkspaceError(
+                f"git write-tree failed in {worktree}: {res.stderr.strip()}")
+        tree = res.stdout.strip()
+
+    head_tree = _git(worktree, *GIT_NEUTRAL_FLAGS, "rev-parse", f"{head}^{{tree}}", env=env)
+    if head_tree.returncode == 0 and head_tree.stdout.strip() == tree:
+        return None
+
+    commit_env = dict(env)
+    commit_env.update({
+        "GIT_AUTHOR_NAME": SNAPSHOT_AUTHOR[0], "GIT_AUTHOR_EMAIL": SNAPSHOT_AUTHOR[1],
+        "GIT_COMMITTER_NAME": SNAPSHOT_AUTHOR[0], "GIT_COMMITTER_EMAIL": SNAPSHOT_AUTHOR[1],
+    })
+    res = _git(worktree, *GIT_NEUTRAL_FLAGS, "commit-tree", tree, "-p", head, "-m", message,
+               env=commit_env)
+    if res.returncode != 0:
+        raise WorkspaceError(f"git commit-tree failed in {worktree}: {res.stderr.strip()}")
+    commit = res.stdout.strip()
+
+    # The old-value argument makes this a compare-and-swap: if anything moved
+    # the branch since `head` was read, the update fails instead of clobbering.
+    res = _git(worktree, *GIT_NEUTRAL_FLAGS, "update-ref", f"refs/heads/{branch}",
+               commit, head, env=env)
+    if res.returncode != 0:
+        raise WorkspaceError(f"git update-ref failed in {worktree}: {res.stderr.strip()}")
+    # The already-sanctioned index-only refresh, so the worktree's index matches
+    # its new HEAD and `git status` is clean rather than showing every file.
+    host_read_tree(worktree)
+    return commit

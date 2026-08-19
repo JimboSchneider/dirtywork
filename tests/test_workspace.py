@@ -480,3 +480,79 @@ def test_host_files_changed_caps_and_reports_truncation(repo: Path):
     assert len(paths) == 5
     assert paths == sorted(paths)
     assert truncated is True
+
+
+def _snapshot_repo(tmp_path: Path):
+    """A repo plus a linked worktree rigged so a snapshot built from porcelain
+    would be caught: a clean filter on every path, a pre-commit hook that
+    leaves a sentinel and fails, a symlink, an executable file, a deletion."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "keep.txt").write_text("keep\n")
+    (repo / "gone.txt").write_text("gone\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "init")
+    wt = tmp_path / "wt"
+    _git(repo, "worktree", "add", "-b", "dirtywork/snap", str(wt))
+    _git(repo, "config", "filter.x.clean", "sed s/RAW/FILTERED/")
+    (wt / ".gitattributes").write_text("* filter=x\n")
+    hooks = repo / ".git" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    hook = hooks / "pre-commit"
+    hook.write_text('#!/bin/sh\ntouch "$(git rev-parse --git-common-dir)/hook-ran"\nexit 1\n')
+    hook.chmod(0o755)
+    (wt / "raw.txt").write_text("RAW content\n")
+    (wt / "script.sh").write_text("#!/bin/sh\necho hi\n")
+    (wt / "script.sh").chmod(0o755)
+    (wt / "link").symlink_to("/etc/passwd")
+    (wt / "gone.txt").unlink()
+    return repo, wt
+
+
+def test_snapshot_worktree_commits_raw_content_without_filters_or_hooks(tmp_path: Path):
+    from dirtywork.workspace import snapshot_worktree
+    repo, wt = _snapshot_repo(tmp_path)
+    sha = snapshot_worktree(wt, "dirtywork/snap", "wip: dirtywork run snap")
+    assert sha is not None and len(sha) == 40
+
+    entries = {}
+    for line in _git(repo, "ls-tree", "-r", sha).splitlines():
+        meta, _, name = line.partition("\t")
+        mode, _kind, blob = meta.split()
+        entries[name] = (mode, blob)
+    assert set(entries) == {".gitattributes", "keep.txt", "raw.txt", "script.sh", "link"}
+    assert "gone.txt" not in entries                 # a deletion is part of the snapshot
+    assert entries["keep.txt"][0] == "100644"
+    assert entries["script.sh"][0] == "100755"       # executable bit preserved
+    assert entries["link"][0] == "120000"            # symlink, recorded not followed
+    assert _git(repo, "cat-file", "-p", entries["link"][1]) == "/etc/passwd"
+    # the clean filter never ran: the blob holds the raw bytes
+    assert _git(repo, "cat-file", "-p", entries["raw.txt"][1]) == "RAW content\n"
+    # the pre-commit hook never ran
+    assert not (repo / ".git" / "hook-ran").exists()
+    # the branch moved onto the new commit, authored by dirtywork
+    assert _git(repo, "rev-parse", "dirtywork/snap").strip() == sha
+    assert _git(repo, "log", "-1", "--format=%an <%ae>", sha).strip() == (
+        "dirtywork <dirtywork@localhost>")
+    assert _git(repo, "log", "-1", "--format=%s", sha).strip() == "wip: dirtywork run snap"
+
+
+def test_snapshot_worktree_returns_none_when_the_tree_is_unchanged(tmp_path: Path):
+    from dirtywork.workspace import snapshot_worktree
+    repo, wt = _snapshot_repo(tmp_path)
+    first = snapshot_worktree(wt, "dirtywork/snap", "wip: one")
+    assert first is not None
+    assert snapshot_worktree(wt, "dirtywork/snap", "wip: two") is None
+    assert _git(repo, "rev-parse", "dirtywork/snap").strip() == first
+
+
+def test_snapshot_worktree_refuses_a_path_containing_a_newline(tmp_path: Path):
+    from dirtywork.workspace import snapshot_worktree
+    repo, wt = _snapshot_repo(tmp_path)
+    (wt / "we\nird.txt").write_text("x")
+    with pytest.raises(WorkspaceError) as excinfo:
+        snapshot_worktree(wt, "dirtywork/snap", "wip: newline")
+    assert "newline" in str(excinfo.value)

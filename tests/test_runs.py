@@ -1163,3 +1163,66 @@ def test_show_renders_verify(tmp_path, monkeypatch, capsys):
     md = capsys.readouterr().out
     assert "**verify** — failed (exit 2) after 1 round(s)" in md
     assert "npm run gate" in md and "2 failing" in md
+
+
+def _linked_worktree(repo: Path, slug: str) -> Path:
+    wt = repo / ".worktrees" / f"dw-{slug}"
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    _git(repo, "worktree", "add", "-b", f"dirtywork/{slug}", str(wt))
+    return wt
+
+
+def test_cmd_snapshot_commits_the_worktree_on_the_run_branch(
+        tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = _linked_worktree(repo, "snap1")
+    (wt / "new.txt").write_text("work in progress\n")
+    _write_run(tmp_path / "runs", "snap1", {
+        "slug": "snap1", "status": "max_turns", "repo": str(repo),
+        "worktree": str(wt), "branch": "dirtywork/snap1", "host_pid": None,
+    })
+    rc = runs.cmd_snapshot(argparse.Namespace(slug="snap1"))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert out.startswith("snapshot ") and "on dirtywork/snap1" in out
+    assert "new.txt" in _git(repo, "ls-tree", "-r", "--name-only", "dirtywork/snap1").stdout
+
+    head = _git(repo, "rev-parse", "dirtywork/snap1").stdout.strip()
+    assert runs.cmd_snapshot(argparse.Namespace(slug="snap1")) == 0
+    assert "nothing to snapshot" in capsys.readouterr().out
+    assert _git(repo, "rev-parse", "dirtywork/snap1").stdout.strip() == head
+
+
+def test_cmd_snapshot_refuses_a_live_run_and_a_foreign_worktree(
+        tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = _linked_worktree(repo, "snap2")
+    (wt / "new.txt").write_text("x\n")
+    _write_run(tmp_path / "runs", "snap2", {
+        "slug": "snap2", "status": "running", "repo": str(repo),
+        "worktree": str(wt), "branch": "dirtywork/snap2", "host_pid": os.getpid(),
+    })
+    assert runs.cmd_snapshot(argparse.Namespace(slug="snap2")) == 2
+    assert "still running" in capsys.readouterr().err
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "f.txt").write_text("x\n")
+    _write_run(tmp_path / "runs", "snap3", {
+        "slug": "snap3", "status": "stalled", "repo": str(repo),
+        "worktree": str(outside), "branch": "dirtywork/snap3", "host_pid": None,
+    })
+    assert runs.cmd_snapshot(argparse.Namespace(slug="snap3")) == 2
+    assert "not a linked worktree" in capsys.readouterr().err
+
+
+def test_cmd_snapshot_refuses_a_worktree_the_export_never_populated(
+        tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = _linked_worktree(repo, "snap4")     # the repo fixture's HEAD is an empty commit
+    _write_run(tmp_path / "runs", "snap4", {
+        "slug": "snap4", "status": "sandbox_error", "repo": str(repo),
+        "worktree": str(wt), "branch": "dirtywork/snap4", "host_pid": None,
+    })
+    assert runs.cmd_snapshot(argparse.Namespace(slug="snap4")) == 2
+    assert "nothing to snapshot" in capsys.readouterr().err

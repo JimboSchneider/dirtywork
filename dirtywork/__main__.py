@@ -772,6 +772,10 @@ def _add_runs_parsers(sub) -> None:
     verdict_p.add_argument("--note", default=None)
     verdict_p.add_argument("--review-seconds", type=float, default=None)
 
+    snapshot_p = runs_sub.add_parser(
+        "snapshot", help="commit the run worktree's current content onto its branch")
+    snapshot_p.add_argument("slug")
+
 
 def _add_bench_parsers(sub) -> None:
     """`dirtywork bench ...` (spec SP3 section 5). --provider/--base-url are

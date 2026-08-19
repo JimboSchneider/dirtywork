@@ -1761,3 +1761,12 @@ def test_verify_is_null_without_the_flag_and_resume_inherits_the_command(
     assert m.main(["resume", Path(first["run_dir"]).name, "--feedback", "again"]) == 0
     second = json.loads(capsys.readouterr().out)
     assert second["verify"]["command"] == "true"      # inherited from the prior run.json
+
+
+def test_runs_snapshot_dispatches(tmp_path, monkeypatch, capsys):
+    import dirtywork.__main__ as m
+    from dirtywork import rundir as rundir_mod
+    monkeypatch.setattr(rundir_mod, "RUNS_DIR", tmp_path / "runs")
+    rc = m.main(["runs", "snapshot", "no-such-run"])
+    assert rc == 2
+    assert "no such run" in capsys.readouterr().err
