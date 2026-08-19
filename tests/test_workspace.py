@@ -453,3 +453,30 @@ def test_host_read_tree_failure_raises_workspace_error(tmp_path: Path):
     not_a_worktree.mkdir()
     with pytest.raises(WorkspaceError):
         host_read_tree(not_a_worktree)
+
+
+def test_host_files_changed_lists_tracked_and_untracked(repo: Path, tmp_path: Path):
+    from dirtywork.workspace import host_files_changed
+    base = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "f.txt").write_text("changed")
+    (repo / "brand-new.txt").write_text("new")
+    (repo / "sub").mkdir()
+    (repo / "sub" / "deep.txt").write_text("deep")
+    (repo / ".gitignore").write_text("ignored.txt\n")
+    (repo / "ignored.txt").write_text("nope")
+    _git(repo, "add", ".gitignore")
+    paths, truncated = host_files_changed(repo, base)
+    assert paths == [".gitignore", "brand-new.txt", "f.txt", "sub/deep.txt"]
+    assert truncated is False
+    assert "ignored.txt" not in paths
+
+
+def test_host_files_changed_caps_and_reports_truncation(repo: Path):
+    from dirtywork.workspace import host_files_changed
+    base = _git(repo, "rev-parse", "HEAD").strip()
+    for i in range(12):
+        (repo / f"n{i:02d}.txt").write_text("x")
+    paths, truncated = host_files_changed(repo, base, cap=5)
+    assert len(paths) == 5
+    assert paths == sorted(paths)
+    assert truncated is True

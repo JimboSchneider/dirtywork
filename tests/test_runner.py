@@ -358,7 +358,8 @@ def test_finalize_merges_into_run_end_and_result_extra(parts):
               finalize=lambda: {"diff_stat": " 1 file changed"})
     result = r.run("s", "t")
     transcript.close()
-    assert result.extra == {"stuck_on": None, "diff_stat": " 1 file changed"}
+    assert result.extra == {"stuck_on": None, "last_tool_result": None,
+                            "last_assistant_text": "done", "diff_stat": " 1 file changed"}
     events = _events(tmp)
     run_end = next(e for e in events if e["event"] == "run_end")
     assert run_end["diff_stat"] == " 1 file changed"
@@ -1008,3 +1009,44 @@ def test_stuck_on_is_null_on_every_other_status(parts):
     transcript.close()
     assert result.status == "completed"
     assert result.extra["stuck_on"] is None
+
+
+def test_last_tool_result_and_assistant_text_ride_on_every_result(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(content="looking now", tool_calls=[_call("c1", "read_file", {"path": "f.txt"})]),
+        _resp(content="", tool_calls=[_call("c2", "list_dir", {"path": "."})]),
+        _resp(content="all done"),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    last = result.extra["last_tool_result"]
+    assert last["tool"] == "list_dir"
+    assert '"path": "."' in last["args"]
+    assert "f.txt" in last["result"]
+    # the empty second reply must not overwrite the last non-empty text, and the
+    # plain answer that ended the run is the newest non-empty one
+    assert result.extra["last_assistant_text"] == "all done"
+
+
+def test_last_tool_result_ignores_finish_and_is_null_when_no_tool_ran(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(content="nothing to do")])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    assert result.extra["last_tool_result"] is None
+
+    transcript2 = Transcript(tmp / "t2.jsonl")
+    registry2 = default_registry(transcript=transcript2)
+    provider2 = FakeProvider([
+        _resp(tool_calls=[_call("c1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+    ])
+    r2 = Runner(provider2, registry2, HostSandbox(wt), transcript2, model="m")
+    result2 = r2.run("s", "t")
+    transcript2.close()
+    assert result2.status == "completed"
+    assert result2.extra["last_tool_result"]["tool"] == "read_file"   # finish is skipped
+    assert result2.extra["last_assistant_text"] is None               # both replies were empty

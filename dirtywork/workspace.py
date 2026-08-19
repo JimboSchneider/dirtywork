@@ -12,6 +12,23 @@ MAX_CONTEXT_CHARS = 32_000
 # Separate from tools.MAX_READ_BYTES (also 5 MB) even though the value is the
 # same today — this bounds a git blob size, not a filesystem read.
 MAX_CONTEXT_BYTES = 5 * 1024 * 1024
+# Spec §2: the end-of-run file list, capped with a companion truncation flag.
+MAX_FILES_CHANGED = 1000
+# The ONE config-neutral git invocation shape for every host git command that
+# looks at worker content (spec §2, §6.1, §6.2). No global/system config, no
+# hooks, no fsmonitor, no commit signing: nothing the operator has configured
+# can execute or interfere when dirtywork reads or commits what a worker wrote.
+GIT_NEUTRAL_FLAGS = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+                     "-c", "commit.gpgsign=false")
+
+
+def git_env() -> dict:
+    """os.environ plus the config-neutral overrides. A fresh dict per call, so
+    a caller can add GIT_INDEX_FILE / GIT_AUTHOR_* without touching the next."""
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    return env
 
 
 class WorkspaceError(Exception):
@@ -267,18 +284,34 @@ def load_repo_context(repo: Path, base_commit: str) -> str | None:
 
 
 def host_read_tree(worktree: Path) -> None:
-    """The only host git command that runs after the worker has produced
-    anything (spec §2 step 11): index-only, against the base tree, using the
-    operator's own object store — writes no working-tree files (verified).
-    Config-neutral env so no checked-out state can influence it, even though
-    only objects/ was ever mounted into any container."""
-    env = dict(os.environ)
-    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
-    env["GIT_CONFIG_NOSYSTEM"] = "1"
-    res = _git(worktree, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
-               "read-tree", "HEAD", env=env)
+    """Index-only, against the base tree, using the operator's own object store
+    — writes no working-tree files (verified). Config-neutral env (git_env +
+    GIT_NEUTRAL_FLAGS) so no checked-out state, hook or filter can influence
+    it, even though only objects/ was ever mounted into any container."""
+    res = _git(worktree, *GIT_NEUTRAL_FLAGS, "read-tree", "HEAD", env=git_env())
     if res.returncode != 0:
         raise WorkspaceError(f"git read-tree HEAD failed in {worktree}: {res.stderr.strip()}")
+
+
+def host_files_changed(worktree: Path, base_commit: str, cap: int = MAX_FILES_CHANGED) -> tuple:
+    """(paths, truncated) — repo-relative paths that differ from base_commit
+    plus every untracked, non-ignored path, sorted and de-duplicated, capped at
+    `cap`. Host mode's half of spec §2's `files_changed`; the docker export
+    computes the same list inside the container. A git failure on either half
+    contributes nothing rather than aborting: this is evidence, not a gate."""
+    env = git_env()
+    paths = set()
+    for args in (("diff", "--name-only", base_commit),
+                 ("ls-files", "--others", "--exclude-standard")):
+        res = _git(worktree, *GIT_NEUTRAL_FLAGS, *args, env=env)
+        if res.returncode != 0:
+            continue
+        for line in res.stdout.splitlines():
+            line = line.strip()
+            if line:
+                paths.add(line)
+    ordered = sorted(paths)
+    return ordered[:cap], len(ordered) > cap
 
 
 def commit_exists(repo: Path, sha: str) -> bool:

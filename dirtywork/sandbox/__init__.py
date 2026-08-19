@@ -34,6 +34,12 @@ class RunArtifacts:
     export_status: str = "ok"
     watchdog_violation: str | None = None
     watchdog_violation_kind: str | None = None
+    # Spec §2: repo-relative paths the run changed, sorted and capped at
+    # workspace.MAX_FILES_CHANGED. Docker mode computes it in the container
+    # (no host git ever touches worker content); host mode computes it beside
+    # diff_stat. Empty list when nothing changed or the export never ran.
+    files_changed: list = field(default_factory=list)
+    files_changed_truncated: bool = False
 
 
 class Sandbox(Protocol):

@@ -587,6 +587,8 @@ def _execute(ctx: RunContext, args, client) -> int:
             return {
                 "diff_stat": artifacts.diff_stat,
                 "untracked": artifacts.untracked,  # host mode: git status ?? entries; docker mode: "" (git add -A folds new files into diff_stat)
+                "files_changed": artifacts.files_changed,
+                "files_changed_truncated": artifacts.files_changed_truncated,
                 "patch_path": artifacts.patch_path,
                 "worktree_bytes": artifacts.worktree_bytes,
                 "worktree_files": artifacts.worktree_files,
@@ -649,6 +651,10 @@ def _execute(ctx: RunContext, args, client) -> int:
         watchdog_violation=extra.get("watchdog_violation"),
         watchdog_violation_kind=extra.get("watchdog_violation_kind"),
         stuck_on=extra.get("stuck_on"),
+        files_changed=extra.get("files_changed") or [],
+        files_changed_truncated=bool(extra.get("files_changed_truncated")),
+        last_tool_result=extra.get("last_tool_result"),
+        last_assistant_text=extra.get("last_assistant_text"),
         turns=result.turns,
     )
 
@@ -659,6 +665,10 @@ def _execute(ctx: RunContext, args, client) -> int:
         watchdog_violation=extra.get("watchdog_violation"),
         watchdog_violation_kind=extra.get("watchdog_violation_kind"),
         stuck_on=extra.get("stuck_on"),
+        files_changed=extra.get("files_changed") or [],
+        files_changed_truncated=bool(extra.get("files_changed_truncated")),
+        last_tool_result=extra.get("last_tool_result"),
+        last_assistant_text=extra.get("last_assistant_text"),
         resumed_from=ctx.resumed_from, provider=ctx.provider,
     ), indent=2))
     return 0 if final_status == "completed" else 1

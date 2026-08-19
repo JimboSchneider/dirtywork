@@ -602,9 +602,17 @@ salvage.
 `base_commit` and `provider` (`"openai"` or `"anthropic"`) are present on
 every post-preflight payload. `resumed_from` is
 the slug of the run this one continued, or `null` if this was a fresh run.
-`finalize_error`, `watchdog_violation`, and `watchdog_violation_kind` are added on the normal
+`finalize_error`, `watchdog_violation`, `watchdog_violation_kind`, `stuck_on`,
+`files_changed`, `files_changed_truncated`, `last_tool_result` and
+`last_assistant_text` are added on the normal
 end-of-run path — i.e. whenever `runner.run()` returns a result, `completed`
-or not — normally `null`; see `run_end` below for what each means. The two
+or not — normally `null` (`[]`/`false` for the two list/flag fields); see
+`run_end` below for what each means. The last four are there so a run that
+ends with an empty `final_message` is still triageable without opening the
+transcript: what it changed, what it last ran and what it last said. On a
+`completed` run they are just as useful — "the last thing the worker checked
+failed, and it called `finish` anyway" reads straight off `last_tool_result`.
+The two
 paths where `runner.run()` never returns (sandbox setup fails before it
 starts, or an exception escapes the loop and is caught in `main()`) report
 `base_commit` and `resumed_from` only, plus `export_status` too if a docker `finalize()` ran

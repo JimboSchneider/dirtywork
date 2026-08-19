@@ -1124,3 +1124,26 @@ def test_show_renders_stuck_on_plain_and_markdown(tmp_path, monkeypatch, capsys)
     md = capsys.readouterr().out
     assert "**stuck on**" in md
     assert "npm test" in md and "3 failing" in md
+
+
+def test_show_renders_end_of_run_evidence(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "eve1", {
+        "slug": "eve1", "status": "max_turns", "task": "do it",
+        "files_changed": ["a.ts", "b.ts", "c.ts", "d.ts"],
+        "files_changed_truncated": False,
+        "last_tool_result": {"tool": "bash", "args": '{"command": "npm test"}',
+                             "result": "exit code: 1\n3 failing"},
+        "last_assistant_text": "I could not get the suite green.",
+    })
+    assert runs.cmd_show(argparse.Namespace(slug="eve1", diff=False)) == 0
+    out = capsys.readouterr().out
+    assert "files_changed: 4 (a.ts, b.ts, c.ts, ...)" in out
+
+    assert runs.cmd_show(argparse.Namespace(slug="eve1", diff=False, markdown=True)) == 0
+    md = capsys.readouterr().out
+    assert "**files changed (4)**" in md
+    assert "- `d.ts`" in md
+    assert "<details><summary>last tool result: bash(" in md
+    assert "3 failing" in md
+    assert "> I could not get the suite green." in md

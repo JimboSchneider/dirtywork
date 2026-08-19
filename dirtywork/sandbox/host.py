@@ -9,7 +9,7 @@ from ..budget import (
     BudgetExceeded,
     measure_worktree,
 )
-from ..workspace import host_diff_stat, host_untracked
+from ..workspace import host_diff_stat, host_files_changed, host_untracked
 from . import RunArtifacts, SandboxError
 
 
@@ -80,9 +80,13 @@ class HostSandbox:
         if self.base_commit is None:
             raise SandboxError("finalize() called before start()")
         report = self._measure()
+        files_changed, files_changed_truncated = host_files_changed(
+            self.worktree, self.base_commit)
         return RunArtifacts(
             diff_stat=host_diff_stat(self.worktree, self.base_commit),
             untracked=host_untracked(self.worktree),
+            files_changed=files_changed,
+            files_changed_truncated=files_changed_truncated,
             worktree_bytes=report.bytes,
             worktree_files=report.files,
             escaping_symlinks=list(report.escaping_symlinks),

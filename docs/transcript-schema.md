@@ -128,6 +128,10 @@ case it carries `status` and `error` only).
 | `watchdog_violation_kind` | | ✓ | string \| null | `"budget"` (worktree-size or host-disk-floor breach) or `"sandbox_error"` (the watchdog's own sampling exec failed twice); meaningful only alongside `watchdog_violation` |
 | `finalize_error` | | ✓ | string \| null | set when the finalize/export step itself raised after the agent loop finished; the run's own status is unaffected except that `completed` becomes `export_failed` |
 | `stuck_on` | | ✓ | object \| null | 0.8: `{command, output, repeats}` for the failing bash call that ended the run as `stuck` (`output` capped at 4000 chars); `null` on every other status |
+| `files_changed` | | ✓ | list | 0.8: repo-relative paths the run changed, sorted, capped at 1000. Docker mode: `git diff --cached --name-only <base_commit>` in the container right after the export's `git add -A`. Host mode: `git diff --name-only <base_commit>` plus `git ls-files --others --exclude-standard`. `[]` when nothing changed or the export never ran |
+| `files_changed_truncated` | | ✓ | boolean | 0.8: true when `files_changed` was cut at the 1000-path cap |
+| `last_tool_result` | | ✓ | object \| null | 0.8: `{tool, args, result}` for the last tool call the runner executed other than `finish` (`args` ≤500 chars, `result` ≤2000 chars); `null` if no tool ever ran |
+| `last_assistant_text` | | ✓ | string \| null | 0.8: the model's last non-empty assistant text, capped at 2000 chars; `null` if there was none |
 
 ## Statuses
 
@@ -152,8 +156,9 @@ case it carries `status` and `error` only).
 section). Its fields: `schema_version`, `status`, `worktree`, `branch`,
 `transcript`, `turns`, `usage`, `final_message`, `run_dir`, `provider`,
 `base_commit`, `resumed_from`, `finalize_error`, `watchdog_violation`,
-`watchdog_violation_kind`, `stuck_on`, and `export_status` on the
-exception-recovery path.
+`watchdog_violation_kind`, `stuck_on`, `files_changed`,
+`files_changed_truncated`, `last_tool_result`, `last_assistant_text`, and
+`export_status` on the exception-recovery path.
 Per this project's compatibility rule the stdout JSON may only gain fields,
 never lose or rename `status`, `worktree`, `branch`, `transcript`, `turns`,
 `usage`, `final_message`.
@@ -199,6 +204,10 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `watchdog_violation` | end | |
 | `watchdog_violation_kind` | end | |
 | `stuck_on` | end | 0.8: `{command, output, repeats}` when the run ended `stuck`, else null |
+| `files_changed` | end, export | 0.8: sorted repo-relative paths the run changed, capped at 1000; rewritten by `dirtywork runs export` |
+| `files_changed_truncated` | end, export | 0.8: true when the 1000-path cap cut the list |
+| `last_tool_result` | end | 0.8: `{tool, args, result}` for the last non-`finish` tool call, or null |
+| `last_assistant_text` | end | 0.8: the last non-empty assistant text (≤2000 chars), or null |
 | `allow_commit` | start | (bool) records whether the run's system prompt told the worker to commit as it went (`--allow-commit`, host mode only — see the README). A run that predates the flag has no such key. |
 | `verdict` | verdict | written by `dirtywork runs verdict`: `"accept"` \| `"reject"` \| `"cleanup"` |
 | `note` | verdict | `--note` text, or null |

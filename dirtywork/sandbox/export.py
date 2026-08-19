@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..workspace import MAX_FILES_CHANGED
 from . import RunArtifacts, SandboxError, docker_args, docker_cli, lifecycle
 
 
@@ -179,6 +180,8 @@ def export_run(cfg, *, slug, base_commit, worktree: Path, run_dir: Path, objects
     patch_path = None
     dropped_git_entries: list = []
     escaping_symlinks: list = []
+    files_changed: list = []
+    files_changed_truncated = False
     worktree_bytes = None
     worktree_files = None
 
@@ -232,6 +235,7 @@ def export_run(cfg, *, slug, base_commit, worktree: Path, run_dir: Path, objects
             diff_stat=diff_stat, patch_path=patch_path,
             worktree_bytes=worktree_bytes, worktree_files=worktree_files,
             escaping_symlinks=escaping_symlinks, dropped_git_entries=dropped_git_entries,
+            files_changed=files_changed, files_changed_truncated=files_changed_truncated,
             export_status=f"export_failed: {reason}",
         )
 
@@ -255,6 +259,22 @@ def export_run(cfg, *, slug, base_commit, worktree: Path, run_dir: Path, objects
         add_captured = run(add_argv, timeout=docker_cli.T_EXPORT_STEP)
         if add_captured.returncode != 0:
             return _fail(f"git add -A failed: {add_captured.output.decode('utf-8', 'replace')[:500]}")
+
+        # Spec §2: the file list, read from the index the `git add -A` above just
+        # built, INSIDE the container — the same rule diff_stat follows, so no
+        # host git ever touches worker content. A failure here is not fatal:
+        # this is evidence for the orchestrator, not a correctness gate.
+        names_argv = docker_args.exec_argv(
+            name, ["/usr/bin/git", "diff", "--cached", "--name-only", base_commit])
+        names_captured = run(names_argv, timeout=docker_cli.T_EXPORT_STEP)
+        if names_captured.returncode == 0:
+            ordered = sorted({
+                line.strip()
+                for line in names_captured.output.decode("utf-8", errors="replace").splitlines()
+                if line.strip()
+            })
+            files_changed = ordered[:MAX_FILES_CHANGED]
+            files_changed_truncated = len(ordered) > MAX_FILES_CHANGED
 
         wt_argv = docker_args.exec_argv(name, ["/usr/bin/git", "write-tree"])
         wt_captured = run(wt_argv, timeout=docker_cli.T_EXPORT_STEP)
@@ -357,5 +377,6 @@ def export_run(cfg, *, slug, base_commit, worktree: Path, run_dir: Path, objects
         diff_stat=diff_stat, patch_path=patch_path,
         worktree_bytes=worktree_bytes, worktree_files=worktree_files,
         escaping_symlinks=escaping_symlinks, dropped_git_entries=dropped_git_entries,
+        files_changed=files_changed, files_changed_truncated=files_changed_truncated,
         export_status="ok",
     )

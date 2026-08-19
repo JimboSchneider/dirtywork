@@ -30,7 +30,7 @@ LIST_COLUMNS = ("slug", "status", "started", "resumed", "branch", "worktree",
                 "container", "volume")
 SHOW_FIELDS = ("slug", "status", "sandbox", "task", "model", "provider", "turns",
                "resumed_from", "resumed_by", "branch", "worktree", "started", "ended",
-               "stuck_on")
+               "stuck_on", "files_changed")
 TASK_PREVIEW_CHARS = 200
 
 
@@ -215,6 +215,10 @@ def _summary_value(key: str, data: dict) -> str:
     # operator scans for, not the whole object (the JSON dump below has it all).
     if key == "stuck_on" and isinstance(value, dict):
         return str(value.get("command") or "-")
+    if key == "files_changed" and isinstance(value, list):
+        head = ", ".join(str(p) for p in value[:3])
+        tail = ", ..." if len(value) > 3 else ""
+        return f"{len(value)} ({head}{tail})"
     text = str(value)
     if key == "task" and len(text) > TASK_PREVIEW_CHARS:
         text = text[:TASK_PREVIEW_CHARS].replace("\n", " ") + " ... (full text below)"
@@ -440,6 +444,25 @@ def _md_result(data: dict, events: list) -> list:
                   f"{stuck_on.get('repeats')} times in a row", ""]
         lines += _md_block(str(stuck_on.get("command") or ""))
         lines += _md_block(str(stuck_on.get("output") or ""))
+    files_changed = data.get("files_changed") or end.get("files_changed")
+    if isinstance(files_changed, list) and files_changed:
+        truncated = data.get("files_changed_truncated") or end.get("files_changed_truncated")
+        note = " — list truncated" if truncated else ""
+        lines += [f"**files changed ({len(files_changed)}){note}**", ""]
+        lines += [f"- `{_md_inline(path, MD_ARGS_CHARS)}`" for path in files_changed]
+        lines.append("")
+    last_tool = data.get("last_tool_result") or end.get("last_tool_result")
+    if isinstance(last_tool, dict):
+        lines.append(f"<details><summary>last tool result: "
+                     f"{_md_inline(last_tool.get('tool'), MD_ARGS_CHARS)}"
+                     f"({_md_inline(last_tool.get('args'), MD_ARGS_CHARS)})</summary>")
+        lines.append("")
+        lines += _md_block(str(last_tool.get("result") or ""))
+        lines += ["</details>", ""]
+    last_text = data.get("last_assistant_text") or end.get("last_assistant_text")
+    if last_text:
+        lines += ["**last assistant text**", ""]
+        lines += [f"> {line}" for line in str(last_text).splitlines()] + [""]
     diff_stat = data.get("diff_stat") or end.get("diff_stat")
     if diff_stat:
         lines += ["**diff_stat**", ""] + _md_block(str(diff_stat))
@@ -636,6 +659,8 @@ def cmd_export(args) -> int:
     data["worktree_files"] = artifacts.worktree_files
     data["escaping_symlinks"] = artifacts.escaping_symlinks
     data["dropped_git_entries"] = artifacts.dropped_git_entries
+    data["files_changed"] = artifacts.files_changed
+    data["files_changed_truncated"] = artifacts.files_changed_truncated
     rundir.write_run_json(run_dir, data)
 
     if artifacts.export_status != "ok":

@@ -13,6 +13,12 @@ from .providers import assistant_message, tool_message
 from .sandbox import SandboxError
 
 MAX_ASSISTANT_TEXT_CHARS = 64_000
+# Spec §2: end-of-run evidence caps. These match the transcript's own preview
+# caps on purpose — the values are taken from the very same variables the
+# transcript records, so a payload and a transcript can never disagree.
+LAST_ARGS_CHARS = 500
+LAST_RESULT_CHARS = 2000
+LAST_TEXT_CHARS = 2000
 
 # The terminal tool's NAME. The runner branches on ToolSpec.terminal, not on
 # this constant; it is kept because the system prompt, the docs and the bench
@@ -372,13 +378,19 @@ class Runner:
         progress = ProgressTracker(self.stall_turns)
         repeats = RepeatTracker(self.stuck_repeats)
         stuck = None            # spec §1.2: set once, read by finish() below
+        last_tool_result = None     # spec §2: the newest non-finish tool call
+        last_assistant_text = None  # spec §2: the newest non-empty reply text
         start = time.monotonic()
         deadline = start + self.timeout
 
         def finish(status: str, final: str) -> RunResult:
-            # stuck_on rides on EVERY result (null unless the run ended 'stuck'),
-            # so a consumer never has to branch on status to read the field.
-            extra: dict = {"stuck_on": stuck}
+            # This evidence rides on EVERY result (null when there is none), so
+            # a consumer never has to branch on status to read the fields. A
+            # `max_turns` run with final_message "" is the case that made this
+            # necessary: without it there was nothing left to triage from.
+            extra: dict = {"stuck_on": stuck,
+                           "last_tool_result": last_tool_result,
+                           "last_assistant_text": last_assistant_text}
             finalize_error = None
             if self.finalize is not None:
                 try:
@@ -460,6 +472,8 @@ class Runner:
                     "assistant", text=transcript_text,
                     tool_calls=[{"name": tc.name, "arguments": (tc.raw_arguments or "")[:2000]}
                                 for tc in tool_calls])
+                if isinstance(transcript_text, str) and transcript_text.strip():
+                    last_assistant_text = transcript_text[:LAST_TEXT_CHARS]
                 if resp.tool_calls:
                     # The adapter re-serializes these into whatever wire shape
                     # its protocol needs; the runner keeps neutral objects.
@@ -537,6 +551,12 @@ class Runner:
                     self.transcript.write("tool_result", tool=name,
                                           args=raw_args[:500],
                                           result=self.registry.transcript_preview(name, result))
+                    if name != FINISH_TOOL:
+                        last_tool_result = {
+                            "tool": name,
+                            "args": raw_args[:LAST_ARGS_CHARS],
+                            "result": result[:LAST_RESULT_CHARS] if isinstance(result, str) else "",
+                        }
                     messages.append(tool_message(tc.id, result))
                     if abort_reason is not None:
                         return finish("model_error", abort_reason)

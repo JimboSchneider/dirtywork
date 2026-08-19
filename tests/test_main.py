@@ -1699,3 +1699,27 @@ def test_stuck_on_is_null_on_an_ordinary_run(tmp_path, monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["stuck_on"] is None
     assert json.loads((Path(payload["run_dir"]) / "run.json").read_text())["stuck_on"] is None
+
+
+def test_end_of_run_evidence_lands_in_stdout_and_run_json(tmp_path, monkeypatch, capsys):
+    write_then_answer = [
+        {"choices": [{"message": {"role": "assistant", "content": "writing it", "tool_calls": [
+            {"id": "w1", "type": "function", "function": {"name": "write_file",
+             "arguments": json.dumps({"path": "evidence.txt", "content": "hi\n"})}}]}}],
+         "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+        {"choices": [{"message": {"role": "assistant", "content": "done writing"}}],
+         "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+    ]
+    m = _install_host_harness(monkeypatch, tmp_path, write_then_answer)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "write a file"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0, payload
+    assert payload["files_changed"] == ["evidence.txt"]
+    assert payload["files_changed_truncated"] is False
+    assert payload["last_tool_result"]["tool"] == "write_file"
+    assert "Wrote 3 bytes" in payload["last_tool_result"]["result"]
+    assert payload["last_assistant_text"] == "done writing"
+    data = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert data["files_changed"] == ["evidence.txt"]
+    assert data["last_assistant_text"] == "done writing"
