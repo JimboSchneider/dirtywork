@@ -1050,3 +1050,22 @@ def test_last_tool_result_ignores_finish_and_is_null_when_no_tool_ran(parts):
     assert result2.status == "completed"
     assert result2.extra["last_tool_result"]["tool"] == "read_file"   # finish is skipped
     assert result2.extra["last_assistant_text"] is None               # both replies were empty
+
+
+def test_last_tool_result_reflects_a_malformed_entry(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    bad = _resp(tool_calls=[_bad_entry()])
+    provider = FakeProvider([bad, bad, bad])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+    last_transcript_result = [e for e in _events(tmp) if e["event"] == "tool_result"][-1]
+    assert result.extra["last_tool_result"] == {
+        "tool": last_transcript_result["tool"],
+        "args": last_transcript_result["args"],
+        "result": last_transcript_result["result"],
+    }
+    assert result.extra["last_tool_result"]["tool"] == ""
+    assert result.extra["last_tool_result"]["args"] == ""
+    assert result.extra["last_tool_result"]["result"].startswith("ERROR: ")

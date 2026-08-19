@@ -383,6 +383,18 @@ class Runner:
         start = time.monotonic()
         deadline = start + self.timeout
 
+        def note_last_tool_result(tool: str, args: str, result) -> None:
+            # spec §2: tracks the SAME values just written to the "tool_result"
+            # transcript event, for both a real tool call and a malformed entry
+            # (tool="", args="") — one assignment, so a payload and the
+            # transcript can never disagree about what ran last.
+            nonlocal last_tool_result
+            last_tool_result = {
+                "tool": tool,
+                "args": args[:LAST_ARGS_CHARS],
+                "result": result[:LAST_RESULT_CHARS] if isinstance(result, str) else "",
+            }
+
         def finish(status: str, final: str) -> RunResult:
             # This evidence rides on EVERY result (null when there is none), so
             # a consumer never has to branch on status to read the fields. A
@@ -504,6 +516,7 @@ class Runner:
                     # error text is what the transcript records.
                     result = f"ERROR: {entry.error}"
                     self.transcript.write("tool_result", tool="", args="", result=result)
+                    note_last_tool_result("", "", result)
                 if abort_reason is not None:
                     return finish("model_error", abort_reason)
 
@@ -552,11 +565,7 @@ class Runner:
                                           args=raw_args[:500],
                                           result=self.registry.transcript_preview(name, result))
                     if name != FINISH_TOOL:
-                        last_tool_result = {
-                            "tool": name,
-                            "args": raw_args[:LAST_ARGS_CHARS],
-                            "result": result[:LAST_RESULT_CHARS] if isinstance(result, str) else "",
-                        }
+                        note_last_tool_result(name, raw_args, result)
                     messages.append(tool_message(tc.id, result))
                     if abort_reason is not None:
                         return finish("model_error", abort_reason)
