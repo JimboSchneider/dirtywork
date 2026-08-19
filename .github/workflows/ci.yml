@@ -33,6 +33,37 @@ jobs:
       # and is excluded by the default addopts in pyproject.toml.
       - run: python -m pytest -v
 
+  windows-unit:
+    # ADVISORY ONLY (spec §5, issue #24). Windows is NOT supported; this leg
+    # exists to MEASURE what breaks there. It is a separate job, not a matrix
+    # entry of `test`, and `gate` does not list it in `needs`, so it can never
+    # block a merge or a release. `continue-on-error` at the job level keeps a
+    # red result from failing the workflow; the same flag on the pytest step
+    # (plus `if: always()` below) is what lets the report and the artifact
+    # still be produced when tests fail -- which is the expected outcome.
+    name: pytest (3.13, windows-latest) — advisory
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install pytest
+      # pyproject.toml's addopts deselect the live/docker markers here exactly as
+      # they do everywhere else -- pytest reads them itself, so no shell quoting
+      # is involved and PowerShell cannot mangle them.
+      - run: python -m pytest --junitxml=junit-windows.xml
+        continue-on-error: true
+      - name: Per-file summary
+        if: always()
+        run: python tools/junit_summary.py junit-windows.xml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: junit-windows
+          path: junit-windows.xml
+
   docker-live:
     # The unit suite above only ever talks to a FakeDocker — this job is
     # the only place in CI that exercises the real Docker sandbox

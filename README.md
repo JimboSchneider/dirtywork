@@ -60,7 +60,7 @@ Full model, known exposures and the host-mode caveats:
 |---|---|---|
 | Developed & benchmarked | macOS on Apple Silicon (M-series, unified memory) with LM Studio | all worker/bench numbers and model-sizing guidance in `docs/superpowers/bench/` were measured here |
 | CI-tested | Linux x86_64 (Ubuntu, Python 3.9 + 3.13) and macOS | unit suite on every push; the Docker sandbox live tests run on Linux in CI |
-| Unsupported | Windows | until a Windows integration suite passes (see the note in [Security & trust](https://github.com/JimboSchneider/dirtywork/blob/main/docs/security.md#security--trust)) |
+| Unsupported | Windows | the unit suite also runs on `windows-latest` in CI as an advisory (allowed-to-fail) job that publishes a per-file pass/fail/error/skip table; Windows remains unsupported until an integration suite passes (see the note in [Security & trust](https://github.com/JimboSchneider/dirtywork/blob/main/docs/security.md#security--trust)) |
 
 Other OpenAI-compatible servers (Ollama, vLLM, llama.cpp) should work via
 `--base-url`/`--provider`; only LM Studio and the Anthropic API adapter
