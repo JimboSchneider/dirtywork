@@ -38,7 +38,7 @@ One per run, always the first line.
 | `context_window` | | ✓ | integer | tokens; the resolved value (`--context-window` > `DIRTYWORK_CONTEXT_WINDOW` > the provider's table > 32768) |
 | `base_commit` | | ✓ | string | resolved commit the worktree branched from |
 | `branch` | | ✓ | string | `dirtywork/<slug>` |
-| `branch_from` | | ✓ | string \| null | `--branch-from` as given, or null for repo HEAD |
+| `branch_from` | | ✓ | string \| null | the ref the worktree was branched from, or null for repo HEAD. For `--branch-from @<slug>` this is the **resolved branch name** of that run, not the `@<slug>` text; `run.json`'s `branch_from_run` records the slug |
 | `base_url` | | ✓ | string | the provider endpoint actually used (after the per-provider default is applied) |
 | `dirtywork_version` | | ✓ | string | `dirtywork.__version__` |
 | `temperature` | | ✓ | number \| null | omitted from the request when null |
@@ -197,6 +197,7 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `context_window` | start | resolved tokens |
 | `resumed_from` | start | slug of the run this one continues, or null |
 | `resumed_by` | — | written onto the **prior** run's `run.json` when a resume starts |
+| `branch_from_run` | start | 0.8: the slug `--branch-from @<slug>` named, or null. The resolved branch itself is `run_start.branch_from` |
 | `container` | start | Docker mode container name, else null |
 | `volume` | start | Docker mode volume name, else null |
 | `image` | start | `--image` as given (Docker mode), else null |

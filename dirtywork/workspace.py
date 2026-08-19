@@ -320,6 +320,20 @@ def host_files_changed(worktree: Path, base_commit: str, cap: int = MAX_FILES_CH
     return ordered[:cap], len(ordered) > cap
 
 
+def host_worktree_dirty(worktree) -> bool:
+    """True when `git status --porcelain` reports anything, or cannot be run at
+    all (fail closed: an unanswerable worktree is treated as having work worth
+    snapshotting). Config-neutral, like every host git command that looks at
+    worker content — the operator's own filters must not run here. This is the
+    ONE dirty check in the codebase: `runs._worktree_is_dirty` delegates here."""
+    try:
+        res = _git(Path(worktree), *GIT_NEUTRAL_FLAGS, "status", "--porcelain",
+                   "--untracked-files=normal", env=git_env())
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return res.returncode != 0 or bool(res.stdout.strip())
+
+
 def commit_exists(repo: Path, sha: str) -> bool:
     """True when `sha` names a commit reachable in the operator's repo."""
     return _git(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode == 0

@@ -40,16 +40,19 @@ from .sandbox.docker_cli import DockerError, docker_version, resolve_image, vali
 from .sandbox.host import HostSandbox
 from .builtin_tools import default_registry
 from .transcript import Transcript
-from .resume import ResumeError, build_resume_task, check_resumable, load_prior_run, render_transcript_tail, resolve_run_dir
+from .resume import (ResumeError, build_resume_task, check_resumable, load_prior_run,
+                     preflight_run_worktree, render_transcript_tail, resolve_run_dir)
 from .workspace import (
     WorkspaceError,
     commit_exists,
     create_worktree,
     ensure_worktrees_excluded,
+    host_worktree_dirty,
     load_repo_context,
     make_slug,
     preflight_repo,
     remove_worktree,
+    snapshot_worktree,
     worktree_base_commit,
 )
 
@@ -112,6 +115,7 @@ class RunContext:
     image_pinned: bool
     context_window: int
     branch_from: str | None = None
+    branch_from_run: str | None = None   # the @<slug> --branch-from named, if any
     resumed_from: str | None = None
     prior_run_dir: Path | None = None
     seed_from_worktree: bool = False
@@ -184,7 +188,54 @@ def _resolve_allow_commit(args) -> None:
     args.allow_commit = bool(args.allow_commit)
 
 
+def _resolve_branch_from(args) -> tuple:
+    """Spec §6.2: `--branch-from @<slug>` means 'the branch that run left
+    behind'. Returns (branch_from, branch_from_run). Anything not starting with
+    '@' passes through untouched, so an ordinary ref is unaffected.
+
+    A dirty worktree is snapshotted FIRST, because the branch head alone does
+    not carry the work the reviewer just read — that snapshot is the whole
+    point of the flag, and it is the one thing this preflight creates before a
+    later failure could still exit 2. Before that: if the run's worktree still
+    exists, it must clear the same preflight resume uses (not still running,
+    not a foreign worktree, no leftover stash) -- a run currently in progress
+    or in an unsafe state must never be touched. If the worktree is gone
+    (e.g. `runs clean` already removed it), branching from the recorded
+    branch head is a legitimate use of `@<slug>` and nothing is snapshotted."""
+    value = getattr(args, "branch_from", None)
+    if not isinstance(value, str) or not value.startswith("@"):
+        return value, None
+    slug = value[1:]
+    run_dir = resolve_run_dir(slug, RUNS_DIR)
+    if not run_dir.is_dir():
+        raise PreflightFailure(f"unknown run '{slug}' (no run dir under {RUNS_DIR})")
+    try:
+        prior = load_prior_run(run_dir)
+    except ResumeError as e:
+        raise PreflightFailure(str(e))
+    branch = prior.get("branch")
+    if not isinstance(branch, str) or not branch:
+        raise PreflightFailure(f"run '{slug}' records no branch to branch from")
+    worktree = Path(prior.get("worktree") or "")
+    if str(worktree) and worktree.is_dir():
+        try:
+            preflight_run_worktree(prior)
+        except ResumeError as e:
+            raise PreflightFailure(str(e))
+        if host_worktree_dirty(worktree):
+            try:
+                sha = snapshot_worktree(worktree, branch, f"wip: dirtywork run {slug}")
+            except WorkspaceError as e:
+                raise PreflightFailure(str(e))
+            if sha:
+                print(f"snapshot {sha} on {branch} (from @{slug})", file=sys.stderr)
+    return branch, slug
+
+
 def _workspace_new(args, repo: Path, context_window: int) -> RunContext:
+    # First: it is the cheapest refusal in this function, and its snapshot must
+    # happen before the run creates a worktree it might have to roll back.
+    branch_from, branch_from_run = _resolve_branch_from(args)
     image_ref, image_digest, image_pinned = None, None, False
     if args.sandbox == "docker":
         image_ref, image_digest, image_pinned = _docker_preflight_or_fail(repo, args.image)
@@ -200,7 +251,7 @@ def _workspace_new(args, repo: Path, context_window: int) -> RunContext:
             raise PreflightFailure(str(e))
     try:
         ensure_worktrees_excluded(repo)
-        worktree = create_worktree(repo, slug, args.branch_from,
+        worktree = create_worktree(repo, slug, branch_from,
                                     no_checkout=(args.sandbox == "docker"))
     except WorkspaceError as e:
         raise PreflightFailure(str(e))
@@ -208,7 +259,8 @@ def _workspace_new(args, repo: Path, context_window: int) -> RunContext:
         repo=repo, slug=slug, branch=branch, worktree=worktree,
         base_commit=worktree_base_commit(worktree), task=args.task,
         sandbox_mode=args.sandbox, provider=args.provider, image_ref=image_ref, image_digest=image_digest,
-        image_pinned=image_pinned, context_window=context_window, branch_from=args.branch_from,
+        image_pinned=image_pinned, context_window=context_window, branch_from=branch_from,
+        branch_from_run=branch_from_run,
     )
 
 
@@ -339,6 +391,7 @@ def _write_run_json_start(run_dir: Path, ctx: RunContext, args) -> None:
         "model": args.model,
         "provider": args.provider,
         "context_window": ctx.context_window,
+        "branch_from_run": ctx.branch_from_run,
         "resumed_from": ctx.resumed_from,
         "container": docker_args.container_name(ctx.slug) if is_docker else None,
         "volume": docker_args.volume_name(ctx.slug) if is_docker else None,
@@ -810,7 +863,11 @@ def _parse_args(argv):
     run_p = sub.add_parser("run", help="run one task in an isolated worktree")
     run_p.add_argument("task")
     run_p.add_argument("--repo", required=True, type=Path)
-    run_p.add_argument("--branch-from", default=None)
+    run_p.add_argument("--branch-from", default=None, metavar="REF",
+                       help="branch the new worktree from REF (default: repo HEAD). "
+                            "'@<slug>' means an earlier run's branch: its worktree is "
+                            "snapshotted first if dirty, so the new run starts from that "
+                            "run's work as it stands")
     run_p.add_argument("--sandbox", choices=["docker", "none"], default="docker")
     _add_run_flags(run_p, resume=False)
     resume_p = sub.add_parser("resume", help="continue an earlier run on its worktree")

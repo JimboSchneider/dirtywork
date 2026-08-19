@@ -1770,3 +1770,109 @@ def test_runs_snapshot_dispatches(tmp_path, monkeypatch, capsys):
     rc = m.main(["runs", "snapshot", "no-such-run"])
     assert rc == 2
     assert "no such run" in capsys.readouterr().err
+
+
+def test_branch_from_run_reference_snapshots_and_branches_from_the_prior_run(
+        tmp_path, monkeypatch, capsys):
+    write_then_loop = [
+        {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "w1", "type": "function", "function": {"name": "write_file",
+             "arguments": json.dumps({"path": "first.txt", "content": "from run 1\n"})}}]}}],
+         "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+    ]
+    m, repo, rc = _first_run(monkeypatch, tmp_path, write_then_loop)
+    first = json.loads(capsys.readouterr().out)
+    assert rc == 1 and first["status"] == "max_turns"
+    slug = Path(first["run_dir"]).name
+
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url))
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                 "--branch-from", f"@{slug}", "keep going"])
+    err = capsys.readouterr()
+    second = json.loads(err.out)
+    assert rc == 0, second
+    assert "snapshot " in err.err and f"(from @{slug})" in err.err
+
+    data = json.loads((Path(second["run_dir"]) / "run.json").read_text())
+    assert data["branch_from_run"] == slug
+    # the new worktree starts from the SNAPSHOT of the earlier run's work
+    assert (Path(second["worktree"]) / "first.txt").read_text() == "from run 1\n"
+    start = next(e for e in (json.loads(l) for l in
+                             Path(second["transcript"]).read_text().splitlines())
+                 if e["event"] == "run_start")
+    assert start["branch_from"] == first["branch"]      # the resolved branch NAME
+
+
+def test_branch_from_unknown_run_exits_2_and_creates_nothing(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                 "--branch-from", "@no-such-run", "t"])
+    assert rc == 2
+    assert "unknown run 'no-such-run'" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()
+    assert not (repo / ".worktrees").exists()
+
+
+def test_branch_from_a_clean_run_takes_no_snapshot(tmp_path, monkeypatch, capsys):
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    slug = Path(first["run_dir"]).name
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url))
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                 "--branch-from", f"@{slug}", "keep going"])
+    err = capsys.readouterr()
+    assert rc == 0, err.out
+    assert "snapshot " not in err.err                  # nothing was dirty
+    assert json.loads((Path(json.loads(err.out)["run_dir"]) / "run.json")
+                      .read_text())["branch_from_run"] == slug
+
+
+def test_branch_from_a_plain_ref_is_unchanged(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                   "--branch-from", "HEAD", "t"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    data = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert data["branch_from_run"] is None
+
+
+def test_branch_from_refuses_a_still_running_prior_run_and_snapshots_nothing(
+        tmp_path, monkeypatch, capsys):
+    # Controller ruling: `_resolve_branch_from` must run the same
+    # preflight_run_worktree guard resume uses BEFORE the dirty check and
+    # snapshot -- a still-running run's worktree must never be touched.
+    import subprocess
+    write_then_loop = [
+        {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "w1", "type": "function", "function": {"name": "write_file",
+             "arguments": json.dumps({"path": "first.txt", "content": "from run 1\n"})}}]}}],
+         "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+    ]
+    m, repo, rc = _first_run(monkeypatch, tmp_path, write_then_loop)
+    first = json.loads(capsys.readouterr().out)
+    assert rc == 1 and first["status"] == "max_turns"
+    run_dir = Path(first["run_dir"])
+    slug = run_dir.name
+    data = json.loads((run_dir / "run.json").read_text())
+    data["status"] = "running"; data["host_pid"] = os.getpid()
+    (run_dir / "run.json").write_text(json.dumps(data))
+
+    branch_log_before = subprocess.run(
+        ["git", "-C", str(repo), "log", "--oneline", data["branch"]],
+        capture_output=True, text=True).stdout
+
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url))
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                 "--branch-from", f"@{slug}", "keep going"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "still in progress" in err
+    assert "snapshot " not in err                       # no snapshot was taken
+
+    branch_log_after = subprocess.run(
+        ["git", "-C", str(repo), "log", "--oneline", data["branch"]],
+        capture_output=True, text=True).stdout
+    assert branch_log_after == branch_log_before         # no snapshot commit was made
+    assert len(list((tmp_path / "runs").iterdir())) == 1  # nothing new created

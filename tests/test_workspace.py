@@ -655,3 +655,31 @@ def test_snapshot_worktree_reports_skipped_non_regular_entries(tmp_path: Path):
     assert sha is not None
     assert report["skipped"] == 1
     assert "fifo" not in _git(repo, "ls-tree", "-r", "--name-only", sha)
+
+
+def test_host_worktree_dirty_sees_untracked_and_modified_and_fails_closed(tmp_path: Path):
+    # Deliberately NOT _snapshot_repo: that fixture rigs a `.gitattributes`
+    # clean filter to prove snapshot_worktree bypasses it when COMMITTING.
+    # A real `git status` (which honours that filter, same as any ordinary
+    # git command) would then see the raw committed blob as "modified"
+    # relative to the filtered working-tree content forever, which is a
+    # property of the filter, not of host_worktree_dirty -- reusing it here
+    # would make "the snapshot made it clean" unprovable for reasons
+    # unrelated to what this test checks.
+    from dirtywork.workspace import host_worktree_dirty, snapshot_worktree
+    repo = tmp_path / "repo3"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "keep.txt").write_text("keep\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "init")
+    wt = tmp_path / "wt3"
+    _git(repo, "worktree", "add", "-b", "dirtywork/snap3", str(wt))
+    (wt / "keep.txt").write_text("modified\n")     # a tracked-file modification
+    (wt / "new.txt").write_text("untracked\n")     # an untracked file
+    assert host_worktree_dirty(wt) is True         # sees both the modification and the untracked file
+    snapshot_worktree(wt, "dirtywork/snap3", "wip: clean it")
+    assert host_worktree_dirty(wt) is False        # the snapshot made it clean
+    assert host_worktree_dirty(tmp_path / "not-a-repo") is True   # fail closed

@@ -564,7 +564,7 @@ read by a human — the primary consumer parses stdout, not the terminal.
 ```
 dirtywork run --repo <path> "<task>"
     [--model qwen/qwen3-coder-next]   # or mistralai/devstral-small-2-2512
-    [--branch-from <ref>]             # default: repo HEAD
+    [--branch-from <ref>|@<slug>]     # default: repo HEAD; @<slug> = an earlier run's branch
     [--max-turns 40]
     [--stall-turns 12]                # end as `stalled` after N no-progress turns; 0 disables
     [--stuck-repeats 4]               # end as `stuck` after N identical failing bash runs; 0 disables
@@ -596,6 +596,20 @@ dirtywork run --repo <path> "<task>"
 dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch-from/--sandbox/<task>;
     [--model <m>]                     # defaults to the earlier run's model; --image defaults to its image
 ```
+
+- `--branch-from @<slug>` — start the new run from the branch an earlier run
+  left behind instead of from repo HEAD. If that run's worktree still has
+  uncommitted work, dirtywork snapshots it first (`dirtywork runs snapshot`'s
+  plumbing-only commit — no filters, no hooks) and prints
+  `snapshot <sha> on <branch> (from @<slug>)` on stderr, so the new run starts
+  from the work as the reviewer actually saw it, not from the last commit.
+  Unknown slug, or a run whose `run.json` records no branch, is a preflight
+  refusal (exit 2, nothing created). The resolved branch NAME is what
+  `run_start.branch_from` records; `run.json` also records
+  `branch_from_run: "<slug>"`. This is the "start a fresh run from what that
+  one produced" half of the review→fix loop — the other half is
+  `dirtywork resume <slug> --feedback "..."`, which continues the same run on
+  the same worktree.
 
 - `--image REF` (docker mode) — the worker image, default
   `ghcr.io/jimboschneider/dirtywork-worker:0.8`. The image is the worker's

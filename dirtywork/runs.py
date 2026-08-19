@@ -25,7 +25,7 @@ from . import rundir
 from .resume import (ResumeError, find_stashes, pid_alive, preflight_run_worktree,
                       stash_dir_for, worktree_belongs_to_repo)
 from .sandbox import docker_args, docker_cli, export
-from .workspace import WorkspaceError, snapshot_worktree
+from .workspace import WorkspaceError, host_worktree_dirty, snapshot_worktree
 
 COLUMN_GAP = "  "
 LIST_COLUMNS = ("slug", "status", "started", "resumed", "branch", "worktree",
@@ -862,13 +862,9 @@ def _clean_docker_resource(kind: str, name: str, repo: str, slug: str, log: list
 
 
 def _worktree_is_dirty(worktree: str) -> bool:
-    """Fail closed: if git cannot be asked, treat the worktree as dirty."""
-    try:
-        cp = subprocess.run(["git", "-C", str(worktree), "status", "--porcelain"],
-                            capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        return True
-    return cp.returncode != 0 or bool(cp.stdout.strip())
+    """Fail closed: if git cannot be asked, treat the worktree as dirty.
+    Delegates to the one config-neutral dirty check in workspace.py."""
+    return host_worktree_dirty(worktree)
 
 
 def _commits_beyond_base(repo: str, base_commit, branch):
