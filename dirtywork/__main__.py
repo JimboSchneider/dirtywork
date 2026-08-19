@@ -221,7 +221,7 @@ def _resolve_branch_from(args) -> tuple:
     worktree = Path(prior.get("worktree") or "")
     if str(worktree) and worktree.is_dir():
         try:
-            preflight_run_worktree(prior)
+            preflight_run_worktree(prior, action="snapshot")
         except ResumeError as e:
             raise PreflightFailure(str(e))
         if host_worktree_dirty(worktree):
