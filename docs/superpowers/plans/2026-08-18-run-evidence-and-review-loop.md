@@ -38,7 +38,7 @@ Three fields join the stdout JSON, `run_end` and `run.json` on **every** normal 
 
 ### §4 — `--verify "<cmd>"`: the operator's gate, first-class (issue #35)
 
-`--verify CMD` (default none), `--verify-rounds N` (default **1**), `--verify-timeout S` (default **600**, clamped to 1–600) on `run`; `resume` accepts all three and inherits the command from the prior `run.json`. It runs inside the runner on the completion path — the `finish` tool or a plain-answer completion — **before** `finalize()`, through the same `sandbox.bash(command, timeout)` the tool uses. Passing iff the first line is `exit code: 0`; the exit code is the integer after `exit code: ` (`null` for `ERROR:`/`BLOCKED:`). Pass → `completed`. Fail with a round left (`rounds_used < verify_rounds`) → a `verify` transcript event, then a user message with the command, exit code and a 4000-char output tail, and the loop continues. Fail with no round left → **`verify_failed`** (exit 1, resumable). `BudgetExceeded`/`SandboxError` out of the verify call end the run with the existing `budget_exceeded`/`sandbox_error` statuses. A passing verify also writes a `verify` event. `verify` on every normal end-of-run payload: `null` without `--verify`, else `{"command", "exit_code", "output_tail", "rounds", "passed"}` for the last verify run.
+`--verify CMD` (default none), `--verify-rounds N` (default **1**), `--verify-timeout S` (default **600**, clamped to 1–600) on `run`; `resume` accepts all three and inherits the command from the prior `run.json`. It runs inside the runner on the completion path — the `finish` tool or a plain-answer completion — **before** `finalize()`, through the same `sandbox.bash(command, timeout)` the tool uses. Passing iff the first line is `exit code: 0`; the exit code is the integer after `exit code: ` (`null` for `ERROR:`/`BLOCKED:`). Pass → `completed`. Fail with a fix round left (`rounds_used <= verify_rounds`; `--verify-rounds N` is the number of fix rounds after a failed verify, so the command may run N+1 times) → a `verify` transcript event, then a user message with the command, exit code and a 4000-char output tail, and the loop continues. Fail with no round left → **`verify_failed`** (exit 1, resumable). `BudgetExceeded`/`SandboxError` out of the verify call end the run with the existing `budget_exceeded`/`sandbox_error` statuses. A passing verify also writes a `verify` event. `verify` on every normal end-of-run payload: `null` without `--verify`, else `{"command", "exit_code", "output_tail", "rounds", "passed"}` for the last verify run.
 
 ### §5 — Sandbox deps: stock image + docs (issue #30)
 
@@ -1513,13 +1513,20 @@ def test_repeat_tracker_counts_only_identical_failures():
     assert t2.note_bash("sleep 999", "ERROR: command timed out after 120s.") == "stuck"
 
 
-def test_a_passing_command_resets_the_stuck_streak():
+def test_only_the_same_command_passing_resets_the_stuck_streak():
     from dirtywork.runner import RepeatTracker
-    t = RepeatTracker(limit=2)
+    t = RepeatTracker(limit=3)
     assert t.note_bash("pytest", "exit code: 1\nfailed") is None
+    # a passing run of ANOTHER command (git status, cat, ls ...) neither counts
+    # nor resets -- exactly like a non-bash tool call in between
     assert t.note_bash("git status", "exit code: 0\nclean") is None
+    assert t.repeats == 1
+    assert t.note_bash("pytest", "exit code: 1\nfailed") is None
+    assert t.repeats == 2
+    # the SAME command going green ends the episode: the streak restarts
+    assert t.note_bash("pytest", "exit code: 0\n3 passed") is None
     assert t.repeats == 0
-    # the streak restarts from scratch, so the next identical failure is not stuck
+    assert t.note_bash("pytest", "exit code: 1\nfailed") is None
     assert t.note_bash("pytest", "exit code: 1\nfailed") is None
     assert t.note_bash("pytest", "exit code: 1\nfailed") == "stuck"
 
@@ -1605,9 +1612,10 @@ class RepeatTracker:
     EXISTING _bash_fingerprint (command + volatile-token-stripped output), so a
     timing-only difference is not a different result — but a changed test
     count, a new line, or a changed exit status is. A passing result (first
-    line exactly 'exit code: 0') resets the streak to zero, so a diligent
-    worker re-running a green typecheck after every edit is never 'stuck'.
-    limit <= 0 disables the tracker entirely."""
+    line exactly 'exit code: 0') of the SAME command resets the streak to zero
+    -- so a diligent worker re-running a green typecheck after every edit is
+    never 'stuck' -- while passing runs of other commands neither count nor
+    reset. limit <= 0 disables the tracker entirely."""
 
     def __init__(self, limit: int):
         self.limit = limit
@@ -1629,10 +1637,16 @@ class RepeatTracker:
         if self.limit <= 0:
             return None
         if not self._failed(result):
-            self.repeats = 0
-            self._fingerprint = None
-            self.command = None
-            self.output = None
+            # Only the SAME command going green ends the episode. A passing run
+            # of some other command (git status, cat, ls ...) neither counts nor
+            # resets -- exactly like a non-bash tool call in between -- so the
+            # reads a model interleaves with its edit->test loop cannot hide an
+            # unchanged failure.
+            if command == self.command:
+                self.repeats = 0
+                self._fingerprint = None
+                self.command = None
+                self.output = None
             return None
         text = result if isinstance(result, str) else ""
         fingerprint = _bash_fingerprint(command, text)
@@ -3263,7 +3277,7 @@ git commit -m "feat: files_changed, last_tool_result and last_assistant_text on 
 
 Two decisions taken here, both recorded in the README text this task writes:
 
-1. **`--verify-rounds N` is the number of times the command may RUN**, because the spec's own condition is `rounds_used < verify_rounds`. The default `1` therefore verifies once and ends the run either way; `2` gives the worker one fix round.
+1. **`--verify-rounds N` is the number of FIX ROUNDS after a failed verify** (owner ruling 2026-08-18 19:58, correcting the spec's literal `rounds_used < verify_rounds`): the command may run N+1 times. The default `1` hands the first failure back to the worker once; `0` verifies once and ends the run either way. The `rounds` field in the payload still counts executions.
 2. **Only the verify *command* is inherited on resume.** `run.json` records `verify` (the result object, which carries `command`) and nothing else — spec §7's `run.json` field list adds `verify` alone, so there is no recorded rounds/timeout to inherit. `--verify-rounds`/`--verify-timeout` fall back to their own defaults on a resume that does not pass them.
 
 - [ ] **Step 1: Write the failing runner tests**
@@ -3294,7 +3308,7 @@ def test_verify_failure_with_no_round_left_is_verify_failed(parts):
     wt, registry, sandbox, transcript, tmp = parts
     provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "done"})])])
     r = Runner(provider, registry, sandbox, transcript, model="m",
-               verify="echo boom; exit 3", verify_rounds=1)
+               verify="echo boom; exit 3", verify_rounds=0)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "verify_failed"
@@ -3314,7 +3328,7 @@ def test_verify_failure_with_a_round_left_feeds_back_and_retries(parts, tmp_path
         _resp(tool_calls=[_call("f2", "finish", {"summary": "second try"})]),
     ])
     r = Runner(provider, registry, sandbox, transcript, model="m",
-               verify="test -e fixed", verify_rounds=2)
+               verify="test -e fixed", verify_rounds=1)
     result = r.run("s", "t")
     transcript.close()
     assert marker.is_file()
@@ -3374,8 +3388,9 @@ After:
 DEFAULT_STUCK_REPEATS = 4
 STUCK_OUTPUT_CHARS = 4000
 # Spec §4: the operator's own gate, run inside the sandbox on the completion
-# path. `verify_rounds` is how many times the command may RUN — the default 1
-# verifies once and ends the run either way; 2 gives the worker one fix round.
+# path. `verify_rounds` is how many FIX ROUNDS follow a failed verify — the
+# command may run verify_rounds + 1 times. The default 1 hands the first failure
+# back to the worker once; 0 verifies once and ends the run either way.
 DEFAULT_VERIFY_ROUNDS = 1
 DEFAULT_VERIFY_TIMEOUT = 600
 VERIFY_OUTPUT_CHARS = 4000
@@ -3514,10 +3529,10 @@ Then insert the two closures immediately **after** `check_progress` (which ends 
                             "passed": passed}
             self.transcript.write("verify", round=verify_rounds_used,
                                   exit_code=exit_code, passed=passed)
-            if passed or verify_rounds_used >= self.verify_rounds:
+            if passed or verify_rounds_used > self.verify_rounds:
                 return None
             return VERIFY_FEEDBACK.format(round=verify_rounds_used,
-                                          rounds=self.verify_rounds,
+                                          rounds=self.verify_rounds + 1,
                                           command=self.verify,
                                           exit_code=exit_code, output=tail)
 
@@ -3710,9 +3725,9 @@ After:
                    help="run CMD in the sandbox when the worker declares itself done; a "
                         "non-zero exit ends the run as 'verify_failed' (resume inherits the "
                         "command from the run it continues)")
-    p.add_argument("--verify-rounds", type=_positive_int, default=DEFAULT_VERIFY_ROUNDS,
-                   help="how many times --verify may run (default 1: verify once and end the "
-                        "run either way; 2 gives the worker one fix round)")
+    p.add_argument("--verify-rounds", type=_non_negative_int, default=DEFAULT_VERIFY_ROUNDS,
+                   help="fix rounds after a failed --verify (default 1: the first failure goes "
+                        "back to the worker once; 0 verifies once and ends the run either way)")
     p.add_argument("--verify-timeout", type=_positive_int, default=DEFAULT_VERIFY_TIMEOUT,
                    help="seconds for the --verify command (default 600, clamped to 1-600)")
 ```
@@ -3945,10 +3960,11 @@ guardrails, same `--network none`, same budget watchdog), and **before** the
 export. A zero exit leaves the run `completed`; anything else ends it
 `verify_failed` (exit 1), with the command, its exit code and a 4000-char
 output tail in `verify` on the stdout JSON, the `run_end` event and `run.json`.
-`--verify-rounds N` (default 1) is how many times the command may run: `2` hands
-the first failure back to the worker as a message naming the command, the exit
-code and the output tail, and lets it try once more against the ordinary
-`--max-turns`/`--timeout` budget. `--verify-timeout S` (default 600, clamped to
+`--verify-rounds N` (default 1) is how many fix rounds follow a failure: the
+default hands the first failure back to the worker as a message naming the
+command, the exit code and the output tail, and lets it try once more against
+the ordinary `--max-turns`/`--timeout` budget (the command may run N+1 times);
+`0` verifies once and ends the run either way. `--verify-timeout S` (default 600, clamped to
 1–600) bounds each run. In docker mode the command can only use what the image
 ships — see the callout under *Review a run*. `dirtywork resume` inherits the
 verify command from the run it continues.
@@ -3969,7 +3985,7 @@ After:
 ```
     [--stuck-repeats 4]               # end as `stuck` after N identical failing bash runs; 0 disables
     [--verify "<cmd>"]                # run this in the sandbox on completion; non-zero → `verify_failed`
-    [--verify-rounds 1]               # how many times --verify may run (2 = one fix round)
+    [--verify-rounds 1]               # fix rounds after a failed --verify (0 = verify once, no retry)
     [--verify-timeout 600]            # seconds per --verify run, clamped to 1-600
 ```
 
@@ -3988,9 +4004,9 @@ After:
   cannot see, since every `edit_file` counts as progress. No nudge is sent:
   the point is to stop paying for turns. `0` disables.
 - `--verify CMD` / `--verify-rounds N` / `--verify-timeout S` — see
-  [Verifying a run](#verifying-a-run). `--verify-rounds` counts **executions of
-  the command**, not retries: the default `1` verifies once and ends the run
-  either way. `dirtywork resume` inherits the command (not the rounds or the
+  [Verifying a run](#verifying-a-run). `--verify-rounds` counts **fix rounds
+  after a failed verify** — the command may run N+1 times; `0` verifies once and
+  ends the run either way. `dirtywork resume` inherits the command (not the rounds or the
   timeout, which `run.json` does not record) from the run it continues.
 ```
 
@@ -4075,7 +4091,7 @@ the export runs.
 
 | Field | v1 | v2 | Type | Notes |
 |---|---|---|---|---|
-| `round` | | ✓ | integer | 1-based; at most `--verify-rounds` of them |
+| `round` | | ✓ | integer | 1-based; at most `--verify-rounds` + 1 of them |
 | `exit_code` | | ✓ | integer \| null | the integer after `exit code: ` in the bash result; `null` for an `ERROR:`/`BLOCKED:` result that never produced a status |
 | `passed` | | ✓ | boolean | true only for exit code 0 |
 
@@ -5258,15 +5274,56 @@ Expected: 1 failed — `ImportError: cannot import name 'host_worktree_dirty' fr
 In `dirtywork/workspace.py`, insert immediately **after** `host_files_changed` (Task 4) and immediately **before** `def load_repo_context(repo: Path, base_commit: str) -> str | None:`.
 
 ```python
-def host_worktree_dirty(worktree: Path) -> bool:
+def host_worktree_dirty(worktree) -> bool:
     """True when `git status --porcelain` reports anything, or cannot be run at
     all (fail closed: an unanswerable worktree is treated as having work worth
     snapshotting). Config-neutral, like every host git command that looks at
-    worker content — the operator's own filters must not run here."""
-    res = _git(worktree, *GIT_NEUTRAL_FLAGS, "status", "--porcelain",
-               "--untracked-files=normal", env=git_env())
+    worker content — the operator's own filters must not run here. This is the
+    ONE dirty check in the codebase: `runs._worktree_is_dirty` delegates here."""
+    try:
+        res = _git(Path(worktree), *GIT_NEUTRAL_FLAGS, "status", "--porcelain",
+                   "--untracked-files=normal", env=git_env())
+    except (OSError, subprocess.SubprocessError):
+        return True
     return res.returncode != 0 or bool(res.stdout.strip())
 ```
+
+- [ ] **Step 3b: Make `runs._worktree_is_dirty` delegate (DRY — one dirty check)**
+
+`dirtywork/runs.py:771-778` already has a `git status --porcelain` dirty check used by `runs clean`. Two copies of "is this worktree dirty" would drift; keep the name `runs clean` calls, but make it a one-line delegate.
+
+Before (`dirtywork/runs.py:771-778`):
+
+```python
+def _worktree_is_dirty(worktree: str) -> bool:
+    """Fail closed: if git cannot be asked, treat the worktree as dirty."""
+    try:
+        cp = subprocess.run(["git", "-C", str(worktree), "status", "--porcelain"],
+                            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return cp.returncode != 0 or bool(cp.stdout.strip())
+```
+
+After:
+
+```python
+def _worktree_is_dirty(worktree: str) -> bool:
+    """Fail closed: if git cannot be asked, treat the worktree as dirty.
+    Delegates to the one config-neutral dirty check in workspace.py."""
+    return host_worktree_dirty(worktree)
+```
+
+and add the import at the top of `dirtywork/runs.py`, immediately after the existing line `from .sandbox import docker_args, docker_cli, export`:
+
+```python
+from .workspace import host_worktree_dirty
+```
+
+(`dirtywork/workspace.py` does not import `runs`, so this introduces no cycle. If `subprocess` is now unused in `runs.py`, leave the import — other functions in the module still use it; check with `grep -n "subprocess\." dirtywork/runs.py` and only remove the import if nothing else uses it.)
+
+Run: `python3 -m pytest tests/test_runs.py -q`
+Expected: all pass (the `runs clean` dirty-worktree tests still pass through the delegate).
 
 - [ ] **Step 4: Run the workspace tests**
 
@@ -6487,7 +6544,7 @@ git commit -m "chore: 0.8.0 — run evidence and review loop"
 | §1.1 `RepeatTracker(limit)` beside `ProgressTracker`, fed from `note_call`'s call site | Task 3, Steps 3, 6 |
 | §1.1 `note_bash` reuses the existing `_bash_fingerprint` | Task 3, Step 3 (`RepeatTracker.note_bash`) |
 | §1.1 only failing results count; first line exactly `exit code: 0` is passing | Task 3, Step 3 (`_failed`); test in Step 1 covers `ERROR:` |
-| §1.1 a passing result resets the streak; non-`bash` calls neither count nor reset | Task 3, Steps 3, 6; test `test_a_passing_command_resets_the_stuck_streak` |
+| §1.1 a passing result of the SAME command resets the streak; other passing commands and non-`bash` calls neither count nor reset | Task 3, Steps 3, 6; test `test_only_the_same_command_passing_resets_the_stuck_streak` |
 | §1.1 `limit <= 0` disables | Task 3, Step 3; test `test_repeat_tracker_limit_zero_disables` |
 | §1.2 `--stuck-repeats N` (default 4) on `run` and `resume`, no nudge | Task 3, Step 11 (`_add_run_flags` serves both parsers) |
 | §1.2 finish the turn's remaining calls, then status `stuck`, exit 1, resumable | Task 3, Step 7 |

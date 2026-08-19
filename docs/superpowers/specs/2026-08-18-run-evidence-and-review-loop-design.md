@@ -38,8 +38,11 @@ piece of container-side data (§2 `files_changed`) is computed where `diff_stat`
   bash fingerprint, `repeats += 1`; otherwise `repeats = 1` and the previous fingerprint is replaced.
 - Only **failing** results count. A result is failing unless its first line is exactly
   `exit code: 0` (so `exit code: N≠0`, `ERROR: command timed out …`, `ERROR: bash failed …` and
-  `BLOCKED: …` all count). A passing result resets the streak to zero — a diligent worker that
-  re-runs a green typecheck after every edit is never "stuck".
+  `BLOCKED: …` all count). A passing result **of the same command** resets the streak to zero — a
+  diligent worker that re-runs a green typecheck after every edit is never "stuck"; passing runs
+  of *other* commands (`git status`, `cat`, `ls` …) neither count nor reset, exactly like a
+  non-bash tool call, so the reads a model interleaves with its edit→test loop cannot hide an
+  unchanged failure.
 - Non-`bash` tool calls (edits, reads) do **not** reset the streak. Edit→test→edit→test with an
   unchanged failure is exactly the loop this catches; the stall detector never fires on it because
   every `edit_file` counts as progress.
