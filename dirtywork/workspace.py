@@ -347,7 +347,8 @@ SNAPSHOT_AUTHOR = ("dirtywork", "dirtywork@localhost")
 
 
 def _walk_worktree(worktree: Path) -> tuple:
-    """(files, links, skipped) for everything under `worktree`.
+    """(files, links, skipped, unreadable_dirs) for everything under
+    `worktree`.
 
     `files` is [(repo-relative path, is_executable)], `links` is
     [(repo-relative path, link target string)], `skipped` counts entries that
@@ -357,22 +358,31 @@ def _walk_worktree(worktree: Path) -> tuple:
     the whole snapshot with `WorkspaceError` when `hash-object` chokes on it,
     since silently dropping a file from a snapshot is worse than a loud
     failure. A DIRECTORY that cannot be listed (`chmod 000` on the directory
-    itself) fails loudly here instead: `os.walk`'s default `onerror` is a
-    no-op that silently drops the unreadable directory from the walk, which
-    would make the snapshot commit its files' DELETION — `onerror` is passed
-    to raise `WorkspaceError` immediately instead. The TOP-LEVEL `.git` entry
-    is skipped and nothing else is skipped by name; ignore rules are not
-    applied here — `snapshot_worktree` filters ignored paths out of the
-    result afterward, via `git check-ignore`, matching what `git add -A`
-    would keep. Symlinks — including symlinked directories — are recorded by
-    their target string and never followed or descended into
+    itself) is NOT raised on here: `os.walk`'s default `onerror` is a no-op
+    that would silently drop it from the walk (which would make the snapshot
+    commit its files' DELETION), but raising unconditionally here would also
+    hard-fail a directory that turns out to be ignored (e.g. a root-owned
+    directory inside an ignored `build/`/`.venv/`) even though nothing under
+    it would ever be committed. So `onerror` only RECORDS the directory's
+    repo-relative path in `unreadable_dirs` instead of raising;
+    `snapshot_worktree` runs it through the same ignore-rule check as every
+    other path afterward and raises `WorkspaceError` itself, but only for one
+    that is NOT ignored. The TOP-LEVEL `.git` entry is skipped and nothing
+    else is skipped by name; ignore rules are not applied here —
+    `snapshot_worktree` filters ignored paths (and decides about unreadable
+    directories) afterward, via `git check-ignore`, matching what `git add
+    -A` would keep. Symlinks — including symlinked directories — are
+    recorded by their target string and never followed or descended into
     (os.lstat/os.readlink only)."""
-    files, links, skipped = [], [], 0
+    files, links, skipped, unreadable_dirs = [], [], 0, []
 
     def _onerror(exc: OSError) -> None:
-        raise WorkspaceError(
-            f"cannot snapshot {worktree}: cannot read directory {exc.filename}: {exc}"
-        )
+        path = exc.filename or str(worktree)
+        try:
+            rel = Path(path).relative_to(worktree).as_posix()
+        except ValueError:
+            rel = path
+        unreadable_dirs.append((rel, exc))
 
     for root, dirnames, filenames in os.walk(worktree, followlinks=False, onerror=_onerror):
         root_path = Path(root)
@@ -408,7 +418,7 @@ def _walk_worktree(worktree: Path) -> tuple:
                 skipped += 1
     files.sort()
     links.sort()
-    return files, links, skipped
+    return files, links, skipped, unreadable_dirs
 
 
 # The well-known SHA of `git write-tree` on an empty index — content-addressed,
@@ -499,10 +509,11 @@ def snapshot_worktree(worktree: Path, branch: str, message: str,
             f"refusing to commit its content onto a branch it is not on"
         )
 
-    files, links, skipped = _walk_worktree(worktree)
+    files, links, skipped, unreadable_dirs = _walk_worktree(worktree)
     if report is not None:
         report["skipped"] = skipped
-    for rel in [r for r, _ in files] + [r for r, _ in links]:
+    unreadable_rels = [rel for rel, _exc in unreadable_dirs]
+    for rel in [r for r, _ in files] + [r for r, _ in links] + unreadable_rels:
         if any(ord(c) < 32 for c in rel):
             raise WorkspaceError(
                 f"cannot snapshot {worktree}: path {rel!r} contains a control character, "
@@ -525,11 +536,23 @@ def snapshot_worktree(worktree: Path, branch: str, message: str,
 
     # Spec §6.1 step 1 / fix item 1: apply the repo's ignore rules like
     # `git add -A` would, via ONE batch `git check-ignore` call, only now that
-    # every path is known to be safe to hand to git's stdin protocols.
-    ignored = _ignored_relpaths(worktree, [r for r, _ in files] + [r for r, _ in links])
+    # every path is known to be safe to hand to git's stdin protocols. The
+    # unreadable directories `_walk_worktree` could not descend into ride
+    # along in this SAME batch call (round 2 fix): a directory that turns out
+    # to be ignored (e.g. root-owned content inside an ignored `build/` or
+    # `.venv/`) must not hard-fail the snapshot, since nothing under it would
+    # ever be committed anyway.
+    ignored = _ignored_relpaths(
+        worktree, [r for r, _ in files] + [r for r, _ in links] + unreadable_rels)
     if ignored:
         files = [(r, is_exec) for r, is_exec in files if r not in ignored]
         links = [(r, target) for r, target in links if r not in ignored]
+
+    for rel, exc in unreadable_dirs:
+        if rel not in ignored:
+            raise WorkspaceError(
+                f"cannot snapshot {worktree}: cannot read directory {exc.filename}: {exc}"
+            )
 
     head_res = _git(worktree, *GIT_NEUTRAL_FLAGS, "rev-parse", "--verify", "--quiet",
                     f"refs/heads/{branch}", env=env)

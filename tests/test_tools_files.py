@@ -266,6 +266,19 @@ def test_describe_change_sees_a_trailing_newline_only_change():
     assert lines[lines.index("-x") + 1] == r"\ No newline at end of file"
 
 
+def test_describe_change_form_feed_is_not_mistaken_for_a_missing_newline():
+    # Round 2 fix: splitlines(keepends=True) also splits on \v \f \x1c \x1d
+    # \x1e \x85 etc, not just "\n" -- a line containing a form feed used to
+    # get a FALSE "no newline at end of file" marker mid-diff even though the
+    # file genuinely ends in "\n". Only "\n" is a line separator now.
+    old = "a\nb\fc\n"
+    new = "a\nb\fC\n"
+    out = tools.describe_change("f.txt", old, new, verb="Edited")
+    assert r"\ No newline at end of file" not in out
+    assert "-b\fc" in out
+    assert "+b\fC" in out
+
+
 def test_describe_change_ordinary_edit_output_is_unchanged():
     # Pin: an ordinary edit where every line (old and new) ends in a newline
     # renders byte-for-byte the same as before the keepends=True switch.

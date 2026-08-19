@@ -788,6 +788,42 @@ def test_walk_worktree_raises_loudly_on_an_unreadable_directory(tmp_path: Path):
     assert _git(repo, "rev-parse", "dirtywork/snap").strip() == orig  # ref untouched
 
 
+def test_snapshot_worktree_succeeds_when_an_unreadable_directory_is_ignored(tmp_path: Path):
+    # Round 2 fix: an unreadable directory that turns out to be IGNORED
+    # (e.g. a root-owned dir inside a docker run's `.venv/`, or `build/sub`
+    # under a `build/` gitignore pattern) must NOT hard-fail the snapshot --
+    # nothing under it would ever have been committed anyway. The unreadable
+    # dir's path rides through the same check-ignore batch as everything
+    # else; only an unreadable dir that is NOT ignored still raises.
+    from dirtywork.workspace import snapshot_worktree
+    if os.geteuid() == 0:
+        pytest.skip("root can read a chmod 000 directory")
+    repo = tmp_path / "repo8"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / ".gitignore").write_text("build/\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "init")
+    wt = tmp_path / "wt8"
+    _git(repo, "worktree", "add", "-b", "dirtywork/snap8", str(wt))
+    (wt / "build").mkdir()
+    blocked = wt / "build" / "sub"
+    blocked.mkdir()
+    (blocked / "secret.txt").write_text("nope\n")
+    (wt / "keep.txt").write_text("keep\n")
+    blocked.chmod(0o000)
+    try:
+        sha = snapshot_worktree(wt, "dirtywork/snap8", "wip: unreadable but ignored")
+    finally:
+        blocked.chmod(0o755)
+    assert sha is not None
+    names = _git(repo, "ls-tree", "-r", "--name-only", sha).splitlines()
+    assert not any(n.startswith("build/") for n in names)
+    assert "keep.txt" in names
+
+
 def test_host_worktree_dirty_sees_untracked_and_modified_and_fails_closed(tmp_path: Path):
     # Deliberately NOT _snapshot_repo: that fixture rigs a `.gitattributes`
     # clean filter to prove snapshot_worktree bypasses it when COMMITTING.

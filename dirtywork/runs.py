@@ -723,8 +723,9 @@ def cmd_verdict(args) -> int:
 
 def cmd_snapshot(args) -> int:
     """Spec §6.1: commit the run worktree's current content onto the run's own
-    branch, using plumbing that never runs a filter, a hook or an ignore rule.
-    Plumbing-only by design — the review→fix loop needs a commit to branch from
+    branch, using plumbing that never runs a filter or a hook (the repo's
+    ignore rules ARE applied, though, the same way `git add -A` would apply
+    them). Plumbing-only by design — the review→fix loop needs a commit to branch from
     (`--branch-from @<slug>`) without asking the operator for a manual wip
     commit that their own git config would have filtered. The live-pid,
     missing/foreign-worktree and pre-resume-stash guards are

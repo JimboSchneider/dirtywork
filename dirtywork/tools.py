@@ -110,6 +110,26 @@ def _number_lines(text: str, offset: int, limit: int) -> str:
     return _cap(numbered, note=" — re-run with offset/limit to see more")
 
 
+def _lines_keep_newlines(text: str) -> list:
+    """Like `text.splitlines(keepends=True)`, except ONLY `"\n"` is treated
+    as a line separator. `str.splitlines()` also breaks on `\v`, `\f`,
+    `\x1c`-`\x1e`, `\x85`, U+2028 and U+2029 -- a line that merely
+    CONTAINS one of those characters (e.g. a form feed) would otherwise be
+    split into a fragment with no trailing `"\n"`, and describe_change would
+    then render a FALSE `\ No newline at end of file` marker mid-diff even
+    though the file genuinely ends in a newline. Splitting on `"\n"` alone
+    means only the file's true final line can ever lack one."""
+    if not text:
+        return []
+    parts = text.split("\n")
+    if parts[-1] == "":
+        # text ends in "\n": every remaining piece is a complete line.
+        return [p + "\n" for p in parts[:-1]]
+    # text does NOT end in "\n": the last piece is the file's final,
+    # newline-less line; every other piece is a complete line.
+    return [p + "\n" for p in parts[:-1]] + [parts[-1]]
+
+
 def _line_counts(old_lines: list, new_lines: list) -> tuple:
     """(added, deleted, removed_non_blank) from SequenceMatcher opcodes. A
     REPLACED non-blank line counts as removed: the counter exists to answer
@@ -128,17 +148,19 @@ def _line_counts(old_lines: list, new_lines: list) -> tuple:
 
 def describe_change(path: str, old_text: str, new_text: str, *, verb: str) -> str:
     """Spec §3.1: '<Verb> <path>: +A -D [(removed N non-blank line(s))]' plus a
-    capped unified diff. Lines are compared WITH their line endings
-    (`splitlines(keepends=True)`), so a change to only the file's final
-    newline (e.g. `"x"` -> `"x\\n"`) is seen rather than reading as identical
-    — `splitlines()` without keepends would have hidden it. A content line
-    that lacks a trailing newline (only ever the diff's very last old/new
-    line) is rendered followed by git's own `\\ No newline at end of file`
-    marker, on its own output line. Pure — no filesystem access — so the host
-    backend and the container backend produce byte-identical text for
-    identical content."""
-    old_lines = old_text.splitlines(keepends=True)
-    new_lines = new_text.splitlines(keepends=True)
+    capped unified diff. Lines are compared WITH their line endings, via
+    `_lines_keep_newlines` (NOT `str.splitlines(keepends=True)`, which also
+    breaks on \\v/\\f/etc — see its docstring), so a change to only the
+    file's final newline (e.g. `"x"` -> `"x\\n"`) is seen rather than reading
+    as identical. A content line that lacks a trailing newline (only ever
+    the diff's very last old/new line) is rendered followed by git's own
+    `\\ No newline at end of file` marker, on its own output line. CRLF
+    content shows its carriage return as-is, like git does — a line ending
+    in `"\\r\\n"` keeps the `"\\r"` once the `"\\n"` is treated as the
+    separator. Pure — no filesystem access — so the host backend and the
+    container backend produce byte-identical text for identical content."""
+    old_lines = _lines_keep_newlines(old_text)
+    new_lines = _lines_keep_newlines(new_text)
     if max(len(old_lines), len(new_lines)) > DESCRIBE_DIFF_MAX_LINES:
         # SequenceMatcher/unified_diff are omitted entirely: even the O(n)
         # line-count pass is skipped so this stays cheap regardless of content.
