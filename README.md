@@ -181,6 +181,18 @@ clone explicitly when testing unreleased changes.
 - **Review a run:** `git -C <worktree> diff`, read the transcript, run the
   repo's tests — then commit the branch or discard it. (The worktree is
   only populated after the run ends, once the export step completes.)
+
+  > **The worker cannot install dependencies in docker mode** (`--network
+  > none`, no host directories mounted); it can only run what the image
+  > ships — git, bash, coreutils, findutils, python3, node/npm, the .NET SDK,
+  > ripgrep, jq, uuid-runtime, shellcheck and curl. Always run the repo's own
+  > gate yourself on the exported worktree, or pass it as
+  > [`--verify`](#verifying-a-run). For a Node repo whose gate needs
+  > `node_modules`, symlink your own into the exported worktree for the gate
+  > and remove it afterwards — a `node_modules/` gitignore pattern does **not**
+  > match a symlink, so a forgotten one shows up as an untracked path. If the
+  > gate needs a tool the image lacks, build a derived image (see the recipe
+  > next to `--image` in [Machine contract](#machine-contract)).
 - **Clean up a run:** `dirtywork runs clean <slug>` — see
   [Inspecting, cleaning up and re-exporting runs](#inspecting-cleaning-up-and-re-exporting-runs)
   for the safety rules and the rest of the `runs` subcommands.
@@ -554,7 +566,7 @@ dirtywork run --repo <path> "<task>"
     [--max-worktree-mb 2048]
     [--max-worktree-files 200000]
     [--sandbox docker|none]           # default: docker
-    [--image ghcr.io/jimboschneider/dirtywork-worker:0.7]  # docker mode only
+    [--image ghcr.io/jimboschneider/dirtywork-worker:0.8]  # docker mode only
     [--allow-network]                 # docker mode only; default --network none
     [--memory 4g]                     # docker mode only
     [--cpus 2]                        # docker mode only
@@ -570,6 +582,23 @@ dirtywork run --repo <path> "<task>"
 dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch-from/--sandbox/<task>;
     [--model <m>]                     # defaults to the earlier run's model; --image defaults to its image
 ```
+
+- `--image REF` (docker mode) — the worker image, default
+  `ghcr.io/jimboschneider/dirtywork-worker:0.8`. The image is the worker's
+  whole toolchain: with `--network none` and no host mounts, nothing can be
+  installed during a run. To add a tool, derive an image once:
+
+  ```Dockerfile
+  FROM ghcr.io/jimboschneider/dirtywork-worker:0.8
+  USER root
+  RUN apt-get update && apt-get install -y --no-install-recommends <packages> \
+      && rm -rf /var/lib/apt/lists/*
+  USER worker
+  ```
+
+  then `docker build -t my-worker:0.8 .` and `--image my-worker:0.8`. A custom
+  `--image` is never digest-pinned — `PINNED_DIGEST` protects the maintained
+  default image only.
 
 - `--stall-turns N` (default 12) — end the run with status `stalled` after N
   consecutive turns that changed no file and produced no new command output;

@@ -11,6 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         nodejs \
         npm \
         ripgrep \
+        jq \
+        uuid-runtime \
+        shellcheck \
+        curl \
         ca-certificates \
         wget \
         gnupg \
