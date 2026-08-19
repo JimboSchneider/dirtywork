@@ -11,6 +11,11 @@ from .rundir import read_run_json
 
 RESUME_TAIL_CHARS = 12_000
 RESUME_MARKER = "\n\n--- RESUMED RUN ---\n"
+# Spec §6.3: a resume that carries a reviewer's instructions gets its own
+# marker, so the two block shapes never mix — and BOTH are stripped from a
+# prior task before a new block is built, so re-resuming never accumulates.
+RESUME_FEEDBACK_MARKER = "\n\n--- RESUMED RUN: REVIEW FEEDBACK ---\n"
+MAX_FEEDBACK_CHARS = 64_000
 PRE_RESUME_SUFFIX = ".pre-resume"
 _REQUIRED_STR_KEYS = ("slug", "repo", "worktree", "branch", "base_commit", "sandbox", "status")
 
@@ -135,16 +140,40 @@ def pid_alive(pid) -> bool:
     return True
 
 
-def check_resumable(prior: dict, *, alive=pid_alive) -> None:
+def _gerund(action: str) -> str:
+    """Minimal English gerund formation for the two verbs preflight_run_worktree
+    actually conjugates ('resume' -> 'resuming', 'snapshot' -> 'snapshotting')
+    -- not a general NLP tool, just correct for those two (and any other verb
+    following the same drop-e / double-final-consonant rules)."""
+    if action.endswith("e") and not action.endswith("ee"):
+        return action[:-1] + "ing"
+    if (len(action) >= 3 and action[-1] not in "aeiouwxy" and action[-2] in "aeiou"
+            and action[-3] not in "aeiou"):
+        return action + action[-1] + "ing"
+    return action + "ing"
+
+
+def preflight_run_worktree(prior: dict, *, alive=pid_alive, action: str = "resume") -> None:
+    """The four guards a run's worktree must clear before dirtywork touches its
+    content again: a live host process, a missing worktree, a worktree that is
+    not a linked worktree of the run's repo, and a pre-resume stash still
+    parked beside it. Shared by `check_resumable` (resume) and
+    `runs.cmd_snapshot` (`dirtywork runs snapshot`) — both act on a prior
+    run's worktree and must refuse the same unsafe states the same way.
+    `action` names the verb the messages read correctly with ('resume' for
+    `dirtywork resume`, the default; 'snapshot' for `runs snapshot`, which
+    passes it explicitly) -- the default reproduces the original resume
+    wording byte-for-byte. Raises ResumeError; the message says why."""
+    gerund = _gerund(action)
     if prior.get("status") == "running" and alive(prior.get("host_pid")):
         raise ResumeError(f"run {prior['slug']} is still in progress (pid {prior['host_pid']}); "
-                          f"wait for it or stop it before resuming")
+                          f"wait for it or stop it before {gerund}")
     worktree = Path(prior["worktree"])
     if not worktree.is_dir() or not (worktree / ".git").exists():
-        raise ResumeError(f"worktree {worktree} is missing; nothing to resume")
+        raise ResumeError(f"worktree {worktree} is missing; nothing to {action}")
     if not worktree_belongs_to_repo(worktree, Path(prior["repo"])):
         raise ResumeError(f"worktree {worktree} is not a linked worktree of {prior['repo']}; "
-                          f"refusing to resume into a directory dirtywork did not create")
+                          f"refusing to {action} into a directory dirtywork did not create")
     stashes = find_stashes(worktree)
     if stashes:
         listing = ", ".join(str(p) for p in stashes)
@@ -152,7 +181,11 @@ def check_resumable(prior: dict, *, alive=pid_alive) -> None:
             f"an earlier resume of this run was interrupted and left its pre-resume stash at "
             f"{listing}; that stash holds the worktree content from before that resume. Move "
             f"its contents back into {worktree} (or delete the stash if you no longer need it) "
-            f"before resuming again")
+            f"before {gerund} again")
+
+
+def check_resumable(prior: dict, *, alive=pid_alive) -> None:
+    preflight_run_worktree(prior, alive=alive)
 
 
 def _render_event(event: dict) -> str | None:
@@ -188,17 +221,33 @@ def render_transcript_tail(transcript_path: Path, max_chars: int = RESUME_TAIL_C
     return "\n".join(reversed(kept))
 
 
-def build_resume_task(prior_task: str, prior_status: str, prior_turns, transcript_tail: str) -> str:
-    prior_task = prior_task.split(RESUME_MARKER, 1)[0]
+def build_resume_task(prior_task: str, prior_status: str, prior_turns, transcript_tail: str,
+                      feedback: str | None = None) -> str:
+    prior_task = prior_task.split(RESUME_MARKER, 1)[0].split(RESUME_FEEDBACK_MARKER, 1)[0]
     turns_text = str(prior_turns) if isinstance(prior_turns, int) else "unknown"
-    return (
-        f"{prior_task}{RESUME_MARKER}"
+    # Shared by both block shapes (plain resume vs. resume-with-feedback): only
+    # the marker and the middle instructions paragraph differ between them.
+    status_line = (
         f"This run continues an earlier run that ended with status '{prior_status}' after "
         f"{turns_text} turns.\n"
-        "The worktree already contains that run's work: inspect it with `git status` and "
-        "`git diff` before doing anything else, and continue from there — do not start over "
-        "or revert prior work.\n"
+    )
+    tail_block = (
         "The last events of the earlier run were:\n"
         f"{transcript_tail}\n"
         "When the task is complete, call finish(summary=...)."
     )
+    if feedback:
+        instructions = (
+            "A reviewer read that run's work and sent this feedback:\n\n"
+            f"{feedback}\n\n"
+            "The worktree already contains the earlier run's work: inspect it with "
+            "`git status` and "
+            "`git diff` first, then apply the feedback. Make no other changes.\n"
+        )
+        return f"{prior_task}{RESUME_FEEDBACK_MARKER}{status_line}{instructions}{tail_block}"
+    instructions = (
+        "The worktree already contains that run's work: inspect it with `git status` and "
+        "`git diff` before doing anything else, and continue from there — do not start over "
+        "or revert prior work.\n"
+    )
+    return f"{prior_task}{RESUME_MARKER}{status_line}{instructions}{tail_block}"

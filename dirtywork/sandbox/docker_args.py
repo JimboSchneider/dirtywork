@@ -5,20 +5,22 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.7"
-# Unset for 0.7.0: the :0.7 image is first published by the v0.7.0 release
-# itself (publish-image.yml runs on x.y.0 tags; the Dockerfile is unchanged
-# from 0.6 but the tag tracks the minor), so there is no prior publish to pin
-# against -- resolve_image() performs no pin check and trusts whatever
-# `docker image inspect` reports for the tag. The next patch (0.7.1) pins the
-# multi-arch index digest: `docker pull ghcr.io/jimboschneider/dirtywork-worker:0.7`
+DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.8"
+# Unset for 0.8.0: the :0.8 image is first published by the v0.8.0 release
+# itself (publish-image.yml runs on x.y.0 tags; 0.8's Dockerfile adds jq,
+# uuid-runtime, shellcheck and curl, so this really is a new build), so there
+# is no prior publish to pin against -- resolve_image() performs no pin check
+# and trusts whatever `docker image inspect` reports for the tag. The next
+# patch (0.8.1) pins the multi-arch index digest:
+# `docker pull ghcr.io/jimboschneider/dirtywork-worker:0.8`
 # then `docker image inspect --format '{{json .RepoDigests}}' ...` (or
 # `docker buildx imagetools inspect ...`), cross-checked against the
 # publish-image.yml job summary; docker/README.md documents the procedure.
 # This only pins a REGISTRY digest -- resolve_image() enforces it against a
 # *pulled* DEFAULT_IMAGE only; a locally built/loaded image warns instead of
 # refusing, and a user-supplied --image is never checked. MUST be re-resolved
-# whenever the :0.7 tag is re-pushed. (0.6.x pinned :0.6 at
+# whenever the :0.8 tag is re-pushed. (0.7.x shipped unpinned; 0.6.x pinned
+# :0.6 at
 # sha256:1f7b98898001b7064d8db396a8a5a1a324df4ce48692597fcd4381ea90e4354a;
 # 0.5.x pinned :0.5 at
 # sha256:3b8d019a2f20a9df55a72ed51139076f02f2feb597243a69519bc41db1029648.)

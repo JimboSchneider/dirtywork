@@ -313,3 +313,41 @@ def test_export_run_create_docker_error_no_cleanup_needed(tmp_path, empty_worktr
 
     assert artifacts.export_status.startswith("export_failed: docker create")
     assert not any(c[0][:2] == ["rm", "-f"] for c in fake.calls)
+
+
+def test_export_run_reports_files_changed(tmp_path, empty_worktree):
+    fake = FakeDocker()
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "diff",
+                 "--cached", "--name-only", "deadbeef" * 5],
+                _ok(b"src/b.ts\nsrc/a.ts\nsrc/b.ts\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "write-tree"],
+                _ok(b"treehash1234\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "diff", "--stat",
+                 "deadbeef" * 5, "treehash1234"],
+                _ok(b" 2 files changed\n"))
+    fake.script_popen_stdout(
+        ["docker", "exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "diff",
+         "deadbeef" * 5, "treehash1234"], b"")
+    fake.script_popen_stdout(
+        ["docker", "exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "archive",
+         "--format=tar", "treehash1234"],
+        _make_tar([{"name": "src/a.ts", "content": b"a"}]))
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+
+    artifacts = export_run(
+        DockerConfig(), slug="abc123", base_commit="deadbeef" * 5, worktree=empty_worktree,
+        run_dir=run_dir, objects_dir=Path("/repo/.git/objects"),
+        image_ref="dirtywork/worker@sha256:" + "a" * 64, uid=501, gid=20,
+        repo_label="deadbeef", run=fake.run, popen=fake.popen,
+    )
+
+    assert artifacts.export_status == "ok"
+    assert artifacts.files_changed == ["src/a.ts", "src/b.ts"]   # sorted, de-duplicated
+    assert artifacts.files_changed_truncated is False
+    # the name list is read from the INDEX, right after `git add -A`
+    names_index = next(i for i, c in enumerate(fake.calls) if "--cached" in c[0])
+    add_index = next(i for i, c in enumerate(fake.calls) if c[0][-2:] == ["add", "-A"])
+    assert add_index < names_index

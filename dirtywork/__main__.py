@@ -25,7 +25,14 @@ from .budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB
 from .llm import LLMError
 from .providers import DEFAULT_BASE_URLS, PROVIDER_NAMES, get_provider
 from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json, write_run_json
-from .runner import DEFAULT_STALL_TURNS, Runner, resolve_context_window
+from .runner import (
+    DEFAULT_STALL_TURNS,
+    DEFAULT_STUCK_REPEATS,
+    DEFAULT_VERIFY_ROUNDS,
+    DEFAULT_VERIFY_TIMEOUT,
+    Runner,
+    resolve_context_window,
+)
 from .sandbox import SandboxError, docker_args, docker_cli
 from .sandbox.docker import DockerSandbox
 from .sandbox.docker_args import DEFAULT_IMAGE, DockerConfig
@@ -33,16 +40,20 @@ from .sandbox.docker_cli import DockerError, docker_version, resolve_image, vali
 from .sandbox.host import HostSandbox
 from .builtin_tools import default_registry
 from .transcript import Transcript
-from .resume import ResumeError, build_resume_task, check_resumable, load_prior_run, render_transcript_tail, resolve_run_dir
+from .resume import (MAX_FEEDBACK_CHARS, ResumeError, build_resume_task, check_resumable,
+                     load_prior_run, preflight_run_worktree, render_transcript_tail,
+                     resolve_run_dir)
 from .workspace import (
     WorkspaceError,
     commit_exists,
     create_worktree,
     ensure_worktrees_excluded,
+    host_worktree_dirty,
     load_repo_context,
     make_slug,
     preflight_repo,
     remove_worktree,
+    snapshot_worktree,
     worktree_base_commit,
 )
 
@@ -70,7 +81,7 @@ def build_system_prompt(display_root, repo_context: str | None, *, allow_commit:
 Complete the task, then reply with a plain-text summary of what you changed and what commands you ran.
 
 Rules:
-- Use edit_file or write_file for ALL file changes. Never modify files via bash (no sed -i, no echo redirects, no heredocs).
+- Use edit_file, insert_before, insert_after or write_file for ALL file changes. Never modify files via bash (no sed -i, no echo redirects, no heredocs).
 - Paths are relative to {display_root}.
 - Explore before editing: use list_dir, grep, and read_file to understand the code first.
 - Verify your work: run the repo's tests or build via bash before declaring the task complete.
@@ -105,6 +116,8 @@ class RunContext:
     image_pinned: bool
     context_window: int
     branch_from: str | None = None
+    branch_from_run: str | None = None   # the @<slug> --branch-from named, if any
+    feedback: str | None = None          # resume only: the reviewer's instructions
     resumed_from: str | None = None
     prior_run_dir: Path | None = None
     seed_from_worktree: bool = False
@@ -177,7 +190,54 @@ def _resolve_allow_commit(args) -> None:
     args.allow_commit = bool(args.allow_commit)
 
 
+def _resolve_branch_from(args) -> tuple:
+    """Spec §6.2: `--branch-from @<slug>` means 'the branch that run left
+    behind'. Returns (branch_from, branch_from_run). Anything not starting with
+    '@' passes through untouched, so an ordinary ref is unaffected.
+
+    A dirty worktree is snapshotted FIRST, because the branch head alone does
+    not carry the work the reviewer just read — that snapshot is the whole
+    point of the flag, and it is the one thing this preflight creates before a
+    later failure could still exit 2. Before that: if the run's worktree still
+    exists, it must clear the same preflight resume uses (not still running,
+    not a foreign worktree, no leftover stash) -- a run currently in progress
+    or in an unsafe state must never be touched. If the worktree is gone
+    (e.g. `runs clean` already removed it), branching from the recorded
+    branch head is a legitimate use of `@<slug>` and nothing is snapshotted."""
+    value = getattr(args, "branch_from", None)
+    if not isinstance(value, str) or not value.startswith("@"):
+        return value, None
+    slug = value[1:]
+    run_dir = resolve_run_dir(slug, RUNS_DIR)
+    if not run_dir.is_dir():
+        raise PreflightFailure(f"unknown run '{slug}' (no run dir under {RUNS_DIR})")
+    try:
+        prior = load_prior_run(run_dir)
+    except ResumeError as e:
+        raise PreflightFailure(str(e))
+    branch = prior.get("branch")
+    if not isinstance(branch, str) or not branch:
+        raise PreflightFailure(f"run '{slug}' records no branch to branch from")
+    worktree = Path(prior.get("worktree") or "")
+    if str(worktree) and worktree.is_dir():
+        try:
+            preflight_run_worktree(prior)
+        except ResumeError as e:
+            raise PreflightFailure(str(e))
+        if host_worktree_dirty(worktree):
+            try:
+                sha = snapshot_worktree(worktree, branch, f"wip: dirtywork run {slug}")
+            except WorkspaceError as e:
+                raise PreflightFailure(str(e))
+            if sha:
+                print(f"snapshot {sha} on {branch} (from @{slug})", file=sys.stderr)
+    return branch, slug
+
+
 def _workspace_new(args, repo: Path, context_window: int) -> RunContext:
+    # First: it is the cheapest refusal in this function, and its snapshot must
+    # happen before the run creates a worktree it might have to roll back.
+    branch_from, branch_from_run = _resolve_branch_from(args)
     image_ref, image_digest, image_pinned = None, None, False
     if args.sandbox == "docker":
         image_ref, image_digest, image_pinned = _docker_preflight_or_fail(repo, args.image)
@@ -193,7 +253,7 @@ def _workspace_new(args, repo: Path, context_window: int) -> RunContext:
             raise PreflightFailure(str(e))
     try:
         ensure_worktrees_excluded(repo)
-        worktree = create_worktree(repo, slug, args.branch_from,
+        worktree = create_worktree(repo, slug, branch_from,
                                     no_checkout=(args.sandbox == "docker"))
     except WorkspaceError as e:
         raise PreflightFailure(str(e))
@@ -201,7 +261,8 @@ def _workspace_new(args, repo: Path, context_window: int) -> RunContext:
         repo=repo, slug=slug, branch=branch, worktree=worktree,
         base_commit=worktree_base_commit(worktree), task=args.task,
         sandbox_mode=args.sandbox, provider=args.provider, image_ref=image_ref, image_digest=image_digest,
-        image_pinned=image_pinned, context_window=context_window, branch_from=args.branch_from,
+        image_pinned=image_pinned, context_window=context_window, branch_from=branch_from,
+        branch_from_run=branch_from_run,
     )
 
 
@@ -332,7 +393,12 @@ def _write_run_json_start(run_dir: Path, ctx: RunContext, args) -> None:
         "model": args.model,
         "provider": args.provider,
         "context_window": ctx.context_window,
+        "branch_from_run": ctx.branch_from_run,
+        "feedback": ctx.feedback,
         "resumed_from": ctx.resumed_from,
+        "verify_command": args.verify,
+        "verify_rounds": args.verify_rounds,
+        "verify_timeout": args.verify_timeout,
         "container": docker_args.container_name(ctx.slug) if is_docker else None,
         "volume": docker_args.volume_name(ctx.slug) if is_docker else None,
         "image": args.image if is_docker else None,
@@ -364,7 +430,14 @@ def _emit_result(*, status: str, worktree: Path, branch: str, transcript_path: P
                   run_dir: Path, turns, usage: dict, final_message: str, provider: str, **extra) -> dict:
     """The one place that shapes the stdout JSON contract — both the success
     path and every failure path funnel through here so the field set can
-    never drift between them."""
+    never drift between them. Fix item 3: the six 0.8 evidence keys
+    (`stuck_on`, `files_changed`, `files_changed_truncated`,
+    `last_tool_result`, `last_assistant_text`, `verify`) are seeded with
+    their null/empty defaults BEFORE `extra` is applied, so every payload —
+    including `_fail_setup`'s and `_fail_run`'s, where `runner.run()` never
+    returned and so never had real values for them — carries the full key
+    set; the normal end-of-run path's real values (passed via `extra`) still
+    override these defaults."""
     payload = {
         "schema_version": 2,
         "status": status,
@@ -376,6 +449,12 @@ def _emit_result(*, status: str, worktree: Path, branch: str, transcript_path: P
         "final_message": final_message,
         "provider": provider,
         "run_dir": str(run_dir),
+        "stuck_on": None,
+        "files_changed": [],
+        "files_changed_truncated": False,
+        "last_tool_result": None,
+        "last_assistant_text": None,
+        "verify": None,
     }
     payload.update(extra)
     return payload
@@ -494,6 +573,26 @@ def _fail_run(e: Exception, ctx: RunContext, *, sandbox, sandbox_started: bool, 
     return 1
 
 
+def _load_feedback(args):
+    """Spec §6.3: --feedback / --feedback-file, mutually exclusive, UTF-8,
+    capped. Returns the text or None. Raises PreflightFailure (exit 2)."""
+    text = getattr(args, "feedback", None)
+    path = getattr(args, "feedback_file", None)
+    if text is not None and path is not None:
+        raise PreflightFailure("--feedback and --feedback-file are mutually exclusive")
+    if path is not None:
+        try:
+            text = Path(path).expanduser().read_text(encoding="utf-8")
+        except (OSError, ValueError) as e:
+            raise PreflightFailure(f"cannot read feedback file '{path}': {e}")
+    if text is None:
+        return None
+    if len(text) > MAX_FEEDBACK_CHARS:
+        raise PreflightFailure(
+            f"feedback is {len(text)} chars, over the {MAX_FEEDBACK_CHARS}-char limit")
+    return text
+
+
 def _load_resume_target(args) -> dict:
     """Spec §5 lookup + refusals; also applies the prior run's defaults to
     args (sandbox mode always; model/image unless given on the command line)."""
@@ -520,6 +619,31 @@ def _load_resume_target(args) -> dict:
         args.image = prior.get("image") or DEFAULT_IMAGE
     if args.allow_commit is None:
         args.allow_commit = bool(prior.get("allow_commit", False))
+    if getattr(args, "verify", None) is None:
+        # run.json records verify_command/verify_rounds/verify_timeout at run
+        # START (from the args given, null/defaults otherwise) so a run that
+        # never reached the verify step (max_turns/stalled/stuck/timeout/
+        # budget_exceeded — the statuses people actually resume) still hands
+        # its gate on. Fall back to the verify RESULT object's command for
+        # run.json files written before this field existed.
+        verify_command = prior.get("verify_command")
+        if verify_command is None:
+            prior_verify = prior.get("verify")
+            if isinstance(prior_verify, dict):
+                verify_command = prior_verify.get("command")
+        if verify_command:
+            args.verify = verify_command
+    if getattr(args, "verify_rounds", None) is None:
+        args.verify_rounds = prior.get("verify_rounds", DEFAULT_VERIFY_ROUNDS)
+    if getattr(args, "verify_timeout", None) is None:
+        args.verify_timeout = prior.get("verify_timeout", DEFAULT_VERIFY_TIMEOUT)
+    # Last, so the earlier refusals (still running, missing worktree, provider
+    # switch) keep their own messages when they apply too.
+    args.feedback_text = _load_feedback(args)
+    if prior.get("status") == "completed" and not args.feedback_text:
+        raise PreflightFailure(
+            f"run '{prior['slug']}' ended 'completed'; pass --feedback to continue it "
+            f"with new instructions")
     return prior
 
 
@@ -537,12 +661,14 @@ def _workspace_resume(args, prior: dict, context_window: int) -> RunContext:
         except SandboxError as e:
             raise PreflightFailure(str(e))
     tail = render_transcript_tail(Path(prior["run_dir"]) / "transcript.jsonl")
-    task = build_resume_task(prior["task"], prior["status"], prior.get("turns"), tail)
+    feedback = getattr(args, "feedback_text", None)
+    task = build_resume_task(prior["task"], prior["status"], prior.get("turns"), tail,
+                             feedback)
     return RunContext(
         repo=repo, slug=slug, branch=prior["branch"], worktree=Path(prior["worktree"]),
         base_commit=prior["base_commit"], task=task, sandbox_mode=args.sandbox,
         provider=args.provider, image_ref=image_ref, image_digest=image_digest, image_pinned=image_pinned,
-        context_window=context_window, resumed_from=prior["slug"],
+        context_window=context_window, resumed_from=prior["slug"], feedback=feedback,
         prior_run_dir=Path(prior["run_dir"]), seed_from_worktree=(args.sandbox == "docker"),
         owns_worktree=False,
     )
@@ -587,6 +713,8 @@ def _execute(ctx: RunContext, args, client) -> int:
             return {
                 "diff_stat": artifacts.diff_stat,
                 "untracked": artifacts.untracked,  # host mode: git status ?? entries; docker mode: "" (git add -A folds new files into diff_stat)
+                "files_changed": artifacts.files_changed,
+                "files_changed_truncated": artifacts.files_changed_truncated,
                 "patch_path": artifacts.patch_path,
                 "worktree_bytes": artifacts.worktree_bytes,
                 "worktree_files": artifacts.worktree_files,
@@ -605,10 +733,14 @@ def _execute(ctx: RunContext, args, client) -> int:
                 "branch_from": ctx.branch_from, "base_commit": ctx.base_commit,
                 "base_url": args.base_url, "dirtywork_version": __version__,
                 "temperature": args.temperature, "sandbox": sandbox_info, "provider": ctx.provider,
-                "resumed_from": ctx.resumed_from,
+                "resumed_from": ctx.resumed_from, "feedback": ctx.feedback,
             },
             finalize=finalize,
             stall_turns=args.stall_turns, context_window=ctx.context_window,
+            stuck_repeats=getattr(args, "stuck_repeats", DEFAULT_STUCK_REPEATS),
+            verify=getattr(args, "verify", None),
+            verify_rounds=getattr(args, "verify_rounds", DEFAULT_VERIFY_ROUNDS),
+            verify_timeout=getattr(args, "verify_timeout", DEFAULT_VERIFY_TIMEOUT),
         )
         display_root = DOCKER_WORKDIR if ctx.sandbox_mode == "docker" else str(ctx.worktree)
         system_prompt = build_system_prompt(display_root,
@@ -647,6 +779,12 @@ def _execute(ctx: RunContext, args, client) -> int:
         finalize_error=finalize_error,
         watchdog_violation=extra.get("watchdog_violation"),
         watchdog_violation_kind=extra.get("watchdog_violation_kind"),
+        stuck_on=extra.get("stuck_on"),
+        files_changed=extra.get("files_changed") or [],
+        files_changed_truncated=bool(extra.get("files_changed_truncated")),
+        last_tool_result=extra.get("last_tool_result"),
+        last_assistant_text=extra.get("last_assistant_text"),
+        verify=extra.get("verify"),
         turns=result.turns,
     )
 
@@ -656,6 +794,12 @@ def _execute(ctx: RunContext, args, client) -> int:
         base_commit=ctx.base_commit, finalize_error=finalize_error,
         watchdog_violation=extra.get("watchdog_violation"),
         watchdog_violation_kind=extra.get("watchdog_violation_kind"),
+        stuck_on=extra.get("stuck_on"),
+        files_changed=extra.get("files_changed") or [],
+        files_changed_truncated=bool(extra.get("files_changed_truncated")),
+        last_tool_result=extra.get("last_tool_result"),
+        last_assistant_text=extra.get("last_assistant_text"),
+        verify=extra.get("verify"),
         resumed_from=ctx.resumed_from, provider=ctx.provider,
     ), indent=2))
     return 0 if final_status == "completed" else 1
@@ -673,6 +817,22 @@ def _add_run_flags(p, *, resume: bool) -> None:
                    help="provider endpoint (default: the provider's own default)")
     p.add_argument("--stall-turns", type=_non_negative_int, default=DEFAULT_STALL_TURNS,
                    help="end the run as 'stalled' after N turns without progress (0 disables)")
+    p.add_argument("--stuck-repeats", type=_non_negative_int, default=DEFAULT_STUCK_REPEATS,
+                   help="end the run as 'stuck' after the same failing bash command runs N "
+                        "times in a row (0 disables); independent of --stall-turns")
+    p.add_argument("--verify", default=None, metavar="CMD",
+                   help="run CMD in the sandbox when the worker declares itself done; a "
+                        "non-zero exit ends the run as 'verify_failed' (resume inherits the "
+                        "command from the run it continues)")
+    p.add_argument("--verify-rounds", type=_non_negative_int,
+                   default=None if resume else DEFAULT_VERIFY_ROUNDS,
+                   help="fix rounds after a failed --verify (default 1: the first failure goes "
+                        "back to the worker once; 0 verifies once and ends the run either way; "
+                        "resume inherits this from the run it continues)")
+    p.add_argument("--verify-timeout", type=_positive_int,
+                   default=None if resume else DEFAULT_VERIFY_TIMEOUT,
+                   help="seconds for the --verify command (default 600, clamped to 1-600; "
+                        "resume inherits this from the run it continues)")
     p.add_argument("--context-window", type=_positive_int, default=None,
                    help="model context window in tokens (default: built-in table, else 32768)")
     p.add_argument("--max-worktree-mb", type=int, default=DEFAULT_MAX_WORKTREE_MB)
@@ -728,6 +888,10 @@ def _add_runs_parsers(sub) -> None:
     verdict_p.add_argument("--note", default=None)
     verdict_p.add_argument("--review-seconds", type=float, default=None)
 
+    snapshot_p = runs_sub.add_parser(
+        "snapshot", help="commit the run worktree's current content onto its branch")
+    snapshot_p.add_argument("slug")
+
 
 def _add_bench_parsers(sub) -> None:
     """`dirtywork bench ...` (spec SP3 section 5). --provider/--base-url are
@@ -762,11 +926,21 @@ def _parse_args(argv):
     run_p = sub.add_parser("run", help="run one task in an isolated worktree")
     run_p.add_argument("task")
     run_p.add_argument("--repo", required=True, type=Path)
-    run_p.add_argument("--branch-from", default=None)
+    run_p.add_argument("--branch-from", default=None, metavar="REF",
+                       help="branch the new worktree from REF (default: repo HEAD). "
+                            "'@<slug>' means an earlier run's branch: its worktree is "
+                            "snapshotted first if dirty, so the new run starts from that "
+                            "run's work as it stands")
     run_p.add_argument("--sandbox", choices=["docker", "none"], default="docker")
     _add_run_flags(run_p, resume=False)
     resume_p = sub.add_parser("resume", help="continue an earlier run on its worktree")
     resume_p.add_argument("run", help="run slug (under ~/.dirtywork/runs) or a run directory path")
+    resume_p.add_argument("--feedback", default=None, metavar="TEXT",
+                          help="reviewer instructions for this resume; the resumed task tells "
+                               "the worker to inspect the earlier work and apply exactly this "
+                               "and nothing else. Required to resume a 'completed' run")
+    resume_p.add_argument("--feedback-file", default=None, metavar="PATH",
+                          help="read --feedback from a UTF-8 file instead (max 64000 chars)")
     _add_run_flags(resume_p, resume=True)
     _add_runs_parsers(sub)
     _add_bench_parsers(sub)

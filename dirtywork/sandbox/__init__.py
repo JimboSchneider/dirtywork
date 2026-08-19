@@ -34,6 +34,12 @@ class RunArtifacts:
     export_status: str = "ok"
     watchdog_violation: str | None = None
     watchdog_violation_kind: str | None = None
+    # Spec §2: repo-relative paths the run changed, sorted and capped at
+    # workspace.MAX_FILES_CHANGED. Docker mode computes it in the container
+    # (no host git ever touches worker content); host mode computes it beside
+    # diff_stat. Empty list when nothing changed or the export never ran.
+    files_changed: list = field(default_factory=list)
+    files_changed_truncated: bool = False
 
 
 class Sandbox(Protocol):
@@ -42,7 +48,7 @@ class Sandbox(Protocol):
     DockerSandbox (dirtywork.sandbox.docker) both implement it; ToolExecutor
     never knows which one it holds.
 
-    Tool methods (read_file/write_file/edit_file/list_dir/grep/bash) may raise BudgetExceeded (worktree over budget) or SandboxError (backend failure); the runner catches both."""
+    Tool methods (read_file/write_file/edit_file/insert_before/insert_after/list_dir/grep/bash) may raise BudgetExceeded (worktree over budget) or SandboxError (backend failure); the runner catches both."""
 
     def start(self, worktree: Path, repo: Path, slug: str, base_commit: str, *, branch: str | None = None, seed_from_worktree: bool = False) -> None: ...
 
@@ -51,6 +57,10 @@ class Sandbox(Protocol):
     def write_file(self, path: str, content: str) -> str: ...
 
     def edit_file(self, path: str, old_string: str, new_string: str) -> str: ...
+
+    def insert_before(self, path: str, anchor: str, text: str) -> str: ...
+
+    def insert_after(self, path: str, anchor: str, text: str) -> str: ...
 
     def list_dir(self, path: str = ".") -> str: ...
 

@@ -43,8 +43,9 @@ macOS (Windows unsupported — see below).
 > `core.symlinks=false`, `core.longpaths`.
 
 **Docker is the default sandbox as of 0.4 — a breaking change from 0.2.**
-Every tool call (`read_file`/`write_file`/`edit_file`/`list_dir`/`grep`/
-`bash`) runs inside a locked-down container: `--network none` by default,
+Every tool call (`read_file`/`write_file`/`edit_file`/`insert_before`/
+`insert_after`/`list_dir`/`grep`/`bash`) runs inside a locked-down
+container: `--network none` by default,
 `--read-only` root filesystem, `--cap-drop ALL`, kernel-enforced memory/CPU/
 process-count/per-file-size limits, and no host path mounted in except the
 parent repository's read-only git object store. The worker's tree lives on
@@ -96,6 +97,13 @@ carried, unchanged.
   `~/.dirtywork/runs/<slug>/diff.patch` instead (the container-computed
   patch — no host git ever touches worker content for that path) or with
   `GIT_CONFIG_GLOBAL=/dev/null`.
+- `dirtywork runs snapshot`'s own commit runs no filter or hook (plumbing
+  only, `--no-filters`). But two callers that decide *whether* to snapshot —
+  `--branch-from @<slug>`'s dirty check and `runs clean`'s dirty-worktree
+  guard — run host `git status` on the exported worktree, where a repo-LOCAL
+  clean filter (e.g. `git lfs install --local`) still applies even with
+  `GIT_CONFIG_GLOBAL=/dev/null`: the same exposure as running `git status`
+  there yourself.
 - A malicious target repo's `CLAUDE.md`/`AGENTS.md` (read from the base
   commit via git, not the filesystem — symlinks and oversized files are
   rejected) is injected into the worker's prompt; treat untrusted repos'
@@ -180,12 +188,44 @@ clone explicitly when testing unreleased changes.
 - **Review a run:** `git -C <worktree> diff`, read the transcript, run the
   repo's tests — then commit the branch or discard it. (The worktree is
   only populated after the run ends, once the export step completes.)
+
+  > **The worker cannot install dependencies in docker mode** (`--network
+  > none`, no host directories mounted); it can only run what the image
+  > ships — git, bash, coreutils, findutils, python3, node/npm, the .NET SDK,
+  > ripgrep, jq, uuid-runtime, shellcheck and curl. Always run the repo's own
+  > gate yourself on the exported worktree, or pass it as
+  > [`--verify`](#verifying-a-run). For a Node repo whose gate needs
+  > `node_modules`, symlink your own into the exported worktree for the gate
+  > and remove it afterwards — a `node_modules/` gitignore pattern does **not**
+  > match a symlink, so a forgotten one shows up as an untracked path. If the
+  > gate needs a tool the image lacks, build a derived image (see the recipe
+  > next to `--image` in [Machine contract](#machine-contract)).
 - **Clean up a run:** `dirtywork runs clean <slug>` — see
   [Inspecting, cleaning up and re-exporting runs](#inspecting-cleaning-up-and-re-exporting-runs)
   for the safety rules and the rest of the `runs` subcommands.
 
 - **All flags, stdout JSON, exit codes, transcript events:** see
   [Machine contract](#machine-contract).
+
+#### Verifying a run
+
+    dirtywork run --repo ~/repos/someproject --verify 'npm test' "Add a unit test for X"
+
+`--verify CMD` makes your gate the harness's gate. The moment the worker
+declares itself done — `finish(summary=…)` or a plain answer — dirtywork runs
+`CMD` inside the sandbox, through the same `bash` path the worker used (same
+guardrails, same `--network none`, same budget watchdog), and **before** the
+export. A zero exit leaves the run `completed`; anything else ends it
+`verify_failed` (exit 1), with the command, its exit code and a 4000-char
+output tail in `verify` on the stdout JSON, the `run_end` event and `run.json`.
+`--verify-rounds N` (default 1) is how many fix rounds follow a failure: the
+default hands the first failure back to the worker as a message naming the
+command, the exit code and the output tail, and lets it try once more against
+the ordinary `--max-turns`/`--timeout` budget (the command may run N+1 times);
+`0` verifies once and ends the run either way. `--verify-timeout S` (default 600, clamped to
+1–600) bounds each run. In docker mode the command can only use what the image
+ships — see the callout under *Review a run*. `dirtywork resume` inherits the
+verify command from the run it continues.
 
 ### Resuming a run
 
@@ -207,6 +247,23 @@ export fails, so a failed resume leaves the worktree exactly as it was. If a doc
 resume is killed mid-export, that stash (`<worktree>.pre-resume-<slug>`, next to the
 worktree) still holds the pre-resume content; `resume` refuses to run again until you
 move it back or delete it, and never deletes a stash it did not create.
+
+**Sending review feedback.** `--feedback TEXT` (or `--feedback-file PATH`, a
+UTF-8 file, max 64 000 chars; the two are mutually exclusive) turns a resume
+into a review round: the resumed task keeps the original brief, then tells the
+worker that a reviewer read its work and sent *this*, and to inspect the
+worktree with `git status`/`git diff` and apply the feedback and nothing else.
+
+    dirtywork resume <slug> --feedback "You dropped the null check in api.ts; restore it."
+
+Resuming a run that ended `completed` **requires** feedback — without it the
+command refuses (exit 2, nothing created), because a completed run that is
+continued with its own original brief just re-does work it already declared
+done. Every other status resumes with or without feedback, as before. The
+feedback text is recorded in the new run's `run.json` (`feedback`) and its
+`run_start` event; both resume markers (`--- RESUMED RUN ---` and
+`--- RESUMED RUN: REVIEW FEEDBACK ---`) are stripped from the prior task before
+a new block is built, so resuming a resume never accumulates preambles.
 
 Docker-mode limit: export stores files, not the worker's in-container
 commits, so a resumed docker worker sees the earlier work as uncommitted
@@ -274,6 +331,21 @@ of whether the run is still going:
     the rest of the run directory.
 - `dirtywork runs verdict <slug> accept|reject|cleanup [--note TEXT] [--review-seconds N]` —
   record the operator's verdict on a run into its `run.json`.
+- `dirtywork runs snapshot <slug>` — commit the run worktree's current content
+  onto the run's own branch as `wip: dirtywork run <slug>`, then print
+  `snapshot <sha> on <branch>` (or `nothing to snapshot` when the tree already
+  matches the branch head). Built entirely from git plumbing — no `git add`, no
+  `git commit` — so a worker-authored `.gitattributes` plus a configured clean
+  filter, and any hook in your repo, are bypassed rather than executed; the
+  repo's ignore rules ARE applied, the same way `git add -A` would apply them
+  (`git check-ignore`, config-neutral — a tracked file matching an ignore
+  pattern is still kept). Symlinks are recorded by their target string, never
+  followed; executable bits are preserved; anything that is not a regular file
+  or a symlink is skipped. Refuses (exit 2) a run still going with a live pid, a
+  missing worktree, a worktree that is not a linked worktree of the run's repo,
+  a worktree with a pre-resume stash beside it, and one the export never
+  populated. Mostly you will not call it by hand: `--branch-from @<slug>` calls
+  it for you.
 
 ## Benchmarking
 
@@ -323,9 +395,15 @@ are not part of the installed package.
    `.git/info/exclude` automatically. If the repo has a `CLAUDE.md` or
    `AGENTS.md` at its base commit, its content is injected into the
    worker's system prompt so it inherits your conventions.
-3. **The loop** — the model gets seven tools (`read_file`, `write_file`,
-   `edit_file`, `list_dir`, `grep`, `bash`, `finish`) via OpenAI
-   function-calling. Context is budgeted per model (oldest tool results get
+3. **The loop** — the model gets nine tools (`read_file`, `write_file`,
+   `edit_file`, `insert_before`, `insert_after`, `list_dir`, `grep`, `bash`,
+   `finish`) via OpenAI function-calling. `insert_before`/`insert_after` add
+   whole lines around a unique anchor without touching the anchor's own line
+   — the primitive for "add a line here", which `edit_file` could only express
+   as a replace. Every successful `edit_file`/`write_file`/`insert_*` result
+   echoes a capped unified diff of what actually changed, so a replace that
+   silently deleted a line is visible to the worker in the same turn.
+   Context is budgeted per model (oldest tool results get
    trimmed first); three consecutive tool failures of one kind (malformed
    call, malformed arguments, unknown tool, bad arguments, empty reply) or
    six in total abort the run. The model ends a run by calling the
@@ -426,6 +504,19 @@ In August 2026 the project was renamed **dirtywork** — same tool, a name that 
   and no new command output; the worktree is kept. Usually the work is
   done but the model never called `finish` — inspect the worktree, or
   `dirtywork resume <slug>`.
+- **status `stuck`** — the same failing `bash` command ran `--stuck-repeats`
+  times in a row (default 4) with output that differed only in timing; the
+  worktree is kept. The payload's `stuck_on` names the command, its output and
+  the repeat count. Usually the worker cannot run the repo's gate at all (a
+  missing dependency in docker mode) or is re-running a test it has no way to
+  pass — read `stuck_on`, fix the environment or the brief, then
+  `dirtywork resume <slug> --feedback "..."`. `--stuck-repeats 0` disables it.
+- **status `verify_failed`** — the worker declared itself done but the
+  `--verify` command exited non-zero on its last allowed run; the worktree is
+  kept and the export still ran. Read `verify.output_tail` in the payload, then
+  `dirtywork resume <slug> --feedback "<what to fix>"` — the resume inherits
+  the same verify command. In docker mode, check first that the command can run
+  at all in the image (`--network none`, nothing installed at run time).
 - **host mode (`--sandbox none`): "No module named pytest", or a
   `Library/`/`.cache/` directory appears in the worktree** — bash runs with
   `HOME` set to the worktree on purpose (so `~/.ssh` and friends are out of
@@ -498,9 +589,13 @@ read by a human — the primary consumer parses stdout, not the terminal.
 ```
 dirtywork run --repo <path> "<task>"
     [--model qwen/qwen3-coder-next]   # or mistralai/devstral-small-2-2512
-    [--branch-from <ref>]             # default: repo HEAD
+    [--branch-from <ref>|@<slug>]     # default: repo HEAD; @<slug> = an earlier run's branch
     [--max-turns 40]
     [--stall-turns 12]                # end as `stalled` after N no-progress turns; 0 disables
+    [--stuck-repeats 4]               # end as `stuck` after N identical failing bash runs; 0 disables
+    [--verify "<cmd>"]                # run this in the sandbox on completion; non-zero → `verify_failed`
+    [--verify-rounds 1]               # fix rounds after a failed --verify (0 = verify once, no retry)
+    [--verify-timeout 600]            # seconds per --verify run, clamped to 1-600
     [--context-window <tokens>]       # default: built-in table, else 32768 (+ stderr warning)
     [--timeout 1800]                  # whole-run wall clock, seconds
     [--temperature <f>]               # omitted by default → server preset
@@ -510,7 +605,7 @@ dirtywork run --repo <path> "<task>"
     [--max-worktree-mb 2048]
     [--max-worktree-files 200000]
     [--sandbox docker|none]           # default: docker
-    [--image ghcr.io/jimboschneider/dirtywork-worker:0.7]  # docker mode only
+    [--image ghcr.io/jimboschneider/dirtywork-worker:0.8]  # docker mode only
     [--allow-network]                 # docker mode only; default --network none
     [--memory 4g]                     # docker mode only
     [--cpus 2]                        # docker mode only
@@ -525,11 +620,60 @@ dirtywork run --repo <path> "<task>"
 ```
 dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch-from/--sandbox/<task>;
     [--model <m>]                     # defaults to the earlier run's model; --image defaults to its image
+    [--feedback "<text>"]             # reviewer instructions; REQUIRED to resume a `completed` run
+    [--feedback-file <path>]          # same, read from a UTF-8 file (max 64000 chars)
 ```
+
+- `--branch-from @<slug>` — start the new run from the branch an earlier run
+  left behind instead of from repo HEAD. If that run's worktree still has
+  uncommitted work, dirtywork snapshots it first (`dirtywork runs snapshot`'s
+  plumbing-only commit — no filters, no hooks) and prints
+  `snapshot <sha> on <branch> (from @<slug>)` on stderr, so the new run starts
+  from the work as the reviewer actually saw it, not from the last commit.
+  Unknown slug, or a run whose `run.json` records no branch, is a preflight
+  refusal (exit 2, nothing created). The resolved branch NAME is what
+  `run_start.branch_from` records; `run.json` also records
+  `branch_from_run: "<slug>"`. This is the "start a fresh run from what that
+  one produced" half of the review→fix loop — the other half is
+  `dirtywork resume <slug> --feedback "..."`, which continues the same run on
+  the same worktree.
+
+- `--image REF` (docker mode) — the worker image, default
+  `ghcr.io/jimboschneider/dirtywork-worker:0.8`. The image is the worker's
+  whole toolchain: with `--network none` and no host mounts, nothing can be
+  installed during a run. To add a tool, derive an image once:
+
+  ```Dockerfile
+  FROM ghcr.io/jimboschneider/dirtywork-worker:0.8
+  USER root
+  RUN apt-get update && apt-get install -y --no-install-recommends <packages> \
+      && rm -rf /var/lib/apt/lists/*
+  USER worker
+  ```
+
+  then `docker build -t my-worker:0.8 .` and `--image my-worker:0.8`. A custom
+  `--image` is never digest-pinned — `PINNED_DIGEST` protects the maintained
+  default image only.
 
 - `--stall-turns N` (default 12) — end the run with status `stalled` after N
   consecutive turns that changed no file and produced no new command output;
   the model gets one nudge halfway. `0` disables.
+- `--stuck-repeats N` (default 4) — end the run with status `stuck` after the
+  same **failing** `bash` command has run N times in a row. "Same" uses the
+  stall detector's own fingerprint (command plus output with timings, clock
+  times and git shas stripped), so a rerun that differs only in duration
+  counts; a passing run (`exit code: 0`) resets the streak to zero. Edits
+  between the reruns do **not** reset it — that is the loop `--stall-turns`
+  cannot see, since every `edit_file` counts as progress. No nudge is sent:
+  the point is to stop paying for turns. `0` disables.
+- `--verify CMD` / `--verify-rounds N` / `--verify-timeout S` — see
+  [Verifying a run](#verifying-a-run). `--verify-rounds` counts **fix rounds
+  after a failed verify** — the command may run N+1 times; `0` verifies once and
+  ends the run either way. `dirtywork resume` inherits all three — the command,
+  the rounds, and the timeout — from the run it continues (recorded in `run.json`
+  at run start, so this works even when the prior run ended before verify ever
+  ran, e.g. `max_turns`/`stalled`/`stuck`/`timeout`/`budget_exceeded`); an
+  explicit flag on `resume` overrides the inherited value.
 - `--context-window TOKENS` — the model's context window, used to size the
   transcript trimming budget. Precedence: flag, then `DIRTYWORK_CONTEXT_WINDOW`,
   then a built-in table for the known LM Studio models, then 32768 (with a
@@ -562,13 +706,36 @@ printed to stdout (nothing else goes to stdout):
   "resumed_from": null,
   "finalize_error": null,
   "watchdog_violation": null,
-  "watchdog_violation_kind": null
+  "watchdog_violation_kind": null,
+  "stuck_on": null,
+  "files_changed": ["web/src/lib/api.ts", "web/src/lib/api.test.ts"],
+  "files_changed_truncated": false,
+  "last_tool_result": {
+    "tool": "bash",
+    "args": "{\"command\": \"npm test\"}",
+    "result": "exit code: 0\n12 passing"
+  },
+  "last_assistant_text": "Added the retry and a test for it.",
+  "verify": {
+    "command": "npm test",
+    "exit_code": 0,
+    "output_tail": "exit code: 0\n12 passing",
+    "rounds": 1,
+    "passed": true
+  }
 }
 ```
 
-`status` is one of: `completed`, `max_turns`, `timeout`, `stalled`,
-`context_exhausted`, `model_error`, `interrupted`, `budget_exceeded`,
-`sandbox_error`, `export_failed`. When the run fails before a `RunResult`
+The last six keys are 0.8 additions (`stuck_on`, `files_changed`,
+`files_changed_truncated`, `last_tool_result`, `last_assistant_text`,
+`verify`). Every one of them is present on every payload — `null` when it
+does not apply, `[]`/`false` for the list and its flag — including the two
+paths where `runner.run()` never returns (see below), where they carry those
+same null/empty defaults rather than being omitted.
+
+`status` is one of: `completed`, `max_turns`, `timeout`, `stalled`, `stuck`,
+`verify_failed`, `context_exhausted`, `model_error`, `interrupted`,
+`budget_exceeded`, `sandbox_error`, `export_failed`. When the run fails before a `RunResult`
 exists — the LLM client raises, post-worktree setup fails (e.g. the
 transcript can't be created), or any other exception escapes the run
 (status `model_error` in every case) — `turns` is `null` and `usage` is
@@ -579,20 +746,34 @@ salvage.
 `base_commit` and `provider` (`"openai"` or `"anthropic"`) are present on
 every post-preflight payload. `resumed_from` is
 the slug of the run this one continued, or `null` if this was a fresh run.
-`finalize_error`, `watchdog_violation`, and `watchdog_violation_kind` are added on the normal
-end-of-run path — i.e. whenever `runner.run()` returns a result, `completed`
-or not — normally `null`; see `run_end` below for what each means. The two
+`finalize_error`, `watchdog_violation` and `watchdog_violation_kind` are
+added on the normal end-of-run path — i.e. whenever `runner.run()` returns a
+result, `completed` or not — normally `null`; see `run_end` below for what
+each means. `stuck_on`, `files_changed`, `files_changed_truncated`,
+`last_tool_result`, `last_assistant_text` and `verify` are present on
+**every** payload (`null`/`[]`/`false` when they do not apply) — including
+the two paths below where `runner.run()` never returns, where they carry
+those same defaults rather than being omitted. The last four of these six
+are there so a run that ends with an empty `final_message` is still
+triageable without opening the transcript: what it changed, what it last ran
+and what it last said. On a `completed` run they are just as useful — "the
+last thing the worker checked failed, and it called `finish` anyway" reads
+straight off `last_tool_result`.
+The two
 paths where `runner.run()` never returns (sandbox setup fails before it
 starts, or an exception escapes the loop and is caught in `main()`) report
-`base_commit` and `resumed_from` only, plus `export_status` too if a docker `finalize()` ran
-during that exception recovery.
+`base_commit` and `resumed_from`, the six 0.8 evidence keys above (as their
+null/empty defaults), plus `export_status` too if a docker `finalize()` ran
+during that exception recovery — `finalize_error`, `watchdog_violation` and
+`watchdog_violation_kind` are not present on these two paths, since they
+never got far enough to know.
 
 **Exit codes:**
 
 - `0` — `completed`.
 - `1` — any non-`completed` status (`max_turns`, `timeout`, `stalled`,
-  `context_exhausted`, `model_error`, `interrupted`, `budget_exceeded`,
-  `sandbox_error`, `export_failed`); the worktree and branch are kept for
+  `stuck`, `verify_failed`, `context_exhausted`, `model_error`, `interrupted`,
+  `budget_exceeded`, `sandbox_error`, `export_failed`); the worktree and branch are kept for
   salvage/review. `main` catches every `Exception` the run raises (not
   just ones the runner itself converts to a status) and reports
   it as `model_error` via the same JSON contract, so a post-preflight run

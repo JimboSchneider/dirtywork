@@ -358,7 +358,9 @@ def test_finalize_merges_into_run_end_and_result_extra(parts):
               finalize=lambda: {"diff_stat": " 1 file changed"})
     result = r.run("s", "t")
     transcript.close()
-    assert result.extra == {"diff_stat": " 1 file changed"}
+    assert result.extra == {"stuck_on": None, "last_tool_result": None,
+                            "last_assistant_text": "done", "verify": None,
+                            "diff_stat": " 1 file changed"}
     events = _events(tmp)
     run_end = next(e for e in events if e["event"] == "run_end")
     assert run_end["diff_stat"] == " 1 file changed"
@@ -934,3 +936,259 @@ def test_runner_context_window_zero_is_not_replaced_by_the_provider(parts):
     r = Runner(FakeProvider([], context_window=65536), registry, sandbox, transcript,
                model="qwen/qwen3-coder-next", context_window=0)
     assert r.context_window == 0
+
+
+def test_repeat_tracker_counts_only_identical_failures():
+    from dirtywork.runner import RepeatTracker
+    t = RepeatTracker(limit=3)
+    assert t.note_bash("pytest", "exit code: 1\n1 failed in 2.10s") is None
+    # a timing-only difference is the SAME failure (existing _bash_fingerprint)
+    assert t.note_bash("pytest", "exit code: 1\n1 failed in 2.44s") is None
+    assert t.repeats == 2
+    assert t.note_bash("pytest", "exit code: 1\n1 failed in 2.99s") == "stuck"
+    assert t.stuck_on() == {"command": "pytest",
+                            "output": "exit code: 1\n1 failed in 2.99s",
+                            "repeats": 3}
+    # a different failure restarts the streak at 1
+    assert t.note_bash("pytest", "exit code: 2\ncollection error") is None
+    assert t.repeats == 1
+    # ERROR: and BLOCKED: results are failures too
+    t2 = RepeatTracker(limit=2)
+    assert t2.note_bash("sleep 999", "ERROR: command timed out after 120s.") is None
+    assert t2.note_bash("sleep 999", "ERROR: command timed out after 120s.") == "stuck"
+
+
+def test_only_the_same_command_passing_resets_the_stuck_streak():
+    from dirtywork.runner import RepeatTracker
+    t = RepeatTracker(limit=3)
+    assert t.note_bash("pytest", "exit code: 1\nfailed") is None
+    # a passing run of ANOTHER command (git status, cat, ls ...) neither counts
+    # nor resets -- exactly like a non-bash tool call in between
+    assert t.note_bash("git status", "exit code: 0\nclean") is None
+    assert t.repeats == 1
+    assert t.note_bash("pytest", "exit code: 1\nfailed") is None
+    assert t.repeats == 2
+    # the SAME command going green ends the episode: the streak restarts
+    assert t.note_bash("pytest", "exit code: 0\n3 passed") is None
+    assert t.repeats == 0
+    assert t.note_bash("pytest", "exit code: 1\nfailed") is None
+    assert t.note_bash("pytest", "exit code: 1\nfailed") is None
+    assert t.note_bash("pytest", "exit code: 1\nfailed") == "stuck"
+
+
+def test_repeat_tracker_limit_zero_disables():
+    from dirtywork.runner import RepeatTracker
+    t = RepeatTracker(limit=0)
+    for _ in range(10):
+        assert t.note_bash("pytest", "exit code: 1\nfailed") is None
+    assert t.repeats == 0
+
+
+def test_stuck_status_ends_the_run_and_reports_stuck_on(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    failing = _resp(tool_calls=[_call("c", "bash", {"command": "exit 7"})])
+    provider = FakeProvider([failing] * 5)
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_turns=10,
+               stuck_repeats=3)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "stuck"
+    assert result.turns == 3
+    assert result.extra["stuck_on"]["command"] == "exit 7"
+    assert result.extra["stuck_on"]["repeats"] == 3
+    assert result.extra["stuck_on"]["output"].startswith("exit code: 7")
+    end = [e for e in _events(tmp) if e["event"] == "run_end"][-1]
+    assert end["status"] == "stuck"
+    assert end["stuck_on"]["command"] == "exit 7"
+
+
+def test_stuck_on_is_null_on_every_other_status(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(content="all done")])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.extra["stuck_on"] is None
+
+
+def test_last_tool_result_and_assistant_text_ride_on_every_result(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(content="looking now", tool_calls=[_call("c1", "read_file", {"path": "f.txt"})]),
+        _resp(content="", tool_calls=[_call("c2", "list_dir", {"path": "."})]),
+        _resp(content="all done"),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    last = result.extra["last_tool_result"]
+    assert last["tool"] == "list_dir"
+    assert '"path": "."' in last["args"]
+    assert "f.txt" in last["result"]
+    # the empty second reply must not overwrite the last non-empty text, and the
+    # plain answer that ended the run is the newest non-empty one
+    assert result.extra["last_assistant_text"] == "all done"
+
+
+def test_last_tool_result_ignores_finish_and_is_null_when_no_tool_ran(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(content="nothing to do")])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    assert result.extra["last_tool_result"] is None
+
+    transcript2 = Transcript(tmp / "t2.jsonl")
+    registry2 = default_registry(transcript=transcript2)
+    provider2 = FakeProvider([
+        _resp(tool_calls=[_call("c1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+    ])
+    r2 = Runner(provider2, registry2, HostSandbox(wt), transcript2, model="m")
+    result2 = r2.run("s", "t")
+    transcript2.close()
+    assert result2.status == "completed"
+    assert result2.extra["last_tool_result"]["tool"] == "read_file"   # finish is skipped
+    assert result2.extra["last_assistant_text"] is None               # both replies were empty
+
+
+def test_last_tool_result_reflects_a_malformed_entry(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    bad = _resp(tool_calls=[_bad_entry()])
+    provider = FakeProvider([bad, bad, bad])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+    last_transcript_result = [e for e in _events(tmp) if e["event"] == "tool_result"][-1]
+    assert result.extra["last_tool_result"] == {
+        "tool": last_transcript_result["tool"],
+        "args": last_transcript_result["args"],
+        "result": last_transcript_result["result"],
+    }
+    assert result.extra["last_tool_result"]["tool"] == ""
+    assert result.extra["last_tool_result"]["args"] == ""
+    assert result.extra["last_tool_result"]["result"].startswith("ERROR: ")
+
+
+def test_verify_timeout_is_clamped_to_the_bash_tools_range(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    over = Runner(FakeProvider([]), registry, sandbox, transcript, model="m",
+                  verify_timeout=99999)
+    assert over.verify_timeout == 600
+    under = Runner(FakeProvider([]), registry, sandbox, transcript, model="m",
+                   verify_timeout=0)
+    assert under.verify_timeout == 1
+
+
+def test_verify_passes_and_the_run_completes(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "done"})])])
+    r = Runner(provider, registry, sandbox, transcript, model="m", verify="true")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    verify = result.extra["verify"]
+    assert verify["command"] == "true"
+    assert verify["exit_code"] == 0
+    assert verify["passed"] is True
+    assert verify["rounds"] == 1
+    # tools.bash returns "exit code: 0\n" for a command with no output
+    assert verify["output_tail"].startswith("exit code: 0")
+    event = next(e for e in _events(tmp) if e["event"] == "verify")
+    assert event == {"ts": event["ts"], "event": "verify", "round": 1,
+                     "exit_code": 0, "passed": True}
+
+
+def test_verify_failure_with_no_round_left_is_verify_failed(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "done"})])])
+    r = Runner(provider, registry, sandbox, transcript, model="m",
+               verify="echo boom; exit 3", verify_rounds=0)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "verify_failed"
+    assert result.final_message == "done"          # the worker's own summary is kept
+    assert result.extra["verify"]["passed"] is False
+    assert result.extra["verify"]["exit_code"] == 3
+    assert "boom" in result.extra["verify"]["output_tail"]
+    assert result.extra["verify"]["rounds"] == 1
+
+
+def test_verify_failure_with_a_round_left_feeds_back_and_retries(parts, tmp_path):
+    wt, registry, sandbox, transcript, tmp = parts
+    marker = wt / "fixed"
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "first try"})]),
+        _resp(tool_calls=[_call("w1", "write_file", {"path": "fixed", "content": "y"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "second try"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m",
+               verify="test -e fixed", verify_rounds=1)
+    result = r.run("s", "t")
+    transcript.close()
+    assert marker.is_file()
+    assert result.status == "completed"
+    assert result.final_message == "second try"
+    assert result.extra["verify"]["rounds"] == 2 and result.extra["verify"]["passed"] is True
+    # the failed round was fed back as a user message naming the command
+    feedback = [m for m in provider.requests[-1] if m["role"] == "user"]
+    assert any("VERIFY FAILED (round 1 of 2)" in m["content"] for m in feedback)
+    assert any("test -e fixed" in m["content"] for m in feedback)
+    verify_events = [e for e in _events(tmp) if e["event"] == "verify"]
+    assert [e["passed"] for e in verify_events] == [False, True]
+
+
+def test_a_verify_feedback_round_clears_a_stuck_latch_from_the_same_turn(parts, tmp_path):
+    # Regression for the `stuck` latch outliving the turn it was set in: a
+    # worker whose bash retries went stuck IN THE SAME TURN it also called
+    # finish must get the verify feedback round it earned, not have the NEXT
+    # turn's unrelated work summarily ended as "stuck" on stale state.
+    wt, registry, sandbox, transcript, tmp = parts
+    marker = wt / "fixed"
+    provider = FakeProvider([
+        _resp(tool_calls=[
+            _call("b1", "bash", {"command": "false"}),
+            _call("b2", "bash", {"command": "false"}),
+            _call("b3", "bash", {"command": "false"}),
+            _call("b4", "bash", {"command": "false"}),      # latches `stuck` mid-turn
+            _call("f1", "finish", {"summary": "first try"}),
+        ]),
+        _resp(tool_calls=[_call("w1", "write_file", {"path": "fixed", "content": "y"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "second try"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m",
+               verify="test -e fixed", verify_rounds=1, stuck_repeats=4)
+    result = r.run("s", "t")
+    transcript.close()
+    assert marker.is_file()
+    assert result.status == "completed"
+    assert result.final_message == "second try"
+    assert result.extra["stuck_on"] is None
+    assert result.extra["verify"]["rounds"] == 2
+    assert result.extra["verify"]["passed"] is True
+
+
+def test_verify_on_a_plain_answer_completion_and_error_passthrough(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(content="I am done")])
+    r = Runner(provider, registry, sandbox, transcript, model="m", verify="exit 1",
+              verify_rounds=0)
+    result = r.run("s", "t")
+    assert result.status == "verify_failed"
+    assert result.final_message == "I am done"
+
+    class ExplodingSandbox:
+        def bash(self, command, timeout=120):
+            from dirtywork.budget import BudgetExceeded
+            raise BudgetExceeded("worktree over budget")
+
+    transcript2 = Transcript(tmp / "t2.jsonl")
+    provider2 = FakeProvider([_resp(content="I am done")])
+    r2 = Runner(provider2, default_registry(transcript=transcript2), ExplodingSandbox(),
+                transcript2, model="m", verify="true")
+    result2 = r2.run("s", "t")
+    transcript2.close()
+    assert result2.status == "budget_exceeded"
+    assert result2.extra["verify"] is None

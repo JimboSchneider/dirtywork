@@ -15,6 +15,7 @@ from dirtywork.resume import (
     find_stashes,
     load_prior_run,
     pid_alive,
+    preflight_run_worktree,
     render_transcript_tail,
     resolve_run_dir,
     stash_dir_for,
@@ -213,6 +214,50 @@ def test_check_resumable_refuses_while_a_stash_exists(tmp_path):
     check_resumable(prior)
 
 
+def test_preflight_run_worktree_action_reads_correctly_for_snapshot(tmp_path):
+    # `runs snapshot` shares these four guards with `resume` (M15): passing
+    # action="snapshot" must produce wording that reads correctly for the
+    # snapshot caller, not the literal "resume"/"resuming" text. Each case
+    # gets its own subdirectory: _prior() always uses fixed "repo"/"wt" names
+    # under the tmp_path it is given.
+    prior = _prior(tmp_path / "case1", status="running")
+    with pytest.raises(ResumeError, match="before snapshotting"):
+        preflight_run_worktree(prior, alive=lambda pid: True, action="snapshot")
+
+    missing = _prior(tmp_path / "case2")
+    missing["worktree"] = str(tmp_path / "case2" / "gone")
+    with pytest.raises(ResumeError, match="nothing to snapshot"):
+        preflight_run_worktree(missing, action="snapshot")
+
+    foreign = _prior(tmp_path / "case3")
+    wt = Path(foreign["worktree"])
+    (wt / ".git").unlink()
+    (wt / ".git").mkdir()
+    with pytest.raises(ResumeError, match="not a linked worktree"):
+        preflight_run_worktree(foreign, action="snapshot")
+
+    stashed = _prior(tmp_path / "case4")
+    stash = stash_dir_for(Path(stashed["worktree"]), "older-run")
+    stash.mkdir()
+    with pytest.raises(ResumeError, match="before snapshotting again"):
+        preflight_run_worktree(stashed, action="snapshot")
+
+
+def test_preflight_run_worktree_default_action_keeps_the_resume_wording_byte_identical(tmp_path):
+    prior = _prior(tmp_path, status="running")
+    with pytest.raises(ResumeError) as excinfo:
+        preflight_run_worktree(prior, alive=lambda pid: True)
+    assert str(excinfo.value) == (
+        f"run {prior['slug']} is still in progress (pid {prior['host_pid']}); "
+        f"wait for it or stop it before resuming")
+
+    missing = _prior(tmp_path)
+    missing["worktree"] = str(tmp_path / "gone")
+    with pytest.raises(ResumeError) as excinfo:
+        preflight_run_worktree(missing)
+    assert str(excinfo.value) == f"worktree {missing['worktree']} is missing; nothing to resume"
+
+
 def test_stash_helpers(tmp_path):
     wt = tmp_path / "dw-abc"
     wt.mkdir()
@@ -222,3 +267,42 @@ def test_stash_helpers(tmp_path):
     (tmp_path / "dw-abc.pre-resume-s0").mkdir()
     (tmp_path / "dw-abcd.pre-resume-s9").mkdir()   # a different worktree's stash
     assert find_stashes(wt) == [tmp_path / "dw-abc.pre-resume-s0", tmp_path / "dw-abc.pre-resume-s1"]
+
+
+def test_build_resume_task_with_feedback_uses_the_feedback_block():
+    text = build_resume_task("Fix the bug", "completed", 12, "run_end: completed",
+                             feedback="You deleted the retry loop; put it back.")
+    assert text.startswith("Fix the bug\n\n--- RESUMED RUN: REVIEW FEEDBACK ---\n")
+    assert "--- RESUMED RUN ---" not in text
+    assert "ended with status 'completed' after 12 turns" in text
+    assert "A reviewer read that run's work and sent this feedback:" in text
+    assert "You deleted the retry loop; put it back." in text
+    assert "apply the feedback. Make no other changes." in text
+    assert text.endswith("When the task is complete, call finish(summary=...).")
+
+
+def test_build_resume_task_with_feedback_keeps_the_inspect_sentence_on_one_line():
+    # A stray "\n" used to split "...inspect it with `git status` and" onto its
+    # own line, breaking the sentence mid-clause.
+    text = build_resume_task("Fix the bug", "completed", 12, "run_end: completed",
+                             feedback="You deleted the retry loop; put it back.")
+    assert (
+        "The worktree already contains the earlier run's work: inspect it with "
+        "`git status` and `git diff` first, then apply the feedback. Make no "
+        "other changes.\n"
+    ) in text
+    for line in text.splitlines():
+        assert not line.endswith("`git status` and")
+
+
+def test_build_resume_task_strips_both_markers_so_blocks_never_stack():
+    plain = build_resume_task("Fix the bug", "max_turns", 40, "run_end: max_turns")
+    with_feedback = build_resume_task(plain, "stalled", 12, "run_end: stalled",
+                                      feedback="try again")
+    assert with_feedback.count("--- RESUMED RUN ---") == 0
+    assert with_feedback.count("--- RESUMED RUN: REVIEW FEEDBACK ---") == 1
+    assert with_feedback.startswith("Fix the bug\n\n--- RESUMED RUN")
+    back_to_plain = build_resume_task(with_feedback, "max_turns", 3, "run_end: max_turns")
+    assert back_to_plain.count("--- RESUMED RUN: REVIEW FEEDBACK ---") == 0
+    assert back_to_plain.count("--- RESUMED RUN ---") == 1
+    assert back_to_plain.startswith("Fix the bug\n\n--- RESUMED RUN ---")

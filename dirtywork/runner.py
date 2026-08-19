@@ -13,6 +13,12 @@ from .providers import assistant_message, tool_message
 from .sandbox import SandboxError
 
 MAX_ASSISTANT_TEXT_CHARS = 64_000
+# Spec §2: end-of-run evidence caps. These match the transcript's own preview
+# caps on purpose — the values are taken from the very same variables the
+# transcript records, so a payload and a transcript can never disagree.
+LAST_ARGS_CHARS = 500
+LAST_RESULT_CHARS = 2000
+LAST_TEXT_CHARS = 2000
 
 # The terminal tool's NAME. The runner branches on ToolSpec.terminal, not on
 # this constant; it is kept because the system prompt, the docs and the bench
@@ -120,10 +126,30 @@ def classify_text_reply(content, finish_reason) -> str:
 
 
 DEFAULT_STALL_TURNS = 12
+# Spec §1: independent of the stall detector. The stall detector never fires on
+# edit -> test -> edit -> test (every edit_file counts as progress), so a worker
+# grinding on a check it cannot pass burns every remaining turn. This ends the
+# run instead. No nudge: the point is to stop paying for turns.
+DEFAULT_STUCK_REPEATS = 4
+STUCK_OUTPUT_CHARS = 4000
+# Spec §4: the operator's own gate, run inside the sandbox on the completion
+# path. `verify_rounds` is how many FIX ROUNDS follow a failed verify — the
+# command may run verify_rounds + 1 times. The default 1 hands the first failure
+# back to the worker once; 0 verifies once and ends the run either way.
+DEFAULT_VERIFY_ROUNDS = 1
+DEFAULT_VERIFY_TIMEOUT = 600
+VERIFY_OUTPUT_CHARS = 4000
+VERIFY_FEEDBACK = (
+    "VERIFY FAILED (round {round} of {rounds}). The verification command\n"
+    "  {command}\n"
+    "exited with code {exit_code}. Output tail:\n"
+    "{output}\n"
+    "Fix the problem, then call finish(summary=...) again."
+)
 STALL_NUDGE = ("No progress in the last {n} turns: no file changed and no command produced "
                "new output. If the task is complete, commit (if asked) and call "
                "finish(summary=...); otherwise change your approach.")
-_MUTATING_TOOLS = ("write_file", "edit_file")
+_MUTATING_TOOLS = ("write_file", "edit_file", "insert_before", "insert_after")
 # Tokens that change between otherwise-identical runs of the same command:
 # durations ("in 24.51s", "0.39s", "12 ms"), clock times / ISO timestamps,
 # and long hex ids (git shas, container ids — at least one a-f letter, so a
@@ -148,6 +174,22 @@ def _bash_fingerprint(command, result: str) -> str:
     head, sep, body = result.partition("\n")
     normalized = head + sep + _VOLATILE_RE.sub("", body)
     return hashlib.sha256((str(command) + "\0" + normalized).encode("utf-8", "replace")).hexdigest()
+
+
+def parse_exit_code(result):
+    """The integer after 'exit code: ' on a bash result's first line, or None
+    for an ERROR:/BLOCKED: result that never produced an exit status at all.
+    The same first-line rule RepeatTracker._failed uses, read for its value."""
+    if not isinstance(result, str):
+        return None
+    head = result.split("\n", 1)[0]
+    prefix = "exit code: "
+    if not head.startswith(prefix):
+        return None
+    try:
+        return int(head[len(prefix):].strip())
+    except ValueError:
+        return None
 
 
 class ProgressTracker:
@@ -198,6 +240,66 @@ class ProgressTracker:
             self._nudged = True
             return "nudge"
         return None
+
+
+class RepeatTracker:
+    """Spec §1.1: the same FAILING bash call, N times in a row.
+
+    Fed only bash calls, from the same place ProgressTracker.note_call is fed.
+    A non-bash call neither counts nor resets: edit -> test -> edit -> test
+    with an unchanged failure is exactly the loop this catches. Identity is the
+    EXISTING _bash_fingerprint (command + volatile-token-stripped output), so a
+    timing-only difference is not a different result — but a changed test
+    count, a new line, or a changed exit status is. A passing result (first
+    line exactly 'exit code: 0') of the SAME command resets the streak to zero
+    -- so a diligent worker re-running a green typecheck after every edit is
+    never 'stuck' -- while passing runs of other commands neither count nor
+    reset. limit <= 0 disables the tracker entirely."""
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.repeats = 0
+        self.command = None
+        self.output = None
+        self._fingerprint = None
+
+    def reset(self) -> None:
+        """Start a new episode: the same field resets a passing rerun of the
+        current command applies, also used when a verify feedback round
+        begins (spec §4.2's retry is a fresh start, not a continuation of
+        whatever the worker was stuck on before calling finish/answering)."""
+        self.repeats = 0
+        self._fingerprint = None
+        self.command = None
+        self.output = None
+
+    def note_bash(self, command, result):
+        if self.limit <= 0:
+            return None
+        if parse_exit_code(result) == 0:
+            # Only the SAME command going green ends the episode. A passing run
+            # of some other command (git status, cat, ls ...) neither counts nor
+            # resets -- exactly like a non-bash tool call in between -- so the
+            # reads a model interleaves with its edit->test loop cannot hide an
+            # unchanged failure.
+            if command == self.command:
+                self.reset()
+            return None
+        text = result if isinstance(result, str) else ""
+        fingerprint = _bash_fingerprint(command, text)
+        if fingerprint == self._fingerprint:
+            self.repeats += 1
+        else:
+            self._fingerprint = fingerprint
+            self.repeats = 1
+        self.command = command
+        self.output = text
+        return "stuck" if self.repeats >= self.limit else None
+
+    def stuck_on(self) -> dict:
+        return {"command": self.command,
+                "output": (self.output or "")[:STUCK_OUTPUT_CHARS],
+                "repeats": self.repeats}
 
 
 def resolve_context_window(model: str, flag_value, env_value, provider=None) -> tuple:
@@ -269,7 +371,11 @@ class Runner:
                  run_info: dict | None = None,
                  finalize: Callable[[], dict] | None = None,
                  stall_turns: int = DEFAULT_STALL_TURNS,
-                 context_window: int | None = None):
+                 context_window: int | None = None,
+                 stuck_repeats: int = DEFAULT_STUCK_REPEATS,
+                 verify: str | None = None,
+                 verify_rounds: int = DEFAULT_VERIFY_ROUNDS,
+                 verify_timeout: int = DEFAULT_VERIFY_TIMEOUT):
         self.provider = provider
         self.registry = registry
         self.sandbox = sandbox
@@ -281,6 +387,12 @@ class Runner:
         self.run_info = run_info
         self.finalize = finalize
         self.stall_turns = stall_turns
+        self.stuck_repeats = stuck_repeats
+        self.verify = verify
+        self.verify_rounds = verify_rounds
+        # Clamped to the bash tool's own range so --verify can never ask the
+        # sandbox for a timeout the bash path would refuse.
+        self.verify_timeout = max(1, min(int(verify_timeout), 600))
         # An explicit 0 is honoured (it is how a test forces context_exhausted);
         # only None means "ask the provider".
         self.context_window = (context_window if context_window is not None
@@ -300,11 +412,36 @@ class Runner:
         turns = 0
         failures = FailureTracker()
         progress = ProgressTracker(self.stall_turns)
+        repeats = RepeatTracker(self.stuck_repeats)
+        stuck = None            # spec §1.2: set once, read by finish() below
+        last_tool_result = None     # spec §2: the newest non-finish tool call
+        last_assistant_text = None  # spec §2: the newest non-empty reply text
+        verify_state = None         # spec §4.3: the LAST verify run, or None
+        verify_rounds_used = 0
         start = time.monotonic()
         deadline = start + self.timeout
 
+        def note_last_tool_result(tool: str, args: str, result) -> None:
+            # spec §2: tracks the SAME values just written to the "tool_result"
+            # transcript event, for both a real tool call and a malformed entry
+            # (tool="", args="") — one assignment, so a payload and the
+            # transcript can never disagree about what ran last.
+            nonlocal last_tool_result
+            last_tool_result = {
+                "tool": tool,
+                "args": args[:LAST_ARGS_CHARS],
+                "result": result[:LAST_RESULT_CHARS] if isinstance(result, str) else "",
+            }
+
         def finish(status: str, final: str) -> RunResult:
-            extra: dict = {}
+            # This evidence rides on EVERY result (null when there is none), so
+            # a consumer never has to branch on status to read the fields. A
+            # `max_turns` run with final_message "" is the case that made this
+            # necessary: without it there was nothing left to triage from.
+            extra: dict = {"stuck_on": stuck,
+                           "last_tool_result": last_tool_result,
+                           "last_assistant_text": last_assistant_text,
+                           "verify": verify_state}
             finalize_error = None
             if self.finalize is not None:
                 try:
@@ -333,6 +470,60 @@ class Runner:
                 self.transcript.write("nudge", kind="stall", turn=turns)
                 return None, STALL_NUDGE.format(n=self.stall_turns // 2)
             return None, None
+
+        def run_verify():
+            """One execution of the operator's gate (spec §4.2). Runs through
+            the same sandbox.bash the tool uses — same guardrails, same budget
+            watchdog, same reaper, same environment the worker's bash had — and
+            happens BEFORE finalize(), so in docker mode the container is still
+            alive and nothing has been exported yet. Returns the feedback text
+            for another round, or None when the run may end now (verify_state
+            says whether it passed)."""
+            nonlocal verify_state, verify_rounds_used
+            verify_rounds_used += 1
+            result = self.sandbox.bash(self.verify, self.verify_timeout)
+            exit_code = parse_exit_code(result)
+            passed = exit_code == 0
+            tail = result[-VERIFY_OUTPUT_CHARS:] if isinstance(result, str) else ""
+            verify_state = {"command": self.verify, "exit_code": exit_code,
+                            "output_tail": tail, "rounds": verify_rounds_used,
+                            "passed": passed}
+            self.transcript.write("verify", round=verify_rounds_used,
+                                  exit_code=exit_code, passed=passed)
+            if passed or verify_rounds_used > self.verify_rounds:
+                return None
+            return VERIFY_FEEDBACK.format(round=verify_rounds_used,
+                                          rounds=self.verify_rounds + 1,
+                                          command=self.verify,
+                                          exit_code=exit_code, output=tail)
+
+        def check_verify(final: str):
+            """(RunResult to return, or None; feedback to append, or None) for a
+            completion path. Both completion paths — the finish tool and a plain
+            answer — go through this one function, so they can never disagree
+            about what verifying means. BudgetExceeded/SandboxError end the run
+            with the same statuses a tool call would."""
+            nonlocal stuck
+            if not self.verify:
+                return finish("completed", final), None
+            try:
+                feedback = run_verify()
+            except BudgetExceeded as e:
+                return finish("budget_exceeded", e.reason), None
+            except SandboxError as e:
+                return finish("sandbox_error", str(e)), None
+            if feedback is not None:
+                # A feedback round is a fresh episode: the worker is retrying
+                # against new instructions, so whatever bash streak was latched
+                # (possibly in THIS SAME turn, before it called finish) must not
+                # end the next turn as "stuck" for a check that no longer
+                # reflects what the worker is doing.
+                stuck = None
+                repeats.reset()
+                return None, feedback
+            if verify_state["passed"]:
+                return finish("completed", final), None
+            return finish("verify_failed", final), None
 
         try:
             while True:
@@ -386,6 +577,8 @@ class Runner:
                     "assistant", text=transcript_text,
                     tool_calls=[{"name": tc.name, "arguments": (tc.raw_arguments or "")[:2000]}
                                 for tc in tool_calls])
+                if isinstance(transcript_text, str) and transcript_text.strip():
+                    last_assistant_text = transcript_text[:LAST_TEXT_CHARS]
                 if resp.tool_calls:
                     # The adapter re-serializes these into whatever wire shape
                     # its protocol needs; the runner keeps neutral objects.
@@ -395,7 +588,11 @@ class Runner:
                     kind = classify_text_reply(content, finish_reason)
                     if kind == "answer":
                         messages.append(assistant_message(content, None))
-                        return finish("completed", content)
+                        ended, feedback = check_verify(content)
+                        if ended is not None:
+                            return ended
+                        messages.append({"role": "user", "content": feedback})
+                        continue
                     messages.append(assistant_message(content, None))
                     self.transcript.write("nudge", kind=kind, turn=turns)
                     abort_reason = failures.record("empty_reply")
@@ -416,6 +613,7 @@ class Runner:
                     # error text is what the transcript records.
                     result = f"ERROR: {entry.error}"
                     self.transcript.write("tool_result", tool="", args="", result=result)
+                    note_last_tool_result("", "", result)
                 if abort_reason is not None:
                     return finish("model_error", abort_reason)
 
@@ -456,15 +654,34 @@ class Runner:
                         except SandboxError as e:
                             return finish("sandbox_error", str(e))
                     progress.note_call(name, self.registry.canonical_args(name, args), result)
+                    if name == "bash":
+                        command = args.get("command") if isinstance(args, dict) else None
+                        if repeats.note_bash(command, result) == "stuck":
+                            stuck = repeats.stuck_on()
                     self.transcript.write("tool_result", tool=name,
                                           args=raw_args[:500],
                                           result=self.registry.transcript_preview(name, result))
+                    if name != FINISH_TOOL:
+                        note_last_tool_result(name, raw_args, result)
                     messages.append(tool_message(tc.id, result))
                     if abort_reason is not None:
                         return finish("model_error", abort_reason)
 
                 if pending_finish is not None:
-                    return finish("completed", pending_finish)
+                    ended, feedback = check_verify(pending_finish)
+                    if ended is not None:
+                        return ended
+                    messages.append({"role": "user", "content": feedback})
+                    continue
+
+                # Same rule as `finish` in a mixed turn: the turn's remaining
+                # tool calls have already run. `finish` still wins — a worker
+                # that declared itself done did so with full knowledge of the
+                # failure it had just seen.
+                if stuck is not None:
+                    return finish("stuck",
+                                  f"the same failing command ran {stuck['repeats']} "
+                                  f"times in a row")
 
                 stalled, stall_text = check_progress()
                 if stalled is not None:

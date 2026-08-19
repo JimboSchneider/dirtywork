@@ -77,6 +77,58 @@
   {
     "type": "function",
     "function": {
+      "name": "insert_before",
+      "description": "Insert text as whole new line(s) immediately BEFORE the line containing anchor. anchor must occur exactly once — include surrounding context. The anchor's own line is never modified; use this instead of edit_file when you mean to add a line, not replace one.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "anchor": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "anchor",
+          "text"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "insert_after",
+      "description": "Insert text as whole new line(s) immediately AFTER the line containing anchor. anchor must occur exactly once — include surrounding context. The anchor's own line is never modified; use this instead of edit_file when you mean to add a line, not replace one.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "anchor": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "anchor",
+          "text"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "list_dir",
       "description": "List a directory's entries (dirs end with /).",
       "parameters": {

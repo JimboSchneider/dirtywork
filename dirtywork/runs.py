@@ -22,14 +22,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import rundir
-from .resume import find_stashes, pid_alive, stash_dir_for, worktree_belongs_to_repo
+from .resume import (ResumeError, find_stashes, load_prior_run, pid_alive,
+                      preflight_run_worktree, stash_dir_for, worktree_belongs_to_repo)
 from .sandbox import docker_args, docker_cli, export
+from .workspace import WorkspaceError, host_worktree_dirty, snapshot_worktree
 
 COLUMN_GAP = "  "
 LIST_COLUMNS = ("slug", "status", "started", "resumed", "branch", "worktree",
                 "container", "volume")
 SHOW_FIELDS = ("slug", "status", "sandbox", "task", "model", "provider", "turns",
-               "resumed_from", "resumed_by", "branch", "worktree", "started", "ended")
+               "resumed_from", "resumed_by", "branch", "worktree", "started", "ended",
+               "stuck_on", "files_changed", "verify")
 TASK_PREVIEW_CHARS = 200
 
 
@@ -208,8 +211,19 @@ def _export_status_update(previous: str, export_status: str) -> str:
 
 def _summary_value(key: str, data: dict) -> str:
     value = data.get(key)
-    if value is None or value == "":
+    if value is None or value == "" or value == []:
         return "-"
+    # Structured end-of-run evidence: the plain view shows the one thing an
+    # operator scans for, not the whole object (the JSON dump below has it all).
+    if key == "stuck_on" and isinstance(value, dict):
+        return str(value.get("command") or "-")
+    if key == "files_changed" and isinstance(value, list):
+        head = ", ".join(str(p) for p in value[:3])
+        tail = ", ..." if len(value) > 3 else ""
+        return f"{len(value)} ({head}{tail})"
+    if key == "verify" and isinstance(value, dict):
+        state = "passed" if value.get("passed") else "failed"
+        return f"{state} (exit {value.get('exit_code')})"
     text = str(value)
     if key == "task" and len(text) > TASK_PREVIEW_CHARS:
         text = text[:TASK_PREVIEW_CHARS].replace("\n", " ") + " ... (full text below)"
@@ -429,6 +443,38 @@ def _md_result(data: dict, events: list) -> list:
         if value not in (None, ""):
             lines.append(f"- **{key}:** {str(value).splitlines()[0]}")
     lines.append("")
+    verify = data.get("verify") or end.get("verify")
+    if isinstance(verify, dict):
+        state = "passed" if verify.get("passed") else "failed"
+        lines += [f"**verify** — {state} (exit {verify.get('exit_code')}) after "
+                  f"{verify.get('rounds')} round(s)", ""]
+        lines += _md_block(str(verify.get("command") or ""))
+        lines += _md_block(str(verify.get("output_tail") or ""))
+    stuck_on = data.get("stuck_on") or end.get("stuck_on")
+    if isinstance(stuck_on, dict):
+        lines += [f"**stuck on** — the same failing command ran "
+                  f"{stuck_on.get('repeats')} times in a row", ""]
+        lines += _md_block(str(stuck_on.get("command") or ""))
+        lines += _md_block(str(stuck_on.get("output") or ""))
+    files_changed = data.get("files_changed") or end.get("files_changed")
+    if isinstance(files_changed, list) and files_changed:
+        truncated = data.get("files_changed_truncated") or end.get("files_changed_truncated")
+        note = " — list truncated" if truncated else ""
+        lines += [f"**files changed ({len(files_changed)}){note}**", ""]
+        lines += [f"- `{_md_inline(path, MD_ARGS_CHARS)}`" for path in files_changed]
+        lines.append("")
+    last_tool = data.get("last_tool_result") or end.get("last_tool_result")
+    if isinstance(last_tool, dict):
+        lines.append(f"<details><summary>last tool result: "
+                     f"{_md_inline(last_tool.get('tool'), MD_ARGS_CHARS)}"
+                     f"({_md_inline(last_tool.get('args'), MD_ARGS_CHARS)})</summary>")
+        lines.append("")
+        lines += _md_block(str(last_tool.get("result") or ""))
+        lines += ["</details>", ""]
+    last_text = data.get("last_assistant_text") or end.get("last_assistant_text")
+    if last_text:
+        lines += ["**last assistant text**", ""]
+        lines += [f"> {line}" for line in str(last_text).splitlines()] + [""]
     diff_stat = data.get("diff_stat") or end.get("diff_stat")
     if diff_stat:
         lines += ["**diff_stat**", ""] + _md_block(str(diff_stat))
@@ -625,6 +671,8 @@ def cmd_export(args) -> int:
     data["worktree_files"] = artifacts.worktree_files
     data["escaping_symlinks"] = artifacts.escaping_symlinks
     data["dropped_git_entries"] = artifacts.dropped_git_entries
+    data["files_changed"] = artifacts.files_changed
+    data["files_changed_truncated"] = artifacts.files_changed_truncated
     rundir.write_run_json(run_dir, data)
 
     if artifacts.export_status != "ok":
@@ -673,6 +721,67 @@ def cmd_verdict(args) -> int:
     return 0
 
 
+def cmd_snapshot(args) -> int:
+    """Spec §6.1: commit the run worktree's current content onto the run's own
+    branch, using plumbing that never runs a filter or a hook (the repo's
+    ignore rules ARE applied, though, the same way `git add -A` would apply
+    them). Plumbing-only by design — the review→fix loop needs a commit to branch from
+    (`--branch-from @<slug>`) without asking the operator for a manual wip
+    commit that their own git config would have filtered. The live-pid,
+    missing/foreign-worktree and pre-resume-stash guards are
+    `resume.preflight_run_worktree` — the same guards `dirtywork resume`
+    applies before touching a prior run's worktree, and Task 8's
+    `--branch-from @<slug>` is the third caller. The empty-tree guard lives
+    inside `snapshot_worktree` itself, since that function has callers (Task
+    8) that never pass through this CLI guard at all.
+
+    Reads run.json via `resume.load_prior_run` rather than `_open_run` (which
+    validates only "is a dict"): `preflight_run_worktree` indexes
+    `prior["worktree"]`/`["repo"]`/`["slug"]` directly, so a malformed
+    run.json must be refused with a clean RunsError/ResumeError message
+    BEFORE that, not surfaced as a bare KeyError traceback. `_run_dir_for`
+    still does the slug-shape/containment validation `_open_run` uses."""
+    try:
+        run_dir = _run_dir_for(args.slug)
+    except RunsError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if not run_dir.is_dir():
+        print(f"error: no such run '{args.slug}' under {rundir.RUNS_DIR}", file=sys.stderr)
+        return 2
+    try:
+        data = load_prior_run(run_dir)
+    except ResumeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    try:
+        preflight_run_worktree(data, action="snapshot")
+    except ResumeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    branch = data.get("branch") or ""
+    if not branch:
+        print(f"error: run.json for '{args.slug}' records no branch", file=sys.stderr)
+        return 2
+    worktree = Path(data.get("worktree", ""))
+
+    report: dict = {}
+    try:
+        sha = snapshot_worktree(worktree, branch, f"wip: dirtywork run {args.slug}",
+                                report=report)
+    except WorkspaceError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    line = f"snapshot {sha} on {branch}" if sha else "nothing to snapshot"
+    skipped = report.get("skipped", 0)
+    if skipped:
+        noun = "entry" if skipped == 1 else "entries"
+        line += f" ({skipped} non-regular {noun} skipped)"
+    print(line)
+    return 0
+
+
 def dispatch(args) -> int:
     """`main()` routes `dirtywork runs <sub>` here. Each later task adds one
     entry to this table and one parser block in `__main__._add_runs_parsers`."""
@@ -689,6 +798,7 @@ def dispatch(args) -> int:
         "export": cmd_export,
         "clean": cmd_clean,
         "verdict": cmd_verdict,
+        "snapshot": cmd_snapshot,
     }
     return handlers[args.runs_cmd](args)
 
@@ -769,13 +879,9 @@ def _clean_docker_resource(kind: str, name: str, repo: str, slug: str, log: list
 
 
 def _worktree_is_dirty(worktree: str) -> bool:
-    """Fail closed: if git cannot be asked, treat the worktree as dirty."""
-    try:
-        cp = subprocess.run(["git", "-C", str(worktree), "status", "--porcelain"],
-                            capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        return True
-    return cp.returncode != 0 or bool(cp.stdout.strip())
+    """Fail closed: if git cannot be asked, treat the worktree as dirty.
+    Delegates to the one config-neutral dirty check in workspace.py."""
+    return host_worktree_dirty(worktree)
 
 
 def _commits_beyond_base(repo: str, base_commit, branch):

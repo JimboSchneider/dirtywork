@@ -13,6 +13,49 @@ from dirtywork.sandbox.docker_cli import DockerError
 from .provider_doubles import (DictProvider, PreflightProvider, patch_provider,
                                text_body, tool_call_body)
 
+# Fix item 3: the six 0.8 evidence keys must be present -- with these null/
+# empty defaults -- on EVERY stdout payload, including the two failure paths
+# where runner.run() never returns.
+_DEFAULT_EVIDENCE = {
+    "stuck_on": None,
+    "files_changed": [],
+    "files_changed_truncated": False,
+    "last_tool_result": None,
+    "last_assistant_text": None,
+    "verify": None,
+}
+
+
+def _assert_default_evidence_keys(payload: dict) -> None:
+    for key, default in _DEFAULT_EVIDENCE.items():
+        assert key in payload, f"{key!r} missing from payload"
+        assert payload[key] == default, f"{key!r} was {payload[key]!r}, expected {default!r}"
+
+
+def test_emit_result_seeds_the_six_evidence_keys_with_defaults():
+    import dirtywork.__main__ as m
+    payload = m._emit_result(
+        status="sandbox_error", worktree=Path("/wt"), branch="b",
+        transcript_path=Path("/t.jsonl"), run_dir=Path("/rd"), turns=None,
+        usage={}, final_message="boom", provider="openai",
+    )
+    _assert_default_evidence_keys(payload)
+    # extras still override the defaults (order matters: seed, then update)
+    payload2 = m._emit_result(
+        status="completed", worktree=Path("/wt"), branch="b",
+        transcript_path=Path("/t.jsonl"), run_dir=Path("/rd"), turns=1,
+        usage={}, final_message="ok", provider="openai",
+        stuck_on={"command": "x"}, files_changed=["a.py"],
+        files_changed_truncated=True, last_tool_result={"tool": "bash"},
+        last_assistant_text="done", verify={"passed": True},
+    )
+    assert payload2["stuck_on"] == {"command": "x"}
+    assert payload2["files_changed"] == ["a.py"]
+    assert payload2["files_changed_truncated"] is True
+    assert payload2["last_tool_result"] == {"tool": "bash"}
+    assert payload2["last_assistant_text"] == "done"
+    assert payload2["verify"] == {"passed": True}
+
 
 def test_main_docker_preflight_failure_exits_2_with_hint(tmp_path, monkeypatch, capsys):
     import subprocess
@@ -460,6 +503,8 @@ def test_main_docker_start_failure_is_sandbox_error_exit_1(tmp_path, monkeypatch
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "sandbox_error"
     assert "git init failed" in payload["final_message"]
+    assert payload["turns"] is None
+    _assert_default_evidence_keys(payload)  # fix item 3: _fail_setup path
     run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
     assert run_json["status"] == "sandbox_error"
 
@@ -942,6 +987,8 @@ def test_transcript_construction_failure_still_prints_json(tmp_path, monkeypatch
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "model_error"
     assert "disk unavailable" in payload["final_message"]
+    assert payload["turns"] is None
+    _assert_default_evidence_keys(payload)  # fix item 3: _fail_run path
 
 
 def test_load_repo_context_uses_worktree_not_caller_checkout(tmp_path, monkeypatch):
@@ -1003,6 +1050,8 @@ def test_llm_error_during_run_prints_model_error_json(tmp_path, monkeypatch, cap
     payload = json.loads(out)
     assert payload["status"] == "model_error"
     assert "worktree" in payload
+    assert payload["turns"] is None
+    _assert_default_evidence_keys(payload)  # fix item 3: _fail_run path (LLMError)
 
 
 def test_run_start_has_all_provenance_fields(tmp_path, monkeypatch):
@@ -1391,7 +1440,8 @@ def test_resume_uses_prior_model_unless_overridden(tmp_path, monkeypatch, capsys
     first = json.loads(capsys.readouterr().out)
     patch_provider(monkeypatch, m,
                         lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
-    rc = m.main(["resume", "--model", "other/model", Path(first["run_dir"]).name])
+    rc = m.main(["resume", "--model", "other/model", "--feedback", "keep going",
+                 Path(first["run_dir"]).name])
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert json.loads((Path(out["run_dir"]) / "run.json").read_text())["model"] == "other/model"
@@ -1410,7 +1460,7 @@ def test_resume_setup_failure_keeps_worktree(tmp_path, monkeypatch, capsys):
             raise SandboxError("boom at start")
 
     monkeypatch.setattr(m, "HostSandbox", ExplodingHost)
-    rc = m.main(["resume", Path(first["run_dir"]).name])
+    rc = m.main(["resume", Path(first["run_dir"]).name, "--feedback", "keep going"])
     out = json.loads(capsys.readouterr().out)
     assert rc == 1 and out["status"] == "sandbox_error"
     assert Path(first["worktree"]).is_dir()            # prior work preserved
@@ -1487,7 +1537,7 @@ def test_resume_docker_mode_seeds_and_keeps_branch(tmp_path, monkeypatch, capsys
     assert start_calls[0]["seed_from_worktree"] is False
     assert start_calls[0]["branch"] == first["branch"]
 
-    rc = m.main(["resume", Path(first["run_dir"]).name])
+    rc = m.main(["resume", Path(first["run_dir"]).name, "--feedback", "keep going"])
     second = json.loads(capsys.readouterr().out)
     assert rc == 0, second
     assert len(start_calls) == 2
@@ -1558,7 +1608,7 @@ def test_resume_inherits_the_prior_provider(tmp_path, monkeypatch, capsys):
     repo = _host_repo(tmp_path)
     assert m2.main(["run", "--repo", str(repo), "--sandbox", "none", "task"]) == 0
     slug = json.loads(capsys.readouterr().out)["run_dir"].rsplit("/", 1)[-1]
-    assert m2.main(["resume", str(tmp_path / "runs" / slug)]) == 0
+    assert m2.main(["resume", str(tmp_path / "runs" / slug), "--feedback", "keep going"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["provider"] == "openai"
 
@@ -1670,3 +1720,330 @@ def test_resume_inherits_allow_commit_from_the_prior_run(tmp_path, monkeypatch, 
     second = json.loads(capsys.readouterr().out)
     assert captured["allow_commit"] is True
     assert json.loads((Path(second["run_dir"]) / "run.json").read_text())["allow_commit"] is True
+
+
+def test_stuck_repeats_flag_reaches_the_runner_and_stuck_on_lands_everywhere(
+        tmp_path, monkeypatch, capsys):
+    failing = {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "b1", "type": "function", "function": {"name": "bash",
+         "arguments": json.dumps({"command": "exit 7"})}}]}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    m = _install_host_harness(monkeypatch, tmp_path, [failing])
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                 "--stuck-repeats", "2", "--max-turns", "9", "grind"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1, payload
+    assert payload["status"] == "stuck"
+    assert payload["stuck_on"]["command"] == "exit 7"
+    assert payload["stuck_on"]["repeats"] == 2
+    data = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert data["status"] == "stuck"
+    assert data["stuck_on"]["command"] == "exit 7"
+
+
+def test_stuck_on_is_null_on_an_ordinary_run(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "t"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stuck_on"] is None
+    assert json.loads((Path(payload["run_dir"]) / "run.json").read_text())["stuck_on"] is None
+
+
+def test_end_of_run_evidence_lands_in_stdout_and_run_json(tmp_path, monkeypatch, capsys):
+    write_then_answer = [
+        {"choices": [{"message": {"role": "assistant", "content": "writing it", "tool_calls": [
+            {"id": "w1", "type": "function", "function": {"name": "write_file",
+             "arguments": json.dumps({"path": "evidence.txt", "content": "hi\n"})}}]}}],
+         "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+        {"choices": [{"message": {"role": "assistant", "content": "done writing"}}],
+         "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+    ]
+    m = _install_host_harness(monkeypatch, tmp_path, write_then_answer)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "write a file"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0, payload
+    assert payload["files_changed"] == ["evidence.txt"]
+    assert payload["files_changed_truncated"] is False
+    assert payload["last_tool_result"]["tool"] == "write_file"
+    assert "Wrote 3 bytes" in payload["last_tool_result"]["result"]
+    assert payload["last_assistant_text"] == "done writing"
+    data = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert data["files_changed"] == ["evidence.txt"]
+    assert data["last_assistant_text"] == "done writing"
+
+
+def test_verify_flag_records_the_gate_and_can_fail_the_run(tmp_path, monkeypatch, capsys):
+    finished = [{"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "f1", "type": "function", "function": {"name": "finish",
+         "arguments": json.dumps({"summary": "claimed done"})}}]}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1}}]
+    m = _install_host_harness(monkeypatch, tmp_path, finished)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                 "--verify", "echo nope; exit 4", "do it"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1, payload
+    assert payload["status"] == "verify_failed"
+    assert payload["verify"]["command"] == "echo nope; exit 4"
+    assert payload["verify"]["exit_code"] == 4
+    assert payload["verify"]["passed"] is False
+    assert "nope" in payload["verify"]["output_tail"]
+    data = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert data["status"] == "verify_failed"
+    assert data["verify"]["exit_code"] == 4
+
+
+def test_verify_is_null_without_the_flag_and_resume_inherits_the_command(
+        tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+                   "--verify", "true", "do it"]) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["verify"]["command"] == "true"
+
+    patch_provider(monkeypatch, m,
+                        lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
+    assert m.main(["resume", Path(first["run_dir"]).name, "--feedback", "again"]) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["verify"]["command"] == "true"      # inherited from the prior run.json
+
+
+def test_resume_after_a_non_completed_end_inherits_verify_command_rounds_and_timeout(
+        tmp_path, monkeypatch, capsys):
+    # A run that never reaches the verify step (max_turns here; also stalled/
+    # stuck/timeout/budget_exceeded) must still hand its gate on to resume:
+    # the `verify` RESULT field stays null on these paths (verify never ran),
+    # so the command/rounds/timeout must come from run.json's own
+    # verify_command/verify_rounds/verify_timeout, recorded at run START.
+    write_then_loop = [
+        {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "w1", "type": "function", "function": {"name": "write_file",
+             "arguments": json.dumps({"path": "new.txt", "content": "from run 1\n"})}}]}}],
+         "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+    ]
+    m = _install_host_harness(monkeypatch, tmp_path, write_then_loop)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+                 "--verify", "true", "--verify-rounds", "3", "--verify-timeout", "45",
+                 "add a file"])
+    assert rc == 1
+    first = json.loads(capsys.readouterr().out)
+    assert first["status"] == "max_turns"
+    assert first["verify"] is None                    # verify never ran
+    start_run_json = json.loads((Path(first["run_dir"]) / "run.json").read_text())
+    assert start_run_json["verify_command"] == "true"
+    assert start_run_json["verify_rounds"] == 3
+    assert start_run_json["verify_timeout"] == 45
+
+    patch_provider(monkeypatch, m,
+                        lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
+    assert m.main(["resume", Path(first["run_dir"]).name]) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["verify"]["command"] == "true"
+    second_run_json = json.loads((Path(second["run_dir"]) / "run.json").read_text())
+    assert second_run_json["verify_command"] == "true"
+    assert second_run_json["verify_rounds"] == 3
+    assert second_run_json["verify_timeout"] == 45
+
+
+def test_resume_explicit_verify_rounds_overrides_the_inherited_value(
+        tmp_path, monkeypatch, capsys):
+    write_then_loop = [
+        {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "w1", "type": "function", "function": {"name": "write_file",
+             "arguments": json.dumps({"path": "new.txt", "content": "from run 1\n"})}}]}}],
+         "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+    ]
+    m = _install_host_harness(monkeypatch, tmp_path, write_then_loop)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+                 "--verify", "true", "--verify-rounds", "3", "--verify-timeout", "45",
+                 "add a file"])
+    assert rc == 1
+    first = json.loads(capsys.readouterr().out)
+
+    patch_provider(monkeypatch, m,
+                        lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
+    assert m.main(["resume", Path(first["run_dir"]).name,
+                   "--verify-rounds", "0", "--verify-timeout", "30"]) == 0
+    second = json.loads(capsys.readouterr().out)
+    second_run_json = json.loads((Path(second["run_dir"]) / "run.json").read_text())
+    assert second_run_json["verify_rounds"] == 0
+    assert second_run_json["verify_timeout"] == 30
+
+
+def test_runs_snapshot_dispatches(tmp_path, monkeypatch, capsys):
+    import dirtywork.__main__ as m
+    from dirtywork import rundir as rundir_mod
+    monkeypatch.setattr(rundir_mod, "RUNS_DIR", tmp_path / "runs")
+    rc = m.main(["runs", "snapshot", "no-such-run"])
+    assert rc == 2
+    assert "no such run" in capsys.readouterr().err
+
+
+def test_branch_from_run_reference_snapshots_and_branches_from_the_prior_run(
+        tmp_path, monkeypatch, capsys):
+    write_then_loop = [
+        {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "w1", "type": "function", "function": {"name": "write_file",
+             "arguments": json.dumps({"path": "first.txt", "content": "from run 1\n"})}}]}}],
+         "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+    ]
+    m, repo, rc = _first_run(monkeypatch, tmp_path, write_then_loop)
+    first = json.loads(capsys.readouterr().out)
+    assert rc == 1 and first["status"] == "max_turns"
+    slug = Path(first["run_dir"]).name
+
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url))
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                 "--branch-from", f"@{slug}", "keep going"])
+    err = capsys.readouterr()
+    second = json.loads(err.out)
+    assert rc == 0, second
+    assert "snapshot " in err.err and f"(from @{slug})" in err.err
+
+    data = json.loads((Path(second["run_dir"]) / "run.json").read_text())
+    assert data["branch_from_run"] == slug
+    # the new worktree starts from the SNAPSHOT of the earlier run's work
+    assert (Path(second["worktree"]) / "first.txt").read_text() == "from run 1\n"
+    start = next(e for e in (json.loads(l) for l in
+                             Path(second["transcript"]).read_text().splitlines())
+                 if e["event"] == "run_start")
+    assert start["branch_from"] == first["branch"]      # the resolved branch NAME
+
+
+def test_branch_from_unknown_run_exits_2_and_creates_nothing(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                 "--branch-from", "@no-such-run", "t"])
+    assert rc == 2
+    assert "unknown run 'no-such-run'" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()
+    assert not (repo / ".worktrees").exists()
+
+
+def test_branch_from_a_clean_run_takes_no_snapshot(tmp_path, monkeypatch, capsys):
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    slug = Path(first["run_dir"]).name
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url))
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                 "--branch-from", f"@{slug}", "keep going"])
+    err = capsys.readouterr()
+    assert rc == 0, err.out
+    assert "snapshot " not in err.err                  # nothing was dirty
+    assert json.loads((Path(json.loads(err.out)["run_dir"]) / "run.json")
+                      .read_text())["branch_from_run"] == slug
+
+
+def test_branch_from_a_plain_ref_is_unchanged(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                   "--branch-from", "HEAD", "t"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    data = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert data["branch_from_run"] is None
+
+
+def test_branch_from_refuses_a_still_running_prior_run_and_snapshots_nothing(
+        tmp_path, monkeypatch, capsys):
+    # Controller ruling: `_resolve_branch_from` must run the same
+    # preflight_run_worktree guard resume uses BEFORE the dirty check and
+    # snapshot -- a still-running run's worktree must never be touched.
+    import subprocess
+    write_then_loop = [
+        {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "w1", "type": "function", "function": {"name": "write_file",
+             "arguments": json.dumps({"path": "first.txt", "content": "from run 1\n"})}}]}}],
+         "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+    ]
+    m, repo, rc = _first_run(monkeypatch, tmp_path, write_then_loop)
+    first = json.loads(capsys.readouterr().out)
+    assert rc == 1 and first["status"] == "max_turns"
+    run_dir = Path(first["run_dir"])
+    slug = run_dir.name
+    data = json.loads((run_dir / "run.json").read_text())
+    data["status"] = "running"; data["host_pid"] = os.getpid()
+    (run_dir / "run.json").write_text(json.dumps(data))
+
+    branch_log_before = subprocess.run(
+        ["git", "-C", str(repo), "log", "--oneline", data["branch"]],
+        capture_output=True, text=True).stdout
+
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url))
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                 "--branch-from", f"@{slug}", "keep going"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "still in progress" in err
+    assert "snapshot " not in err                       # no snapshot was taken
+
+    branch_log_after = subprocess.run(
+        ["git", "-C", str(repo), "log", "--oneline", data["branch"]],
+        capture_output=True, text=True).stdout
+    assert branch_log_after == branch_log_before         # no snapshot commit was made
+    assert len(list((tmp_path / "runs").iterdir())) == 1  # nothing new created
+
+
+def test_resume_feedback_reaches_the_task_run_json_and_run_start(
+        tmp_path, monkeypatch, capsys):
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    assert first["status"] == "completed"
+    patch_provider(monkeypatch, m,
+                        lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
+    rc = m.main(["resume", Path(first["run_dir"]).name,
+                 "--feedback", "You removed the null check; restore it."])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0, out
+    data = json.loads((Path(out["run_dir"]) / "run.json").read_text())
+    assert data["feedback"] == "You removed the null check; restore it."
+    assert "--- RESUMED RUN: REVIEW FEEDBACK ---" in data["task"]
+    assert "You removed the null check; restore it." in data["task"]
+    start = next(e for e in (json.loads(l) for l in
+                             Path(out["transcript"]).read_text().splitlines())
+                 if e["event"] == "run_start")
+    assert start["feedback"] == "You removed the null check; restore it."
+
+
+def test_resume_of_a_completed_run_without_feedback_is_refused(tmp_path, monkeypatch, capsys):
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    slug = Path(first["run_dir"]).name
+    assert m.main(["resume", slug]) == 2
+    err = capsys.readouterr().err
+    assert f"run '{slug}' ended 'completed'" in err
+    assert "--feedback" in err
+    assert len(list((tmp_path / "runs").iterdir())) == 1     # nothing created
+
+
+def test_resume_feedback_file_and_its_refusals(tmp_path, monkeypatch, capsys):
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    slug = Path(first["run_dir"]).name
+
+    assert m.main(["resume", slug, "--feedback", "a", "--feedback-file", "b"]) == 2
+    assert "mutually exclusive" in capsys.readouterr().err
+
+    assert m.main(["resume", slug, "--feedback-file", str(tmp_path / "nope.txt")]) == 2
+    assert "cannot read feedback file" in capsys.readouterr().err
+
+    big = tmp_path / "big.txt"
+    big.write_text("x" * 64_001, encoding="utf-8")
+    assert m.main(["resume", slug, "--feedback-file", str(big)]) == 2
+    assert "over the 64000-char limit" in capsys.readouterr().err
+
+    note = tmp_path / "note.txt"
+    note.write_text("Restore the retry loop.\n", encoding="utf-8")
+    patch_provider(monkeypatch, m,
+                        lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
+    assert m.main(["resume", slug, "--feedback-file", str(note)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert json.loads((Path(out["run_dir"]) / "run.json").read_text())["feedback"] == (
+        "Restore the retry loop.\n")

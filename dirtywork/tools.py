@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import errno
 import os
 import shutil
@@ -11,6 +12,15 @@ from .guardrails import GuardrailError, build_env, check_bash_command, resolve_i
 from .procs import run_capped
 
 MAX_RESULT_CHARS = 8000
+# Spec §3.1: every successful edit/write echoes the unified diff of what it
+# actually changed, so a worker that meant to insert a line and replaced one
+# instead sees that in the tool result rather than at review time.
+MAX_DIFF_LINES = 40
+MAX_DIFF_CHARS = 3000
+# describe_change's SequenceMatcher/unified_diff are quadratic-ish on files
+# with popular repeated lines; above this many lines (either side) the diff
+# is omitted entirely rather than risk a multi-minute, uninterruptible call.
+DESCRIBE_DIFF_MAX_LINES = 20000
 # Refuse to load a file larger than this into memory. read_file/edit_file read
 # the whole file (offset/limit only window the result), so an unbounded read is a
 # memory-DoS; a non-regular file (FIFO/device) would also block read_text forever.
@@ -100,6 +110,155 @@ def _number_lines(text: str, offset: int, limit: int) -> str:
     return _cap(numbered, note=" — re-run with offset/limit to see more")
 
 
+def _lines_keep_newlines(text: str) -> list:
+    """Like `text.splitlines(keepends=True)`, except ONLY `"\n"` is treated
+    as a line separator. `str.splitlines()` also breaks on `\v`, `\f`,
+    `\x1c`-`\x1e`, `\x85`, U+2028 and U+2029 -- a line that merely
+    CONTAINS one of those characters (e.g. a form feed) would otherwise be
+    split into a fragment with no trailing `"\n"`, and describe_change would
+    then render a FALSE `\ No newline at end of file` marker mid-diff even
+    though the file genuinely ends in a newline. Splitting on `"\n"` alone
+    means only the file's true final line can ever lack one."""
+    if not text:
+        return []
+    parts = text.split("\n")
+    if parts[-1] == "":
+        # text ends in "\n": every remaining piece is a complete line.
+        return [p + "\n" for p in parts[:-1]]
+    # text does NOT end in "\n": the last piece is the file's final,
+    # newline-less line; every other piece is a complete line.
+    return [p + "\n" for p in parts[:-1]] + [parts[-1]]
+
+
+def _line_counts(old_lines: list, new_lines: list) -> tuple:
+    """(added, deleted, removed_non_blank) from SequenceMatcher opcodes. A
+    REPLACED non-blank line counts as removed: the counter exists to answer
+    'did I delete content I did not mean to delete', and a replace deletes
+    before it inserts."""
+    added = deleted = removed_non_blank = 0
+    matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("delete", "replace"):
+            deleted += i2 - i1
+            removed_non_blank += sum(1 for line in old_lines[i1:i2] if line.strip())
+        if tag in ("insert", "replace"):
+            added += j2 - j1
+    return added, deleted, removed_non_blank
+
+
+def describe_change(path: str, old_text: str, new_text: str, *, verb: str) -> str:
+    """Spec §3.1: '<Verb> <path>: +A -D [(removed N non-blank line(s))]' plus a
+    capped unified diff. Lines are compared WITH their line endings, via
+    `_lines_keep_newlines` (NOT `str.splitlines(keepends=True)`, which also
+    breaks on \\v/\\f/etc — see its docstring), so a change to only the
+    file's final newline (e.g. `"x"` -> `"x\\n"`) is seen rather than reading
+    as identical. A content line that lacks a trailing newline (only ever
+    the diff's very last old/new line) is rendered followed by git's own
+    `\\ No newline at end of file` marker, on its own output line. CRLF
+    content shows its carriage return as-is, like git does — a line ending
+    in `"\\r\\n"` keeps the `"\\r"` once the `"\\n"` is treated as the
+    separator. Pure — no filesystem access — so the host backend and the
+    container backend produce byte-identical text for identical content."""
+    old_lines = _lines_keep_newlines(old_text)
+    new_lines = _lines_keep_newlines(new_text)
+    if max(len(old_lines), len(new_lines)) > DESCRIBE_DIFF_MAX_LINES:
+        # SequenceMatcher/unified_diff are omitted entirely: even the O(n)
+        # line-count pass is skipped so this stays cheap regardless of content.
+        return f"{verb} {path}: {len(new_lines)} lines (diff omitted: file too large)"
+    added, deleted, removed_non_blank = _line_counts(old_lines, new_lines)
+    head = f"{verb} {path}: +{added} -{deleted}"
+    if removed_non_blank > 0:
+        plural = "" if removed_non_blank == 1 else "s"
+        head += f" (removed {removed_non_blank} non-blank line{plural})"
+    diff_lines = list(difflib.unified_diff(
+        old_lines, new_lines, fromfile=f"a/{path}", tofile=f"b/{path}", n=2, lineterm=""))
+    if not diff_lines:
+        return head
+    # The first two entries (fromfile/tofile) and every "@@ ... @@" hunk
+    # header are already newline-free (lineterm=""); every other entry is a
+    # ' '/'+'/'-'-prefixed content line whose text still carries whatever
+    # ending its source line had (or didn't). Strip that ending so every
+    # entry below joins on a single "\n", inserting git's marker line right
+    # after any content line that had no ending of its own.
+    rendered = []
+    for i, line in enumerate(diff_lines):
+        if i < 2 or line.startswith("@@"):
+            rendered.append(line)
+        elif line.endswith("\n"):
+            rendered.append(line[:-1])
+        else:
+            rendered.append(line)
+            rendered.append(r"\ No newline at end of file")
+    kept = []
+    total = 0
+    for line in rendered:
+        if len(kept) >= MAX_DIFF_LINES or total + len(line) + 1 > MAX_DIFF_CHARS:
+            kept.append(f"[diff truncated: {len(rendered) - len(kept)} more lines]")
+            break
+        kept.append(line)
+        total += len(line) + 1
+    return head + "\n" + "\n".join(kept)
+
+
+def describe_write(path: str, old_text, new_text: str, byte_count: int) -> str:
+    """write_file's result string (spec §3.1). `old_text` is the file's previous
+    content, or None when there was none to read — a new file, OR an existing
+    file the backend could not read back as UTF-8 text (binary, oversized,
+    unreadable). Both render as '(new file, M lines)'; that only ever changes
+    the wording of a result string, never the write itself. The byte count
+    stays in the new-file string so callers matching 'Wrote N bytes' match."""
+    if old_text is None:
+        lines = len(new_text.splitlines())
+        plural = "" if lines == 1 else "s"
+        return f"Wrote {byte_count} bytes to {path} (new file, {lines} line{plural})"
+    return describe_change(path, old_text, new_text, verb="Wrote")
+
+
+def insert_text(text: str, anchor: str, insert: str, where: str) -> str:
+    """Spec §3.2: place `insert` as WHOLE LINES relative to the line(s) holding
+    `anchor`, never modifying the anchor's own line. `where` is 'before' (just
+    before the start of the line holding the anchor's first character) or
+    'after' (just after the end of the line holding its last character — the
+    anchor may span lines). The caller has already proved the anchor occurs
+    exactly once. Pure: both backends call this with the text they read."""
+    start = text.index(anchor)
+    end = start + len(anchor)
+    if not insert.endswith("\n"):
+        insert = insert + "\n"
+    if where == "before":
+        line_start = text.rfind("\n", 0, start) + 1
+        return text[:line_start] + insert + text[line_start:]
+    last = max(start, end - 1)
+    newline = text.find("\n", last)
+    if newline == -1:
+        # the anchor sits on a final line with no trailing newline: give the
+        # file one so the inserted text starts on a line of its own
+        head = text + "\n" if text and not text.endswith("\n") else text
+        return head + insert
+    return text[:newline + 1] + insert + text[newline + 1:]
+
+
+def _read_text_for_diff(path: Path):
+    """The file's current text for describe_write, or None when there is none
+    to read (missing, a symlink, a FIFO/device, over the read limit, or not
+    valid UTF-8). Never raises: this is decoration on a write, and a write must
+    never fail because its 'before' picture could not be taken."""
+    try:
+        fh = _open_regular(path, os.O_RDONLY, max_size=MAX_READ_BYTES)
+    except OSError:
+        return None
+    try:
+        raw = fh.read()
+    except OSError:
+        return None
+    finally:
+        fh.close()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def read_file(worktree: Path, path: str, offset: int = 0, limit: int = 400) -> str:
     try:
         p = resolve_in_worktree(path, worktree)
@@ -128,6 +287,9 @@ def write_file(worktree: Path, path: str, content: str) -> str:
     except GuardrailError as e:
         return f"ERROR: {e}"
     p = _worktree_candidate(path, worktree)
+    # Best-effort 'before' picture, taken after the containment check and
+    # before the truncating open. None means "nothing to diff against".
+    old_text = _read_text_for_diff(p)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -147,10 +309,16 @@ def write_file(worktree: Path, path: str, content: str) -> str:
         fh.write(encoded)
     finally:
         fh.close()
-    return f"Wrote {len(encoded)} bytes to {path}"
+    return describe_write(path, old_text, content, len(encoded))
 
 
-def edit_file(worktree: Path, path: str, old_string: str, new_string: str) -> str:
+def _transform_file(worktree: Path, path: str, transform, *, tool: str) -> str:
+    """Read → transform → write for every in-place file tool (spec §3.2).
+    `transform(text) -> (new_text_or_None, result)`: a None new_text means the
+    transform refused and `result` (an 'ERROR: …' string) is returned without
+    writing anything. Every check edit_file used to perform itself lives here,
+    unchanged: worktree containment, the regular-file/symlink refusals, the
+    5 MB read limit, UTF-8 validation, and the O_NOFOLLOW write."""
     try:
         p = resolve_in_worktree(path, worktree, writing=True)
     except GuardrailError as e:
@@ -166,14 +334,10 @@ def edit_file(worktree: Path, path: str, old_string: str, new_string: str) -> st
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
-        return f"ERROR: {path} is not valid UTF-8 text; edit_file only works on text files"
-    count = text.count(old_string)
-    if count != 1:
-        return (
-            f"ERROR: old_string occurs {count} times in {path}; it must occur exactly "
-            f"once. Include more surrounding context to make it unique."
-        )
-    new_text = text.replace(old_string, new_string, 1)
+        return f"ERROR: {path} is not valid UTF-8 text; {tool} only works on text files"
+    new_text, result = transform(text)
+    if new_text is None:
+        return result
     write_target = _worktree_candidate(path, worktree)
     try:
         wfh = _open_regular(write_target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
@@ -190,7 +354,53 @@ def edit_file(worktree: Path, path: str, old_string: str, new_string: str) -> st
         wfh.write(new_text.encode("utf-8"))
     finally:
         wfh.close()
-    return f"Edited {path}"
+    return result
+
+
+def _replace_once(path: str, old_string: str, new_string: str):
+    """edit_file's transform. Defined here (not in a backend) so the host and
+    the container share one uniqueness rule and one error string."""
+    def transform(text: str):
+        count = text.count(old_string)
+        if count != 1:
+            return None, (
+                f"ERROR: old_string occurs {count} times in {path}; it must occur exactly "
+                f"once. Include more surrounding context to make it unique."
+            )
+        new_text = text.replace(old_string, new_string, 1)
+        return new_text, describe_change(path, text, new_text, verb="Edited")
+    return transform
+
+
+def _insert_once(path: str, anchor: str, insert: str, where: str):
+    """insert_before/insert_after's transform — the same uniqueness rule and
+    the same error shape as _replace_once, with `anchor` in place of
+    `old_string`."""
+    def transform(text: str):
+        count = text.count(anchor)
+        if count != 1:
+            return None, (
+                f"ERROR: anchor occurs {count} times in {path}; it must occur exactly "
+                f"once. Include more surrounding context to make it unique."
+            )
+        new_text = insert_text(text, anchor, insert, where)
+        return new_text, describe_change(path, text, new_text, verb="Inserted into")
+    return transform
+
+
+def edit_file(worktree: Path, path: str, old_string: str, new_string: str) -> str:
+    return _transform_file(worktree, path, _replace_once(path, old_string, new_string),
+                           tool="edit_file")
+
+
+def insert_before(worktree: Path, path: str, anchor: str, text: str) -> str:
+    return _transform_file(worktree, path, _insert_once(path, anchor, text, "before"),
+                           tool="insert_before")
+
+
+def insert_after(worktree: Path, path: str, anchor: str, text: str) -> str:
+    return _transform_file(worktree, path, _insert_once(path, anchor, text, "after"),
+                           tool="insert_after")
 
 
 def list_dir(worktree: Path, path: str = ".") -> str:

@@ -3,20 +3,24 @@
 `dirtywork` writes one JSON object per line to
 `~/.dirtywork/runs/<slug>/transcript.jsonl` (`tail -f` friendly — each line is
 flushed immediately). Every line has at least `ts` (UTC ISO-8601) and `event`
-(one of the seven event names below). `schema_version` marks the overall
+(one of the eight event names below). `schema_version` marks the overall
 version and appears once, on `run_start`, and again in the CLI's stdout JSON
 and in `run.json` — not on every line.
 
 **v1** is the pre-hardening shape (dirtywork ≤ 0.2.0, host-only execution, no
 `schema_version` field at all — its absence *is* the v1 marker). **v2** (0.3.0
-and later, including the 0.4.x Docker sandbox and the 0.5.x harness-robustness
-releases) adds Docker-sandbox provenance, provider identity, resume lineage,
-four new terminal statuses, the `nudge` and `sandbox_reset` events, and richer
-`run_end` fields from the export validator. A v1 reader that ignores unknown
+and later, including the 0.4.x Docker sandbox, the 0.5.x harness-robustness
+releases and the 0.8 run-evidence release) adds Docker-sandbox provenance,
+provider identity, resume lineage, six new terminal statuses, the `nudge`,
+`sandbox_reset` and `verify` events, richer `run_end` fields from the export
+validator, and 0.8's end-of-run evidence (`files_changed`,
+`files_changed_truncated`, `last_tool_result`, `last_assistant_text`,
+`stuck_on`, `verify`). A v1 reader that ignores unknown
 fields keeps working unmodified against v2 output: every v2 addition is a new
 field, a new event, or a new enum value — never a removed or renamed one. That
 is the same compatibility rule the stdout JSON contract follows, for the same
-reason.
+reason. **0.8 keeps `schema_version` at 2** for exactly that reason: everything
+it adds is additive.
 
 ## Events
 
@@ -28,7 +32,7 @@ One per run, always the first line.
 |---|---|---|---|---|
 | `ts` | ✓ | ✓ | string | UTC ISO-8601 |
 | `event` | ✓ | ✓ | `"run_start"` | |
-| `task` | ✓ | ✓ | string | the task text; on a resumed run it also carries the `--- RESUMED RUN ---` block |
+| `task` | ✓ | ✓ | string | the task text; on a resumed run it also carries the `--- RESUMED RUN ---` block, or the `--- RESUMED RUN: REVIEW FEEDBACK ---` block when `--feedback` was given. Both markers are stripped from the prior task before a new block is built, so resuming a resume never stacks them |
 | `model` | ✓ | ✓ | string | |
 | `max_turns` | ✓ | ✓ | integer | |
 | `timeout` | ✓ | ✓ | integer | seconds, whole-run wall clock |
@@ -38,12 +42,13 @@ One per run, always the first line.
 | `context_window` | | ✓ | integer | tokens; the resolved value (`--context-window` > `DIRTYWORK_CONTEXT_WINDOW` > the provider's table > 32768) |
 | `base_commit` | | ✓ | string | resolved commit the worktree branched from |
 | `branch` | | ✓ | string | `dirtywork/<slug>` |
-| `branch_from` | | ✓ | string \| null | `--branch-from` as given, or null for repo HEAD |
+| `branch_from` | | ✓ | string \| null | the ref the worktree was branched from, or null for repo HEAD. For `--branch-from @<slug>` this is the **resolved branch name** of that run, not the `@<slug>` text; `run.json`'s `branch_from_run` records the slug |
 | `base_url` | | ✓ | string | the provider endpoint actually used (after the per-provider default is applied) |
 | `dirtywork_version` | | ✓ | string | `dirtywork.__version__` |
 | `temperature` | | ✓ | number \| null | omitted from the request when null |
 | `provider` | | ✓ | `"openai"` \| `"anthropic"` | |
 | `resumed_from` | | ✓ | string \| null | slug of the run this one continues |
+| `feedback` | | ✓ | string \| null | 0.8: `resume --feedback`/`--feedback-file` text, verbatim (max 64 000 chars); null on a fresh run or a resume without feedback |
 | `sandbox` | | ✓ | `"none"` \| object | `"none"` in host mode; in Docker mode `{backend, image, image_digest, image_pinned, network, memory, cpus, pids_limit, tmp_size, gitdir_size, max_worktree_mb, max_worktree_files, user}` |
 
 ### `assistant`
@@ -61,9 +66,9 @@ One per tool call executed, plus one per malformed tool-call entry discarded.
 
 | Field | v1 | v2 | Type | Notes |
 |---|---|---|---|---|
-| `tool` | ✓ | ✓ | string | tool name — one of `read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `bash`, `finish`; `""` for a discarded malformed entry |
+| `tool` | ✓ | ✓ | string | tool name — one of `read_file`, `write_file`, `edit_file`, `insert_before`, `insert_after`, `list_dir`, `grep`, `bash`, `finish` (`insert_before`/`insert_after` are v2, added in 0.8); `""` for a discarded malformed entry |
 | `args` | ✓ | ✓ | string | the raw JSON argument string, capped at 500 chars; `""` for a discarded malformed entry |
-| `result` | ✓ | ✓ | string | the tool's result, trimmed per the tool's `Caps.transcript` setting. All seven built-in tools declare `preview`, which caps the record at 2000 chars; the registry also supports `full` and `none`, unused by any shipped tool |
+| `result` | ✓ | ✓ | string | the tool's result, trimmed per the tool's `Caps.transcript` setting. All built-in tools declare `preview`, which caps the record at 2000 chars; the registry also supports `full` and `none`, unused by any shipped tool. Since 0.8 a successful `edit_file`/`write_file` result is `<Verb> <path>: +A -D [(removed N non-blank lines)]` followed by a unified diff (capped at 40 lines / 3000 chars, then `[diff truncated: N more lines]`); `write_file` on a new file returns `Wrote N bytes to <path> (new file, M lines)` with no diff. When either side of the edit exceeds 20000 lines, the diff itself is never computed (it is quadratic-ish on files with popular repeated lines) — the result is just `<Verb> <path>: <N> lines (diff omitted: file too large)` |
 
 A `finish(summary=…)` call is an ordinary tool call: it appears in the
 `assistant` event's `tool_calls` and produces a `tool_result` whose `result` is
@@ -103,6 +108,18 @@ runner — this moved from `ToolExecutor` in sub-project 3.
 |---|---|---|---|---|
 | `reason` | | ✓ | string | why the reset happened |
 
+### `verify`
+
+**v2 only**, 0.8 and later, and only when `--verify CMD` was given. One per
+execution of the verification command, written on the completion path before
+the export runs.
+
+| Field | v1 | v2 | Type | Notes |
+|---|---|---|---|---|
+| `round` | | ✓ | integer | 1-based; at most `--verify-rounds` + 1 of them |
+| `exit_code` | | ✓ | integer \| null | the integer after `exit code: ` in the bash result; `null` for an `ERROR:`/`BLOCKED:` result that never produced a status |
+| `passed` | | ✓ | boolean | true only for exit code 0 |
+
 ### `run_end`
 
 One per run, always the last line. Written by the runner on every terminal
@@ -127,6 +144,12 @@ case it carries `status` and `error` only).
 | `watchdog_violation` | | ✓ | string \| null | Docker mode: the reason the watchdog killed the container, when that happened after the last tool call returned |
 | `watchdog_violation_kind` | | ✓ | string \| null | `"budget"` (worktree-size or host-disk-floor breach) or `"sandbox_error"` (the watchdog's own sampling exec failed twice); meaningful only alongside `watchdog_violation` |
 | `finalize_error` | | ✓ | string \| null | set when the finalize/export step itself raised after the agent loop finished; the run's own status is unaffected except that `completed` becomes `export_failed` |
+| `stuck_on` | | ✓ | object \| null | 0.8: `{command, output, repeats}` for the failing bash call that ended the run as `stuck` (`output` capped at 4000 chars); `null` on every other status |
+| `files_changed` | | ✓ | list | 0.8: repo-relative paths the run changed, sorted, capped at 1000. Docker mode: `git diff --cached --name-only <base_commit>` in the container right after the export's `git add -A`. Host mode: `git diff --name-only <base_commit>` plus `git ls-files --others --exclude-standard`. `[]` when nothing changed or the export never ran |
+| `files_changed_truncated` | | ✓ | boolean | 0.8: true when `files_changed` was cut at the 1000-path cap |
+| `last_tool_result` | | ✓ | object \| null | 0.8: `{tool, args, result}` for the last tool call the runner executed other than `finish` (`args` ≤500 chars, `result` ≤2000 chars); `null` if no tool ever ran |
+| `last_assistant_text` | | ✓ | string \| null | 0.8: the model's last non-empty assistant text, capped at 2000 chars; `null` if there was none |
+| `verify` | | ✓ | object \| null | 0.8: `{command, exit_code, output_tail, rounds, passed}` for the LAST `--verify` execution (`output_tail` capped at 4000 chars); `null` when `--verify` was not given |
 
 ## Statuses
 
@@ -139,6 +162,8 @@ case it carries `status` and `error` only).
 | `model_error` | ✓ | ✓ | repeated malformed replies/tool calls, an unreadable response body, or any exception the CLI caught |
 | `interrupted` | ✓ | ✓ | Ctrl-C during the loop |
 | `stalled` | | ✓ | `--stall-turns` consecutive turns with no progress (no new tool call, no successful write, no new command output) |
+| `stuck` | | ✓ | 0.8: the same **failing** bash command ran `--stuck-repeats` times in a row (fingerprint as the stall detector's: timings/shas stripped); edits in between do not reset the streak, a passing run does |
+| `verify_failed` | | ✓ | 0.8: the worker declared itself done, but the `--verify` command exited non-zero on its last allowed round |
 | `budget_exceeded` | | ✓ | worktree size/file budget or host disk floor breached |
 | `sandbox_error` | | ✓ | the sandbox backend failed in a way the run cannot continue past |
 | `export_failed` | | ✓ | the run itself completed, but the validated export of the worker's files did not |
@@ -150,7 +175,9 @@ case it carries `status` and `error` only).
 section). Its fields: `schema_version`, `status`, `worktree`, `branch`,
 `transcript`, `turns`, `usage`, `final_message`, `run_dir`, `provider`,
 `base_commit`, `resumed_from`, `finalize_error`, `watchdog_violation`,
-`watchdog_violation_kind`, and `export_status` on the exception-recovery path.
+`watchdog_violation_kind`, `stuck_on`, `files_changed`,
+`files_changed_truncated`, `last_tool_result`, `last_assistant_text`, `verify`,
+and `export_status` on the exception-recovery path.
 Per this project's compatibility rule the stdout JSON may only gain fields,
 never lose or rename `status`, `worktree`, `branch`, `transcript`, `turns`,
 `usage`, `final_message`.
@@ -175,6 +202,11 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `context_window` | start | resolved tokens |
 | `resumed_from` | start | slug of the run this one continues, or null |
 | `resumed_by` | — | written onto the **prior** run's `run.json` when a resume starts |
+| `branch_from_run` | start | 0.8: the slug `--branch-from @<slug>` named, or null. The resolved branch itself is `run_start.branch_from` |
+| `feedback` | start | 0.8: `resume --feedback`/`--feedback-file` text, or null |
+| `verify_command` | start | 0.8: `--verify` as given, or null. `dirtywork resume` inherits this (and `verify_rounds`/`verify_timeout` below) when not given, so the gate survives a run that ended before verify ever ran (`max_turns`/`stalled`/`stuck`/`timeout`/`budget_exceeded`) |
+| `verify_rounds` | start | 0.8: `--verify-rounds` as given, else `1` |
+| `verify_timeout` | start | 0.8: `--verify-timeout` as given (clamped to 1-600 by the runner), else `600` |
 | `container` | start | Docker mode container name, else null |
 | `volume` | start | Docker mode volume name, else null |
 | `image` | start | `--image` as given (Docker mode), else null |
@@ -195,6 +227,12 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `finalize_error` | end | |
 | `watchdog_violation` | end | |
 | `watchdog_violation_kind` | end | |
+| `stuck_on` | end | 0.8: `{command, output, repeats}` when the run ended `stuck`, else null |
+| `files_changed` | end, export | 0.8: sorted repo-relative paths the run changed, capped at 1000; rewritten by `dirtywork runs export` |
+| `files_changed_truncated` | end, export | 0.8: true when the 1000-path cap cut the list |
+| `last_tool_result` | end | 0.8: `{tool, args, result}` for the last non-`finish` tool call, or null |
+| `last_assistant_text` | end | 0.8: the last non-empty assistant text (≤2000 chars), or null |
+| `verify` | end | 0.8: `{command, exit_code, output_tail, rounds, passed}` for the last `--verify` execution, or null (null whenever verify never ran, even if `--verify` was given — see `verify_command` above, which `dirtywork resume` reads from instead) |
 | `allow_commit` | start | (bool) records whether the run's system prompt told the worker to commit as it went (`--allow-commit`, host mode only — see the README). A run that predates the flag has no such key. |
 | `verdict` | verdict | written by `dirtywork runs verdict`: `"accept"` \| `"reject"` \| `"cleanup"` |
 | `note` | verdict | `--note` text, or null |
@@ -204,6 +242,10 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 
 Rows marked *verdict* are added post hoc by `dirtywork runs verdict <slug> …`
 (a merge-update; no existing key is dropped) and are absent until then.
+
+`dirtywork runs snapshot <slug>` writes no `run.json` field: it reads `branch`,
+`worktree`, `repo`, `status` and `host_pid` and commits the worktree's current
+content onto that branch with git plumbing only. The run directory is unchanged.
 
 `dirtywork runs show <slug>` prints this file alongside a tool-call timeline
 reconstructed from the transcript. `dirtywork runs show <slug> --markdown

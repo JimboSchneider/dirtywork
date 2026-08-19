@@ -27,3 +27,16 @@ def test_docker_build_succeeds_and_image_has_required_tools():
     assert "git version" in git_version.stdout
 
     subprocess.run(["docker", "rmi", "-f", IMAGE_TAG], capture_output=True, timeout=60)
+
+
+def test_dockerfile_installs_the_packages_the_docs_promise():
+    """Unmarked (no daemon needed): the Dockerfile is read as text. The four
+    0.8 additions come from a real run whose bash suite needed them (issue
+    #30); docker/README.md's package list must stay in step with this."""
+    text = (DOCKER_DIR / "Dockerfile").read_text(encoding="utf-8")
+    for package in ("git", "bash", "coreutils", "findutils", "python3", "nodejs",
+                    "npm", "ripgrep", "jq", "uuid-runtime", "shellcheck", "curl"):
+        assert f"\n        {package} \\\n" in text, f"{package} is not in the apt list"
+    readme = (DOCKER_DIR / "README.md").read_text(encoding="utf-8")
+    for package in ("jq", "uuid-runtime", "shellcheck", "curl"):
+        assert package in readme, f"{package} is not documented in docker/README.md"

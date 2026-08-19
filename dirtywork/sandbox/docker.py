@@ -12,7 +12,17 @@ from pathlib import Path
 from ..budget import BudgetExceeded
 from ..guardrails import check_bash_command
 from ..procs import Captured, run_capped
-from ..tools import MAX_BASH_CHARS, MAX_LIST_ENTRIES, MAX_READ_BYTES, MAX_WRITE_BYTES, _cap, _number_lines
+from ..tools import (
+    MAX_BASH_CHARS,
+    MAX_LIST_ENTRIES,
+    MAX_READ_BYTES,
+    MAX_WRITE_BYTES,
+    _cap,
+    _insert_once,
+    _number_lines,
+    _replace_once,
+    describe_write,
+)
 from . import SandboxError
 from . import docker_args
 from . import docker_cli
@@ -57,6 +67,19 @@ def _rel(path: str, *, writing: bool = False):
     if writing and parts and parts[0] == ".git":
         return None, f"ERROR: writing inside .git/ is not allowed (got '{path}')"
     return normalized, None
+
+
+def _oversized(encoded: bytes):
+    """The one 'content too big' refusal for every in-container write, or None.
+    write_file checks it BEFORE any exec (so an oversized write costs nothing);
+    _write_raw checks it again for edit/insert, whose new text is built from a
+    read that was only capped at MAX_READ_BYTES."""
+    if len(encoded) > MAX_WRITE_BYTES:
+        return (
+            f"ERROR: content is {len(encoded)} bytes, over the "
+            f"{MAX_WRITE_BYTES}-byte write limit"
+        )
+    return None
 
 
 class DockerSandbox:
@@ -395,13 +418,14 @@ class DockerSandbox:
             return err
         return _number_lines(text, offset, limit)
 
-    def write_file(self, path: str, content: str) -> str:
-        encoded = content.encode("utf-8")
-        if len(encoded) > MAX_WRITE_BYTES:
-            return (
-                f"ERROR: content is {len(encoded)} bytes, over the "
-                f"{MAX_WRITE_BYTES}-byte write limit"
-            )
+    def _write_raw(self, path: str, encoded: bytes) -> str:
+        """The in-container write itself: '' on success, an 'ERROR: …' string
+        otherwise. Split out of write_file so edit_file (and, from Task 2,
+        insert_before/insert_after) can write WITHOUT paying for write_file's
+        own read-back — one read exec per edit, as before."""
+        too_big = _oversized(encoded)
+        if too_big:
+            return too_big
         rel, err = _rel(path, writing=True)
         if err:
             return err
@@ -416,22 +440,46 @@ class DockerSandbox:
                 f"ERROR: cannot write '{path}': "
                 f"{captured.output.decode('utf-8', 'replace')[:500]}"
             )
-        return f"Wrote {len(encoded)} bytes to {path}"
+        return ""
 
-    def edit_file(self, path: str, old_string: str, new_string: str) -> str:
+    def write_file(self, path: str, content: str) -> str:
+        encoded = content.encode("utf-8")
+        # Best-effort 'before' picture for the echoed diff (spec §3.1); an
+        # unreadable/missing file yields None and reads as a new file.
+        # _oversized/_rel checks are owned by _write_raw (DRY) — one extra
+        # `head` exec on an oversized/invalid-path write is acceptable.
+        old_text, _unused = self._read_raw(path, strict=True)
+        err = self._write_raw(path, encoded)
+        if err:
+            return err
+        return describe_write(path, old_text, content, len(encoded))
+
+    def _transform_file(self, path: str, transform) -> str:
+        """Read → transform → write inside the container: the same shape as
+        tools._transform_file, over the same transforms, so edit_file,
+        insert_before and insert_after are three transforms over ONE path per
+        backend (spec §3.2) and the two backends can never disagree about an
+        anchor rule or an error string. The UTF-8 refusal comes from
+        _read_raw(strict=True), which is why no `tool` name is needed here."""
         text, err = self._read_raw(path, strict=True)
         if err:
             return err
-        count = text.count(old_string)
-        if count != 1:
-            return (
-                f"ERROR: old_string occurs {count} times in {path}; it must occur "
-                f"exactly once. Include more surrounding context to make it unique."
-            )
-        result = self.write_file(path, text.replace(old_string, new_string, 1))
-        if result.startswith("ERROR:"):
+        new_text, result = transform(text)
+        if new_text is None:
             return result
-        return f"Edited {path}"
+        err = self._write_raw(path, new_text.encode("utf-8"))
+        if err:
+            return err
+        return result
+
+    def edit_file(self, path: str, old_string: str, new_string: str) -> str:
+        return self._transform_file(path, _replace_once(path, old_string, new_string))
+
+    def insert_before(self, path: str, anchor: str, text: str) -> str:
+        return self._transform_file(path, _insert_once(path, anchor, text, "before"))
+
+    def insert_after(self, path: str, anchor: str, text: str) -> str:
+        return self._transform_file(path, _insert_once(path, anchor, text, "after"))
 
     def _probe(self, attr: str, argv: list) -> bool:
         """Probe once per sandbox instance for an optional in-image tool; cached on self."""

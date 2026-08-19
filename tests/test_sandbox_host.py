@@ -89,3 +89,11 @@ def test_host_sandbox_bash_raises_budget_exceeded_over_cap(wt: Path):
     big = wt / "big.bin"
     with pytest.raises(BudgetExceeded):
         sb.bash("dd if=/dev/zero of=big2.bin bs=1M count=5 2>/dev/null")
+
+
+def test_host_sandbox_insert_before_and_after(wt: Path):
+    sb = HostSandbox(wt)
+    sb.start(wt, wt, "slug", "deadbeef")
+    assert "Inserted into" in sb.insert_after("hello.txt", "hi", "there")
+    assert "Inserted into" in sb.insert_before("hello.txt", "there", "before-there")
+    assert (wt / "hello.txt").read_text() == "hi\nbefore-there\nthere\n"

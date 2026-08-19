@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import time
 from pathlib import Path
 
 import pytest
@@ -225,3 +227,190 @@ def test_list_dir_truncates_at_max_entries(wt: Path, monkeypatch):
     assert "[listing truncated at 3 entries]" in out
     shown = [l for l in out.splitlines() if l.endswith("bytes)")]
     assert len(shown) == 3
+
+
+def test_describe_change_counts_and_diffs():
+    old = "one\ntwo\nthree\nfour\nfive\n"
+    new = "one\ntwo\nTWO AND A HALF\nthree\nfour\nfive\n"
+    out = tools.describe_change("a/b.py", old, new, verb="Edited")
+    lines = out.splitlines()
+    assert lines[0] == "Edited a/b.py: +1 -0"      # pure insert: no removal note
+    assert "--- a/a/b.py" in out and "+++ b/a/b.py" in out
+    assert "+TWO AND A HALF" in out
+
+
+def test_describe_change_reports_removed_non_blank_lines():
+    old = "keep\ndrop me\n\nkeep2\n"
+    new = "keep\nkeep2\n"
+    out = tools.describe_change("x.txt", old, new, verb="Edited")
+    # 'drop me' and the blank line go; only the non-blank one is counted
+    assert out.splitlines()[0] == "Edited x.txt: +0 -2 (removed 1 non-blank line)"
+    old2 = "a\nb\nc\n"
+    new2 = "a\nB\nC\n"
+    # a replaced non-blank line counts as removed
+    assert tools.describe_change("x.txt", old2, new2, verb="Edited").splitlines()[0] == (
+        "Edited x.txt: +2 -2 (removed 2 non-blank lines)")
+
+
+def test_describe_change_sees_a_trailing_newline_only_change():
+    # Fix item 4: splitlines() drops terminal-newline info, so "x" -> "x\n"
+    # used to report +0 -0 and no diff. splitlines(keepends=True) sees it,
+    # and the missing-newline side is rendered with git's marker line.
+    out = tools.describe_change("f.txt", "x", "x\n", verb="Edited")
+    lines = out.splitlines()
+    assert lines[0] == "Edited f.txt: +1 -1 (removed 1 non-blank line)"
+    assert "-x" in lines
+    assert "+x" in lines
+    assert r"\ No newline at end of file" in lines
+    # the marker immediately follows the content line that lacked a newline
+    assert lines[lines.index("-x") + 1] == r"\ No newline at end of file"
+
+
+def test_describe_change_form_feed_is_not_mistaken_for_a_missing_newline():
+    # Round 2 fix: splitlines(keepends=True) also splits on \v \f \x1c \x1d
+    # \x1e \x85 etc, not just "\n" -- a line containing a form feed used to
+    # get a FALSE "no newline at end of file" marker mid-diff even though the
+    # file genuinely ends in "\n". Only "\n" is a line separator now.
+    old = "a\nb\fc\n"
+    new = "a\nb\fC\n"
+    out = tools.describe_change("f.txt", old, new, verb="Edited")
+    assert r"\ No newline at end of file" not in out
+    assert "-b\fc" in out
+    assert "+b\fC" in out
+
+
+def test_describe_change_ordinary_edit_output_is_unchanged():
+    # Pin: an ordinary edit where every line (old and new) ends in a newline
+    # renders byte-for-byte the same as before the keepends=True switch.
+    old = "one\ntwo\nthree\n"
+    new = "one\nCHANGED\nthree\n"
+    out = tools.describe_change("f.py", old, new, verb="Edited")
+    assert out == (
+        "Edited f.py: +1 -1 (removed 1 non-blank line)\n"
+        "--- a/f.py\n+++ b/f.py\n@@ -1,3 +1,3 @@\n"
+        " one\n-two\n+CHANGED\n three"
+    )
+
+
+def test_describe_change_truncates_a_huge_diff():
+    old = "".join(f"line {i}\n" for i in range(200))
+    new = "".join(f"changed {i}\n" for i in range(200))
+    out = tools.describe_change("big.txt", old, new, verb="Edited")
+    body = out.split("\n", 1)[1]
+    assert len(body.splitlines()) <= tools.MAX_DIFF_LINES + 1     # + the marker line
+    assert body.splitlines()[-1].startswith("[diff truncated: ")
+    assert body.splitlines()[-1].endswith(" more lines]")
+
+
+def test_describe_change_header_counts_match_the_diff_body_with_popular_repeated_lines():
+    # >200 lines with a "popular" repeated line: with autojunk=False the header's
+    # SequenceMatcher pass treats the popular line as an ordinary match and reports
+    # far fewer +/- than unified_diff (which always uses the default autojunk=True)
+    # actually prints in the body. They must agree.
+    old_lines, new_lines = [], []
+    for i in range(250):
+        if i % 5 == 0:
+            old_lines.append(f"unique-old-{i}")
+            new_lines.append(f"unique-new-{i}")
+        else:
+            old_lines.append("popular")
+            new_lines.append("popular")
+    old = "\n".join(old_lines) + "\n"
+    new = "\n".join(new_lines) + "\n"
+    out = tools.describe_change("big.txt", old, new, verb="Edited")
+    head = out.splitlines()[0]
+    m = re.match(r"Edited big\.txt: \+(\d+) -(\d+)", head)
+    assert m, head
+    added, deleted = int(m.group(1)), int(m.group(2))
+    # With autojunk fixed (matching unified_diff's default), the popular
+    # repeated line is treated the same way in the header pass as in the
+    # diff body: both see it as junk and can't anchor a match around it, so
+    # the whole 250-line sequence reads as changed. Before the fix (header
+    # pinned to autojunk=False) the header undercounted this as +50 -50
+    # while unified_diff's body — always autojunk=True — printed 250/250:
+    # the two disagreed. They must not.
+    assert added == deleted == 250
+
+
+def test_describe_change_omits_the_diff_for_a_huge_file():
+    old = "\n".join(f"line {i}" for i in range(tools.DESCRIBE_DIFF_MAX_LINES + 1))
+    new = old + "\nextra"
+    new_line_count = len(new.splitlines())
+    start = time.monotonic()
+    out = tools.describe_change("huge.txt", old, new, verb="Edited")
+    elapsed = time.monotonic() - start
+    assert elapsed < 5, f"describe_change took {elapsed:.1f}s on a huge file"
+    assert out == f"Edited huge.txt: {new_line_count} lines (diff omitted: file too large)"
+    assert "\n" not in out
+
+
+def test_describe_write_new_file_keeps_the_byte_count():
+    assert tools.describe_write("new.txt", None, "a\nb\n", 4) == (
+        "Wrote 4 bytes to new.txt (new file, 2 lines)")
+    assert tools.describe_write("one.txt", None, "solo", 4) == (
+        "Wrote 4 bytes to one.txt (new file, 1 line)")
+
+
+def test_edit_and_write_echo_their_diff(wt: Path):
+    out = tools.edit_file(wt, "src/app.py", "return 42", "return 43")
+    assert out.startswith("Edited src/app.py: +1 -1 (removed 1 non-blank line)")
+    assert "-    return 42" in out and "+    return 43" in out
+    over = tools.write_file(wt, "src/app.py", "def main():\n    return 44\n")
+    assert over.startswith("Wrote src/app.py: ")
+    assert "+    return 44" in over
+
+
+def test_insert_text_places_whole_lines_around_the_anchor_line():
+    text = "alpha\nbeta\ngamma\n"
+    assert tools.insert_text(text, "beta", "NEW\n", "before") == "alpha\nNEW\nbeta\ngamma\n"
+    assert tools.insert_text(text, "beta", "NEW\n", "after") == "alpha\nbeta\nNEW\ngamma\n"
+    # a multi-line anchor: 'before' the first line, 'after' the last
+    assert tools.insert_text(text, "beta\ngamma", "NEW\n", "before") == (
+        "alpha\nNEW\nbeta\ngamma\n")
+    assert tools.insert_text(text, "beta\ngamma", "NEW\n", "after") == (
+        "alpha\nbeta\ngamma\nNEW\n")
+    # an anchor in the middle of a line never splits that line
+    assert tools.insert_text("x = f(1)\ny\n", "f(1", "NEW\n", "before") == (
+        "NEW\nx = f(1)\ny\n")
+
+
+def test_insert_text_adds_the_missing_newlines():
+    # insert without a trailing newline gets one
+    assert tools.insert_text("a\nb\n", "a", "NEW", "after") == "a\nNEW\nb\n"
+    # a file with no final newline gets one before the appended line
+    assert tools.insert_text("a\nb", "b", "NEW\n", "after") == "a\nb\nNEW\n"
+    # inserting before the first line needs no leading newline
+    assert tools.insert_text("a\nb\n", "a", "NEW\n", "before") == "NEW\na\nb\n"
+
+
+def test_insert_before_and_after_write_the_file_and_echo_a_diff(wt: Path):
+    (wt / "cfg.txt").write_text("alpha\nbeta\ngamma\n")
+    out = tools.insert_after(wt, "cfg.txt", "beta", "beta-plus")
+    assert out.startswith("Inserted into cfg.txt: +1 -0")
+    assert "+beta-plus" in out
+    assert (wt / "cfg.txt").read_text() == "alpha\nbeta\nbeta-plus\ngamma\n"
+    out = tools.insert_before(wt, "cfg.txt", "gamma", "pre-gamma\n")
+    assert out.startswith("Inserted into cfg.txt: +1 -0")
+    assert (wt / "cfg.txt").read_text() == "alpha\nbeta\nbeta-plus\npre-gamma\ngamma\n"
+
+
+def test_insert_requires_a_unique_anchor(wt: Path):
+    (wt / "dup.txt").write_text("aa\naa\n")
+    out = tools.insert_before(wt, "dup.txt", "aa", "x")
+    assert out.startswith("ERROR: anchor occurs 2 times in dup.txt")
+    assert "it must occur exactly once" in out
+    assert (wt / "dup.txt").read_text() == "aa\naa\n"      # nothing written
+    missing = tools.insert_after(wt, "dup.txt", "zz", "x")
+    assert missing.startswith("ERROR: anchor occurs 0 times in dup.txt")
+
+
+def test_insert_keeps_the_edit_file_guardrails(wt: Path):
+    assert tools.insert_before(wt, "../../etc/passwd", "root", "x").startswith("ERROR:")
+    assert tools.insert_before(wt, "nope.py", "x", "y").startswith("ERROR: cannot read")
+    (wt / "bin2.dat").write_bytes(b"\xff\xfe\x00\x01")
+    binary = tools.insert_after(wt, "bin2.dat", "x", "y")
+    assert binary == "ERROR: bin2.dat is not valid UTF-8 text; insert_after only works on text files"
+    # edit_file's own message is unchanged
+    (wt / "bin3.dat").write_bytes(b"\xff\xfe\x00\x01")
+    assert tools.edit_file(wt, "bin3.dat", "x", "y") == (
+        "ERROR: bin3.dat is not valid UTF-8 text; edit_file only works on text files")

@@ -1107,3 +1107,194 @@ def test_render_markdown_diff_fallback_note_is_plain_text_not_fenced():
     doc = runs.render_markdown("slug1", {}, [], diff=runs.NO_PATCH_NOTE)
     assert runs.NO_PATCH_NOTE in doc
     assert "```diff" not in doc
+
+
+def test_show_renders_stuck_on_plain_and_markdown(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "stuck1", {
+        "slug": "stuck1", "status": "stuck", "task": "grind",
+        "stuck_on": {"command": "npm test", "output": "exit code: 1\n3 failing",
+                     "repeats": 4},
+    })
+    assert runs.cmd_show(argparse.Namespace(slug="stuck1", diff=False)) == 0
+    out = capsys.readouterr().out
+    assert "stuck_on: npm test" in out
+
+    assert runs.cmd_show(argparse.Namespace(slug="stuck1", diff=False, markdown=True)) == 0
+    md = capsys.readouterr().out
+    assert "**stuck on**" in md
+    assert "npm test" in md and "3 failing" in md
+
+
+def test_show_renders_end_of_run_evidence(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "eve1", {
+        "slug": "eve1", "status": "max_turns", "task": "do it",
+        "files_changed": ["a.ts", "b.ts", "c.ts", "d.ts"],
+        "files_changed_truncated": False,
+        "last_tool_result": {"tool": "bash", "args": '{"command": "npm test"}',
+                             "result": "exit code: 1\n3 failing"},
+        "last_assistant_text": "I could not get the suite green.",
+    })
+    assert runs.cmd_show(argparse.Namespace(slug="eve1", diff=False)) == 0
+    out = capsys.readouterr().out
+    assert "files_changed: 4 (a.ts, b.ts, c.ts, ...)" in out
+
+    assert runs.cmd_show(argparse.Namespace(slug="eve1", diff=False, markdown=True)) == 0
+    md = capsys.readouterr().out
+    assert "**files changed (4)**" in md
+    assert "- `d.ts`" in md
+    assert "<details><summary>last tool result: bash(" in md
+    assert "3 failing" in md
+    assert "> I could not get the suite green." in md
+
+
+def test_summary_value_renders_an_empty_files_changed_list_as_a_dash():
+    assert runs._summary_value("files_changed", {"files_changed": []}) == "-"
+    assert runs._summary_value("files_changed", {"files_changed": ["a.ts"]}) == "1 (a.ts)"
+
+
+def test_show_renders_verify(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "ver1", {
+        "slug": "ver1", "status": "verify_failed", "task": "do it",
+        "verify": {"command": "npm run gate", "exit_code": 2,
+                   "output_tail": "exit code: 2\n2 failing", "rounds": 1, "passed": False},
+    })
+    assert runs.cmd_show(argparse.Namespace(slug="ver1", diff=False)) == 0
+    assert "verify: failed (exit 2)" in capsys.readouterr().out
+
+    assert runs.cmd_show(argparse.Namespace(slug="ver1", diff=False, markdown=True)) == 0
+    md = capsys.readouterr().out
+    assert "**verify** — failed (exit 2) after 1 round(s)" in md
+    assert "npm run gate" in md and "2 failing" in md
+
+
+def _linked_worktree(repo: Path, slug: str) -> Path:
+    wt = repo / ".worktrees" / f"dw-{slug}"
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    _git(repo, "worktree", "add", "-b", f"dirtywork/{slug}", str(wt))
+    return wt
+
+
+def test_cmd_snapshot_commits_the_worktree_on_the_run_branch(
+        tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = _linked_worktree(repo, "snap1")
+    (wt / "new.txt").write_text("work in progress\n")
+    _write_run(tmp_path / "runs", "snap1", {
+        "slug": "snap1", "status": "max_turns", "repo": str(repo),
+        "worktree": str(wt), "branch": "dirtywork/snap1", "host_pid": None,
+        "base_commit": "deadbeef", "sandbox": "none", "task": "do it", "model": "m",
+    })
+    rc = runs.cmd_snapshot(argparse.Namespace(slug="snap1"))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert out.startswith("snapshot ") and "on dirtywork/snap1" in out
+    assert "new.txt" in _git(repo, "ls-tree", "-r", "--name-only", "dirtywork/snap1").stdout
+
+    head = _git(repo, "rev-parse", "dirtywork/snap1").stdout.strip()
+    assert runs.cmd_snapshot(argparse.Namespace(slug="snap1")) == 0
+    assert "nothing to snapshot" in capsys.readouterr().out
+    assert _git(repo, "rev-parse", "dirtywork/snap1").stdout.strip() == head
+
+
+def test_cmd_snapshot_refuses_a_live_run_and_a_foreign_worktree(
+        tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = _linked_worktree(repo, "snap2")
+    (wt / "new.txt").write_text("x\n")
+    _write_run(tmp_path / "runs", "snap2", {
+        "slug": "snap2", "status": "running", "repo": str(repo),
+        "worktree": str(wt), "branch": "dirtywork/snap2", "host_pid": os.getpid(),
+        "base_commit": "deadbeef", "sandbox": "none", "task": "do it", "model": "m",
+    })
+    assert runs.cmd_snapshot(argparse.Namespace(slug="snap2")) == 2
+    err = capsys.readouterr().err
+    assert "still in progress" in err
+    assert "before snapshotting" in err   # M15: cmd_snapshot's own wording, not "resuming"
+
+    # A plain clone (a directory `.git`, not the FILE a linked worktree has)
+    # is a foreign directory dirtywork did not create — must be refused, not
+    # just "missing" (it exists and has SOME `.git`).
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _git(outside, "init")
+    (outside / "f.txt").write_text("x\n")
+    _write_run(tmp_path / "runs", "snap3", {
+        "slug": "snap3", "status": "stalled", "repo": str(repo),
+        "worktree": str(outside), "branch": "dirtywork/snap3", "host_pid": None,
+        "base_commit": "deadbeef", "sandbox": "none", "task": "do it", "model": "m",
+    })
+    assert runs.cmd_snapshot(argparse.Namespace(slug="snap3")) == 2
+    assert "not a linked worktree" in capsys.readouterr().err
+
+
+def test_cmd_snapshot_refuses_a_worktree_the_export_never_populated(
+        tmp_path, repo, monkeypatch, capsys):
+    # A `--no-checkout` worktree off a NON-empty branch: the branch has real
+    # content, but nothing was ever checked out into this worktree (the
+    # docker export never landed) — snapshot_worktree's empty-tree guard must
+    # refuse rather than commit "delete everything" onto the branch.
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    (repo / "f.txt").write_text("content\n")
+    _git(repo, "add", "f.txt")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "add f")
+    wt = repo / ".worktrees" / "dw-snap4"
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    _git(repo, "worktree", "add", "--no-checkout", "-b", "dirtywork/snap4", str(wt))
+    _write_run(tmp_path / "runs", "snap4", {
+        "slug": "snap4", "status": "sandbox_error", "repo": str(repo),
+        "worktree": str(wt), "branch": "dirtywork/snap4", "host_pid": None,
+        "base_commit": "deadbeef", "sandbox": "none", "task": "do it", "model": "m",
+    })
+    assert runs.cmd_snapshot(argparse.Namespace(slug="snap4")) == 2
+    assert "empty tree" in capsys.readouterr().err
+
+
+def test_cmd_snapshot_refuses_a_malformed_run_json_cleanly(tmp_path, monkeypatch, capsys):
+    # A run.json missing required keys (e.g. hand-edited, or from a crashed
+    # write) must not reach preflight_run_worktree's prior["worktree"]/
+    # ["repo"] indexing at all -- that raises a bare KeyError/traceback
+    # instead of a clean, exit-2 error message.
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "x1", {"slug": "x1", "status": "max_turns"})
+    rc = runs.cmd_snapshot(argparse.Namespace(slug="x1"))
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert err.startswith("error: ")
+    assert "repo" in err
+
+
+def test_cmd_snapshot_reports_skipped_non_regular_entries(
+        tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = _linked_worktree(repo, "snap5")
+    (wt / "new.txt").write_text("x\n")
+    os.mkfifo(wt / "fifo")
+    _write_run(tmp_path / "runs", "snap5", {
+        "slug": "snap5", "status": "max_turns", "repo": str(repo),
+        "worktree": str(wt), "branch": "dirtywork/snap5", "host_pid": None,
+        "base_commit": "deadbeef", "sandbox": "none", "task": "do it", "model": "m",
+    })
+    rc = runs.cmd_snapshot(argparse.Namespace(slug="snap5"))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "(1 non-regular entry skipped)" in out
+
+
+def test_cmd_snapshot_pluralizes_skipped_entries_correctly(tmp_path, repo, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    wt = _linked_worktree(repo, "snap6")
+    (wt / "new.txt").write_text("x\n")
+    os.mkfifo(wt / "fifo1")
+    os.mkfifo(wt / "fifo2")
+    _write_run(tmp_path / "runs", "snap6", {
+        "slug": "snap6", "status": "max_turns", "repo": str(repo),
+        "worktree": str(wt), "branch": "dirtywork/snap6", "host_pid": None,
+        "base_commit": "deadbeef", "sandbox": "none", "task": "do it", "model": "m",
+    })
+    rc = runs.cmd_snapshot(argparse.Namespace(slug="snap6"))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "(2 non-regular entries skipped)" in out
