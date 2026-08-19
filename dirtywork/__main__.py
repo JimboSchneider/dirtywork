@@ -430,7 +430,14 @@ def _emit_result(*, status: str, worktree: Path, branch: str, transcript_path: P
                   run_dir: Path, turns, usage: dict, final_message: str, provider: str, **extra) -> dict:
     """The one place that shapes the stdout JSON contract — both the success
     path and every failure path funnel through here so the field set can
-    never drift between them."""
+    never drift between them. Fix item 3: the six 0.8 evidence keys
+    (`stuck_on`, `files_changed`, `files_changed_truncated`,
+    `last_tool_result`, `last_assistant_text`, `verify`) are seeded with
+    their null/empty defaults BEFORE `extra` is applied, so every payload —
+    including `_fail_setup`'s and `_fail_run`'s, where `runner.run()` never
+    returned and so never had real values for them — carries the full key
+    set; the normal end-of-run path's real values (passed via `extra`) still
+    override these defaults."""
     payload = {
         "schema_version": 2,
         "status": status,
@@ -442,6 +449,12 @@ def _emit_result(*, status: str, worktree: Path, branch: str, transcript_path: P
         "final_message": final_message,
         "provider": provider,
         "run_dir": str(run_dir),
+        "stuck_on": None,
+        "files_changed": [],
+        "files_changed_truncated": False,
+        "last_tool_result": None,
+        "last_assistant_text": None,
+        "verify": None,
     }
     payload.update(extra)
     return payload

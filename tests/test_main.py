@@ -13,6 +13,49 @@ from dirtywork.sandbox.docker_cli import DockerError
 from .provider_doubles import (DictProvider, PreflightProvider, patch_provider,
                                text_body, tool_call_body)
 
+# Fix item 3: the six 0.8 evidence keys must be present -- with these null/
+# empty defaults -- on EVERY stdout payload, including the two failure paths
+# where runner.run() never returns.
+_DEFAULT_EVIDENCE = {
+    "stuck_on": None,
+    "files_changed": [],
+    "files_changed_truncated": False,
+    "last_tool_result": None,
+    "last_assistant_text": None,
+    "verify": None,
+}
+
+
+def _assert_default_evidence_keys(payload: dict) -> None:
+    for key, default in _DEFAULT_EVIDENCE.items():
+        assert key in payload, f"{key!r} missing from payload"
+        assert payload[key] == default, f"{key!r} was {payload[key]!r}, expected {default!r}"
+
+
+def test_emit_result_seeds_the_six_evidence_keys_with_defaults():
+    import dirtywork.__main__ as m
+    payload = m._emit_result(
+        status="sandbox_error", worktree=Path("/wt"), branch="b",
+        transcript_path=Path("/t.jsonl"), run_dir=Path("/rd"), turns=None,
+        usage={}, final_message="boom", provider="openai",
+    )
+    _assert_default_evidence_keys(payload)
+    # extras still override the defaults (order matters: seed, then update)
+    payload2 = m._emit_result(
+        status="completed", worktree=Path("/wt"), branch="b",
+        transcript_path=Path("/t.jsonl"), run_dir=Path("/rd"), turns=1,
+        usage={}, final_message="ok", provider="openai",
+        stuck_on={"command": "x"}, files_changed=["a.py"],
+        files_changed_truncated=True, last_tool_result={"tool": "bash"},
+        last_assistant_text="done", verify={"passed": True},
+    )
+    assert payload2["stuck_on"] == {"command": "x"}
+    assert payload2["files_changed"] == ["a.py"]
+    assert payload2["files_changed_truncated"] is True
+    assert payload2["last_tool_result"] == {"tool": "bash"}
+    assert payload2["last_assistant_text"] == "done"
+    assert payload2["verify"] == {"passed": True}
+
 
 def test_main_docker_preflight_failure_exits_2_with_hint(tmp_path, monkeypatch, capsys):
     import subprocess
@@ -460,6 +503,8 @@ def test_main_docker_start_failure_is_sandbox_error_exit_1(tmp_path, monkeypatch
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "sandbox_error"
     assert "git init failed" in payload["final_message"]
+    assert payload["turns"] is None
+    _assert_default_evidence_keys(payload)  # fix item 3: _fail_setup path
     run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
     assert run_json["status"] == "sandbox_error"
 
@@ -942,6 +987,8 @@ def test_transcript_construction_failure_still_prints_json(tmp_path, monkeypatch
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "model_error"
     assert "disk unavailable" in payload["final_message"]
+    assert payload["turns"] is None
+    _assert_default_evidence_keys(payload)  # fix item 3: _fail_run path
 
 
 def test_load_repo_context_uses_worktree_not_caller_checkout(tmp_path, monkeypatch):
@@ -1003,6 +1050,8 @@ def test_llm_error_during_run_prints_model_error_json(tmp_path, monkeypatch, cap
     payload = json.loads(out)
     assert payload["status"] == "model_error"
     assert "worktree" in payload
+    assert payload["turns"] is None
+    _assert_default_evidence_keys(payload)  # fix item 3: _fail_run path (LLMError)
 
 
 def test_run_start_has_all_provenance_fields(tmp_path, monkeypatch):

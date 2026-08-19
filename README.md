@@ -728,8 +728,10 @@ printed to stdout (nothing else goes to stdout):
 
 The last six keys are 0.8 additions (`stuck_on`, `files_changed`,
 `files_changed_truncated`, `last_tool_result`, `last_assistant_text`,
-`verify`). Every one of them is present on every normal end-of-run payload:
-`null` when it does not apply, `[]`/`false` for the list and its flag.
+`verify`). Every one of them is present on every payload — `null` when it
+does not apply, `[]`/`false` for the list and its flag — including the two
+paths where `runner.run()` never returns (see below), where they carry those
+same null/empty defaults rather than being omitted.
 
 `status` is one of: `completed`, `max_turns`, `timeout`, `stalled`, `stuck`,
 `verify_failed`, `context_exhausted`, `model_error`, `interrupted`,
@@ -744,21 +746,27 @@ salvage.
 `base_commit` and `provider` (`"openai"` or `"anthropic"`) are present on
 every post-preflight payload. `resumed_from` is
 the slug of the run this one continued, or `null` if this was a fresh run.
-`finalize_error`, `watchdog_violation`, `watchdog_violation_kind`, `stuck_on`,
-`files_changed`, `files_changed_truncated`, `last_tool_result` and
-`last_assistant_text` are added on the normal
-end-of-run path — i.e. whenever `runner.run()` returns a result, `completed`
-or not — normally `null` (`[]`/`false` for the two list/flag fields); see
-`run_end` below for what each means. The last four are there so a run that
-ends with an empty `final_message` is still triageable without opening the
-transcript: what it changed, what it last ran and what it last said. On a
-`completed` run they are just as useful — "the last thing the worker checked
-failed, and it called `finish` anyway" reads straight off `last_tool_result`.
+`finalize_error`, `watchdog_violation` and `watchdog_violation_kind` are
+added on the normal end-of-run path — i.e. whenever `runner.run()` returns a
+result, `completed` or not — normally `null`; see `run_end` below for what
+each means. `stuck_on`, `files_changed`, `files_changed_truncated`,
+`last_tool_result`, `last_assistant_text` and `verify` are present on
+**every** payload (`null`/`[]`/`false` when they do not apply) — including
+the two paths below where `runner.run()` never returns, where they carry
+those same defaults rather than being omitted. The last four of these six
+are there so a run that ends with an empty `final_message` is still
+triageable without opening the transcript: what it changed, what it last ran
+and what it last said. On a `completed` run they are just as useful — "the
+last thing the worker checked failed, and it called `finish` anyway" reads
+straight off `last_tool_result`.
 The two
 paths where `runner.run()` never returns (sandbox setup fails before it
 starts, or an exception escapes the loop and is caught in `main()`) report
-`base_commit` and `resumed_from` only, plus `export_status` too if a docker `finalize()` ran
-during that exception recovery.
+`base_commit` and `resumed_from`, the six 0.8 evidence keys above (as their
+null/empty defaults), plus `export_status` too if a docker `finalize()` ran
+during that exception recovery — `finalize_error`, `watchdog_violation` and
+`watchdog_violation_kind` are not present on these two paths, since they
+never got far enough to know.
 
 **Exit codes:**
 
