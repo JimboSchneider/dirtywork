@@ -1325,3 +1325,29 @@ def test_show_renders_context_window_with_its_source(tmp_path, monkeypatch, caps
     assert runs.cmd_show(argparse.Namespace(slug="ctx1", diff=False, markdown=True)) == 0
     md = capsys.readouterr().out
     assert "- **context_window:** 65536 (provider:openai:server)" in md
+
+
+def test_timed_out_is_its_own_outcome_class_in_both_views(tmp_path, monkeypatch, capsys):
+    from dirtywork.tools import timeout_result
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    run_dir = _write_run(tmp_path / "runs", "to1", {
+        "slug": "to1", "status": "completed", "task": "t", "timeouts": 2,
+    })
+    (run_dir / "transcript.jsonl").write_text("\n".join(json.dumps(e) for e in [
+        {"ts": "T", "event": "tool_result", "tool": "bash",
+         "args": '{"command": "sleep 999"}', "result": timeout_result(120),
+         "timed_out": True},
+        {"ts": "T", "event": "tool_result", "tool": "bash",
+         "args": '{"command": "false"}', "result": "ERROR: bash failed: boom"},
+    ]) + "\n")
+
+    assert runs.cmd_show(argparse.Namespace(slug="to1", diff=False)) == 0
+    plain = capsys.readouterr().out
+    assert "[timed out]" in plain
+    assert "[ERROR]" in plain             # the ordinary failure keeps its class
+    assert "timeouts: 2" in plain
+
+    assert runs.cmd_show(argparse.Namespace(slug="to1", diff=False, markdown=True)) == 0
+    md = capsys.readouterr().out
+    assert "[timed out]" in md
+    assert "- **timeouts:** 2" in md

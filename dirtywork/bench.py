@@ -43,7 +43,9 @@ from .sandbox import docker_args, docker_cli
 
 BENCH_REPOS = Path(__file__).resolve().parent.parent / "bench" / "repos"
 BENCH_HOME = rundir.BENCH_HOME
-NUDGE_KINDS = ("stall", "empty", "truncated", "text_tool_call")
+# Order is the order the NUDGES column prints in; the plain summary's legend
+# line spells it out and must stay in step.
+NUDGE_KINDS = ("stall", "empty", "truncated", "text_tool_call", "timeout")
 ACCEPTANCE_MEMORY = "2g"
 ACCEPTANCE_CPUS = "2"
 ACCEPTANCE_PIDS = 256
@@ -224,13 +226,22 @@ def _abort_kind(final_message):
     return "mixed" if kind == "tool" else None
 
 
-def _harness_failures(counts: dict, status, final_message) -> dict:
+def _harness_failures(counts: dict, status, final_message, timeouts=0) -> dict:
     """The harness-failure classes the scoreboard reports. `empty_reply` is the
-    FailureTracker kind: the runner records exactly one per non-stall nudge."""
-    non_stall = sum(counts[f"nudge_{kind}"] for kind in NUDGE_KINDS if kind != "stall")
+    FailureTracker kind: the runner records exactly one per non-stall nudge --
+    EXCEPT 0.9's `timeout` nudge, which is not a FailureTracker event at all
+    (a timed-out command is not a model mistake), so it is excluded here too and
+    gets its own class.
+
+    `timeouts` is the RUNNER's own count, taken from the payload by the caller
+    and never re-derived from the nudge events: a turn with two timed-out
+    commands emits ONE nudge and counts TWO timeouts."""
+    non_stall = sum(counts[f"nudge_{kind}"] for kind in NUDGE_KINDS
+                    if kind not in ("stall", "timeout"))
     failures = {f"nudge_{kind}": counts[f"nudge_{kind}"] for kind in NUDGE_KINDS}
     failures["nudge_other"] = counts["nudge_other"]
     failures["empty_reply"] = non_stall
+    failures["timeouts"] = int(timeouts or 0)
     for name in ("stalled", "max_turns", "sandbox_error"):
         failures[name] = 1 if status == name else 0
     failures["abort_kind"] = _abort_kind(final_message)
@@ -314,7 +325,8 @@ def run_one_bench_case(model: str, task: str, repeat: int, *, provider, base_url
         "guardrail_blocks": counts["guardrail_block"],
         "sandbox_resets": counts["sandbox_reset"],
         "diff_stat": run_json.get("diff_stat"),
-        "harness": _harness_failures(counts, status, payload.get("final_message")),
+        "harness": _harness_failures(counts, status, payload.get("final_message"),
+                                     payload.get("timeouts", 0)),
         "verdict": run_json.get("verdict"),
         "review_seconds": run_json.get("review_seconds"),
     }
@@ -385,6 +397,8 @@ def _failure_cell(harness: dict) -> str:
     parts = [name for name in ("stalled", "max_turns", "sandbox_error") if harness.get(name)]
     if harness.get("empty_reply"):
         parts.append(f"empty_reply={harness['empty_reply']}")
+    if harness.get("timeouts"):
+        parts.append(f"timeouts={harness['timeouts']}")
     if harness.get("abort_kind"):
         parts.append(f"abort={harness['abort_kind']}")
     return ",".join(parts) if parts else "-"
@@ -456,6 +470,9 @@ def _summarize_model(rows: list, verdicts: list, review_seconds: list) -> dict:
         "nudges": sum((h.get(f"nudge_{kind}") or 0) for h in harness_dicts for kind in NUDGE_KINDS),
         "stalled": sum(1 for h in harness_dicts if h.get("stalled")),
         "max_turns": sum(1 for h in harness_dicts if h.get("max_turns")),
+        # A COUNT, not a run tally like stalled/max_turns: one run can time out
+        # many commands, and that is the number worth comparing between sweeps.
+        "timeouts": sum((h.get("timeouts") or 0) for h in harness_dicts),
     }
 
 
@@ -559,9 +576,9 @@ def _stat(summary, key: str):
 
 
 def _harness_cell(summary) -> str:
-    """nudges/stalled/max_turns for one side, compact. MISSING when none of
-    this side's rows carried a harness dict (bench_error rows only -- P2-2);
-    suffixed with `*` when only SOME of them did, so partial knowledge is
+    """nudges/stalled/max_turns/timeouts for one side, compact. MISSING when
+    none of this side's rows carried a harness dict (bench_error rows only --
+    P2-2); suffixed with `*` when only SOME of them did, so partial knowledge is
     visible instead of silently reading like a clean zero."""
     if summary is None or summary["harness_rows"] == 0:
         return MISSING
@@ -572,7 +589,8 @@ def _harness_cell(summary) -> str:
 
 
 def _harness_counts(summary) -> tuple:
-    return (summary["nudges"], summary["stalled"], summary["max_turns"])
+    return (summary["nudges"], summary["stalled"], summary["max_turns"],
+            summary["timeouts"])
 
 
 def _harness_known(summary) -> bool:
@@ -689,7 +707,7 @@ def _print_comparison(path_a: Path, rows_a: list, path_b: Path, rows_b: list) ->
     print("cells: A -> B (Δ); Δ = B - A (component-wise for count cells); "
           f"'{MISSING}' = no rows for that key in that file; "
           "outcomes = pass/fail/gamed/skipped")
-    print("harness: nudges/stalled/max_turns")
+    print("harness: nudges/stalled/max_turns/timeouts")
     print()
     print(format_table(COMPARE_COLUMNS, _compare_rows(agg_a, agg_b)))
     footnote = _harness_partial_footnote(agg_a, agg_b)
@@ -732,7 +750,9 @@ def cmd_summarize(args) -> int:
             reviews.setdefault(model, []).append(review)
 
     if detail:
-        print("nudges: stall/empty/truncated/text_tool_call")
+        print("nudges: stall/empty/truncated/text_tool_call/timeout")
+        print("failures: harness classes for the run; timeouts=N counts timed-out bash "
+              "calls (excluded from empty_reply, which is the FailureTracker kind)")
         print(format_table(DETAIL_COLUMNS, detail))
         print()
 

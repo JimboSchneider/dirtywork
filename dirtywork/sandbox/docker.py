@@ -24,6 +24,7 @@ from ..tools import (
     _number_lines,
     _replace_once,
     describe_write,
+    timeout_result,
 )
 from . import SandboxError
 from . import docker_args
@@ -577,8 +578,14 @@ class DockerSandbox:
         argv = docker_args.exec_argv(self.container, cmd)
         try:
             captured = self._run(argv, timeout=timeout + 10)
-        except docker_cli.DockerError:
-            return f"ERROR: grep timed out after {timeout}s — narrow the pattern or path."
+        except docker_cli.DockerError as e:
+            # Spec §4.2: the same discrimination as bash below. A grep timeout
+            # keeps its own (unchanged) wording and does NOT count toward
+            # `timeouts` or the `timeout` nudge -- those are about commands the
+            # WORKER ran, and grep is the harness searching on its behalf.
+            if e.timed_out:
+                return f"ERROR: grep timed out after {timeout}s — narrow the pattern or path."
+            return f"ERROR: grep failed: {e}"
         if captured.returncode not in (0, 1):
             return f"ERROR: grep failed: {captured.output.decode('utf-8', 'replace')[:500]}"
         text = captured.output.decode("utf-8", errors="replace")
@@ -779,10 +786,16 @@ class DockerSandbox:
             self.watchdog.note_bash_start()
         try:
             captured = self._run(argv, timeout=timeout + 10)
-        except docker_cli.DockerError:
+        except docker_cli.DockerError as e:
             if self.watchdog is not None:
                 self.watchdog.note_bash_end()
-            result = _cap(f"ERROR: command timed out after {timeout}s.", cap=MAX_BASH_CHARS)
+            # Spec §4.2: only a REAL expired timeout renders as the canonical
+            # timeout text. Any other DockerError (a killed container, an exec
+            # that could not start) gets the host's own non-timeout wording, so
+            # an ordinary failure is never read as "it might still be running"
+            # -- and never counts as a timeout downstream.
+            result = (timeout_result(timeout) if e.timed_out
+                      else f"ERROR: bash failed: {e}")
             self._after_bash()
             return result
         if self.watchdog is not None:

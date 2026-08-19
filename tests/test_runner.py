@@ -422,7 +422,8 @@ def test_finalize_merges_into_run_end_and_result_extra(parts):
     transcript.close()
     assert result.extra == {"stuck_on": None, "last_tool_result": None,
                             "last_assistant_text": "done", "verify": None,
-                            "trimmed_turns": 0, "context_window_source": None,
+                            "trimmed_turns": 0, "timeouts": 0,
+                            "context_window_source": None,
                             "diff_stat": " 1 file changed"}
     events = _events(tmp)
     run_end = next(e for e in events if e["event"] == "run_end")
@@ -1304,3 +1305,121 @@ def test_flag_and_env_still_beat_the_server_report():
     provider = _ServerProvider(131072)
     assert resolve_context_window("m", 8000, None, provider) == (8000, "flag")
     assert resolve_context_window("m", None, "9000", provider) == (9000, "env")
+
+
+class _TimeoutSandbox:
+    """A sandbox whose bash always times out (or never does), with the canonical
+    text the real backends produce. Only `bash` is needed: the registry calls
+    exactly the method the tool dispatches to."""
+
+    def __init__(self, timing_out=True):
+        self.timing_out = timing_out
+        self.commands = []
+
+    def bash(self, command, timeout=120):
+        self.commands.append(command)
+        if self.timing_out:
+            from dirtywork.tools import timeout_result
+            return timeout_result(timeout)
+        return "exit code: 0\nfine"
+
+
+def _bash_call(call_id, command="sleep 999"):
+    return _call(call_id, "bash", {"command": command})
+
+
+def test_timed_out_is_flagged_on_the_event_and_absent_otherwise(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_bash_call("b1")]),
+        _resp(content="done"),
+    ])
+    r = Runner(provider, registry, _TimeoutSandbox(), transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    events = [e for e in _events(tmp) if e["event"] == "tool_result"]
+    assert events[0]["timed_out"] is True
+    assert result.extra["timeouts"] == 1
+
+    # and a normal bash result carries no such key at all (sparse, additive)
+    transcript2 = Transcript(tmp / "t2.jsonl")
+    registry2 = default_registry(transcript=transcript2)
+    provider2 = FakeProvider([_resp(tool_calls=[_bash_call("b2")]), _resp(content="ok")])
+    r2 = Runner(provider2, registry2, _TimeoutSandbox(timing_out=False), transcript2,
+                model="m")
+    result2 = r2.run("s", "t")
+    transcript2.close()
+    events2 = [json.loads(l) for l in (tmp / "t2.jsonl").read_text().splitlines()]
+    tool_events = [e for e in events2 if e["event"] == "tool_result"]
+    assert "timed_out" not in tool_events[0]
+    assert result2.extra["timeouts"] == 0
+
+
+def test_one_timeout_nudge_per_turn_even_with_two_timeouts(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_bash_call("b1", "sleep 1"), _bash_call("b2", "sleep 2")]),
+        _resp(content="done"),
+    ])
+    r = Runner(provider, registry, _TimeoutSandbox(), transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    nudges = [e for e in _events(tmp) if e["event"] == "nudge"]
+    assert [n["kind"] for n in nudges] == ["timeout"]
+    assert nudges[0]["turn"] == 1
+    assert result.extra["timeouts"] == 2        # the COUNT is per call, not per turn
+    # the nudge text reached the model as the next user message
+    second_request = provider.requests[1]
+    assert second_request[-1]["role"] == "user"
+    assert second_request[-1]["content"] == (
+        "A command timed out and did not finish; its result is unknown. Re-run it "
+        "with a larger timeout (up to 600 seconds) or split it into smaller "
+        "commands. Do not report it as passed.")
+
+
+def test_timeout_nudge_merges_with_the_stall_nudge(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    # stall_turns=2 nudges at turn 1 (2 // 2); the same turn also timed out.
+    provider = FakeProvider([_resp(tool_calls=[_bash_call("b1")]),
+                             _resp(content="done")])
+    r = Runner(provider, registry, _TimeoutSandbox(), transcript, model="m",
+               stall_turns=2)
+    r.run("s", "t")
+    transcript.close()
+    kinds = [e["kind"] for e in _events(tmp) if e["event"] == "nudge"]
+    # Both events are written; their ORDER follows the code path (check_progress
+    # runs first, because it may end the run), while the merged MESSAGE leads
+    # with the timeout, which is the more actionable of the two.
+    assert sorted(kinds) == ["stall", "timeout"]
+    text = provider.requests[1][-1]["content"]
+    assert text.startswith("A command timed out and did not finish;")
+    assert "No progress in the last 1 turns" in text
+    assert "\n\n" in text                      # merged through _join_nudges
+
+
+def test_no_timeout_nudge_when_the_turn_ends_the_run(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_bash_call("b1"),
+                          _call("f1", "finish", {"summary": "done anyway"})]),
+    ])
+    r = Runner(provider, registry, _TimeoutSandbox(), transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert [e for e in _events(tmp) if e["event"] == "nudge"] == []
+    assert result.extra["timeouts"] == 1       # the COUNT is unaffected by finishing
+
+
+def test_a_verify_timeout_is_not_counted(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(content="all done")])
+    box = _TimeoutSandbox()
+    r = Runner(provider, registry, box, transcript, model="m",
+               verify="npm test", verify_rounds=0)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "verify_failed"
+    assert box.commands == ["npm test"]        # it DID run, and it DID time out
+    assert result.extra["timeouts"] == 0       # spec §4.3: worker tool calls only
+    assert [e for e in _events(tmp) if e["event"] == "nudge"] == []

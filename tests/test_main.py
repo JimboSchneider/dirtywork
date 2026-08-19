@@ -24,6 +24,7 @@ _DEFAULT_EVIDENCE = {
     "last_assistant_text": None,
     "verify": None,
     "trimmed_turns": 0,
+    "timeouts": 0,
 }
 
 
@@ -2063,6 +2064,19 @@ def test_trimmed_turns_lands_on_the_payload_run_end_and_run_json(tmp_path, monke
               (run_dir / "transcript.jsonl").read_text().splitlines()]
     end = [e for e in events if e["event"] == "run_end"][-1]
     assert end["trimmed_turns"] == 0
+
+
+def test_timeouts_land_on_the_payload_run_end_and_run_json(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "t"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["timeouts"] == 0
+    run_dir = Path(payload["run_dir"])
+    assert json.loads((run_dir / "run.json").read_text())["timeouts"] == 0
+    events = [json.loads(line) for line in
+              (run_dir / "transcript.jsonl").read_text().splitlines()]
+    assert [e for e in events if e["event"] == "run_end"][-1]["timeouts"] == 0
 
 
 def test_task_size_warning_fires_for_a_long_brief(tmp_path, monkeypatch, capsys):

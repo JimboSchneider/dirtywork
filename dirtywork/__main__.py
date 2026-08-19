@@ -473,7 +473,12 @@ def _emit_result(*, status: str, worktree: Path, branch: str, transcript_path: P
     including `_fail_setup`'s and `_fail_run`'s, where `runner.run()` never
     returned and so never had real values for them — carries the full key
     set; the normal end-of-run path's real values (passed via `extra`) still
-    override these defaults."""
+    override these defaults.
+
+    0.9 seeds three more the same way (spec §6): `trimmed_turns` and `timeouts`
+    (ints, default 0) and `context_window_source` (string). Both failure paths
+    pass real values for all three through `_contract_fields`, so the seeds are
+    only a backstop against a future caller that forgets."""
     payload = {
         "schema_version": 2,
         "status": status,
@@ -492,6 +497,7 @@ def _emit_result(*, status: str, worktree: Path, branch: str, transcript_path: P
         "last_assistant_text": None,
         "verify": None,
         "trimmed_turns": 0,
+        "timeouts": 0,
         "context_window_source": None,
     }
     payload.update(extra)
@@ -510,6 +516,7 @@ def _contract_fields(extra: dict, ctx: RunContext) -> dict:
     exist on -- a context-window preflight failure exits 2 with no payload at
     all, as it did before 0.9."""
     return {"trimmed_turns": extra.get("trimmed_turns", 0),
+            "timeouts": extra.get("timeouts", 0),
             "context_window_source": ctx.context_window_source}
 
 

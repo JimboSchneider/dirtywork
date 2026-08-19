@@ -540,6 +540,31 @@ MAX_BASH_CHARS = 10000
 # pipe) but keep only the first MAX_BASH_CAPTURE_BYTES.
 MAX_BASH_CAPTURE_BYTES = 1024 * 1024
 
+# Spec §4.1: ONE canonical timed-out-command result, identical on both backends.
+# TIMEOUT_PREFIX is the predicate everything downstream keys on -- the
+# tool_result flag, the `timeout` nudge, the run's `timeouts` counter,
+# `runs show`'s outcome class and the bench scoreboard -- so there is exactly
+# one string in this codebase to keep in step.
+TIMEOUT_PREFIX = "ERROR: command timed out after "
+TIMEOUT_TEXT = (TIMEOUT_PREFIX + "{timeout}s — it did not finish and its result is "
+                "unknown. Re-run it with a larger timeout (up to 600) or split it "
+                "into smaller commands; do not report it as passed.")
+
+
+def timeout_result(timeout: int) -> str:
+    """The canonical result for a command that hit its timeout. No partial
+    output is appended: the host CAN produce a tail (it captured one) and docker
+    cannot, and parity wins -- a tail is exactly what a small model reads as
+    "the command's result" when the truth is that the command never finished."""
+    return TIMEOUT_TEXT.format(timeout=timeout)
+
+
+def is_timeout_result(text) -> bool:
+    """True for a bash result produced by timeout_result(). The ONE predicate --
+    never re-derive this from a substring search somewhere else, or the two
+    will drift the first time the wording changes."""
+    return isinstance(text, str) and text.startswith(TIMEOUT_PREFIX)
+
 
 def bash(worktree: Path, command: str, timeout: int = 120) -> str:
     reason = check_bash_command(command, worktree)
@@ -558,9 +583,9 @@ def bash(worktree: Path, command: str, timeout: int = 120) -> str:
     out = captured.output.decode("utf-8", errors="replace").strip()
     note = " — bash output capped" if captured.truncated else ""
     if captured.timed_out:
-        tail = f"\n{out}" if out else ""
-        return _cap(f"ERROR: command timed out after {timeout}s.{tail}",
-                    cap=MAX_BASH_CHARS, note=note)
+        # Spec §4.1: no partial output, and no cap -- the canonical text is a
+        # couple of hundred characters, far under MAX_BASH_CHARS.
+        return timeout_result(timeout)
     if captured.returncode is None and not captured.timed_out:
         return _cap(f"ERROR: bash failed: {captured.output.decode('utf-8', 'replace').strip()}", cap=MAX_BASH_CHARS, note=note)
     return _cap(f"exit code: {captured.returncode}\n{out}", cap=MAX_BASH_CHARS, note=note)

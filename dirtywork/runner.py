@@ -11,6 +11,7 @@ from .budget import BudgetExceeded
 from .llm import LLMTimeout, MalformedResponse
 from .providers import assistant_message, tool_message
 from .sandbox import SandboxError
+from .tools import is_timeout_result
 
 MAX_ASSISTANT_TEXT_CHARS = 64_000
 # Spec §2: end-of-run evidence caps. These match the transcript's own preview
@@ -149,6 +150,13 @@ VERIFY_FEEDBACK = (
 STALL_NUDGE = ("No progress in the last {n} turns: no file changed and no command produced "
                "new output. If the task is complete, commit (if asked) and call "
                "finish(summary=...); otherwise change your approach.")
+# Spec §4.3: a timed-out command is not a model mistake -- it never reaches
+# FailureTracker and it RESETS the consecutive-failure streak like any other
+# non-failing execution. This exists only so the model is told, in words, that
+# the result it just got is not a result.
+TIMEOUT_NUDGE = ("A command timed out and did not finish; its result is unknown. Re-run it "
+                 "with a larger timeout (up to 600 seconds) or split it into smaller "
+                 "commands. Do not report it as passed.")
 _MUTATING_TOOLS = ("write_file", "edit_file", "apply_edits", "insert_before", "insert_after")
 # Tokens that change between otherwise-identical runs of the same command:
 # durations ("in 24.51s", "0.39s", "12 ms"), clock times / ISO timestamps,
@@ -443,6 +451,7 @@ class Runner:
         usage = {"prompt_tokens": 0, "completion_tokens": 0}
         turns = 0
         trimmed_turns = 0       # spec §2.2: turns on which trimming happened
+        timeouts = 0            # spec §4.3: worker bash calls that timed out
         failures = FailureTracker()
         progress = ProgressTracker(self.stall_turns)
         repeats = RepeatTracker(self.stuck_repeats)
@@ -476,6 +485,7 @@ class Runner:
                            "last_assistant_text": last_assistant_text,
                            "verify": verify_state,
                            "trimmed_turns": trimmed_turns,
+                           "timeouts": timeouts,
                            "context_window_source": self.context_window_source}
             finalize_error = None
             if self.finalize is not None:
@@ -659,6 +669,7 @@ class Runner:
                     return finish("model_error", abort_reason)
 
                 pending_finish = None
+                timed_out_this_turn = False   # spec §4.3: at most ONE nudge per turn
                 for tc in tool_calls:
                     name = tc.name
                     raw_args = tc.raw_arguments or "{}"
@@ -695,13 +706,23 @@ class Runner:
                         except SandboxError as e:
                             return finish("sandbox_error", str(e))
                     progress.note_call(name, self.registry.canonical_args(name, args), result)
+                    timed_out_fields = {}
                     if name == "bash":
                         command = args.get("command") if isinstance(args, dict) else None
                         if repeats.note_bash(command, result) == "stuck":
                             stuck = repeats.stuck_on()
+                        if is_timeout_result(result):
+                            # Spec §4.3: worker bash TOOL CALLS only. The
+                            # --verify command goes through sandbox.bash
+                            # directly, is never a tool call and is never
+                            # transcribed here, so it can never reach this.
+                            timeouts += 1
+                            timed_out_this_turn = True
+                            timed_out_fields["timed_out"] = True
                     self.transcript.write("tool_result", tool=name,
                                           args=raw_args[:500],
-                                          result=self.registry.transcript_preview(name, result))
+                                          result=self.registry.transcript_preview(name, result),
+                                          **timed_out_fields)
                     if name != FINISH_TOOL:
                         note_last_tool_result(name, raw_args, result)
                     messages.append(tool_message(tc.id, result))
@@ -733,7 +754,15 @@ class Runner:
                     malformed_text = (f"{malformed_count} of your tool calls were malformed "
                                       "(unaddressable: no usable id/name) and were "
                                       "discarded. Re-issue them as valid tool calls.")
-                nudge_text = _join_nudges(malformed_text, stall_text)
+                timeout_text = None
+                if timed_out_this_turn:
+                    # Emitted HERE, past the finish/stuck/abort exits above, so a
+                    # turn that ENDS the run never writes a nudge -- the same
+                    # place and the same reason as the stall nudge. Once per
+                    # turn, however many commands timed out in it.
+                    self.transcript.write("nudge", kind="timeout", turn=turns)
+                    timeout_text = TIMEOUT_NUDGE
+                nudge_text = _join_nudges(malformed_text, timeout_text, stall_text)
                 if nudge_text:
                     messages.append({"role": "user", "content": nudge_text})
         except KeyboardInterrupt:

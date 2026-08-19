@@ -74,6 +74,38 @@ the ordinary `--max-turns`/`--timeout` budget (the command may run N+1 times);
 ships — see the callout under *Review a run*. `dirtywork resume` inherits the
 verify command from the run it continues.
 
+#### The bash tool
+
+`bash(command, timeout=120)` runs one shell command in the worktree. The
+per-call `timeout` is the model's to set (default 120 s, maximum 600 s, clamped;
+`--timeout` is the separate whole-run wall clock). A command that hits its
+timeout is killed (host mode kills its whole process group; in docker mode the
+`docker exec` is abandoned, which is why the result is *unknown*, not *failed*)
+and returns exactly:
+
+    ERROR: command timed out after 120s — it did not finish and its result is unknown. Re-run it with a larger timeout (up to 600) or split it into smaller commands; do not report it as passed.
+
+**No partial output is appended**, deliberately: the host backend could produce
+a tail and the container backend cannot, and a tail is exactly what a small
+model reads as "the command's result" when the command never finished. The same
+turn also gets a one-line nudge telling the worker in words that the result is
+unknown and must not be reported as a pass, the `tool_result` transcript event
+carries `timed_out: true`, and the run's `timeouts` counter rises — visible on
+the stdout JSON, in `run_end`, in `run.json`, in `dirtywork runs show`
+(where the call renders `[timed out]` rather than `[ERROR]`), and in
+`dirtywork bench summarize` (a `timeouts=N` token in the FAILURES column, and
+the fourth number of the `--compare` harness cell).
+
+A timeout is **not** counted as a model failure: it does not feed the
+consecutive-failure abort, and it resets that streak like any other tool call
+that executed. It does count toward `--stuck-repeats` — the same command timing
+out four times in a row ends the run `stuck`, which is the honest outcome.
+
+In docker mode, only a real expired timeout renders that way; any other docker
+failure (a killed container, an exec that could not start) returns
+`ERROR: bash failed: …` instead, so an ordinary failure is never read as "it
+might still be running".
+
 ### Resuming a run
 
 A run that ended early (`max_turns`, `stalled`, `timeout`, `interrupted`, a

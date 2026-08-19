@@ -70,6 +70,7 @@ One per tool call executed, plus one per malformed tool-call entry discarded.
 | `tool` | ✓ | ✓ | string | tool name — one of `read_file`, `write_file`, `edit_file`, `apply_edits`, `insert_before`, `insert_after`, `list_dir`, `grep`, `bash`, `finish` (`insert_before`/`insert_after` are v2, added in 0.8; `apply_edits` in 0.9); `""` for a discarded malformed entry |
 | `args` | ✓ | ✓ | string | the raw JSON argument string, capped at 500 chars; `""` for a discarded malformed entry |
 | `result` | ✓ | ✓ | string | the tool's result, trimmed per the tool's `Caps.transcript` setting. All built-in tools declare `preview`, which caps the record at 2000 chars; the registry also supports `full` and `none`, unused by any shipped tool. Since 0.8 a successful `edit_file`/`write_file` result is `<Verb> <path>: +A -D [(removed N non-blank lines)]` followed by a unified diff (capped at 40 lines / 3000 chars, then `[diff truncated: N more lines]`); `write_file` on a new file returns `Wrote N bytes to <path> (new file, M lines)` with no diff. 0.9's `apply_edits` uses the same shape with the verb `Applied N edits to` (`Applied 1 edit to` for a single edit). When either side of the edit exceeds 20000 lines, the diff itself is never computed (it is quadratic-ish on files with popular repeated lines) — the result is just `<Verb> <path>: <N> lines (diff omitted: file too large)`. An in-place tool whose RESULT would exceed the 5 MB write limit returns `ERROR: result is <n> bytes, over the <limit>-byte write limit; nothing was written` on both backends (0.9) |
+| `timed_out` | | ✓ | boolean | 0.9: `true` on a `bash` tool result whose command hit its timeout. **Sparse** — the key is absent, not `false`, on every other result, including a `grep` timeout (a different wording and a different meaning: the harness's search, not the worker's command) and the `--verify` command (not a tool call, so it produces no `tool_result` at all; its outcome is in `verify`) |
 
 A `finish(summary=…)` call is an ordinary tool call: it appears in the
 `assistant` event's `tool_calls` and produces a `tool_result` whose `result` is
@@ -85,7 +86,7 @@ messages), but each is recorded here separately.
 
 | Field | v1 | v2 | Type | Notes |
 |---|---|---|---|---|
-| `kind` | | ✓ | string | `truncated` (the reply hit the token limit), `empty` (no tool call and no answer), `text_tool_call` (a tool call written as prose instead of through the tools API), `stall` (no progress for `--stall-turns // 2` turns) |
+| `kind` | | ✓ | string | `truncated` (the reply hit the token limit), `empty` (no tool call and no answer), `text_tool_call` (a tool call written as prose instead of through the tools API), `stall` (no progress for `--stall-turns // 2` turns), `timeout` (0.9: at least one `bash` command timed out on this turn — exactly one per turn however many timed out, and only on a turn that continues; a timeout is not a `FailureTracker` event) |
 | `turn` | | ✓ | integer | 1-based turn number the nudge was issued on |
 
 ### `guardrail_block`
@@ -154,6 +155,7 @@ run-level fields that are known even when the agent loop never started).
 | `verify` | | ✓ | object \| null | 0.8: `{command, exit_code, output_tail, rounds, passed}` for the LAST `--verify` execution (`output_tail` capped at 4000 chars); `null` when `--verify` was not given |
 | `trimmed_turns` | | ✓ | integer | **always** — 0.9: the number of turns on which the runner had to replace at least one tool result with `[result trimmed — re-run the tool if needed]` to fit the char budget. A result already trimmed is never recounted, and the final failing trim (the one that ends the run `context_exhausted`) counts if it trimmed anything. `0` on a run that never trimmed, and on the two failure paths where the runner never returned |
 | `context_window_source` | | ✓ | string | **always** — 0.9: the same value as `run_start.context_window_source`, repeated at the end so a consumer that reads only the last line still knows where the window came from |
+| `timeouts` | | ✓ | integer | **always** — 0.9: how many `bash` TOOL CALLS timed out during the run (per call, not per turn). `grep` timeouts and the `--verify` command are excluded. `0` on a run where nothing timed out, and on the two failure paths where the runner never returned |
 
 ## Statuses
 
@@ -239,6 +241,7 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `last_assistant_text` | end | 0.8: the last non-empty assistant text (≤2000 chars), or null |
 | `verify` | end | 0.8: `{command, exit_code, output_tail, rounds, passed}` for the last `--verify` execution, or null (null whenever verify never ran, even if `--verify` was given — see `verify_command` above, which `dirtywork resume` reads from instead) |
 | `trimmed_turns` | end | 0.9: turns on which at least one tool result was trimmed to fit the context budget; `0` when nothing was trimmed |
+| `timeouts` | end | 0.9: how many `bash` tool calls timed out; `0` when none did |
 | `allow_commit` | start | (bool) records whether the run's system prompt told the worker to commit as it went (`--allow-commit`, host mode only — see [docs/machine-contract.md](machine-contract.md)). A run that predates the flag has no such key. |
 | `verdict` | verdict | written by `dirtywork runs verdict`: `"accept"` \| `"reject"` \| `"cleanup"` |
 | `note` | verdict | `--note` text, or null |

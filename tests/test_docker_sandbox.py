@@ -524,11 +524,27 @@ def test_grep_timeout_returns_error_text(started):
 
     def raise_timeout(argv, *, timeout, stdin=None):
         fake.calls.append((list(argv), timeout, stdin))
-        raise DockerError("docker exec ... timed out after 40s")
+        raise DockerError("docker exec ... timed out after 40s", timed_out=True)
 
     sb._run = raise_timeout
     out = sb.grep("foo", timeout=30)
-    assert "timed out" in out.lower()
+    # Unchanged wording (spec §4.2): a grep timeout is not a bash timeout.
+    assert out == "ERROR: grep timed out after 30s — narrow the pattern or path."
+
+
+def test_grep_generic_docker_error_is_not_reported_as_a_timeout(started):
+    # Spec §4.2: before 0.9 EVERY DockerError out of grep rendered as "timed
+    # out", so a killed container read as a slow search.
+    sb, fake, run_dir = started
+
+    def raise_failure(argv, *, timeout, stdin=None):
+        fake.calls.append((list(argv), timeout, stdin))
+        raise DockerError("No such container: dw-abc123")
+
+    sb._run = raise_failure
+    out = sb.grep("foo", timeout=30)
+    assert out == "ERROR: grep failed: No such container: dw-abc123"
+    assert "timed out" not in out
 
 
 def test_bash_exec_argv_and_shaping(started):
@@ -586,14 +602,37 @@ def test_bash_timeout_returns_text_not_raise(started):
         # Only the model's own bash exec times out; docker top/inspect keep working.
         if "sleep 600" in " ".join(argv):
             fake.calls.append((list(argv), timeout, stdin))
-            raise DockerError("docker exec ... timed out after 1s")
+            raise DockerError("docker exec ... timed out after 1s", timed_out=True)
         return real_run(argv, timeout=timeout, stdin=stdin)
     sb._run = run_with_timeout
     fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
     fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
     out = sb.bash("sleep 600", timeout=1)
-    assert "timed out after 1s" in out
+    # Spec §4.2: the FULL canonical text -- a substring check would pass on the
+    # non-timeout branch too, which is the bug this test now guards.
+    assert out == (
+        "ERROR: command timed out after 1s — it did not finish and its result is "
+        "unknown. Re-run it with a larger timeout (up to 600) or split it into "
+        "smaller commands; do not report it as passed.")
     assert not any(c[0][:1] == ["kill"] for c in fake.calls)  # healthy container: no reset
+
+
+def test_bash_generic_docker_error_is_not_reported_as_a_timeout(started):
+    sb, fake, run_dir = started
+    real_run = sb._run
+
+    def run_with_failure(argv, *, timeout, stdin=None):
+        if "sleep 600" in " ".join(argv):
+            fake.calls.append((list(argv), timeout, stdin))
+            raise DockerError("No such container: dw-abc123")
+        return real_run(argv, timeout=timeout, stdin=stdin)
+
+    sb._run = run_with_failure
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+    out = sb.bash("sleep 600", timeout=1)
+    assert out == "ERROR: bash failed: No such container: dw-abc123"
+    assert "timed out" not in out
 
 
 def test_bash_nonzero_exit_reported(started):
