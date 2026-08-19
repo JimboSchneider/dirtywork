@@ -23,6 +23,7 @@ _DEFAULT_EVIDENCE = {
     "last_tool_result": None,
     "last_assistant_text": None,
     "verify": None,
+    "trimmed_turns": 0,
 }
 
 
@@ -2048,3 +2049,55 @@ def test_resume_feedback_file_and_its_refusals(tmp_path, monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert json.loads((Path(out["run_dir"]) / "run.json").read_text())["feedback"] == (
         "Restore the retry loop.\n")
+
+
+def test_trimmed_turns_lands_on_the_payload_run_end_and_run_json(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "t"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["trimmed_turns"] == 0
+    run_dir = Path(payload["run_dir"])
+    assert json.loads((run_dir / "run.json").read_text())["trimmed_turns"] == 0
+    events = [json.loads(line) for line in
+              (run_dir / "transcript.jsonl").read_text().splitlines()]
+    end = [e for e in events if e["event"] == "run_end"][-1]
+    assert end["trimmed_turns"] == 0
+
+
+def test_task_size_warning_fires_for_a_long_brief(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    task = "x" * 4000                     # ~1000 tokens at 4 chars/token
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                   "--context-window", "2000", task]) == 0
+    err = capsys.readouterr().err
+    assert "warning: the task text is ~1000 tokens, 50% of the 2000-token context window" in err
+    assert "docs/operating.md#sizing-the-context-window" in err
+
+
+def test_task_size_warning_is_silent_under_the_threshold(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    task = "x" * 400                      # ~100 tokens = 5% of 2000
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                   "--context-window", "2000", task]) == 0
+    assert "the task text is" not in capsys.readouterr().err
+
+
+def test_task_size_warning_fires_on_resume(tmp_path, monkeypatch, capsys):
+    # resume has no args.task: the check runs against ctx.task, which
+    # build_resume_task filled with the prior task plus the transcript tail.
+    # The scripted client repeats its one tool call, so both runs end
+    # `max_turns` after a single turn -- resumable, and deterministic.
+    loop = [tool_call_body("read_file", {"path": "README.md"})]
+    m = _install_host_harness(monkeypatch, tmp_path, loop)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+                   "x" * 4000]) == 1
+    prior = json.loads(capsys.readouterr().out)
+    assert m.main(["resume", Path(prior["run_dir"]).name, "--context-window", "2000",
+                   "--max-turns", "1"]) == 1
+    err = capsys.readouterr().err
+    assert "warning: the task text is ~" in err
+    assert "% of the 2000-token context window" in err

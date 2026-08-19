@@ -305,6 +305,9 @@ def run_one_bench_case(model: str, task: str, repeat: int, *, provider, base_url
         "provider": payload.get("provider", provider), "base_url": base_url,
         "slug": slug, "run_dir": str(run_dir) if run_dir else None,
         "status": status, "turns": payload.get("turns"), "wall_s": wall_s,
+        # Spec §2.2: the runner's own count, straight off the payload -- the
+        # per-run signal for "this model needed a bigger window for this task".
+        "trimmed_turns": payload.get("trimmed_turns"),
         "prompt_tokens": usage.get("prompt_tokens"),
         "completion_tokens": usage.get("completion_tokens"),
         "acceptance": acceptance,
@@ -444,6 +447,7 @@ def _summarize_model(rows: list, verdicts: list, review_seconds: list) -> dict:
         "mean_wall_s": _mean(_numbers(rows, "wall_s")),
         "verdict_rate": (verdicts.count("accept") / len(verdicts)) if verdicts else None,
         "median_review_seconds": statistics.median(review_seconds) if review_seconds else None,
+        "mean_trimmed_turns": _mean(_numbers(rows, "trimmed_turns")),
         # added for `--compare`; the per-model block above ignores them
         "mean_turns": _mean(_numbers(rows, "turns")),
         "mean_prompt_tokens": _mean(_numbers(rows, "prompt_tokens")),
@@ -459,7 +463,7 @@ MISSING = "-"
 COMPARE_COLUMNS = ("model", "task", "runs", "turns", "wall_s", "prompt", "completion",
                    "accept", "outcomes", "verdict", "harness")
 COMPARE_MODEL_COLUMNS = ("model", "runs", "completion", "accept", "gamed", "tokens",
-                         "wall_s", "verdict", "review_s")
+                         "wall_s", "trimmed", "verdict", "review_s")
 
 
 def _load_results(path: Path) -> list:
@@ -667,6 +671,8 @@ def _compare_model_rows(agg_a: dict, agg_b: dict) -> list:
             "gamed": _compare_cell(_stat(a, "gamed"), _stat(b, "gamed"), "int"),
             "tokens": _compare_cell(_stat(a, "mean_tokens"), _stat(b, "mean_tokens")),
             "wall_s": _compare_cell(_stat(a, "mean_wall_s"), _stat(b, "mean_wall_s")),
+            "trimmed": _compare_cell(_stat(a, "mean_trimmed_turns"),
+                                     _stat(b, "mean_trimmed_turns")),
             "verdict": _compare_cell(_stat(a, "verdict_rate"),
                                      _stat(b, "verdict_rate"), "pct"),
             "review_s": _compare_cell(_stat(a, "median_review_seconds"),
@@ -742,6 +748,9 @@ def cmd_summarize(args) -> int:
               else "  mean tokens: n/a")
         print(f"  mean wall_s: {summary['mean_wall_s']:.1f}" if summary["mean_wall_s"] is not None
               else "  mean wall_s: n/a")
+        print(f"  mean trimmed_turns: {summary['mean_trimmed_turns']:.1f}"
+              if summary["mean_trimmed_turns"] is not None
+              else "  mean trimmed_turns: n/a")
         if summary["verdict_rate"] is not None:
             print(f"  verdict rate: {summary['verdict_rate']:.0%}")
             print(f"  median review_seconds: {summary['median_review_seconds']:g}"

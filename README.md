@@ -77,7 +77,10 @@ exercised by the test suites.
 - [LM Studio](https://lmstudio.ai) serving its OpenAI-compatible API at
   `localhost:1234` with a tool-calling-capable model loaded. Verified
   working: `qwen/qwen3-coder-next` (65k context, default) and
-  `mistralai/devstral-small-2-2512` (32k context)
+  `mistralai/devstral-small-2-2512` (32k context). One slot loaded with the
+  largest context your machine holds beats several smaller ones — see
+  [Sizing the context window](https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md#sizing-the-context-window)
+  for the measured numbers
 - `--provider anthropic` needs the `ANTHROPIC_API_KEY` environment variable
   set; the default (`--provider openai`, LM Studio or any OpenAI-compatible
   server) needs no key.

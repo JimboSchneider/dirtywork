@@ -1298,3 +1298,16 @@ def test_cmd_snapshot_pluralizes_skipped_entries_correctly(tmp_path, repo, monke
     out = capsys.readouterr().out
     assert rc == 0, out
     assert "(2 non-regular entries skipped)" in out
+
+
+def test_show_renders_trimmed_turns_plain_and_markdown(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "trim1", {
+        "slug": "trim1", "status": "context_exhausted", "task": "big brief",
+        "trimmed_turns": 7,
+    })
+    assert runs.cmd_show(argparse.Namespace(slug="trim1", diff=False)) == 0
+    assert "trimmed_turns: 7" in capsys.readouterr().out
+
+    assert runs.cmd_show(argparse.Namespace(slug="trim1", diff=False, markdown=True)) == 0
+    assert "- **trimmed_turns:** 7" in capsys.readouterr().out

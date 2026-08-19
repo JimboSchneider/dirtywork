@@ -32,7 +32,7 @@ LIST_COLUMNS = ("slug", "status", "started", "resumed", "branch", "worktree",
                 "container", "volume")
 SHOW_FIELDS = ("slug", "status", "sandbox", "task", "model", "provider", "turns",
                "resumed_from", "resumed_by", "branch", "worktree", "started", "ended",
-               "stuck_on", "files_changed", "verify")
+               "stuck_on", "files_changed", "verify", "trimmed_turns")
 TASK_PREVIEW_CHARS = 200
 
 
@@ -301,7 +301,11 @@ def _timeline_line(event: dict) -> str:
 MD_HEADER_FIELDS = ("status", "task", "model", "provider", "sandbox", "turns",
                     "base_commit", "branch", "worktree", "resumed_from", "resumed_by")
 MD_VERDICT_FIELDS = ("verdict", "note")
-MD_RESULT_FIELDS = ("status", "error", "export_status", "finalize_error", "watchdog_violation")
+# `trimmed_turns` (0.9) is an int that is meaningful at 0, and _md_result's loop
+# prints anything not None/"" -- so it renders "0" rather than disappearing,
+# which is the point: "nothing was trimmed" is a fact worth reading.
+MD_RESULT_FIELDS = ("status", "error", "export_status", "finalize_error",
+                    "watchdog_violation", "trimmed_turns")
 MD_ARGS_CHARS = 200      # the transcript already caps `args` at 500
 MD_RESULT_CHARS = 2000   # the transcript's own `preview` cap for a tool result
 

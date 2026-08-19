@@ -166,16 +166,30 @@ def test_trim_messages():
         {"role": "assistant", "content": "a" * 100},
         {"role": "tool", "tool_call_id": "2", "content": "y" * 1000},
     ]
-    fits = trim_messages(msgs, char_budget=1300)
-    assert fits
+    fits, newly_trimmed = trim_messages(msgs, char_budget=1300)
+    assert fits is True
+    assert newly_trimmed == 1                      # spec §2.2: replaced ON THIS CALL
     assert msgs[1]["content"] == TRIM_MARKER      # oldest trimmed first
     assert msgs[3]["content"] == "y" * 1000        # newer kept
     assert msgs[0]["content"] == "s" * 100         # system never trimmed
 
 
+def test_trim_does_not_recount_a_result_it_already_trimmed():
+    # The count is what makes `trimmed_turns` mean "turns on which trimming
+    # happened" rather than "markers currently in the history".
+    msgs = [
+        {"role": "system", "content": "s" * 100},
+        {"role": "tool", "tool_call_id": "1", "content": "x" * 1000},
+        {"role": "assistant", "content": "a" * 100},
+        {"role": "tool", "tool_call_id": "2", "content": "y" * 1000},
+    ]
+    assert trim_messages(msgs, char_budget=1300) == (True, 1)
+    assert trim_messages(msgs, char_budget=1300) == (True, 0)
+
+
 def test_trim_cannot_fit():
     msgs = [{"role": "system", "content": "s" * 5000}]
-    assert trim_messages(msgs, char_budget=100) is False
+    assert trim_messages(msgs, char_budget=100) == (False, 0)
 
 
 def test_trim_counts_tool_call_arguments():
@@ -186,7 +200,55 @@ def test_trim_counts_tool_call_arguments():
     ]
     # No role=="tool" messages exist to trim, so this only passes if the
     # tool_call arguments are counted toward the budget in the first place.
-    assert trim_messages(msgs, char_budget=500) is False
+    assert trim_messages(msgs, char_budget=500) == (False, 0)
+
+
+def _scripted_trim(monkeypatch, script):
+    """Drive Runner.run's trim bookkeeping with a scripted trim_messages, so
+    the counting rule is tested without also re-testing the trim arithmetic
+    (which the four unit tests above already pin). The runner looks the name up
+    on the module at call time, so patching the module attribute is enough."""
+    import dirtywork.runner as runner_mod
+    steps = iter(script)
+    monkeypatch.setattr(runner_mod, "trim_messages",
+                        lambda messages, char_budget: next(steps))
+
+
+def test_trimmed_turns_counts_the_final_failing_call_when_it_trimmed(parts, monkeypatch):
+    wt, registry, sandbox, transcript, tmp = parts
+    _scripted_trim(monkeypatch, [(True, 0), (True, 2), (True, 1), (False, 3)])
+    provider = FakeProvider([_resp(tool_calls=[_call(f"c{i}", "read_file", {"path": "f.txt"})])
+                             for i in range(3)])
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_turns=10)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "context_exhausted"
+    # turns 2 and 3 trimmed, and so did the call that then gave up
+    assert result.extra["trimmed_turns"] == 3
+    end = [e for e in _events(tmp) if e["event"] == "run_end"][-1]
+    assert end["trimmed_turns"] == 3
+
+
+def test_trimmed_turns_ignores_a_final_failing_call_that_trimmed_nothing(parts, monkeypatch):
+    wt, registry, sandbox, transcript, tmp = parts
+    _scripted_trim(monkeypatch, [(True, 0), (True, 1), (True, 1), (False, 0)])
+    provider = FakeProvider([_resp(tool_calls=[_call(f"c{i}", "read_file", {"path": "f.txt"})])
+                             for i in range(3)])
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_turns=10)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "context_exhausted"
+    assert result.extra["trimmed_turns"] == 2
+
+
+def test_trimmed_turns_is_zero_on_an_ordinary_run(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(content="all done")])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.extra["trimmed_turns"] == 0
 
 
 def test_malformed_tool_call_entry_recovers(parts):
@@ -360,6 +422,7 @@ def test_finalize_merges_into_run_end_and_result_extra(parts):
     transcript.close()
     assert result.extra == {"stuck_on": None, "last_tool_result": None,
                             "last_assistant_text": "done", "verify": None,
+                            "trimmed_turns": 0,
                             "diff_stat": " 1 file changed"}
     events = _events(tmp)
     run_end = next(e for e in events if e["event"] == "run_end")

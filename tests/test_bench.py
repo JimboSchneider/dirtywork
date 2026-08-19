@@ -673,3 +673,33 @@ def test_fmt_component_delta_signs():
     assert bench._fmt_component_delta((0, 0, 1, 0), (1, 0, 0, 0)) == "+1/0/-1/0"
     assert bench._fmt_component_delta((2, 2), (2, 2)) == "0/0"
 
+
+def test_bench_row_records_trimmed_turns_and_summarize_reports_its_mean(
+        tmp_path, monkeypatch, capsys):
+    _fake_run_environment(tmp_path, monkeypatch, payload={
+        "status": "completed", "turns": 3, "trimmed_turns": 4,
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1}, "provider": "openai"})
+    row = bench.run_one_bench_case("m1", "sh-fix-script", 0, provider="openai",
+                                   base_url=None, stamp="s", max_turns=40, timeout=1800)
+    assert row["trimmed_turns"] == 4
+
+    monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs2")
+    results = tmp_path / "r.jsonl"
+    results.write_text("\n".join(json.dumps(r) for r in [
+        _result_row(slug=None, trimmed_turns=2),
+        _result_row(slug=None, repeat=1, trimmed_turns=4),
+    ]) + "\n")
+    assert bench.cmd_summarize(argparse.Namespace(file=str(results))) == 0
+    assert "mean trimmed_turns: 3.0" in capsys.readouterr().out
+
+
+def test_summarize_compare_pairs_trimmed_turns(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs")
+    a, b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    a.write_text(json.dumps(_result_row(slug=None, trimmed_turns=6)) + "\n")
+    b.write_text(json.dumps(_result_row(slug=None, trimmed_turns=2)) + "\n")
+    assert bench.cmd_summarize(argparse.Namespace(file=str(a), compare=str(b))) == 0
+    out = capsys.readouterr().out
+    assert "TRIMMED" in out
+    assert "6.0 -> 2.0 (-4.0)" in out
+

@@ -124,7 +124,8 @@ the export runs.
 
 One per run, always the last line. Written by the runner on every terminal
 status, and by the CLI's failure paths when the runner never returned (in that
-case it carries `status` and `error` only).
+case it carries `status`, `error` and the rows marked **always** below —
+run-level fields that are known even when the agent loop never started).
 
 | Field | v1 | v2 | Type | Notes |
 |---|---|---|---|---|
@@ -150,6 +151,7 @@ case it carries `status` and `error` only).
 | `last_tool_result` | | ✓ | object \| null | 0.8: `{tool, args, result}` for the last tool call the runner executed other than `finish` (`args` ≤500 chars, `result` ≤2000 chars); `null` if no tool ever ran |
 | `last_assistant_text` | | ✓ | string \| null | 0.8: the model's last non-empty assistant text, capped at 2000 chars; `null` if there was none |
 | `verify` | | ✓ | object \| null | 0.8: `{command, exit_code, output_tail, rounds, passed}` for the LAST `--verify` execution (`output_tail` capped at 4000 chars); `null` when `--verify` was not given |
+| `trimmed_turns` | | ✓ | integer | **always** — 0.9: the number of turns on which the runner had to replace at least one tool result with `[result trimmed — re-run the tool if needed]` to fit the char budget. A result already trimmed is never recounted, and the final failing trim (the one that ends the run `context_exhausted`) counts if it trimmed anything. `0` on a run that never trimmed, and on the two failure paths where the runner never returned |
 
 ## Statuses
 
@@ -233,6 +235,7 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `last_tool_result` | end | 0.8: `{tool, args, result}` for the last non-`finish` tool call, or null |
 | `last_assistant_text` | end | 0.8: the last non-empty assistant text (≤2000 chars), or null |
 | `verify` | end | 0.8: `{command, exit_code, output_tail, rounds, passed}` for the last `--verify` execution, or null (null whenever verify never ran, even if `--verify` was given — see `verify_command` above, which `dirtywork resume` reads from instead) |
+| `trimmed_turns` | end | 0.9: turns on which at least one tool result was trimmed to fit the context budget; `0` when nothing was trimmed |
 | `allow_commit` | start | (bool) records whether the run's system prompt told the worker to commit as it went (`--allow-commit`, host mode only — see [docs/machine-contract.md](machine-contract.md)). A run that predates the flag has no such key. |
 | `verdict` | verdict | written by `dirtywork runs verdict`: `"accept"` \| `"reject"` \| `"cleanup"` |
 | `note` | verdict | `--note` text, or null |

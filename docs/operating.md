@@ -194,6 +194,51 @@ of whether the run is still going:
   populated. Mostly you will not call it by hand: `--branch-from @<slug>` calls
   it for you.
 
+## Sizing the context window
+
+**One slot loaded with the largest context your machine holds beats more slots
+with smaller ones.** These numbers are from the SP3 build record
+(`docs/superpowers/bench/2026-08-17-sp3-worker-scoreboard.md` and
+`-run-split.md`), measured on a 128 GB Apple Silicon machine with LM Studio
+serving `qwen/qwen3-coder-next`:
+
+| Loaded context | Per turn | Prompt throughput | Outcome on a 1,084-line brief |
+|---|---|---|---|
+| 65k | 15–17 s | ~3k tok/s | `context_exhausted` twice — the per-turn trim invalidated the prompt cache, so every turn re-read the whole history from scratch |
+| 131k | 2.6–5 s | ~13k tok/s | no exhaustion |
+
+The 65k number is not a slow model; it is a *cache-miss* number. Once the
+history stops fitting, dirtywork trims the oldest tool results every turn, the
+prompt prefix changes every turn, and the server re-processes it every turn.
+The fix is a bigger window, not a faster machine.
+
+Two 131k slots do **not** fit on 128 GB: loading the second one crashed LM
+Studio (55.9 GB wired, 1.2 GB free just before the crash), while a single 131k
+slot peaks around 66 GB wired. Load one:
+
+    lms load qwen/qwen3-coder-next -c 131072
+
+dirtywork asks the server what it actually loaded (LM Studio's
+`GET /api/v0/models` reports `loaded_context_length`) and uses that, so you do
+not have to repeat the number as `--context-window`. The run records where the
+value came from in `context_window_source` — `provider:openai:server` when the
+server answered, `provider:openai` when the built-in table did, `flag`/`env`
+when you said so, `default` when nothing knew. Ollama is not probed in 0.9: its
+`/api/show` reports the model's architectural maximum rather than the loaded
+`num_ctx`, so pass `--context-window` there.
+
+**Rules of thumb**
+
+- Keep a dispatched brief under ~450 lines. Past roughly 20% of the window
+  dirtywork prints a `warning: the task text is ~N tokens, P% of the …` line on
+  stderr; that is the same signal, earlier.
+- Bias briefs toward whole-file writes and `apply_edits` batches rather than
+  long prose: the model re-reads the task every turn, so a compact brief is
+  cheaper on every turn, not just the first.
+- Watch `trimmed_turns` on the run's stdout JSON (and in `dirtywork runs show`).
+  A run with a non-zero count paid the cache-miss tax on that many turns; a run
+  with a large one wanted a bigger window or a smaller brief.
+
 ## Benchmarking
 
     dirtywork bench --models 'model[@provider][=base_url],...' \

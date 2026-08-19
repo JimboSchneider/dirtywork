@@ -346,14 +346,23 @@ def _total_chars(messages: list) -> int:
     return total
 
 
-def trim_messages(messages: list, char_budget: int) -> bool:
-    """Replace oldest tool results with TRIM_MARKER until under budget."""
+def trim_messages(messages: list, char_budget: int) -> tuple:
+    """Replace oldest tool results with TRIM_MARKER until under budget.
+
+    Returns (fits, newly_trimmed) (spec §2.2). `newly_trimmed` counts only the
+    results replaced ON THIS CALL -- a result already holding the marker is
+    never counted twice -- which is what lets the runner report `trimmed_turns`
+    as "turns on which trimming happened" instead of "markers in the history".
+    Trimming is destructive and cumulative, so a running total of markers would
+    say the same thing on every later turn and mean nothing."""
+    newly_trimmed = 0
     for m in messages:
         if _total_chars(messages) <= char_budget:
-            return True
+            return True, newly_trimmed
         if m.get("role") == "tool" and m.get("content") != TRIM_MARKER:
             m["content"] = TRIM_MARKER
-    return _total_chars(messages) <= char_budget
+            newly_trimmed += 1
+    return _total_chars(messages) <= char_budget, newly_trimmed
 
 
 @dataclass
@@ -411,6 +420,7 @@ class Runner:
                               schema_version=2, **(self.run_info or {}))
         usage = {"prompt_tokens": 0, "completion_tokens": 0}
         turns = 0
+        trimmed_turns = 0       # spec §2.2: turns on which trimming happened
         failures = FailureTracker()
         progress = ProgressTracker(self.stall_turns)
         repeats = RepeatTracker(self.stuck_repeats)
@@ -442,7 +452,8 @@ class Runner:
             extra: dict = {"stuck_on": stuck,
                            "last_tool_result": last_tool_result,
                            "last_assistant_text": last_assistant_text,
-                           "verify": verify_state}
+                           "verify": verify_state,
+                           "trimmed_turns": trimmed_turns}
             finalize_error = None
             if self.finalize is not None:
                 try:
@@ -533,7 +544,13 @@ class Runner:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return finish("timeout", "")
-                if not trim_messages(messages, self.char_budget):
+                fits, newly_trimmed = trim_messages(messages, self.char_budget)
+                if newly_trimmed > 0:
+                    # Counted BEFORE the fits check, so the final call that
+                    # trimmed something and still could not fit counts too
+                    # (spec §2.2).
+                    trimmed_turns += 1
+                if not fits:
                     return finish("context_exhausted", "")
 
                 try:

@@ -5,6 +5,7 @@ import argparse
 import contextlib
 import io
 import json
+import math
 import os
 import sys
 
@@ -26,6 +27,7 @@ from .llm import LLMError
 from .providers import DEFAULT_BASE_URLS, PROVIDER_NAMES, get_provider
 from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json, write_run_json
 from .runner import (
+    CHARS_PER_TOKEN,
     DEFAULT_STALL_TURNS,
     DEFAULT_STUCK_REPEATS,
     DEFAULT_VERIFY_ROUNDS,
@@ -59,6 +61,11 @@ from .workspace import (
 
 DEFAULT_MODEL = "qwen/qwen3-coder-next"
 DOCKER_WORKDIR = "/work"
+# Spec §2.1: a brief past this fraction of the window earns one stderr line.
+# 20% is where SP3's 1,084-line brief started thrashing the prompt cache on a
+# 65k window: every turn re-sent a task that large, the per-turn trim
+# invalidated the cache, and two runs died `context_exhausted`.
+TASK_WARN_FRACTION = 0.20
 
 
 def build_system_prompt(display_root, repo_context: str | None, *, allow_commit: bool = False) -> str:
@@ -94,6 +101,23 @@ Rules:
 
 def _err(msg: str) -> None:
     print(f"error: {msg}", file=sys.stderr)
+
+
+def _warn_task_size(ctx) -> None:
+    """Spec §2.1: one advisory stderr line when the brief itself eats too much
+    of the window. Called once, after the RunContext exists, so it covers both
+    `run` (args.task) and `resume` (the marker block build_resume_task made,
+    which is what actually gets sent). Nothing is recorded anywhere: this is
+    advice, and a run that ignores it is not a different kind of run."""
+    task_tokens = math.ceil(len(ctx.task) / CHARS_PER_TOKEN)
+    if task_tokens <= TASK_WARN_FRACTION * ctx.context_window:
+        return
+    pct = round(100 * task_tokens / ctx.context_window)
+    print(f"warning: the task text is ~{task_tokens} tokens, {pct}% of the "
+          f"{ctx.context_window}-token context window; long briefs thrash the prompt "
+          f"cache and risk context_exhausted — split the task or load the model with "
+          f"a larger context (docs/operating.md#sizing-the-context-window)",
+          file=sys.stderr)
 
 
 class PreflightFailure(Exception):
@@ -455,9 +479,23 @@ def _emit_result(*, status: str, worktree: Path, branch: str, transcript_path: P
         "last_tool_result": None,
         "last_assistant_text": None,
         "verify": None,
+        "trimmed_turns": 0,
     }
     payload.update(extra)
     return payload
+
+
+def _contract_fields(extra: dict, ctx: RunContext) -> dict:
+    """The 0.9 contract fields that ride on EVERY payload, `run_end` event and
+    `run.json` write (spec §6). One dict feeds the stdout payload and the
+    `_update_run_json` call on every path, so those two can never disagree.
+
+    The two failure paths call it with `extra={}`: `runner.run()` never
+    returned there, so the documented defaults are exactly what `.get` yields.
+    `ctx` is taken even though this first version does not read it -- the
+    context-window source (Task 4) comes from the RunContext, not from
+    `extra`."""
+    return {"trimmed_turns": extra.get("trimmed_turns", 0)}
 
 
 def _final_status(result) -> str:
@@ -511,19 +549,20 @@ def _fail_setup(e: Exception, ctx: RunContext, *, run_dir, transcript, transcrip
     preflight-shaped failure — roll the worktree back (binding adjustment
     #1) rather than leaving .worktrees/dw-<slug> + its branch orphaned."""
     message = str(e)
+    contract = _contract_fields({}, ctx)
     if transcript is not None:
         try:
-            transcript.write("run_end", status="sandbox_error", error=message)
+            transcript.write("run_end", status="sandbox_error", error=message, **contract)
         except Exception:
             pass
     if ctx.owns_worktree:
         remove_worktree(ctx.repo, ctx.slug)
     _err(message)
-    _update_run_json(run_dir, status="sandbox_error")
+    _update_run_json(run_dir, status="sandbox_error", **contract)
     print(json.dumps(_emit_result(
         status="sandbox_error", worktree=ctx.worktree, branch=ctx.branch, transcript_path=transcript_path,
         run_dir=run_dir, turns=None, usage={}, final_message=message, base_commit=ctx.base_commit,
-        resumed_from=ctx.resumed_from, provider=ctx.provider,
+        resumed_from=ctx.resumed_from, provider=ctx.provider, **contract,
     ), indent=2))
     return 1
 
@@ -551,15 +590,17 @@ def _fail_run(e: Exception, ctx: RunContext, *, sandbox, sandbox_started: bool, 
             sandbox.cfg.keep_volume = True
             message += f" (docker volume kept for recovery: {sandbox.volume})"
 
+    contract = _contract_fields({}, ctx)
     if transcript is not None:
         try:
-            transcript.write("run_end", status=fail_status, error=message)
+            transcript.write("run_end", status=fail_status, error=message, **contract)
         except Exception:
             pass
     _err(message)
 
-    run_json_fields = {"status": fail_status}
-    extra_fields = {"base_commit": ctx.base_commit, "resumed_from": ctx.resumed_from}
+    run_json_fields = dict(contract, status=fail_status)
+    extra_fields = dict(contract, base_commit=ctx.base_commit,
+                        resumed_from=ctx.resumed_from)
     if export_status is not None:
         run_json_fields["export_status"] = export_status
         extra_fields["export_status"] = export_status
@@ -786,6 +827,7 @@ def _execute(ctx: RunContext, args, client) -> int:
         last_assistant_text=extra.get("last_assistant_text"),
         verify=extra.get("verify"),
         turns=result.turns,
+        **_contract_fields(extra, ctx),
     )
 
     print(json.dumps(_emit_result(
@@ -801,6 +843,7 @@ def _execute(ctx: RunContext, args, client) -> int:
         last_assistant_text=extra.get("last_assistant_text"),
         verify=extra.get("verify"),
         resumed_from=ctx.resumed_from, provider=ctx.provider,
+        **_contract_fields(extra, ctx),
     ), indent=2))
     return 0 if final_status == "completed" else 1
 
@@ -992,6 +1035,7 @@ def main(argv: list | None = None) -> int:
     except (PreflightFailure, WorkspaceError) as e:
         _err(str(e))
         return 2
+    _warn_task_size(ctx)
     return _execute(ctx, args, client)
 
 
