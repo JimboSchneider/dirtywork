@@ -114,7 +114,9 @@ Edited web/src/lib/api.ts: +2 -1 (removed 1 non-blank line)
   `difflib.SequenceMatcher` opcodes; the parenthetical `(removed N non-blank line(s))` appears only
   when N > 0 non-blank lines were deleted (a replaced non-blank line counts as removed).
 - Then `difflib.unified_diff(old, new, fromfile="a/<path>", tofile="b/<path>", n=2)`, capped at
-  **40 lines / 3000 chars**; when capped, the last line is `[diff truncated: N more lines]`.
+  **40 lines / 3000 chars**; when capped, the last line is `[diff truncated: N more lines]`. Lines
+  are compared with their line endings; a final line without a newline is shown with git's `\ No
+  newline at end of file` marker.
 - `write_file` on an existing file: same format with verb `Wrote` (`Wrote path: +A -D …`). On a new
   file: `Wrote N bytes to path (new file, M lines)` — no diff. The byte count stays in the string
   so existing tests that match `Wrote` still hold.

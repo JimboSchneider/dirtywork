@@ -252,6 +252,33 @@ def test_describe_change_reports_removed_non_blank_lines():
         "Edited x.txt: +2 -2 (removed 2 non-blank lines)")
 
 
+def test_describe_change_sees_a_trailing_newline_only_change():
+    # Fix item 4: splitlines() drops terminal-newline info, so "x" -> "x\n"
+    # used to report +0 -0 and no diff. splitlines(keepends=True) sees it,
+    # and the missing-newline side is rendered with git's marker line.
+    out = tools.describe_change("f.txt", "x", "x\n", verb="Edited")
+    lines = out.splitlines()
+    assert lines[0] == "Edited f.txt: +1 -1 (removed 1 non-blank line)"
+    assert "-x" in lines
+    assert "+x" in lines
+    assert r"\ No newline at end of file" in lines
+    # the marker immediately follows the content line that lacked a newline
+    assert lines[lines.index("-x") + 1] == r"\ No newline at end of file"
+
+
+def test_describe_change_ordinary_edit_output_is_unchanged():
+    # Pin: an ordinary edit where every line (old and new) ends in a newline
+    # renders byte-for-byte the same as before the keepends=True switch.
+    old = "one\ntwo\nthree\n"
+    new = "one\nCHANGED\nthree\n"
+    out = tools.describe_change("f.py", old, new, verb="Edited")
+    assert out == (
+        "Edited f.py: +1 -1 (removed 1 non-blank line)\n"
+        "--- a/f.py\n+++ b/f.py\n@@ -1,3 +1,3 @@\n"
+        " one\n-two\n+CHANGED\n three"
+    )
+
+
 def test_describe_change_truncates_a_huge_diff():
     old = "".join(f"line {i}\n" for i in range(200))
     new = "".join(f"changed {i}\n" for i in range(200))

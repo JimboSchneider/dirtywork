@@ -128,10 +128,17 @@ def _line_counts(old_lines: list, new_lines: list) -> tuple:
 
 def describe_change(path: str, old_text: str, new_text: str, *, verb: str) -> str:
     """Spec §3.1: '<Verb> <path>: +A -D [(removed N non-blank line(s))]' plus a
-    capped unified diff. Pure — no filesystem access — so the host backend and
-    the container backend produce byte-identical text for identical content."""
-    old_lines = old_text.splitlines()
-    new_lines = new_text.splitlines()
+    capped unified diff. Lines are compared WITH their line endings
+    (`splitlines(keepends=True)`), so a change to only the file's final
+    newline (e.g. `"x"` -> `"x\\n"`) is seen rather than reading as identical
+    — `splitlines()` without keepends would have hidden it. A content line
+    that lacks a trailing newline (only ever the diff's very last old/new
+    line) is rendered followed by git's own `\\ No newline at end of file`
+    marker, on its own output line. Pure — no filesystem access — so the host
+    backend and the container backend produce byte-identical text for
+    identical content."""
+    old_lines = old_text.splitlines(keepends=True)
+    new_lines = new_text.splitlines(keepends=True)
     if max(len(old_lines), len(new_lines)) > DESCRIBE_DIFF_MAX_LINES:
         # SequenceMatcher/unified_diff are omitted entirely: even the O(n)
         # line-count pass is skipped so this stays cheap regardless of content.
@@ -145,11 +152,26 @@ def describe_change(path: str, old_text: str, new_text: str, *, verb: str) -> st
         old_lines, new_lines, fromfile=f"a/{path}", tofile=f"b/{path}", n=2, lineterm=""))
     if not diff_lines:
         return head
+    # The first two entries (fromfile/tofile) and every "@@ ... @@" hunk
+    # header are already newline-free (lineterm=""); every other entry is a
+    # ' '/'+'/'-'-prefixed content line whose text still carries whatever
+    # ending its source line had (or didn't). Strip that ending so every
+    # entry below joins on a single "\n", inserting git's marker line right
+    # after any content line that had no ending of its own.
+    rendered = []
+    for i, line in enumerate(diff_lines):
+        if i < 2 or line.startswith("@@"):
+            rendered.append(line)
+        elif line.endswith("\n"):
+            rendered.append(line[:-1])
+        else:
+            rendered.append(line)
+            rendered.append(r"\ No newline at end of file")
     kept = []
     total = 0
-    for line in diff_lines:
+    for line in rendered:
         if len(kept) >= MAX_DIFF_LINES or total + len(line) + 1 > MAX_DIFF_CHARS:
-            kept.append(f"[diff truncated: {len(diff_lines) - len(kept)} more lines]")
+            kept.append(f"[diff truncated: {len(rendered) - len(kept)} more lines]")
             break
         kept.append(line)
         total += len(line) + 1
