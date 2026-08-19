@@ -189,3 +189,28 @@ def test_assistant_with_tool_use_and_empty_text_is_kept():
     assistant_msg = messages[1]
     assert assistant_msg["content"] == [
         {"type": "tool_use", "id": "c1", "name": "list_dir", "input": {}}]
+
+
+def test_nested_parameters_reach_input_schema_unchanged():
+    # Spec §1.3: a ParamSpec.schema renders into `function.parameters`, and the
+    # Anthropic adapter forwards `parameters` verbatim as `input_schema` -- so
+    # both wire renderings carry the nested schema without adapter-side work.
+    from dirtywork.providers.anthropic import _to_anthropic_tool
+    from dirtywork.toolspec import Caps, ParamSpec, ToolRegistry, ToolSpec
+
+    nested = {"type": "array", "minItems": 1,
+              "items": {"type": "object",
+                        "properties": {"old": {"type": "string"},
+                                       "new": {"type": "string"}},
+                        "required": ["old", "new"], "additionalProperties": False}}
+    registry = ToolRegistry()
+    registry.register(ToolSpec(
+        name="apply_edits", description="batch edits",
+        params={"path": ParamSpec(type="string"),
+                "edits": ParamSpec(type="array", schema=nested)},
+        required=("path", "edits"), fn=lambda sandbox, path, edits: "",
+        caps=Caps(fs="write")))
+    tool = _to_anthropic_tool(registry.schemas()[0])
+    assert tool["name"] == "apply_edits"
+    assert tool["input_schema"]["properties"]["edits"] == nested
+    assert tool["input_schema"]["required"] == ["path", "edits"]

@@ -441,3 +441,120 @@ def test_canonical_args_coerces_numeric_strings_like_execute():
     r.register(spec)
     assert r.canonical_args("takesint", {"n": "5"}) == {"n": 5}
     assert r.canonical_args("takesint", {"n": 5}) == {"n": 5}
+
+
+# --- spec §1.3/§1.4: nested parameter schemas, recursive validation, and
+# --- recursive input-size accounting. No shipped tool uses these until Task 2.
+
+_EDITS_SCHEMA = {
+    "type": "array", "minItems": 1, "maxItems": 100,
+    "items": {"type": "object",
+              "properties": {"old": {"type": "string"}, "new": {"type": "string"}},
+              "required": ["old", "new"], "additionalProperties": False},
+}
+
+
+def _nested_spec(**caps_kwargs):
+    """A ToolSpec shaped exactly like Task 2's apply_edits, so these tests pin
+    the registry behaviour the real tool will depend on."""
+    def _fn(sandbox, path, edits):
+        return f"{path}:{len(edits)}"
+
+    return ToolSpec(
+        name="apply_edits",
+        description="batch edits",
+        params={
+            "path": ParamSpec(type="string"),
+            "edits": ParamSpec(type="array", description="Replacements in order.",
+                               schema=_EDITS_SCHEMA),
+        },
+        required=("path", "edits"),
+        fn=_fn,
+        caps=Caps(fs="write", **caps_kwargs),
+    )
+
+
+def test_schema_param_renders_the_nested_schema_with_the_description_merged():
+    registry = ToolRegistry()
+    registry.register(_nested_spec())
+    params = registry.schemas()[0]["function"]["parameters"]
+    assert params["properties"]["path"] == {"type": "string"}     # flat rendering unchanged
+    assert params["properties"]["edits"] == {
+        "type": "array", "minItems": 1, "maxItems": 100,
+        "items": {"type": "object",
+                  "properties": {"old": {"type": "string"}, "new": {"type": "string"}},
+                  "required": ["old", "new"], "additionalProperties": False},
+        "description": "Replacements in order.",
+    }
+    # the ParamSpec's own schema dict is never mutated by the merge
+    assert "description" not in _EDITS_SCHEMA
+
+
+@pytest.mark.parametrize("edits,message", [
+    ("not-a-list", "edits must be array, got str"),
+    ([], "edits must have at least 1 item(s)"),
+    ([{"old": "a", "new": "b"}] * 101, "edits must have at most 100 item(s)"),
+    (["nope"], "edits[0] must be an object"),
+    ([{"old": "a", "new": "b"}, {"new": "b"}], "edits[1] is missing required property 'old'"),
+    ([{"old": "a", "new": "b"}, {"old": "a", "new": "b", "note": "x"}],
+     "edits[1] has unexpected property 'note'"),
+    ([{"old": "a", "new": "b"}, {"old": "a", "new": "b"}, {"old": "a", "new": 3}],
+     "edits[2].new must be string, got int"),
+])
+def test_nested_validation_messages_are_path_qualified_bad_args(edits, message):
+    registry = ToolRegistry()
+    registry.register(_nested_spec())
+    result = registry.execute("apply_edits", {"path": "a.py", "edits": edits},
+                              sandbox=None, deadline=None)
+    assert result.failure == "bad_args"
+    assert result.text == f"ERROR: bad arguments for apply_edits: {message}"
+
+
+def test_nested_validation_coerces_a_numeric_string_at_a_nested_leaf():
+    # Same rule as the top level (_coerce_numeric_string): local models send
+    # "5" where the schema says integer, at every depth.
+    spec = ToolSpec(
+        name="t", description="", params={
+            "rows": ParamSpec(type="array", schema={
+                "type": "array",
+                "items": {"type": "object", "properties": {"n": {"type": "integer"}},
+                          "required": ["n"], "additionalProperties": False}}),
+        },
+        required=("rows",), fn=lambda sandbox, rows: repr(rows),
+        caps=Caps(fs="none"))
+    registry = ToolRegistry()
+    registry.register(spec)
+    result = registry.execute("t", {"rows": [{"n": "5"}]}, sandbox=None, deadline=None)
+    assert result.kind == "ok"
+    assert result.text == "[{'n': 5}]"
+
+
+def test_nested_validation_passes_a_valid_batch_through_unchanged():
+    registry = ToolRegistry()
+    registry.register(_nested_spec())
+    result = registry.execute("apply_edits",
+                              {"path": "a.py", "edits": [{"old": "a", "new": "b"}]},
+                              sandbox=None, deadline=None)
+    assert result.kind == "ok" and result.text == "a.py:1"
+
+
+def test_max_input_bytes_counts_nested_strings_and_the_path_but_not_keys():
+    registry = ToolRegistry()
+    registry.register(_nested_spec(max_input_bytes=20))
+    # path "a.py" (4) + old "x"*10 (10) + new "y"*10 (10) = 24 > 20.
+    # The keys "old"/"new" (6 more bytes) are deliberately NOT counted.
+    result = registry.execute(
+        "apply_edits", {"path": "a.py", "edits": [{"old": "x" * 10, "new": "y" * 10}]},
+        sandbox=None, deadline=None)
+    assert result.failure == "bad_args"
+    assert result.text == ("ERROR: bad arguments for apply_edits: input is 24 bytes, "
+                           "over the 20-byte limit.")
+
+
+def test_max_input_bytes_under_the_cap_runs_the_tool():
+    registry = ToolRegistry()
+    registry.register(_nested_spec(max_input_bytes=20))
+    result = registry.execute("apply_edits",
+                              {"path": "a.py", "edits": [{"old": "x", "new": "y"}]},
+                              sandbox=None, deadline=None)
+    assert result.kind == "ok" and result.text == "a.py:1"

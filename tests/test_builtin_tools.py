@@ -11,7 +11,7 @@ from dirtywork.builtin_tools import default_registry
 from dirtywork.sandbox.host import HostSandbox
 from dirtywork.transcript import Transcript
 
-FROZEN_SCHEMAS = Path(__file__).parent / "fixtures" / "tool_schemas_v051.json"
+FROZEN_SCHEMAS = Path(__file__).parent / "fixtures" / "tool_schemas.json"
 
 
 class FakeSandbox:
@@ -57,9 +57,15 @@ def wt(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_schemas_match_the_frozen_v051_wire_contract():
+def test_schemas_match_the_frozen_wire_fixture():
     # The model-facing contract must not drift without a deliberate, matching
-    # change to builtin_tools.py AND to this fixture.
+    # change to builtin_tools.py AND to this fixture. The fixture tracks HEAD
+    # (it was regenerated in 0.8 and again in 0.9), which is why it is no
+    # longer named after 0.5.1: regenerate it with
+    #   python3 -c "import json; from dirtywork.builtin_tools import default_registry; \
+    #     open('tests/fixtures/tool_schemas.json','w',encoding='utf-8').write(\
+    #     json.dumps(default_registry().schemas(), indent=2, ensure_ascii=False) + '\n')"
+    # and read the diff before committing it.
     expected = json.loads(FROZEN_SCHEMAS.read_text(encoding="utf-8"))
     assert default_registry().schemas() == expected
 
