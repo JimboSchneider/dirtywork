@@ -25,7 +25,14 @@ from .budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB
 from .llm import LLMError
 from .providers import DEFAULT_BASE_URLS, PROVIDER_NAMES, get_provider
 from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json, write_run_json
-from .runner import DEFAULT_STALL_TURNS, DEFAULT_STUCK_REPEATS, Runner, resolve_context_window
+from .runner import (
+    DEFAULT_STALL_TURNS,
+    DEFAULT_STUCK_REPEATS,
+    DEFAULT_VERIFY_ROUNDS,
+    DEFAULT_VERIFY_TIMEOUT,
+    Runner,
+    resolve_context_window,
+)
 from .sandbox import SandboxError, docker_args, docker_cli
 from .sandbox.docker import DockerSandbox
 from .sandbox.docker_args import DEFAULT_IMAGE, DockerConfig
@@ -520,6 +527,13 @@ def _load_resume_target(args) -> dict:
         args.image = prior.get("image") or DEFAULT_IMAGE
     if args.allow_commit is None:
         args.allow_commit = bool(prior.get("allow_commit", False))
+    if getattr(args, "verify", None) is None:
+        # run.json records the verify RESULT object (spec §4.3), which carries
+        # the command; rounds/timeout are not recorded, so they keep their own
+        # defaults unless this invocation passes them.
+        prior_verify = prior.get("verify")
+        if isinstance(prior_verify, dict) and prior_verify.get("command"):
+            args.verify = prior_verify["command"]
     return prior
 
 
@@ -612,6 +626,9 @@ def _execute(ctx: RunContext, args, client) -> int:
             finalize=finalize,
             stall_turns=args.stall_turns, context_window=ctx.context_window,
             stuck_repeats=getattr(args, "stuck_repeats", DEFAULT_STUCK_REPEATS),
+            verify=getattr(args, "verify", None),
+            verify_rounds=getattr(args, "verify_rounds", DEFAULT_VERIFY_ROUNDS),
+            verify_timeout=getattr(args, "verify_timeout", DEFAULT_VERIFY_TIMEOUT),
         )
         display_root = DOCKER_WORKDIR if ctx.sandbox_mode == "docker" else str(ctx.worktree)
         system_prompt = build_system_prompt(display_root,
@@ -655,6 +672,7 @@ def _execute(ctx: RunContext, args, client) -> int:
         files_changed_truncated=bool(extra.get("files_changed_truncated")),
         last_tool_result=extra.get("last_tool_result"),
         last_assistant_text=extra.get("last_assistant_text"),
+        verify=extra.get("verify"),
         turns=result.turns,
     )
 
@@ -669,6 +687,7 @@ def _execute(ctx: RunContext, args, client) -> int:
         files_changed_truncated=bool(extra.get("files_changed_truncated")),
         last_tool_result=extra.get("last_tool_result"),
         last_assistant_text=extra.get("last_assistant_text"),
+        verify=extra.get("verify"),
         resumed_from=ctx.resumed_from, provider=ctx.provider,
     ), indent=2))
     return 0 if final_status == "completed" else 1
@@ -689,6 +708,15 @@ def _add_run_flags(p, *, resume: bool) -> None:
     p.add_argument("--stuck-repeats", type=_non_negative_int, default=DEFAULT_STUCK_REPEATS,
                    help="end the run as 'stuck' after the same failing bash command runs N "
                         "times in a row (0 disables); independent of --stall-turns")
+    p.add_argument("--verify", default=None, metavar="CMD",
+                   help="run CMD in the sandbox when the worker declares itself done; a "
+                        "non-zero exit ends the run as 'verify_failed' (resume inherits the "
+                        "command from the run it continues)")
+    p.add_argument("--verify-rounds", type=_non_negative_int, default=DEFAULT_VERIFY_ROUNDS,
+                   help="fix rounds after a failed --verify (default 1: the first failure goes "
+                        "back to the worker once; 0 verifies once and ends the run either way)")
+    p.add_argument("--verify-timeout", type=_positive_int, default=DEFAULT_VERIFY_TIMEOUT,
+                   help="seconds for the --verify command (default 600, clamped to 1-600)")
     p.add_argument("--context-window", type=_positive_int, default=None,
                    help="model context window in tokens (default: built-in table, else 32768)")
     p.add_argument("--max-worktree-mb", type=int, default=DEFAULT_MAX_WORKTREE_MB)

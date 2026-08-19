@@ -188,6 +188,26 @@ clone explicitly when testing unreleased changes.
 - **All flags, stdout JSON, exit codes, transcript events:** see
   [Machine contract](#machine-contract).
 
+#### Verifying a run
+
+    dirtywork run --repo ~/repos/someproject --verify 'npm test' "Add a unit test for X"
+
+`--verify CMD` makes your gate the harness's gate. The moment the worker
+declares itself done — `finish(summary=…)` or a plain answer — dirtywork runs
+`CMD` inside the sandbox, through the same `bash` path the worker used (same
+guardrails, same `--network none`, same budget watchdog), and **before** the
+export. A zero exit leaves the run `completed`; anything else ends it
+`verify_failed` (exit 1), with the command, its exit code and a 4000-char
+output tail in `verify` on the stdout JSON, the `run_end` event and `run.json`.
+`--verify-rounds N` (default 1) is how many fix rounds follow a failure: the
+default hands the first failure back to the worker as a message naming the
+command, the exit code and the output tail, and lets it try once more against
+the ordinary `--max-turns`/`--timeout` budget (the command may run N+1 times);
+`0` verifies once and ends the run either way. `--verify-timeout S` (default 600, clamped to
+1–600) bounds each run. In docker mode the command can only use what the image
+ships — see the callout under *Review a run*. `dirtywork resume` inherits the
+verify command from the run it continues.
+
 ### Resuming a run
 
 A run that ended early (`max_turns`, `stalled`, `timeout`, `interrupted`, a
@@ -440,6 +460,12 @@ In August 2026 the project was renamed **dirtywork** — same tool, a name that 
   missing dependency in docker mode) or is re-running a test it has no way to
   pass — read `stuck_on`, fix the environment or the brief, then
   `dirtywork resume <slug> --feedback "..."`. `--stuck-repeats 0` disables it.
+- **status `verify_failed`** — the worker declared itself done but the
+  `--verify` command exited non-zero on its last allowed run; the worktree is
+  kept and the export still ran. Read `verify.output_tail` in the payload, then
+  `dirtywork resume <slug> --feedback "<what to fix>"` — the resume inherits
+  the same verify command. In docker mode, check first that the command can run
+  at all in the image (`--network none`, nothing installed at run time).
 - **host mode (`--sandbox none`): "No module named pytest", or a
   `Library/`/`.cache/` directory appears in the worktree** — bash runs with
   `HOME` set to the worktree on purpose (so `~/.ssh` and friends are out of
@@ -516,6 +542,9 @@ dirtywork run --repo <path> "<task>"
     [--max-turns 40]
     [--stall-turns 12]                # end as `stalled` after N no-progress turns; 0 disables
     [--stuck-repeats 4]               # end as `stuck` after N identical failing bash runs; 0 disables
+    [--verify "<cmd>"]                # run this in the sandbox on completion; non-zero → `verify_failed`
+    [--verify-rounds 1]               # fix rounds after a failed --verify (0 = verify once, no retry)
+    [--verify-timeout 600]            # seconds per --verify run, clamped to 1-600
     [--context-window <tokens>]       # default: built-in table, else 32768 (+ stderr warning)
     [--timeout 1800]                  # whole-run wall clock, seconds
     [--temperature <f>]               # omitted by default → server preset
@@ -553,6 +582,11 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   between the reruns do **not** reset it — that is the loop `--stall-turns`
   cannot see, since every `edit_file` counts as progress. No nudge is sent:
   the point is to stop paying for turns. `0` disables.
+- `--verify CMD` / `--verify-rounds N` / `--verify-timeout S` — see
+  [Verifying a run](#verifying-a-run). `--verify-rounds` counts **fix rounds
+  after a failed verify** — the command may run N+1 times; `0` verifies once and
+  ends the run either way. `dirtywork resume` inherits the command (not the rounds or the
+  timeout, which `run.json` does not record) from the run it continues.
 - `--context-window TOKENS` — the model's context window, used to size the
   transcript trimming budget. Precedence: flag, then `DIRTYWORK_CONTEXT_WINDOW`,
   then a built-in table for the known LM Studio models, then 32768 (with a
@@ -590,8 +624,8 @@ printed to stdout (nothing else goes to stdout):
 ```
 
 `status` is one of: `completed`, `max_turns`, `timeout`, `stalled`, `stuck`,
-`context_exhausted`, `model_error`, `interrupted`, `budget_exceeded`,
-`sandbox_error`, `export_failed`. When the run fails before a `RunResult`
+`verify_failed`, `context_exhausted`, `model_error`, `interrupted`,
+`budget_exceeded`, `sandbox_error`, `export_failed`. When the run fails before a `RunResult`
 exists — the LLM client raises, post-worktree setup fails (e.g. the
 transcript can't be created), or any other exception escapes the run
 (status `model_error` in every case) — `turns` is `null` and `usage` is
@@ -622,7 +656,7 @@ during that exception recovery.
 
 - `0` — `completed`.
 - `1` — any non-`completed` status (`max_turns`, `timeout`, `stalled`,
-  `stuck`, `context_exhausted`, `model_error`, `interrupted`,
+  `stuck`, `verify_failed`, `context_exhausted`, `model_error`, `interrupted`,
   `budget_exceeded`, `sandbox_error`, `export_failed`); the worktree and branch are kept for
   salvage/review. `main` catches every `Exception` the run raises (not
   just ones the runner itself converts to a status) and reports

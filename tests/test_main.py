@@ -1723,3 +1723,41 @@ def test_end_of_run_evidence_lands_in_stdout_and_run_json(tmp_path, monkeypatch,
     data = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
     assert data["files_changed"] == ["evidence.txt"]
     assert data["last_assistant_text"] == "done writing"
+
+
+def test_verify_flag_records_the_gate_and_can_fail_the_run(tmp_path, monkeypatch, capsys):
+    finished = [{"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "f1", "type": "function", "function": {"name": "finish",
+         "arguments": json.dumps({"summary": "claimed done"})}}]}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1}}]
+    m = _install_host_harness(monkeypatch, tmp_path, finished)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                 "--verify", "echo nope; exit 4", "do it"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1, payload
+    assert payload["status"] == "verify_failed"
+    assert payload["verify"]["command"] == "echo nope; exit 4"
+    assert payload["verify"]["exit_code"] == 4
+    assert payload["verify"]["passed"] is False
+    assert "nope" in payload["verify"]["output_tail"]
+    data = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert data["status"] == "verify_failed"
+    assert data["verify"]["exit_code"] == 4
+
+
+@pytest.mark.skip(reason="needs resume --feedback (Task 9); unskipped there")
+def test_verify_is_null_without_the_flag_and_resume_inherits_the_command(
+        tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+                   "--verify", "true", "do it"]) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["verify"]["command"] == "true"
+
+    patch_provider(monkeypatch, m,
+                        lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
+    assert m.main(["resume", Path(first["run_dir"]).name, "--feedback", "again"]) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["verify"]["command"] == "true"      # inherited from the prior run.json

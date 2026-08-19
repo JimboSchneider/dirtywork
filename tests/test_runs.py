@@ -1147,3 +1147,19 @@ def test_show_renders_end_of_run_evidence(tmp_path, monkeypatch, capsys):
     assert "<details><summary>last tool result: bash(" in md
     assert "3 failing" in md
     assert "> I could not get the suite green." in md
+
+
+def test_show_renders_verify(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "ver1", {
+        "slug": "ver1", "status": "verify_failed", "task": "do it",
+        "verify": {"command": "npm run gate", "exit_code": 2,
+                   "output_tail": "exit code: 2\n2 failing", "rounds": 1, "passed": False},
+    })
+    assert runs.cmd_show(argparse.Namespace(slug="ver1", diff=False)) == 0
+    assert "verify: failed (exit 2)" in capsys.readouterr().out
+
+    assert runs.cmd_show(argparse.Namespace(slug="ver1", diff=False, markdown=True)) == 0
+    md = capsys.readouterr().out
+    assert "**verify** — failed (exit 2) after 1 round(s)" in md
+    assert "npm run gate" in md and "2 failing" in md

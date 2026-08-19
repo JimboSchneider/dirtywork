@@ -132,6 +132,20 @@ DEFAULT_STALL_TURNS = 12
 # run instead. No nudge: the point is to stop paying for turns.
 DEFAULT_STUCK_REPEATS = 4
 STUCK_OUTPUT_CHARS = 4000
+# Spec §4: the operator's own gate, run inside the sandbox on the completion
+# path. `verify_rounds` is how many FIX ROUNDS follow a failed verify — the
+# command may run verify_rounds + 1 times. The default 1 hands the first failure
+# back to the worker once; 0 verifies once and ends the run either way.
+DEFAULT_VERIFY_ROUNDS = 1
+DEFAULT_VERIFY_TIMEOUT = 600
+VERIFY_OUTPUT_CHARS = 4000
+VERIFY_FEEDBACK = (
+    "VERIFY FAILED (round {round} of {rounds}). The verification command\n"
+    "  {command}\n"
+    "exited with code {exit_code}. Output tail:\n"
+    "{output}\n"
+    "Fix the problem, then call finish(summary=...) again."
+)
 STALL_NUDGE = ("No progress in the last {n} turns: no file changed and no command produced "
                "new output. If the task is complete, commit (if asked) and call "
                "finish(summary=...); otherwise change your approach.")
@@ -160,6 +174,22 @@ def _bash_fingerprint(command, result: str) -> str:
     head, sep, body = result.partition("\n")
     normalized = head + sep + _VOLATILE_RE.sub("", body)
     return hashlib.sha256((str(command) + "\0" + normalized).encode("utf-8", "replace")).hexdigest()
+
+
+def parse_exit_code(result):
+    """The integer after 'exit code: ' on a bash result's first line, or None
+    for an ERROR:/BLOCKED: result that never produced an exit status at all.
+    The same first-line rule RepeatTracker._failed uses, read for its value."""
+    if not isinstance(result, str):
+        return None
+    head = result.split("\n", 1)[0]
+    prefix = "exit code: "
+    if not head.startswith(prefix):
+        return None
+    try:
+        return int(head[len(prefix):].strip())
+    except ValueError:
+        return None
 
 
 class ProgressTracker:
@@ -344,7 +374,10 @@ class Runner:
                  finalize: Callable[[], dict] | None = None,
                  stall_turns: int = DEFAULT_STALL_TURNS,
                  context_window: int | None = None,
-                 stuck_repeats: int = DEFAULT_STUCK_REPEATS):
+                 stuck_repeats: int = DEFAULT_STUCK_REPEATS,
+                 verify: str | None = None,
+                 verify_rounds: int = DEFAULT_VERIFY_ROUNDS,
+                 verify_timeout: int = DEFAULT_VERIFY_TIMEOUT):
         self.provider = provider
         self.registry = registry
         self.sandbox = sandbox
@@ -357,6 +390,11 @@ class Runner:
         self.finalize = finalize
         self.stall_turns = stall_turns
         self.stuck_repeats = stuck_repeats
+        self.verify = verify
+        self.verify_rounds = verify_rounds
+        # Clamped to the bash tool's own range so --verify can never ask the
+        # sandbox for a timeout the bash path would refuse.
+        self.verify_timeout = max(1, min(int(verify_timeout), 600))
         # An explicit 0 is honoured (it is how a test forces context_exhausted);
         # only None means "ask the provider".
         self.context_window = (context_window if context_window is not None
@@ -380,6 +418,8 @@ class Runner:
         stuck = None            # spec §1.2: set once, read by finish() below
         last_tool_result = None     # spec §2: the newest non-finish tool call
         last_assistant_text = None  # spec §2: the newest non-empty reply text
+        verify_state = None         # spec §4.3: the LAST verify run, or None
+        verify_rounds_used = 0
         start = time.monotonic()
         deadline = start + self.timeout
 
@@ -402,7 +442,8 @@ class Runner:
             # necessary: without it there was nothing left to triage from.
             extra: dict = {"stuck_on": stuck,
                            "last_tool_result": last_tool_result,
-                           "last_assistant_text": last_assistant_text}
+                           "last_assistant_text": last_assistant_text,
+                           "verify": verify_state}
             finalize_error = None
             if self.finalize is not None:
                 try:
@@ -431,6 +472,52 @@ class Runner:
                 self.transcript.write("nudge", kind="stall", turn=turns)
                 return None, STALL_NUDGE.format(n=self.stall_turns // 2)
             return None, None
+
+        def run_verify():
+            """One execution of the operator's gate (spec §4.2). Runs through
+            the same sandbox.bash the tool uses — same guardrails, same budget
+            watchdog, same reaper, same environment the worker's bash had — and
+            happens BEFORE finalize(), so in docker mode the container is still
+            alive and nothing has been exported yet. Returns the feedback text
+            for another round, or None when the run may end now (verify_state
+            says whether it passed)."""
+            nonlocal verify_state, verify_rounds_used
+            verify_rounds_used += 1
+            result = self.sandbox.bash(self.verify, self.verify_timeout)
+            exit_code = parse_exit_code(result)
+            passed = exit_code == 0
+            tail = result[-VERIFY_OUTPUT_CHARS:] if isinstance(result, str) else ""
+            verify_state = {"command": self.verify, "exit_code": exit_code,
+                            "output_tail": tail, "rounds": verify_rounds_used,
+                            "passed": passed}
+            self.transcript.write("verify", round=verify_rounds_used,
+                                  exit_code=exit_code, passed=passed)
+            if passed or verify_rounds_used > self.verify_rounds:
+                return None
+            return VERIFY_FEEDBACK.format(round=verify_rounds_used,
+                                          rounds=self.verify_rounds + 1,
+                                          command=self.verify,
+                                          exit_code=exit_code, output=tail)
+
+        def check_verify(final: str):
+            """(RunResult to return, or None; feedback to append, or None) for a
+            completion path. Both completion paths — the finish tool and a plain
+            answer — go through this one function, so they can never disagree
+            about what verifying means. BudgetExceeded/SandboxError end the run
+            with the same statuses a tool call would."""
+            if not self.verify:
+                return finish("completed", final), None
+            try:
+                feedback = run_verify()
+            except BudgetExceeded as e:
+                return finish("budget_exceeded", e.reason), None
+            except SandboxError as e:
+                return finish("sandbox_error", str(e)), None
+            if feedback is not None:
+                return None, feedback
+            if verify_state["passed"]:
+                return finish("completed", final), None
+            return finish("verify_failed", final), None
 
         try:
             while True:
@@ -495,7 +582,11 @@ class Runner:
                     kind = classify_text_reply(content, finish_reason)
                     if kind == "answer":
                         messages.append(assistant_message(content, None))
-                        return finish("completed", content)
+                        ended, feedback = check_verify(content)
+                        if ended is not None:
+                            return ended
+                        messages.append({"role": "user", "content": feedback})
+                        continue
                     messages.append(assistant_message(content, None))
                     self.transcript.write("nudge", kind=kind, turn=turns)
                     abort_reason = failures.record("empty_reply")
@@ -571,7 +662,11 @@ class Runner:
                         return finish("model_error", abort_reason)
 
                 if pending_finish is not None:
-                    return finish("completed", pending_finish)
+                    ended, feedback = check_verify(pending_finish)
+                    if ended is not None:
+                        return ended
+                    messages.append({"role": "user", "content": feedback})
+                    continue
 
                 # Same rule as `finish` in a mixed turn: the turn's remaining
                 # tool calls have already run. `finish` still wins — a worker

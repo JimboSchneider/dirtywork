@@ -16,16 +16,17 @@ from .provider_doubles import DictProvider, patch_provider, text_body, tool_call
 DOC = Path(__file__).parent.parent / "docs" / "transcript-schema.md"
 
 EVENT_NAMES = ["run_start", "assistant", "tool_result", "guardrail_block", "nudge",
-               "sandbox_reset", "run_end"]
+               "sandbox_reset", "verify", "run_end"]
 NUDGE_KINDS = ["truncated", "empty", "text_tool_call", "stall"]
 STATUSES = ["completed", "max_turns", "timeout", "context_exhausted", "model_error",
-            "interrupted", "stalled", "stuck", "budget_exceeded", "sandbox_error",
-            "export_failed"]
+            "interrupted", "stalled", "stuck", "verify_failed", "budget_exceeded",
+            "sandbox_error", "export_failed"]
 RUN_END_FIELDS = ["diff_stat", "untracked", "patch_path", "escaping_symlinks",
                   "dropped_git_entries", "worktree_bytes", "worktree_files",
                   "export_status", "watchdog_violation", "watchdog_violation_kind",
                   "finalize_error", "stuck_on", "files_changed",
-                  "files_changed_truncated", "last_tool_result", "last_assistant_text"]
+                  "files_changed_truncated", "last_tool_result", "last_assistant_text",
+                  "verify"]
 
 
 def _doc_tokens():

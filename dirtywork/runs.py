@@ -30,7 +30,7 @@ LIST_COLUMNS = ("slug", "status", "started", "resumed", "branch", "worktree",
                 "container", "volume")
 SHOW_FIELDS = ("slug", "status", "sandbox", "task", "model", "provider", "turns",
                "resumed_from", "resumed_by", "branch", "worktree", "started", "ended",
-               "stuck_on", "files_changed")
+               "stuck_on", "files_changed", "verify")
 TASK_PREVIEW_CHARS = 200
 
 
@@ -219,6 +219,9 @@ def _summary_value(key: str, data: dict) -> str:
         head = ", ".join(str(p) for p in value[:3])
         tail = ", ..." if len(value) > 3 else ""
         return f"{len(value)} ({head}{tail})"
+    if key == "verify" and isinstance(value, dict):
+        state = "passed" if value.get("passed") else "failed"
+        return f"{state} (exit {value.get('exit_code')})"
     text = str(value)
     if key == "task" and len(text) > TASK_PREVIEW_CHARS:
         text = text[:TASK_PREVIEW_CHARS].replace("\n", " ") + " ... (full text below)"
@@ -438,6 +441,13 @@ def _md_result(data: dict, events: list) -> list:
         if value not in (None, ""):
             lines.append(f"- **{key}:** {str(value).splitlines()[0]}")
     lines.append("")
+    verify = data.get("verify") or end.get("verify")
+    if isinstance(verify, dict):
+        state = "passed" if verify.get("passed") else "failed"
+        lines += [f"**verify** — {state} (exit {verify.get('exit_code')}) after "
+                  f"{verify.get('rounds')} round(s)", ""]
+        lines += _md_block(str(verify.get("command") or ""))
+        lines += _md_block(str(verify.get("output_tail") or ""))
     stuck_on = data.get("stuck_on") or end.get("stuck_on")
     if isinstance(stuck_on, dict):
         lines += [f"**stuck on** — the same failing command ran "

@@ -103,6 +103,18 @@ runner — this moved from `ToolExecutor` in sub-project 3.
 |---|---|---|---|---|
 | `reason` | | ✓ | string | why the reset happened |
 
+### `verify`
+
+**v2 only**, 0.8 and later, and only when `--verify CMD` was given. One per
+execution of the verification command, written on the completion path before
+the export runs.
+
+| Field | v1 | v2 | Type | Notes |
+|---|---|---|---|---|
+| `round` | | ✓ | integer | 1-based; at most `--verify-rounds` + 1 of them |
+| `exit_code` | | ✓ | integer \| null | the integer after `exit code: ` in the bash result; `null` for an `ERROR:`/`BLOCKED:` result that never produced a status |
+| `passed` | | ✓ | boolean | true only for exit code 0 |
+
 ### `run_end`
 
 One per run, always the last line. Written by the runner on every terminal
@@ -132,6 +144,7 @@ case it carries `status` and `error` only).
 | `files_changed_truncated` | | ✓ | boolean | 0.8: true when `files_changed` was cut at the 1000-path cap |
 | `last_tool_result` | | ✓ | object \| null | 0.8: `{tool, args, result}` for the last tool call the runner executed other than `finish` (`args` ≤500 chars, `result` ≤2000 chars); `null` if no tool ever ran |
 | `last_assistant_text` | | ✓ | string \| null | 0.8: the model's last non-empty assistant text, capped at 2000 chars; `null` if there was none |
+| `verify` | | ✓ | object \| null | 0.8: `{command, exit_code, output_tail, rounds, passed}` for the LAST `--verify` execution (`output_tail` capped at 4000 chars); `null` when `--verify` was not given |
 
 ## Statuses
 
@@ -145,6 +158,7 @@ case it carries `status` and `error` only).
 | `interrupted` | ✓ | ✓ | Ctrl-C during the loop |
 | `stalled` | | ✓ | `--stall-turns` consecutive turns with no progress (no new tool call, no successful write, no new command output) |
 | `stuck` | | ✓ | 0.8: the same **failing** bash command ran `--stuck-repeats` times in a row (fingerprint as the stall detector's: timings/shas stripped); edits in between do not reset the streak, a passing run does |
+| `verify_failed` | | ✓ | 0.8: the worker declared itself done, but the `--verify` command exited non-zero on its last allowed round |
 | `budget_exceeded` | | ✓ | worktree size/file budget or host disk floor breached |
 | `sandbox_error` | | ✓ | the sandbox backend failed in a way the run cannot continue past |
 | `export_failed` | | ✓ | the run itself completed, but the validated export of the worker's files did not |
@@ -157,8 +171,8 @@ section). Its fields: `schema_version`, `status`, `worktree`, `branch`,
 `transcript`, `turns`, `usage`, `final_message`, `run_dir`, `provider`,
 `base_commit`, `resumed_from`, `finalize_error`, `watchdog_violation`,
 `watchdog_violation_kind`, `stuck_on`, `files_changed`,
-`files_changed_truncated`, `last_tool_result`, `last_assistant_text`, and
-`export_status` on the exception-recovery path.
+`files_changed_truncated`, `last_tool_result`, `last_assistant_text`, `verify`,
+and `export_status` on the exception-recovery path.
 Per this project's compatibility rule the stdout JSON may only gain fields,
 never lose or rename `status`, `worktree`, `branch`, `transcript`, `turns`,
 `usage`, `final_message`.
@@ -208,6 +222,7 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `files_changed_truncated` | end, export | 0.8: true when the 1000-path cap cut the list |
 | `last_tool_result` | end | 0.8: `{tool, args, result}` for the last non-`finish` tool call, or null |
 | `last_assistant_text` | end | 0.8: the last non-empty assistant text (≤2000 chars), or null |
+| `verify` | end | 0.8: `{command, exit_code, output_tail, rounds, passed}` for the last `--verify` execution, or null. `dirtywork resume` reads `verify.command` back out of here to inherit the gate |
 | `allow_commit` | start | (bool) records whether the run's system prompt told the worker to commit as it went (`--allow-commit`, host mode only — see the README). A run that predates the flag has no such key. |
 | `verdict` | verdict | written by `dirtywork runs verdict`: `"accept"` \| `"reject"` \| `"cleanup"` |
 | `note` | verdict | `--note` text, or null |

@@ -359,7 +359,8 @@ def test_finalize_merges_into_run_end_and_result_extra(parts):
     result = r.run("s", "t")
     transcript.close()
     assert result.extra == {"stuck_on": None, "last_tool_result": None,
-                            "last_assistant_text": "done", "diff_stat": " 1 file changed"}
+                            "last_assistant_text": "done", "verify": None,
+                            "diff_stat": " 1 file changed"}
     events = _events(tmp)
     run_end = next(e for e in events if e["event"] == "run_end")
     assert run_end["diff_stat"] == " 1 file changed"
@@ -1069,3 +1070,85 @@ def test_last_tool_result_reflects_a_malformed_entry(parts):
     assert result.extra["last_tool_result"]["tool"] == ""
     assert result.extra["last_tool_result"]["args"] == ""
     assert result.extra["last_tool_result"]["result"].startswith("ERROR: ")
+
+
+def test_verify_passes_and_the_run_completes(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "done"})])])
+    r = Runner(provider, registry, sandbox, transcript, model="m", verify="true")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    verify = result.extra["verify"]
+    assert verify["command"] == "true"
+    assert verify["exit_code"] == 0
+    assert verify["passed"] is True
+    assert verify["rounds"] == 1
+    # tools.bash returns "exit code: 0\n" for a command with no output
+    assert verify["output_tail"].startswith("exit code: 0")
+    event = next(e for e in _events(tmp) if e["event"] == "verify")
+    assert event == {"ts": event["ts"], "event": "verify", "round": 1,
+                     "exit_code": 0, "passed": True}
+
+
+def test_verify_failure_with_no_round_left_is_verify_failed(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "done"})])])
+    r = Runner(provider, registry, sandbox, transcript, model="m",
+               verify="echo boom; exit 3", verify_rounds=0)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "verify_failed"
+    assert result.final_message == "done"          # the worker's own summary is kept
+    assert result.extra["verify"]["passed"] is False
+    assert result.extra["verify"]["exit_code"] == 3
+    assert "boom" in result.extra["verify"]["output_tail"]
+    assert result.extra["verify"]["rounds"] == 1
+
+
+def test_verify_failure_with_a_round_left_feeds_back_and_retries(parts, tmp_path):
+    wt, registry, sandbox, transcript, tmp = parts
+    marker = wt / "fixed"
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "first try"})]),
+        _resp(tool_calls=[_call("w1", "write_file", {"path": "fixed", "content": "y"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "second try"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m",
+               verify="test -e fixed", verify_rounds=1)
+    result = r.run("s", "t")
+    transcript.close()
+    assert marker.is_file()
+    assert result.status == "completed"
+    assert result.final_message == "second try"
+    assert result.extra["verify"]["rounds"] == 2 and result.extra["verify"]["passed"] is True
+    # the failed round was fed back as a user message naming the command
+    feedback = [m for m in provider.requests[-1] if m["role"] == "user"]
+    assert any("VERIFY FAILED (round 1 of 2)" in m["content"] for m in feedback)
+    assert any("test -e fixed" in m["content"] for m in feedback)
+    verify_events = [e for e in _events(tmp) if e["event"] == "verify"]
+    assert [e["passed"] for e in verify_events] == [False, True]
+
+
+def test_verify_on_a_plain_answer_completion_and_error_passthrough(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(content="I am done")])
+    r = Runner(provider, registry, sandbox, transcript, model="m", verify="exit 1",
+              verify_rounds=0)
+    result = r.run("s", "t")
+    assert result.status == "verify_failed"
+    assert result.final_message == "I am done"
+
+    class ExplodingSandbox:
+        def bash(self, command, timeout=120):
+            from dirtywork.budget import BudgetExceeded
+            raise BudgetExceeded("worktree over budget")
+
+    transcript2 = Transcript(tmp / "t2.jsonl")
+    provider2 = FakeProvider([_resp(content="I am done")])
+    r2 = Runner(provider2, default_registry(transcript=transcript2), ExplodingSandbox(),
+                transcript2, model="m", verify="true")
+    result2 = r2.run("s", "t")
+    transcript2.close()
+    assert result2.status == "budget_exceeded"
+    assert result2.extra["verify"] is None
