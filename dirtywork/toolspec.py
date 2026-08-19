@@ -29,8 +29,15 @@ class ParamSpec:
     (with ``description`` merged in exactly as for a flat param) and
     _validate_args validates against it recursively. ``type`` stays set to the
     schema's top-level type so canonical_args and any other reader that only
-    knows about flat types keeps working. Leave it None for a flat param and
-    nothing about that param changes."""
+    knows about flat types keeps working -- canonical_args itself only special-
+    cases "integer"/"number" coercion, so for a schema-bearing param (whose
+    ``type`` is "array"/"object") it passes the raw, unvalidated, uncoerced
+    value straight through rather than the validated/coerced one _validate_args
+    produces. Moot for a mutating tool (ProgressTracker.note_call short-circuits
+    on tool name for anything in runner._MUTATING_TOOLS before it ever hashes
+    canonical_args), which is the only kind of tool a schema-bearing param is
+    expected to belong to. Leave it None for a flat param and nothing about
+    that param changes."""
 
     type: str
     description: str = ""
@@ -121,6 +128,27 @@ def _coerce_numeric_string(ptype: str, value):
     return None
 
 
+def _check_scalar(ptype: str, value, label: str):
+    """The scalar-leaf check shared by the flat-type path (_validate_args) and
+    the nested-schema path (_validate_against_schema): look up ptype in
+    _TYPE_CHECKS, and if the value doesn't already match, try coercing a
+    numeric string via _coerce_numeric_string before giving up. Returns the
+    (possibly coerced) value, or raises ToolValidationError(f"{label} must be
+    {ptype}, got {type(value).__name__}") -- `label` is the caller's own
+    identifier for the value (a flat param's `"parameter 'name'"`, or a nested
+    leaf's dotted/indexed `path`), so both call sites keep their existing,
+    byte-identical messages. A ptype with no _TYPE_CHECKS entry (e.g. "array"/
+    "object" reaching here, which neither caller does today) passes through
+    unchecked, matching prior behaviour at both sites."""
+    check = _TYPE_CHECKS.get(ptype)
+    if check is None or check(value):
+        return value
+    coerced = _coerce_numeric_string(ptype, value)
+    if coerced is None:
+        raise ToolValidationError(f"{label} must be {ptype}, got {type(value).__name__}")
+    return coerced
+
+
 def _validate_against_schema(value, schema: dict, path: str):
     """Validate `value` against the minimal JSON-Schema subset a ParamSpec.schema
     may use (spec §1.3): type, minItems, maxItems, items, properties, required,
@@ -170,13 +198,7 @@ def _validate_against_schema(value, schema: dict, path: str):
             out[name] = (_validate_against_schema(item, sub, f"{path}.{name}")
                          if isinstance(sub, dict) else item)
         return out
-    check = _TYPE_CHECKS.get(ptype)
-    if check is not None and not check(value):
-        coerced = _coerce_numeric_string(ptype, value)
-        if coerced is None:
-            raise ToolValidationError(f"{path} must be {ptype}, got {type(value).__name__}")
-        return coerced
-    return value
+    return _check_scalar(ptype, value, path)
 
 
 def _input_bytes(value) -> int:
@@ -213,13 +235,7 @@ def _validate_args(spec: ToolSpec, args: dict) -> dict:
                 # so a tool function never has to re-check nested item shapes.
                 call_args[pname] = _validate_against_schema(value, pspec.schema, pname)
                 continue
-            check = _TYPE_CHECKS.get(pspec.type)
-            if check is not None and not check(value):
-                coerced = _coerce_numeric_string(pspec.type, value)
-                if coerced is None:
-                    raise ToolValidationError(
-                        f"parameter '{pname}' must be {pspec.type}, got {type(value).__name__}")
-                value = coerced
+            value = _check_scalar(pspec.type, value, f"parameter '{pname}'")
             call_args[pname] = value
         elif pspec.default is not MISSING:
             call_args[pname] = pspec.default

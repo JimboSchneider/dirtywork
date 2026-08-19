@@ -558,3 +558,33 @@ def test_max_input_bytes_under_the_cap_runs_the_tool():
                               {"path": "a.py", "edits": [{"old": "x", "new": "y"}]},
                               sandbox=None, deadline=None)
     assert result.kind == "ok" and result.text == "a.py:1"
+
+
+_OPTS_SCHEMA = {
+    "type": "object",
+    "properties": {"verbose": {"type": "boolean"}},
+    "required": ["verbose"],
+    "additionalProperties": False,
+}
+
+
+def test_top_level_object_schema_validates_and_path_qualifies_a_missing_required_key():
+    # Every other nested-validation test exercises an object schema nested
+    # inside an array (apply_edits' `edits` items); this one pins the object
+    # branch of _validate_against_schema when it IS the param's own top-level
+    # schema, not a leaf several levels down.
+    spec = ToolSpec(
+        name="t", description="", params={
+            "opts": ParamSpec(type="object", schema=_OPTS_SCHEMA),
+        },
+        required=("opts",), fn=lambda sandbox, opts: repr(opts),
+        caps=Caps(fs="none"))
+    registry = ToolRegistry()
+    registry.register(spec)
+
+    ok = registry.execute("t", {"opts": {"verbose": True}}, sandbox=None, deadline=None)
+    assert ok.kind == "ok" and ok.text == "{'verbose': True}"
+
+    bad = registry.execute("t", {"opts": {}}, sandbox=None, deadline=None)
+    assert bad.failure == "bad_args"
+    assert bad.text == "ERROR: bad arguments for t: opts is missing required property 'verbose'"
