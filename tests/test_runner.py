@@ -422,7 +422,7 @@ def test_finalize_merges_into_run_end_and_result_extra(parts):
     transcript.close()
     assert result.extra == {"stuck_on": None, "last_tool_result": None,
                             "last_assistant_text": "done", "verify": None,
-                            "trimmed_turns": 0,
+                            "trimmed_turns": 0, "context_window_source": None,
                             "diff_stat": " 1 file changed"}
     events = _events(tmp)
     run_end = next(e for e in events if e["event"] == "run_end")
@@ -849,8 +849,16 @@ def test_resolve_context_window_without_a_provider_falls_back_to_default():
 
 
 def test_resolve_context_window_uses_the_real_openai_table():
+    # The stub transport keeps this a pure unit test: with 0.9's server probe
+    # in front of the table, a real client would otherwise try to GET
+    # http://fake/api/v0/models before falling back. LLMError is already
+    # imported at module scope (tests/test_runner.py:9).
     from dirtywork.providers.openai_compat import OpenAICompatClient
-    provider = OpenAICompatClient(base_url="http://fake/v1")
+
+    def no_server(url, payload, headers, timeout, *, method="POST"):
+        raise LLMError(f"cannot reach {url}")
+
+    provider = OpenAICompatClient(base_url="http://fake/v1", http_json=no_server)
     assert resolve_context_window("qwen/qwen3-coder-next", None, None, provider) == \
         (CONTEXT_WINDOWS["qwen/qwen3-coder-next"], "provider:openai")
 
@@ -1255,3 +1263,44 @@ def test_verify_on_a_plain_answer_completion_and_error_passthrough(parts):
     transcript2.close()
     assert result2.status == "budget_exceeded"
     assert result2.extra["verify"] is None
+
+
+class _ServerProvider(FakeProvider):
+    """A provider that also implements the optional loaded_context_window hook
+    (spec §3.1). `loaded` may be an int, None, or an Exception to raise."""
+
+    def __init__(self, loaded, context_window=65536):
+        super().__init__([], context_window=context_window)
+        self._loaded = loaded
+
+    def loaded_context_window(self, model):
+        if isinstance(self._loaded, Exception):
+            raise self._loaded
+        return self._loaded
+
+
+def test_resolve_context_window_prefers_what_the_server_loaded():
+    provider = _ServerProvider(131072)
+    assert resolve_context_window("qwen/qwen3-coder-next", None, None, provider) == \
+        (131072, "provider:fake:server")
+
+
+@pytest.mark.parametrize("loaded", [None, 0, -1, True, "65536", RuntimeError("boom")])
+def test_resolve_context_window_falls_back_to_the_table_when_the_probe_says_nothing(loaded):
+    provider = _ServerProvider(loaded)
+    assert resolve_context_window("qwen/qwen3-coder-next", None, None, provider) == \
+        (65536, "provider:fake")
+
+
+def test_resolve_context_window_without_the_hook_uses_the_table():
+    # Every existing double and every third-party provider is this case.
+    provider = FakeProvider([], context_window=65536)
+    assert not hasattr(provider, "loaded_context_window")
+    assert resolve_context_window("qwen/qwen3-coder-next", None, None, provider) == \
+        (65536, "provider:fake")
+
+
+def test_flag_and_env_still_beat_the_server_report():
+    provider = _ServerProvider(131072)
+    assert resolve_context_window("m", 8000, None, provider) == (8000, "flag")
+    assert resolve_context_window("m", None, "9000", provider) == (9000, "env")

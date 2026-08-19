@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dirtywork.llm import LLMError, MalformedResponse
+from dirtywork.llm import LLMError, LLMTimeout, MalformedResponse
 from dirtywork.providers.openai_compat import OpenAICompatClient, parse_chat_response
 
 from .provider_contract import ProviderContract, RecordingTransport
@@ -186,3 +186,72 @@ def test_non_object_arguments_are_a_malformed_args_error():
     tc = parse_chat_response(body).tool_calls[0]
     assert tc.id == "c1" and tc.arguments is None
     assert "must be a JSON object" in tc.error
+
+
+_LOADED_BODY = {"data": [
+    {"id": "other/model", "state": "loaded", "loaded_context_length": 4096},
+    {"id": "qwen/qwen3-coder-next", "state": "loaded",
+     "max_context_length": 262144, "loaded_context_length": 131072},
+]}
+
+
+def test_loaded_context_window_probes_the_origin_with_its_own_timeout():
+    transport = RecordingTransport([_LOADED_BODY])
+    client = _client(transport)
+    assert client.loaded_context_window("qwen/qwen3-coder-next") == 131072
+    call = transport.calls[0]
+    assert call["url"] == "http://fake/api/v0/models"    # NOT under /v1
+    assert call["method"] == "GET"
+    assert call["payload"] is None
+    assert call["timeout"] == 2
+
+
+def test_loaded_context_window_drops_a_proxy_path_prefix():
+    transport = RecordingTransport([_LOADED_BODY])
+    client = OpenAICompatClient(base_url="http://h:1/prefix/v1", http_json=transport)
+    assert client.loaded_context_window("qwen/qwen3-coder-next") == 131072
+    assert transport.calls[0]["url"] == "http://h:1/api/v0/models"
+
+
+@pytest.mark.parametrize("body", [
+    {},                                                       # not the expected shape
+    {"data": "nope"},                                         # data is not a list
+    {"data": []},                                             # model absent
+    {"data": [{"id": "other", "state": "loaded", "loaded_context_length": 4096}]},
+    {"data": [{"id": "m", "state": "loading", "loaded_context_length": 4096}]},
+    {"data": [{"id": "m", "state": None, "loaded_context_length": 4096}]},
+    {"data": [{"id": "m", "state": "loaded"}]},                # field missing
+    {"data": [{"id": "m", "state": "loaded", "loaded_context_length": None}]},
+    {"data": [{"id": "m", "state": "loaded", "loaded_context_length": 0}]},
+    {"data": [{"id": "m", "state": "loaded", "loaded_context_length": -1}]},
+    {"data": [{"id": "m", "state": "loaded", "loaded_context_length": True}]},
+    {"data": [{"id": "m", "state": "loaded", "loaded_context_length": "4096"}]},
+])
+def test_loaded_context_window_rejects_anything_else(body):
+    assert _client(RecordingTransport([body])).loaded_context_window("m") is None
+
+
+def test_loaded_context_window_accepts_an_entry_with_no_state_field():
+    # The `state` KEY being absent is not the same as `"state": null` (rejected
+    # above): a compatible server that reports the loaded length without a
+    # state field at all is still answering the question.
+    body = {"data": [{"id": "m", "loaded_context_length": 8192}]}
+    assert _client(RecordingTransport([body])).loaded_context_window("m") == 8192
+
+
+def test_loaded_context_window_is_none_when_the_endpoint_is_unreachable():
+    def boom(url, payload, headers, timeout, *, method="POST"):
+        raise LLMError(f"cannot reach {url}")
+
+    client = OpenAICompatClient(base_url="http://fake/v1", http_json=boom)
+    assert client.loaded_context_window("m") is None
+
+
+def test_loaded_context_window_is_none_when_the_probe_times_out():
+    # LLMTimeout subclasses LLMError, so one `except LLMError` covers both --
+    # this test is what proves the probe's 2-second budget cannot fail a run.
+    def slow(url, payload, headers, timeout, *, method="POST"):
+        raise LLMTimeout(f"request to {url} exceeded {timeout}s")
+
+    client = OpenAICompatClient(base_url="http://fake/v1", http_json=slow)
+    assert client.loaded_context_window("m") is None

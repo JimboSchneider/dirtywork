@@ -304,10 +304,12 @@ class RepeatTracker:
 
 
 def resolve_context_window(model: str, flag_value, env_value, provider=None) -> tuple:
-    """Precedence: --context-window > DIRTYWORK_CONTEXT_WINDOW > the provider's
-    own table for this model > DEFAULT_WINDOW. Returns (tokens, source) with
-    source in flag|env|provider:<name>|default. Raises ValueError for an env
-    value that is not a positive integer."""
+    """Precedence: --context-window > DIRTYWORK_CONTEXT_WINDOW > what the SERVER
+    reports it actually loaded the model with > the provider's own static table
+    for this model > DEFAULT_WINDOW. Returns (tokens, source) with source in
+    flag|env|provider:<name>:server|provider:<name>|default -- the two provider
+    sources are deliberately distinct strings, so a run record says which one
+    answered. Raises ValueError for an env value that is not a positive integer."""
     if flag_value is not None:
         return int(flag_value), "flag"
     if env_value not in (None, ""):
@@ -320,9 +322,22 @@ def resolve_context_window(model: str, flag_value, env_value, provider=None) -> 
                 f"DIRTYWORK_CONTEXT_WINDOW must be a positive integer, got {env_value!r}")
         return value, "env"
     if provider is not None:
+        name = getattr(provider, "name", "provider")
+        # Spec §3.1: loaded_context_window is OPTIONAL. Third-party providers and
+        # every existing test double simply do not have it; one that raises (an
+        # endpoint behaving unexpectedly, a transport bug) must never fail a run.
+        # Both cases fall through to the static table, exactly as before 0.9.
+        probe = getattr(provider, "loaded_context_window", None)
+        if probe is not None:
+            try:
+                loaded = probe(model)
+            except Exception:
+                loaded = None
+            if isinstance(loaded, int) and not isinstance(loaded, bool) and loaded > 0:
+                return loaded, f"provider:{name}:server"
         window = provider.context_window(model)
         if window:
-            return int(window), f"provider:{getattr(provider, 'name', 'provider')}"
+            return int(window), f"provider:{name}"
     return DEFAULT_WINDOW, "default"
 
 
@@ -382,6 +397,7 @@ class Runner:
                  finalize: Callable[[], dict] | None = None,
                  stall_turns: int = DEFAULT_STALL_TURNS,
                  context_window: int | None = None,
+                 context_window_source: str | None = None,
                  stuck_repeats: int = DEFAULT_STUCK_REPEATS,
                  verify: str | None = None,
                  verify_rounds: int = DEFAULT_VERIFY_ROUNDS,
@@ -397,6 +413,11 @@ class Runner:
         self.run_info = run_info
         self.finalize = finalize
         self.stall_turns = stall_turns
+        # Spec §3.4: recorded, never used for a decision. The runner already has
+        # the NUMBER; this only says where it came from, so a run record can be
+        # read without guessing whether anybody chose it. None for a Runner
+        # built directly (tests, embedders) that never resolved a source.
+        self.context_window_source = context_window_source
         self.stuck_repeats = stuck_repeats
         self.verify = verify
         self.verify_rounds = verify_rounds
@@ -417,6 +438,7 @@ class Runner:
         self.transcript.write("run_start", task=task, model=self.model,
                               max_turns=self.max_turns, timeout=self.timeout,
                               context_window=self.context_window,
+                              context_window_source=self.context_window_source,
                               schema_version=2, **(self.run_info or {}))
         usage = {"prompt_tokens": 0, "completion_tokens": 0}
         turns = 0
@@ -453,7 +475,8 @@ class Runner:
                            "last_tool_result": last_tool_result,
                            "last_assistant_text": last_assistant_text,
                            "verify": verify_state,
-                           "trimmed_turns": trimmed_turns}
+                           "trimmed_turns": trimmed_turns,
+                           "context_window_source": self.context_window_source}
             finalize_error = None
             if self.finalize is not None:
                 try:

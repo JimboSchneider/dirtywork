@@ -30,7 +30,8 @@ from .workspace import WorkspaceError, host_worktree_dirty, snapshot_worktree
 COLUMN_GAP = "  "
 LIST_COLUMNS = ("slug", "status", "started", "resumed", "branch", "worktree",
                 "container", "volume")
-SHOW_FIELDS = ("slug", "status", "sandbox", "task", "model", "provider", "turns",
+SHOW_FIELDS = ("slug", "status", "sandbox", "task", "model", "provider",
+               "context_window", "turns",
                "resumed_from", "resumed_by", "branch", "worktree", "started", "ended",
                "stuck_on", "files_changed", "verify", "trimmed_turns")
 TASK_PREVIEW_CHARS = 200
@@ -234,6 +235,12 @@ def _summary_value(key: str, data: dict) -> str:
     if key == "verify" and isinstance(value, dict):
         state = "passed" if value.get("passed") else "failed"
         return f"{state} (exit {value.get('exit_code')})"
+    if key == "context_window":
+        # 0.9: the number alone cannot be read -- 32768 may be the model's real
+        # window or the fallback nobody chose. The source says which. A run.json
+        # written before 0.9 has no source and renders the bare number.
+        source = data.get("context_window_source")
+        return f"{value} ({source})" if source else str(value)
     text = str(value)
     if key == "task" and len(text) > TASK_PREVIEW_CHARS:
         text = text[:TASK_PREVIEW_CHARS].replace("\n", " ") + " ... (full text below)"
@@ -298,8 +305,9 @@ def _timeline_line(event: dict) -> str:
     return f"{ts}  {name}"
 
 
-MD_HEADER_FIELDS = ("status", "task", "model", "provider", "sandbox", "turns",
-                    "base_commit", "branch", "worktree", "resumed_from", "resumed_by")
+MD_HEADER_FIELDS = ("status", "task", "model", "provider", "context_window", "sandbox",
+                    "turns", "base_commit", "branch", "worktree", "resumed_from",
+                    "resumed_by")
 MD_VERDICT_FIELDS = ("verdict", "note")
 # `trimmed_turns` (0.9) is an int that is meaningful at 0, and _md_result's loop
 # prints anything not None/"" -- so it renders "0" rather than disappearing,

@@ -139,6 +139,12 @@ class RunContext:
     image_digest: str | None
     image_pinned: bool
     context_window: int
+    # Spec §3.4: which precedence step produced `context_window` --
+    # flag|env|provider:<name>:server|provider:<name>|default. REQUIRED (no
+    # default), so it must stay above the first defaulted field below; a run
+    # record that reports 32768 without saying whether anybody chose it is not
+    # a record.
+    context_window_source: str
     branch_from: str | None = None
     branch_from_run: str | None = None   # the @<slug> --branch-from named, if any
     feedback: str | None = None          # resume only: the reviewer's instructions
@@ -187,7 +193,10 @@ def _preflight_llm(args):
     return provider
 
 
-def _resolve_context_window(args, provider=None) -> int:
+def _resolve_context_window(args, provider=None) -> tuple:
+    """(tokens, source). The source was discarded before 0.9; it is now recorded
+    on the run. The "assuming …" warning still fires only for "default" --
+    "provider:openai:server" and "provider:openai" are both known values."""
     try:
         window, source = resolve_context_window(
             args.model, args.context_window, os.environ.get("DIRTYWORK_CONTEXT_WINDOW"),
@@ -197,7 +206,7 @@ def _resolve_context_window(args, provider=None) -> int:
     if source == "default":
         print(f"warning: no known context window for '{args.model}'; assuming {window} tokens "
               f"(set --context-window or DIRTYWORK_CONTEXT_WINDOW)", file=sys.stderr)
-    return window
+    return window, source
 
 
 def _resolve_allow_commit(args) -> None:
@@ -258,7 +267,8 @@ def _resolve_branch_from(args) -> tuple:
     return branch, slug
 
 
-def _workspace_new(args, repo: Path, context_window: int) -> RunContext:
+def _workspace_new(args, repo: Path, context_window: int,
+                   context_window_source: str) -> RunContext:
     # First: it is the cheapest refusal in this function, and its snapshot must
     # happen before the run creates a worktree it might have to roll back.
     branch_from, branch_from_run = _resolve_branch_from(args)
@@ -285,7 +295,8 @@ def _workspace_new(args, repo: Path, context_window: int) -> RunContext:
         repo=repo, slug=slug, branch=branch, worktree=worktree,
         base_commit=worktree_base_commit(worktree), task=args.task,
         sandbox_mode=args.sandbox, provider=args.provider, image_ref=image_ref, image_digest=image_digest,
-        image_pinned=image_pinned, context_window=context_window, branch_from=branch_from,
+        image_pinned=image_pinned, context_window=context_window,
+        context_window_source=context_window_source, branch_from=branch_from,
         branch_from_run=branch_from_run,
     )
 
@@ -417,6 +428,7 @@ def _write_run_json_start(run_dir: Path, ctx: RunContext, args) -> None:
         "model": args.model,
         "provider": args.provider,
         "context_window": ctx.context_window,
+        "context_window_source": ctx.context_window_source,
         "branch_from_run": ctx.branch_from_run,
         "feedback": ctx.feedback,
         "resumed_from": ctx.resumed_from,
@@ -480,6 +492,7 @@ def _emit_result(*, status: str, worktree: Path, branch: str, transcript_path: P
         "last_assistant_text": None,
         "verify": None,
         "trimmed_turns": 0,
+        "context_window_source": None,
     }
     payload.update(extra)
     return payload
@@ -492,10 +505,12 @@ def _contract_fields(extra: dict, ctx: RunContext) -> dict:
 
     The two failure paths call it with `extra={}`: `runner.run()` never
     returned there, so the documented defaults are exactly what `.get` yields.
-    `ctx` is taken even though this first version does not read it -- the
-    context-window source (Task 4) comes from the RunContext, not from
-    `extra`."""
-    return {"trimmed_turns": extra.get("trimmed_turns", 0)}
+    `context_window_source` comes from the RunContext instead, because it is
+    resolved in preflight and is therefore known on every path a payload can
+    exist on -- a context-window preflight failure exits 2 with no payload at
+    all, as it did before 0.9."""
+    return {"trimmed_turns": extra.get("trimmed_turns", 0),
+            "context_window_source": ctx.context_window_source}
 
 
 def _final_status(result) -> str:
@@ -688,7 +703,8 @@ def _load_resume_target(args) -> dict:
     return prior
 
 
-def _workspace_resume(args, prior: dict, context_window: int) -> RunContext:
+def _workspace_resume(args, prior: dict, context_window: int,
+                      context_window_source: str) -> RunContext:
     repo = Path(prior["repo"]).expanduser().resolve()
     if not commit_exists(repo, prior["base_commit"]):
         raise PreflightFailure(f"base commit {prior['base_commit']} no longer exists in {repo}")
@@ -709,7 +725,8 @@ def _workspace_resume(args, prior: dict, context_window: int) -> RunContext:
         repo=repo, slug=slug, branch=prior["branch"], worktree=Path(prior["worktree"]),
         base_commit=prior["base_commit"], task=task, sandbox_mode=args.sandbox,
         provider=args.provider, image_ref=image_ref, image_digest=image_digest, image_pinned=image_pinned,
-        context_window=context_window, resumed_from=prior["slug"], feedback=feedback,
+        context_window=context_window, context_window_source=context_window_source,
+        resumed_from=prior["slug"], feedback=feedback,
         prior_run_dir=Path(prior["run_dir"]), seed_from_worktree=(args.sandbox == "docker"),
         owns_worktree=False,
     )
@@ -778,6 +795,7 @@ def _execute(ctx: RunContext, args, client) -> int:
             },
             finalize=finalize,
             stall_turns=args.stall_turns, context_window=ctx.context_window,
+            context_window_source=ctx.context_window_source,
             stuck_repeats=getattr(args, "stuck_repeats", DEFAULT_STUCK_REPEATS),
             verify=getattr(args, "verify", None),
             verify_rounds=getattr(args, "verify_rounds", DEFAULT_VERIFY_ROUNDS),
@@ -1029,9 +1047,9 @@ def main(argv: list | None = None) -> int:
         preflight_repo(repo)
         _resolve_allow_commit(args)
         client = _preflight_llm(args)
-        context_window = _resolve_context_window(args, client)
-        ctx = (_workspace_resume(args, prior, context_window) if prior
-               else _workspace_new(args, repo, context_window))
+        context_window, window_source = _resolve_context_window(args, client)
+        ctx = (_workspace_resume(args, prior, context_window, window_source) if prior
+               else _workspace_new(args, repo, context_window, window_source))
     except (PreflightFailure, WorkspaceError) as e:
         _err(str(e))
         return 2

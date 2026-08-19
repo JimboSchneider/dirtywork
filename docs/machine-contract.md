@@ -15,7 +15,8 @@ dirtywork run --repo <path> "<task>"
     [--verify "<cmd>"]                # run this in the sandbox on completion; non-zero → `verify_failed`
     [--verify-rounds 1]               # fix rounds after a failed --verify (0 = verify once, no retry)
     [--verify-timeout 600]            # seconds per --verify run, clamped to 1-600
-    [--context-window <tokens>]       # default: built-in table, else 32768 (+ stderr warning)
+    [--context-window <tokens>]       # default: the server's loaded window, else the
+                                       # built-in table, else 32768 (+ stderr warning)
     [--timeout 1800]                  # whole-run wall clock, seconds
     [--temperature <f>]               # omitted by default → server preset
     [--provider openai|anthropic]     # default: openai; anthropic needs ANTHROPIC_API_KEY
@@ -95,8 +96,17 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   explicit flag on `resume` overrides the inherited value.
 - `--context-window TOKENS` — the model's context window, used to size the
   transcript trimming budget. Precedence: flag, then `DIRTYWORK_CONTEXT_WINDOW`,
-  then a built-in table for the known LM Studio models, then 32768 (with a
-  warning on stderr).
+  then **what the server reports it actually loaded the model with** (LM Studio's
+  `GET /api/v0/models` → `loaded_context_length`, probed once at preflight with
+  a 2-second timeout; any failure is silently no answer), then a built-in table
+  for the known LM Studio models, then 32768 (with a warning on stderr — only
+  this last step warns). Which step answered is recorded as
+  `context_window_source` on `run_start`, `run.json`, every payload and
+  `run_end`: `flag`, `env`, `provider:<name>:server`, `provider:<name>`, or
+  `default`. Ollama is not probed in 0.9 — its `/api/show` reports the model's
+  architectural maximum rather than the loaded `num_ctx` — so pass
+  `--context-window` there. See
+  [Sizing the context window](operating.md#sizing-the-context-window).
 
 - `--allow-commit` (host mode only) — replaces the prompt's "leave all changes
   uncommitted for review" rule with "commit your work in small conventional
@@ -250,7 +260,7 @@ Full field-by-field schema, including every v1→v2 addition and the
 config, `schema_version: 2`, plus provenance: `worktree`, `base_commit`,
 `branch`, `branch_from`, `base_url`, `dirtywork_version`, `temperature`,
 `sandbox` — the docker settings dict, or `"none"` — and `provider`,
-`context_window`, `resumed_from`),
+`context_window`, `context_window_source`, `resumed_from`),
 `assistant` (text + tool calls — text capped at 64 000 chars in the
 transcript only, the full text is still sent to the model), `tool_result`
 (truncated), `guardrail_block`, `nudge` (`{"event": "nudge", "kind":

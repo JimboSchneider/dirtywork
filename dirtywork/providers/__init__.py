@@ -50,6 +50,18 @@ class ChatResponse:
 
 
 class Provider(Protocol):
+    """The four members every adapter must have, plus one OPTIONAL method that
+    is deliberately not declared here:
+
+        loaded_context_window(model: str) -> int | None
+
+    the context length the server currently has `model` loaded with, or None
+    when it cannot say. `runner.resolve_context_window` reaches for it with
+    `getattr(provider, "loaded_context_window", None)` and treats a missing
+    method, a None, and any raised exception identically -- as "no answer" --
+    so a third-party provider or a test double that does not implement it stays
+    a valid Provider. Declaring it below would say the opposite (spec §3.1)."""
+
     name: str
 
     def list_models(self) -> list:

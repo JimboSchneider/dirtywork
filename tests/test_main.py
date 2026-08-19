@@ -2101,3 +2101,58 @@ def test_task_size_warning_fires_on_resume(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "warning: the task text is ~" in err
     assert "% of the 2000-token context window" in err
+
+
+def test_context_window_source_lands_in_run_json_run_start_and_stdout(
+        tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                   "--context-window", "5000", "t"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["context_window_source"] == "flag"
+    run_dir = Path(payload["run_dir"])
+    data = json.loads((run_dir / "run.json").read_text())
+    assert data["context_window"] == 5000
+    assert data["context_window_source"] == "flag"
+    events = [json.loads(line) for line in
+              (run_dir / "transcript.jsonl").read_text().splitlines()]
+    assert events[0]["event"] == "run_start"
+    assert events[0]["context_window_source"] == "flag"
+    end = [e for e in events if e["event"] == "run_end"][-1]
+    assert end["context_window_source"] == "flag"
+
+
+def test_resume_records_its_own_context_window_source(tmp_path, monkeypatch, capsys):
+    # The window is re-resolved on resume exactly as on a fresh run, so the
+    # source is the resuming invocation's, not the prior run's. Both runs end
+    # `max_turns` after one turn: the scripted client repeats its tool call.
+    loop = [tool_call_body("read_file", {"path": "README.md"})]
+    m = _install_host_harness(monkeypatch, tmp_path, loop)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+                   "t"]) == 1
+    prior = json.loads(capsys.readouterr().out)
+    assert json.loads((Path(prior["run_dir"]) / "run.json").read_text())[
+        "context_window_source"] == "default"
+    assert m.main(["resume", Path(prior["run_dir"]).name, "--context-window", "7000",
+                   "--max-turns", "1"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["context_window_source"] == "flag"
+    assert json.loads((Path(payload["run_dir"]) / "run.json").read_text())[
+        "context_window_source"] == "flag"
+
+
+def test_emit_result_seeds_context_window_source():
+    import dirtywork.__main__ as m
+    payload = m._emit_result(
+        status="sandbox_error", worktree=Path("/wt"), branch="b",
+        transcript_path=Path("/t.jsonl"), run_dir=Path("/rd"), turns=None,
+        usage={}, final_message="boom", provider="openai")
+    assert payload["context_window_source"] is None       # seeded, then overridden
+    payload = m._emit_result(
+        status="sandbox_error", worktree=Path("/wt"), branch="b",
+        transcript_path=Path("/t.jsonl"), run_dir=Path("/rd"), turns=None,
+        usage={}, final_message="boom", provider="openai",
+        context_window_source="provider:openai:server")
+    assert payload["context_window_source"] == "provider:openai:server"

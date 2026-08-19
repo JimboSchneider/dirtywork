@@ -214,3 +214,9 @@ def test_nested_parameters_reach_input_schema_unchanged():
     assert tool["name"] == "apply_edits"
     assert tool["input_schema"]["properties"]["edits"] == nested
     assert tool["input_schema"]["required"] == ["path", "edits"]
+
+
+def test_loaded_context_window_is_none():
+    # Spec §3.1: implemented explicitly, so resolve_context_window's optional
+    # hook has a visible answer on both shipped providers.
+    assert _client(RecordingTransport([])).loaded_context_window("claude-opus-5") is None

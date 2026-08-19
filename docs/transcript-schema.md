@@ -39,7 +39,8 @@ One per run, always the first line.
 | `repo` | ✓ | ✓ | string | absolute path |
 | `worktree` | ✓ | ✓ | string | absolute path |
 | `schema_version` | | ✓ | `2` | present from v2 onward; its absence marks v1 |
-| `context_window` | | ✓ | integer | tokens; the resolved value (`--context-window` > `DIRTYWORK_CONTEXT_WINDOW` > the provider's table > 32768) |
+| `context_window` | | ✓ | integer | tokens; the resolved value (`--context-window` > `DIRTYWORK_CONTEXT_WINDOW` > what the server reports it loaded the model with > the provider's static table > 32768) |
+| `context_window_source` | | ✓ | string \| null | 0.9: which of those steps answered — `flag`, `env`, `provider:<name>:server` (the server's own report, e.g. LM Studio's `loaded_context_length`), `provider:<name>` (the built-in table), or `default` (nothing knew; the "assuming 32768 tokens" warning fires only for this one). `null` only for a `Runner` constructed directly without a source |
 | `base_commit` | | ✓ | string | resolved commit the worktree branched from |
 | `branch` | | ✓ | string | `dirtywork/<slug>` |
 | `branch_from` | | ✓ | string \| null | the ref the worktree was branched from, or null for repo HEAD. For `--branch-from @<slug>` this is the **resolved branch name** of that run, not the `@<slug>` text; `run.json`'s `branch_from_run` records the slug |
@@ -152,6 +153,7 @@ run-level fields that are known even when the agent loop never started).
 | `last_assistant_text` | | ✓ | string \| null | 0.8: the model's last non-empty assistant text, capped at 2000 chars; `null` if there was none |
 | `verify` | | ✓ | object \| null | 0.8: `{command, exit_code, output_tail, rounds, passed}` for the LAST `--verify` execution (`output_tail` capped at 4000 chars); `null` when `--verify` was not given |
 | `trimmed_turns` | | ✓ | integer | **always** — 0.9: the number of turns on which the runner had to replace at least one tool result with `[result trimmed — re-run the tool if needed]` to fit the char budget. A result already trimmed is never recounted, and the final failing trim (the one that ends the run `context_exhausted`) counts if it trimmed anything. `0` on a run that never trimmed, and on the two failure paths where the runner never returned |
+| `context_window_source` | | ✓ | string | **always** — 0.9: the same value as `run_start.context_window_source`, repeated at the end so a consumer that reads only the last line still knows where the window came from |
 
 ## Statuses
 
@@ -202,6 +204,7 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `model` | start | |
 | `provider` | start | `"openai"` \| `"anthropic"` |
 | `context_window` | start | resolved tokens |
+| `context_window_source` | start, end | 0.9: `flag` \| `env` \| `provider:<name>:server` \| `provider:<name>` \| `default` — which precedence step produced `context_window`. Written at start and repeated at end (including on the two failure paths) so the plain `dirtywork runs show`, which reads only `run.json`, never shows `-` |
 | `resumed_from` | start | slug of the run this one continues, or null |
 | `resumed_by` | — | written onto the **prior** run's `run.json` when a resume starts |
 | `branch_from_run` | start | 0.8: the slug `--branch-from @<slug>` named, or null. The resolved branch itself is `run_start.branch_from` |

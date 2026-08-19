@@ -1311,3 +1311,17 @@ def test_show_renders_trimmed_turns_plain_and_markdown(tmp_path, monkeypatch, ca
 
     assert runs.cmd_show(argparse.Namespace(slug="trim1", diff=False, markdown=True)) == 0
     assert "- **trimmed_turns:** 7" in capsys.readouterr().out
+
+
+def test_show_renders_context_window_with_its_source(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "ctx1", {
+        "slug": "ctx1", "status": "completed", "task": "t",
+        "context_window": 65536, "context_window_source": "provider:openai:server",
+    })
+    assert runs.cmd_show(argparse.Namespace(slug="ctx1", diff=False)) == 0
+    assert "context_window: 65536 (provider:openai:server)" in capsys.readouterr().out
+
+    assert runs.cmd_show(argparse.Namespace(slug="ctx1", diff=False, markdown=True)) == 0
+    md = capsys.readouterr().out
+    assert "- **context_window:** 65536 (provider:openai:server)" in md

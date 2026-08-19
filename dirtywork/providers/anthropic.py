@@ -152,6 +152,14 @@ class AnthropicClient:
             return 200000
         return None
 
+    def loaded_context_window(self, model: str):
+        """Spec §3.1: the Anthropic API reports no per-connection "loaded"
+        context length -- the window is a property of the model, which
+        context_window() above already covers. Implemented explicitly rather
+        than left absent so the optional hook's contract is visible on both
+        shipped providers."""
+        return None
+
     def chat(self, model, history, tools, *, temperature=None, max_tokens=4096,
              timeout=None) -> ChatResponse:
         self._require_key()
