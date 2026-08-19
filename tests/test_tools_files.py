@@ -225,3 +225,52 @@ def test_list_dir_truncates_at_max_entries(wt: Path, monkeypatch):
     assert "[listing truncated at 3 entries]" in out
     shown = [l for l in out.splitlines() if l.endswith("bytes)")]
     assert len(shown) == 3
+
+
+def test_describe_change_counts_and_diffs():
+    old = "one\ntwo\nthree\nfour\nfive\n"
+    new = "one\ntwo\nTWO AND A HALF\nthree\nfour\nfive\n"
+    out = tools.describe_change("a/b.py", old, new, verb="Edited")
+    lines = out.splitlines()
+    assert lines[0] == "Edited a/b.py: +1 -0"      # pure insert: no removal note
+    assert "--- a/a/b.py" in out and "+++ b/a/b.py" in out
+    assert "+TWO AND A HALF" in out
+
+
+def test_describe_change_reports_removed_non_blank_lines():
+    old = "keep\ndrop me\n\nkeep2\n"
+    new = "keep\nkeep2\n"
+    out = tools.describe_change("x.txt", old, new, verb="Edited")
+    # 'drop me' and the blank line go; only the non-blank one is counted
+    assert out.splitlines()[0] == "Edited x.txt: +0 -2 (removed 1 non-blank line)"
+    old2 = "a\nb\nc\n"
+    new2 = "a\nB\nC\n"
+    # a replaced non-blank line counts as removed
+    assert tools.describe_change("x.txt", old2, new2, verb="Edited").splitlines()[0] == (
+        "Edited x.txt: +2 -2 (removed 2 non-blank lines)")
+
+
+def test_describe_change_truncates_a_huge_diff():
+    old = "".join(f"line {i}\n" for i in range(200))
+    new = "".join(f"changed {i}\n" for i in range(200))
+    out = tools.describe_change("big.txt", old, new, verb="Edited")
+    body = out.split("\n", 1)[1]
+    assert len(body.splitlines()) <= tools.MAX_DIFF_LINES + 1     # + the marker line
+    assert body.splitlines()[-1].startswith("[diff truncated: ")
+    assert body.splitlines()[-1].endswith(" more lines]")
+
+
+def test_describe_write_new_file_keeps_the_byte_count():
+    assert tools.describe_write("new.txt", None, "a\nb\n", 4) == (
+        "Wrote 4 bytes to new.txt (new file, 2 lines)")
+    assert tools.describe_write("one.txt", None, "solo", 4) == (
+        "Wrote 4 bytes to one.txt (new file, 1 line)")
+
+
+def test_edit_and_write_echo_their_diff(wt: Path):
+    out = tools.edit_file(wt, "src/app.py", "return 42", "return 43")
+    assert out.startswith("Edited src/app.py: +1 -1 (removed 1 non-blank line)")
+    assert "-    return 42" in out and "+    return 43" in out
+    over = tools.write_file(wt, "src/app.py", "def main():\n    return 44\n")
+    assert over.startswith("Wrote src/app.py: ")
+    assert "+    return 44" in over

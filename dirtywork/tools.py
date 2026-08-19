@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import errno
 import os
 import shutil
@@ -11,6 +12,11 @@ from .guardrails import GuardrailError, build_env, check_bash_command, resolve_i
 from .procs import run_capped
 
 MAX_RESULT_CHARS = 8000
+# Spec §3.1: every successful edit/write echoes the unified diff of what it
+# actually changed, so a worker that meant to insert a line and replaced one
+# instead sees that in the tool result rather than at review time.
+MAX_DIFF_LINES = 40
+MAX_DIFF_CHARS = 3000
 # Refuse to load a file larger than this into memory. read_file/edit_file read
 # the whole file (offset/limit only window the result), so an unbounded read is a
 # memory-DoS; a non-regular file (FIFO/device) would also block read_text forever.
@@ -100,6 +106,83 @@ def _number_lines(text: str, offset: int, limit: int) -> str:
     return _cap(numbered, note=" — re-run with offset/limit to see more")
 
 
+def _line_counts(old_lines: list, new_lines: list) -> tuple:
+    """(added, deleted, removed_non_blank) from SequenceMatcher opcodes. A
+    REPLACED non-blank line counts as removed: the counter exists to answer
+    'did I delete content I did not mean to delete', and a replace deletes
+    before it inserts."""
+    added = deleted = removed_non_blank = 0
+    matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("delete", "replace"):
+            deleted += i2 - i1
+            removed_non_blank += sum(1 for line in old_lines[i1:i2] if line.strip())
+        if tag in ("insert", "replace"):
+            added += j2 - j1
+    return added, deleted, removed_non_blank
+
+
+def describe_change(path: str, old_text: str, new_text: str, *, verb: str) -> str:
+    """Spec §3.1: '<Verb> <path>: +A -D [(removed N non-blank line(s))]' plus a
+    capped unified diff. Pure — no filesystem access — so the host backend and
+    the container backend produce byte-identical text for identical content."""
+    old_lines = old_text.splitlines()
+    new_lines = new_text.splitlines()
+    added, deleted, removed_non_blank = _line_counts(old_lines, new_lines)
+    head = f"{verb} {path}: +{added} -{deleted}"
+    if removed_non_blank > 0:
+        plural = "" if removed_non_blank == 1 else "s"
+        head += f" (removed {removed_non_blank} non-blank line{plural})"
+    diff_lines = list(difflib.unified_diff(
+        old_lines, new_lines, fromfile=f"a/{path}", tofile=f"b/{path}", n=2, lineterm=""))
+    if not diff_lines:
+        return head
+    kept = []
+    total = 0
+    for line in diff_lines:
+        if len(kept) >= MAX_DIFF_LINES or total + len(line) + 1 > MAX_DIFF_CHARS:
+            kept.append(f"[diff truncated: {len(diff_lines) - len(kept)} more lines]")
+            break
+        kept.append(line)
+        total += len(line) + 1
+    return head + "\n" + "\n".join(kept)
+
+
+def describe_write(path: str, old_text, new_text: str, byte_count: int) -> str:
+    """write_file's result string (spec §3.1). `old_text` is the file's previous
+    content, or None when there was none to read — a new file, OR an existing
+    file the backend could not read back as UTF-8 text (binary, oversized,
+    unreadable). Both render as '(new file, M lines)'; that only ever changes
+    the wording of a result string, never the write itself. The byte count
+    stays in the new-file string so callers matching 'Wrote N bytes' match."""
+    if old_text is None:
+        lines = len(new_text.splitlines())
+        plural = "" if lines == 1 else "s"
+        return f"Wrote {byte_count} bytes to {path} (new file, {lines} line{plural})"
+    return describe_change(path, old_text, new_text, verb="Wrote")
+
+
+def _read_text_for_diff(path: Path):
+    """The file's current text for describe_write, or None when there is none
+    to read (missing, a symlink, a FIFO/device, over the read limit, or not
+    valid UTF-8). Never raises: this is decoration on a write, and a write must
+    never fail because its 'before' picture could not be taken."""
+    try:
+        fh = _open_regular(path, os.O_RDONLY, max_size=MAX_READ_BYTES)
+    except OSError:
+        return None
+    try:
+        raw = fh.read()
+    except OSError:
+        return None
+    finally:
+        fh.close()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def read_file(worktree: Path, path: str, offset: int = 0, limit: int = 400) -> str:
     try:
         p = resolve_in_worktree(path, worktree)
@@ -128,6 +211,9 @@ def write_file(worktree: Path, path: str, content: str) -> str:
     except GuardrailError as e:
         return f"ERROR: {e}"
     p = _worktree_candidate(path, worktree)
+    # Best-effort 'before' picture, taken after the containment check and
+    # before the truncating open. None means "nothing to diff against".
+    old_text = _read_text_for_diff(p)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -147,7 +233,7 @@ def write_file(worktree: Path, path: str, content: str) -> str:
         fh.write(encoded)
     finally:
         fh.close()
-    return f"Wrote {len(encoded)} bytes to {path}"
+    return describe_write(path, old_text, content, len(encoded))
 
 
 def edit_file(worktree: Path, path: str, old_string: str, new_string: str) -> str:
@@ -190,7 +276,7 @@ def edit_file(worktree: Path, path: str, old_string: str, new_string: str) -> st
         wfh.write(new_text.encode("utf-8"))
     finally:
         wfh.close()
-    return f"Edited {path}"
+    return describe_change(path, text, new_text, verb="Edited")
 
 
 def list_dir(worktree: Path, path: str = ".") -> str:

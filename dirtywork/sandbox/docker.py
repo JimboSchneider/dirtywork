@@ -12,7 +12,16 @@ from pathlib import Path
 from ..budget import BudgetExceeded
 from ..guardrails import check_bash_command
 from ..procs import Captured, run_capped
-from ..tools import MAX_BASH_CHARS, MAX_LIST_ENTRIES, MAX_READ_BYTES, MAX_WRITE_BYTES, _cap, _number_lines
+from ..tools import (
+    MAX_BASH_CHARS,
+    MAX_LIST_ENTRIES,
+    MAX_READ_BYTES,
+    MAX_WRITE_BYTES,
+    _cap,
+    _number_lines,
+    describe_change,
+    describe_write,
+)
 from . import SandboxError
 from . import docker_args
 from . import docker_cli
@@ -57,6 +66,19 @@ def _rel(path: str, *, writing: bool = False):
     if writing and parts and parts[0] == ".git":
         return None, f"ERROR: writing inside .git/ is not allowed (got '{path}')"
     return normalized, None
+
+
+def _oversized(encoded: bytes):
+    """The one 'content too big' refusal for every in-container write, or None.
+    write_file checks it BEFORE any exec (so an oversized write costs nothing);
+    _write_raw checks it again for edit/insert, whose new text is built from a
+    read that was only capped at MAX_READ_BYTES."""
+    if len(encoded) > MAX_WRITE_BYTES:
+        return (
+            f"ERROR: content is {len(encoded)} bytes, over the "
+            f"{MAX_WRITE_BYTES}-byte write limit"
+        )
+    return None
 
 
 class DockerSandbox:
@@ -395,13 +417,14 @@ class DockerSandbox:
             return err
         return _number_lines(text, offset, limit)
 
-    def write_file(self, path: str, content: str) -> str:
-        encoded = content.encode("utf-8")
-        if len(encoded) > MAX_WRITE_BYTES:
-            return (
-                f"ERROR: content is {len(encoded)} bytes, over the "
-                f"{MAX_WRITE_BYTES}-byte write limit"
-            )
+    def _write_raw(self, path: str, encoded: bytes) -> str:
+        """The in-container write itself: '' on success, an 'ERROR: …' string
+        otherwise. Split out of write_file so edit_file (and, from Task 2,
+        insert_before/insert_after) can write WITHOUT paying for write_file's
+        own read-back — one read exec per edit, as before."""
+        too_big = _oversized(encoded)
+        if too_big:
+            return too_big
         rel, err = _rel(path, writing=True)
         if err:
             return err
@@ -416,7 +439,23 @@ class DockerSandbox:
                 f"ERROR: cannot write '{path}': "
                 f"{captured.output.decode('utf-8', 'replace')[:500]}"
             )
-        return f"Wrote {len(encoded)} bytes to {path}"
+        return ""
+
+    def write_file(self, path: str, content: str) -> str:
+        encoded = content.encode("utf-8")
+        too_big = _oversized(encoded)
+        if too_big:
+            return too_big
+        rel, err = _rel(path, writing=True)
+        if err:
+            return err
+        # Best-effort 'before' picture for the echoed diff (spec §3.1); an
+        # unreadable/missing file yields None and reads as a new file.
+        old_text, _unused = self._read_raw(path, strict=True)
+        err = self._write_raw(path, encoded)
+        if err:
+            return err
+        return describe_write(path, old_text, content, len(encoded))
 
     def edit_file(self, path: str, old_string: str, new_string: str) -> str:
         text, err = self._read_raw(path, strict=True)
@@ -428,10 +467,11 @@ class DockerSandbox:
                 f"ERROR: old_string occurs {count} times in {path}; it must occur "
                 f"exactly once. Include more surrounding context to make it unique."
             )
-        result = self.write_file(path, text.replace(old_string, new_string, 1))
-        if result.startswith("ERROR:"):
-            return result
-        return f"Edited {path}"
+        new_text = text.replace(old_string, new_string, 1)
+        err = self._write_raw(path, new_text.encode("utf-8"))
+        if err:
+            return err
+        return describe_change(path, text, new_text, verb="Edited")
 
     def _probe(self, attr: str, argv: list) -> bool:
         """Probe once per sandbox instance for an optional in-image tool; cached on self."""

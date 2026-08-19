@@ -368,8 +368,12 @@ def test_read_file_rejects_dotdot_escape(started):
 def test_write_file_sends_content_on_stdin(started):
     sb, fake, run_dir = started
     fake.script(["exec"], _ok())
+    # the pre-write read-back: a new file has nothing to read, so `head` fails
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"],
+                _fail(b"head: cannot open 'deep/new/file.txt': No such file or directory"))
     out = sb.write_file("deep/new/file.txt", "hello")
     assert "Wrote 5 bytes" in out
+    assert "(new file, 1 line)" in out
     argv, timeout, stdin = fake.calls[-1]
     assert argv == [
         "exec", "-w", "/work", "-i", "dw-abc123",
@@ -1335,3 +1339,21 @@ def test_finalize_restores_stash_when_export_raises(docker, tmp_path, monkeypatc
         sb.finalize()
     assert (worktree / "left.txt").read_text() == "x"
     assert not stash_dir_for(worktree, "new1").exists()
+
+
+def test_write_file_over_existing_content_echoes_a_diff(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok())
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"],
+                _ok(b"def main():\n    return 42\n"))
+    out = sb.write_file("src/app.py", "def main():\n    return 43\n")
+    assert out.startswith("Wrote src/app.py: +1 -1 (removed 1 non-blank line)")
+    assert "-    return 42" in out and "+    return 43" in out
+
+
+def test_edit_file_echoes_a_diff(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], [_ok(b"def main():\n    return 42\n"), _ok()])
+    out = sb.edit_file("src/app.py", "return 42", "return 43")
+    assert out.startswith("Edited src/app.py: +1 -1 (removed 1 non-blank line)")
+    assert "--- a/src/app.py" in out and "+++ b/src/app.py" in out
