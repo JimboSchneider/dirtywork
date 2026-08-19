@@ -689,6 +689,105 @@ def test_snapshot_worktree_reports_skipped_non_regular_entries(tmp_path: Path):
     assert "fifo" not in _git(repo, "ls-tree", "-r", "--name-only", sha)
 
 
+def test_snapshot_worktree_respects_ignore_rules_like_git_add_dash_a(tmp_path: Path):
+    # Fix item 1: an untracked file matching .gitignore is dropped from the
+    # snapshot tree, the same as `git add -A` would drop it, while a tracked
+    # file matching the SAME pattern (force-added past the ignore rule) is
+    # still committed -- check-ignore is index-aware, so tracking wins.
+    from dirtywork.workspace import snapshot_worktree
+    repo = tmp_path / "repo4"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / ".gitignore").write_text("*.log\n")
+    (repo / "tracked.log").write_text("tracked\n")
+    _git(repo, "add", "-f", "tracked.log", ".gitignore")
+    _git(repo, "commit", "-m", "init")
+    wt = tmp_path / "wt4"
+    _git(repo, "worktree", "add", "-b", "dirtywork/snap4", str(wt))
+    (wt / "untracked.log").write_text("untracked\n")
+    (wt / "tracked.log").write_text("tracked, modified\n")
+
+    sha = snapshot_worktree(wt, "dirtywork/snap4", "wip: ignore rules")
+    assert sha is not None
+    names = _git(repo, "ls-tree", "-r", "--name-only", sha).splitlines()
+    assert "untracked.log" not in names
+    assert "tracked.log" in names
+
+
+def test_snapshot_worktree_and_dirty_check_agree_when_only_ignored_files_changed(tmp_path: Path):
+    # Fix item 1: host_worktree_dirty (git status, which already excludes
+    # ignored files) and snapshot_worktree must agree -- when the only change
+    # in the worktree is an ignored file, neither sees anything to do.
+    from dirtywork.workspace import host_worktree_dirty, snapshot_worktree
+    repo = tmp_path / "repo5"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / ".gitignore").write_text("*.log\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "init")
+    wt = tmp_path / "wt5"
+    _git(repo, "worktree", "add", "-b", "dirtywork/snap5", str(wt))
+    (wt / "debug.log").write_text("noise\n")
+
+    assert host_worktree_dirty(wt) is False
+    assert snapshot_worktree(wt, "dirtywork/snap5", "wip: nothing") is None
+
+
+def test_snapshot_worktree_excludes_an_entire_ignored_directory(tmp_path: Path):
+    # Fix item 1: an ignored DIRECTORY (a `build/` pattern) is excluded
+    # entirely, including files nested inside it -- check-ignore reports a
+    # nested path as ignored via the directory pattern, same as git add -A.
+    from dirtywork.workspace import snapshot_worktree
+    repo = tmp_path / "repo6"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / ".gitignore").write_text("build/\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "init")
+    wt = tmp_path / "wt6"
+    _git(repo, "worktree", "add", "-b", "dirtywork/snap6", str(wt))
+    (wt / "build").mkdir()
+    (wt / "build" / "out.o").write_text("binary junk\n")
+    (wt / "build" / "nested").mkdir()
+    (wt / "build" / "nested" / "deep.o").write_text("more junk\n")
+    (wt / "keep.txt").write_text("keep\n")
+
+    sha = snapshot_worktree(wt, "dirtywork/snap6", "wip: build excluded")
+    assert sha is not None
+    names = _git(repo, "ls-tree", "-r", "--name-only", sha).splitlines()
+    assert not any(n.startswith("build/") for n in names)
+    assert "keep.txt" in names
+
+
+def test_walk_worktree_raises_loudly_on_an_unreadable_directory(tmp_path: Path):
+    # Fix item 2: os.walk's default onerror silently skips a directory it
+    # cannot list, which would make the snapshot commit that directory's
+    # files as DELETED. A directory dirtywork cannot read must fail the
+    # whole snapshot loudly instead.
+    from dirtywork.workspace import snapshot_worktree
+    if os.geteuid() == 0:
+        pytest.skip("root can read a chmod 000 directory")
+    repo, wt = _snapshot_repo(tmp_path)
+    orig = _git(repo, "rev-parse", "dirtywork/snap").strip()
+    blocked = wt / "blocked"
+    blocked.mkdir()
+    (blocked / "secret.txt").write_text("nope\n")
+    blocked.chmod(0o000)
+    try:
+        with pytest.raises(WorkspaceError) as excinfo:
+            snapshot_worktree(wt, "dirtywork/snap", "wip: blocked dir")
+        assert "cannot read directory" in str(excinfo.value)
+    finally:
+        blocked.chmod(0o755)
+    assert _git(repo, "rev-parse", "dirtywork/snap").strip() == orig  # ref untouched
+
+
 def test_host_worktree_dirty_sees_untracked_and_modified_and_fails_closed(tmp_path: Path):
     # Deliberately NOT _snapshot_repo: that fixture rigs a `.gitattributes`
     # clean filter to prove snapshot_worktree bypasses it when COMMITTING.

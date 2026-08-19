@@ -336,9 +336,10 @@ of whether the run is still going:
   `snapshot <sha> on <branch>` (or `nothing to snapshot` when the tree already
   matches the branch head). Built entirely from git plumbing — no `git add`, no
   `git commit` — so a worker-authored `.gitattributes` plus a configured clean
-  filter, and any hook in your repo, are bypassed rather than executed; ignore
-  rules are deliberately not applied either, because a wip snapshot is a
-  snapshot. Symlinks are recorded by their target string, never followed;
+  filter, and any hook in your repo, are bypassed rather than executed; the
+  repo's ignore rules ARE applied, the same way `git add -A` would apply
+  them (`git check-ignore`, config-neutral — a tracked file matching an
+  ignore pattern is still kept). Symlinks are recorded by their target string, never followed;
   executable bits are preserved; anything that is not a regular file or a
   symlink is skipped. Refuses (exit 2) a run still going with a live pid, a
   missing worktree, a worktree that is not a linked worktree of the run's repo,

@@ -353,15 +353,28 @@ def _walk_worktree(worktree: Path) -> tuple:
     [(repo-relative path, link target string)], `skipped` counts entries that
     are neither a regular file nor a symlink (FIFOs, sockets, devices) or that
     failed `os.lstat`/`os.readlink` outright — an entry that DOES lstat but is
-    later unreadable (e.g. `chmod 000`) is NOT skipped: it fails the whole
-    snapshot with `WorkspaceError` when `hash-object` chokes on it, since
-    silently dropping a file from a snapshot is worse than a loud failure. The
-    TOP-LEVEL `.git` entry is skipped and NOTHING else is: ignore rules are
-    deliberately not applied, because a wip snapshot is a snapshot. Symlinks —
-    including symlinked directories — are recorded by their target string and
-    never followed or descended into (os.lstat/os.readlink only)."""
+    later unreadable (e.g. `chmod 000` on the FILE) is NOT skipped: it fails
+    the whole snapshot with `WorkspaceError` when `hash-object` chokes on it,
+    since silently dropping a file from a snapshot is worse than a loud
+    failure. A DIRECTORY that cannot be listed (`chmod 000` on the directory
+    itself) fails loudly here instead: `os.walk`'s default `onerror` is a
+    no-op that silently drops the unreadable directory from the walk, which
+    would make the snapshot commit its files' DELETION — `onerror` is passed
+    to raise `WorkspaceError` immediately instead. The TOP-LEVEL `.git` entry
+    is skipped and nothing else is skipped by name; ignore rules are not
+    applied here — `snapshot_worktree` filters ignored paths out of the
+    result afterward, via `git check-ignore`, matching what `git add -A`
+    would keep. Symlinks — including symlinked directories — are recorded by
+    their target string and never followed or descended into
+    (os.lstat/os.readlink only)."""
     files, links, skipped = [], [], 0
-    for root, dirnames, filenames in os.walk(worktree, followlinks=False):
+
+    def _onerror(exc: OSError) -> None:
+        raise WorkspaceError(
+            f"cannot snapshot {worktree}: cannot read directory {exc.filename}: {exc}"
+        )
+
+    for root, dirnames, filenames in os.walk(worktree, followlinks=False, onerror=_onerror):
         root_path = Path(root)
         rel_root = root_path.relative_to(worktree)
         if root_path == worktree:
@@ -405,6 +418,32 @@ def _walk_worktree(worktree: Path) -> tuple:
 EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
+def _ignored_relpaths(worktree: Path, rels: list) -> set:
+    """Every path in `rels` (repo-relative, POSIX-separated) that the repo's
+    ignore rules cover, per ONE batch `git check-ignore -z --stdin` run from
+    `worktree` under the config-neutral env (`git_env()` + GIT_NEUTRAL_FLAGS)
+    — the same rules `.gitignore`/`.git/info/exclude`/`core.excludesFile`
+    that `git add -A` honors (global excludes are disabled by the env, same
+    as everywhere else in this module). `check-ignore` is index-aware by
+    default: a path that is already TRACKED is never reported here even if it
+    matches a pattern, which is exactly what `git add -A` does too — call
+    ONLY after the control-character/UTF-8 guard in `snapshot_worktree` has
+    already validated every path, since `-z` gives the paths no quoting step
+    to rely on. Exit code 0 means some paths matched (their names are on
+    stdout, NUL-separated); exit code 1 means none did (empty stdout, not an
+    error); anything else is a WorkspaceError."""
+    if not rels:
+        return set()
+    stdin_text = "".join(rel + "\0" for rel in rels)
+    res = _git(worktree, *GIT_NEUTRAL_FLAGS, "check-ignore", "-z", "--stdin",
+               env=git_env(), stdin_text=stdin_text)
+    if res.returncode not in (0, 1):
+        raise WorkspaceError(f"git check-ignore failed in {worktree}: {res.stderr.strip()}")
+    if not res.stdout:
+        return set()
+    return {p for p in res.stdout.split("\0") if p}
+
+
 def _check(res: subprocess.CompletedProcess, what: str, worktree: Path) -> None:
     """Raise WorkspaceError for a failed plumbing call in `snapshot_worktree`;
     `what` names the git subcommand (plus any call-specific detail)."""
@@ -420,8 +459,13 @@ def snapshot_worktree(worktree: Path, branch: str, message: str,
     against content a worker wrote. Returns the new commit sha, or None when
     the resulting tree equals the branch head's tree (nothing to snapshot).
     When `report` is given, fills it with `{"skipped": N}` — the count of
-    non-regular, non-symlink entries `_walk_worktree` skipped. Raises
-    WorkspaceError.
+    non-regular, non-symlink entries `_walk_worktree` skipped. Applies the
+    repo's ignore rules exactly like `git add -A` would: every path
+    `_walk_worktree` found is dropped from the snapshot when `git
+    check-ignore` reports it ignored (a tracked file matching an ignore
+    pattern is kept — check-ignore is index-aware, same as `git add -A`),
+    which is what keeps this in agreement with `host_worktree_dirty`'s `git
+    status`. Raises WorkspaceError.
 
     `hash-object -w --no-filters` is load-bearing: the filter that would
     otherwise run is configured REPO-locally, which GIT_CONFIG_GLOBAL=/dev/null
@@ -478,6 +522,14 @@ def snapshot_worktree(worktree: Path, branch: str, message: str,
                 f"(undecodable filename), which git's stdin path protocols "
                 f"cannot carry safely"
             )
+
+    # Spec §6.1 step 1 / fix item 1: apply the repo's ignore rules like
+    # `git add -A` would, via ONE batch `git check-ignore` call, only now that
+    # every path is known to be safe to hand to git's stdin protocols.
+    ignored = _ignored_relpaths(worktree, [r for r, _ in files] + [r for r, _ in links])
+    if ignored:
+        files = [(r, is_exec) for r, is_exec in files if r not in ignored]
+        links = [(r, target) for r, target in links if r not in ignored]
 
     head_res = _git(worktree, *GIT_NEUTRAL_FLAGS, "rev-parse", "--verify", "--quiet",
                     f"refs/heads/{branch}", env=env)

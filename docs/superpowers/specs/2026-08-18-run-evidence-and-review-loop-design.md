@@ -228,8 +228,8 @@ A new `workspace.snapshot_worktree(worktree, branch, message) -> str` builds a c
 worktree's current content on the run's branch **without** `git add`/`git commit`, honoring the
 rule that the only host porcelain dirtywork runs on worker content is `read-tree HEAD`:
 
-1. Walk the worktree in Python (`os.lstat`, skip the top-level `.git` file, skip nothing else —
-   ignore rules are not applied; a wip snapshot is a snapshot). Regular files → blobs via one
+1. Walk the worktree in Python (`os.lstat`, skip the top-level `.git` file), then apply the repo's
+   ignore rules like `git add -A` would (`git check-ignore`, config-neutral). Regular files → blobs via one
    `git hash-object -w --no-filters --stdin-paths` (never applies clean filters or `.gitattributes`;
    paths are given via stdin, so filenames with newlines are refused with an error rather than
    mis-hashed); symlinks → the link *target string* hashed with `hash-object -w --stdin` and
