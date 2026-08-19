@@ -171,8 +171,8 @@ case it carries `status` and `error` only).
 ## `schema_version` and the stdout JSON contract
 
 `schema_version: 2` also appears in the CLI's single stdout JSON object
-(`dirtywork run`'s machine contract — see the README's "Machine contract"
-section). Its fields: `schema_version`, `status`, `worktree`, `branch`,
+(`dirtywork run`'s machine contract — see
+[docs/machine-contract.md](machine-contract.md)). Its fields: `schema_version`, `status`, `worktree`, `branch`,
 `transcript`, `turns`, `usage`, `final_message`, `run_dir`, `provider`,
 `base_commit`, `resumed_from`, `finalize_error`, `watchdog_violation`,
 `watchdog_violation_kind`, `stuck_on`, `files_changed`,
@@ -233,7 +233,7 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `last_tool_result` | end | 0.8: `{tool, args, result}` for the last non-`finish` tool call, or null |
 | `last_assistant_text` | end | 0.8: the last non-empty assistant text (≤2000 chars), or null |
 | `verify` | end | 0.8: `{command, exit_code, output_tail, rounds, passed}` for the last `--verify` execution, or null (null whenever verify never ran, even if `--verify` was given — see `verify_command` above, which `dirtywork resume` reads from instead) |
-| `allow_commit` | start | (bool) records whether the run's system prompt told the worker to commit as it went (`--allow-commit`, host mode only — see the README). A run that predates the flag has no such key. |
+| `allow_commit` | start | (bool) records whether the run's system prompt told the worker to commit as it went (`--allow-commit`, host mode only — see [docs/machine-contract.md](machine-contract.md)). A run that predates the flag has no such key. |
 | `verdict` | verdict | written by `dirtywork runs verdict`: `"accept"` \| `"reject"` \| `"cleanup"` |
 | `note` | verdict | `--note` text, or null |
 | `verdict_at` | verdict | UTC ISO-8601 |

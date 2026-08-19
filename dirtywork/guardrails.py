@@ -65,8 +65,8 @@ def resolve_in_worktree(path_str: str, worktree: Path, writing: bool = False) ->
 # `python3 -c "open('/tmp/x','w').write('y')"`. Enumerating every interpreter's
 # write primitive is not a regex-shaped problem. Host mode (`--sandbox none`)
 # does not close that gap; the fix is a real OS process boundary (the Docker
-# sandbox, sub-project 2), not a bigger denylist. Documented in README.md and
-# SECURITY.md.
+# sandbox, sub-project 2), not a bigger denylist. Documented in
+# docs/security.md and SECURITY.md.
 #
 # ONE ORDERED LIST, because the reported reason for a two-rule-match command
 # is a documented transcript field (`guardrail_block.reason`) an orchestrating

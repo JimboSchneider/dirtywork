@@ -1,0 +1,299 @@
+# Operating dirtywork
+
+Day-to-day usage once dirtywork is installed: running a task, reviewing and resuming a run, the `runs` subcommands, benchmarking, and troubleshooting.
+
+## Use
+
+    dirtywork run --repo ~/repos/someproject "Add a unit test for X"
+
+> See [Security & trust](security.md#security--trust) — docker mode does not protect
+> repository-history confidentiality.
+
+- **Watch a run:** `tail -f` the transcript path printed on stderr.
+- **Review a run:** `git -C <worktree> diff`, read the transcript, run the
+  repo's tests — then commit the branch or discard it. (The worktree is
+  only populated after the run ends, once the export step completes.)
+
+  > **The worker cannot install dependencies in docker mode** (`--network
+  > none`, no host directories mounted); it can only run what the image
+  > ships — git, bash, coreutils, findutils, python3, node/npm, the .NET SDK,
+  > ripgrep, jq, uuid-runtime, shellcheck and curl. Always run the repo's own
+  > gate yourself on the exported worktree, or pass it as
+  > [`--verify`](#verifying-a-run). For a Node repo whose gate needs
+  > `node_modules`, symlink your own into the exported worktree for the gate
+  > and remove it afterwards — a `node_modules/` gitignore pattern does **not**
+  > match a symlink, so a forgotten one shows up as an untracked path. If the
+  > gate needs a tool the image lacks, build a derived image (see the recipe
+  > next to `--image` in [Machine contract](machine-contract.md#machine-contract)).
+- **Clean up a run:** `dirtywork runs clean <slug>` — see
+  [Inspecting, cleaning up and re-exporting runs](#inspecting-cleaning-up-and-re-exporting-runs)
+  for the safety rules and the rest of the `runs` subcommands.
+
+- **All flags, stdout JSON, exit codes, transcript events:** see
+  [Machine contract](machine-contract.md#machine-contract).
+
+#### Verifying a run
+
+    dirtywork run --repo ~/repos/someproject --verify 'npm test' "Add a unit test for X"
+
+`--verify CMD` makes your gate the harness's gate. The moment the worker
+declares itself done — `finish(summary=…)` or a plain answer — dirtywork runs
+`CMD` inside the sandbox, through the same `bash` path the worker used (same
+guardrails, same `--network none`, same budget watchdog), and **before** the
+export. A zero exit leaves the run `completed`; anything else ends it
+`verify_failed` (exit 1), with the command, its exit code and a 4000-char
+output tail in `verify` on the stdout JSON, the `run_end` event and `run.json`.
+`--verify-rounds N` (default 1) is how many fix rounds follow a failure: the
+default hands the first failure back to the worker as a message naming the
+command, the exit code and the output tail, and lets it try once more against
+the ordinary `--max-turns`/`--timeout` budget (the command may run N+1 times);
+`0` verifies once and ends the run either way. `--verify-timeout S` (default 600, clamped to
+1–600) bounds each run. In docker mode the command can only use what the image
+ships — see the callout under *Review a run*. `dirtywork resume` inherits the
+verify command from the run it continues.
+
+### Resuming a run
+
+A run that ended early (`max_turns`, `stalled`, `timeout`, `interrupted`, a
+crash) keeps its worktree. Continue it on the same worktree and branch:
+
+    dirtywork resume <slug>          # slug from the run's stdout JSON / ~/.dirtywork/runs
+    dirtywork resume ~/.dirtywork/runs/<slug> --max-turns 60
+
+A resume is a new run (new slug, transcript, run dir, and — in docker mode —
+container and volume) whose task is the original task plus a summary of how
+the earlier run ended and the tail of its transcript; the model is told to
+`git status`/`git diff` first and continue rather than restart. The sandbox
+mode is the original run's; `--model` and the other run flags may be
+overridden. Refused (exit 2, nothing created) when the earlier run is still
+running, its worktree is gone, or its base commit no longer exists. In docker
+mode the prior work is moved aside during the final export and put back if that
+export fails, so a failed resume leaves the worktree exactly as it was. If a docker
+resume is killed mid-export, that stash (`<worktree>.pre-resume-<slug>`, next to the
+worktree) still holds the pre-resume content; `resume` refuses to run again until you
+move it back or delete it, and never deletes a stash it did not create.
+
+**Sending review feedback.** `--feedback TEXT` (or `--feedback-file PATH`, a
+UTF-8 file, max 64 000 chars; the two are mutually exclusive) turns a resume
+into a review round: the resumed task keeps the original brief, then tells the
+worker that a reviewer read its work and sent *this*, and to inspect the
+worktree with `git status`/`git diff` and apply the feedback and nothing else.
+
+    dirtywork resume <slug> --feedback "You dropped the null check in api.ts; restore it."
+
+Resuming a run that ended `completed` **requires** feedback — without it the
+command refuses (exit 2, nothing created), because a completed run that is
+continued with its own original brief just re-does work it already declared
+done. Every other status resumes with or without feedback, as before. The
+feedback text is recorded in the new run's `run.json` (`feedback`) and its
+`run_start` event; both resume markers (`--- RESUMED RUN ---` and
+`--- RESUMED RUN: REVIEW FEEDBACK ---`) are stripped from the prior task before
+a new block is built, so resuming a resume never accumulates preambles.
+
+Docker-mode limit: export stores files, not the worker's in-container
+commits, so a resumed docker worker sees the earlier work as uncommitted
+changes against the base commit — not as its old commit history. Host mode
+(`--sandbox none`) keeps the real commits.
+
+## Inspecting, cleaning up and re-exporting runs
+
+Every run leaves a directory under `~/.dirtywork/runs/<slug>/` (`run.json`,
+`transcript.jsonl`, and in docker mode `diff.patch`); the `runs` subcommands
+work from that directory (plus best-effort docker/git lookups) independently
+of whether the run is still going:
+
+- `dirtywork runs list [--json]` — every run under `~/.dirtywork/runs`: slug,
+  status, when it started, its place in a resume chain, branch, whether the
+  worktree still exists, and container/volume state.
+- `dirtywork runs show <slug> [--diff] [--markdown] [--out FILE]` — the run's
+  summary fields, its full `run.json`, and a timeline reconstructed from the
+  transcript; `--diff` also prints `diff.patch`. `--markdown` renders the same
+  run as a Markdown report instead (header block whose `task` field is a
+  one-line preview, a `## Task` section with the full task text, one
+  `### Turn N` section per assistant turn, collapsible `<details>` tool
+  results, blockquote callouts for nudges/guardrail blocks/sandbox resets, a
+  `## Result` section, and with `--diff` the patch in a fenced block) —
+  paste-ready for a PR or an issue; `--out FILE` writes it to a file instead
+  of stdout.
+- `dirtywork runs export <slug> [--max-worktree-mb 2048] [--max-worktree-files 200000] [--max-patch-mb 10] [--keep-volume]` —
+  re-runs the docker export into the worktree for a run whose volume still
+  exists (after `export_failed`, or a crash before the export ran); refuses
+  a non-empty worktree, a still-running run, or a non-docker-sandbox run.
+  `--max-worktree-mb`/`--max-worktree-files` default to the same limits as
+  `dirtywork run` — raise them here to retry an export that failed because
+  the tree was too big.
+- `dirtywork runs clean <slug>|--all [--force] [--keep-transcript]` —
+  remove a run's container, volume, worktree, branch, and run directory.
+  Every refusal is printed and makes the command exit 1:
+  - refuses a worktree with uncommitted changes, or a branch that has
+    commits beyond the run's recorded base commit — both are what make
+    `--allow-commit` runs safe to clean; `--force` removes them anyway.
+  - refuses a run that's still marked `running` with a live (or
+    unconfirmable) host process — not overridable; once the process is
+    confirmed dead, `--force` is required to confirm the cleanup.
+  - never deletes a branch unless it's still the one actually checked out
+    in the worktree (protects against deleting the wrong branch if you
+    checked out something else there by hand).
+  - a run whose worktree was taken over by a later `resume`
+    (`resumed_by` set) keeps its worktree and branch — they belong to the
+    newest run in the chain; clean that run instead.
+  - only ever removes the worktree dirtywork itself created for the run
+    (`<repo>/.worktrees/dw-<slug>`, a linked worktree of the recorded repo)
+    — an edited `run.json` cannot point it at another worktree; a worktree
+    that is already gone is not a refusal (git bookkeeping is pruned and the
+    run's own `dirtywork/<slug>` branch removed if nothing has it checked out).
+  - container/volume removal only ever touches a resource whose
+    `dirtywork.run`/`dirtywork.repo` labels match this exact run (the SP2
+    collision rule); anything else is left alone and reported. A resource
+    that is already gone ("no such object") is fine; any other `docker
+    inspect` failure (daemon down, permission denied) is a refusal, and then
+    the worktree, branch and run directory are left untouched too, so a
+    retry can still finish.
+  - if anything above was refused, the run directory is kept too, so
+    nothing it describes is lost before you can retry with `--force`.
+  - slugs are plain names (`[A-Za-z0-9._-]`); paths are rejected.
+  - `--keep-transcript` keeps `run.json`/`transcript.jsonl` and removes
+    the rest of the run directory.
+- `dirtywork runs verdict <slug> accept|reject|cleanup [--note TEXT] [--review-seconds N]` —
+  record the operator's verdict on a run into its `run.json`.
+- `dirtywork runs snapshot <slug>` — commit the run worktree's current content
+  onto the run's own branch as `wip: dirtywork run <slug>`, then print
+  `snapshot <sha> on <branch>` (or `nothing to snapshot` when the tree already
+  matches the branch head). Built entirely from git plumbing — no `git add`, no
+  `git commit` — so a worker-authored `.gitattributes` plus a configured clean
+  filter, and any hook in your repo, are bypassed rather than executed; the
+  repo's ignore rules ARE applied, the same way `git add -A` would apply them
+  (`git check-ignore`, config-neutral — a tracked file matching an ignore
+  pattern is still kept). Symlinks are recorded by their target string, never
+  followed; executable bits are preserved; anything that is not a regular file
+  or a symlink is skipped. Refuses (exit 2) a run still going with a live pid, a
+  missing worktree, a worktree that is not a linked worktree of the run's repo,
+  a worktree with a pre-resume stash beside it, and one the export never
+  populated. Mostly you will not call it by hand: `--branch-from @<slug>` calls
+  it for you.
+
+## Benchmarking
+
+    dirtywork bench --models 'model[@provider][=base_url],...' \
+        [--provider openai] [--base-url URL] [--tasks name1,name2] \
+        [--repeats N] [--out PATH] [--max-turns 40] [--timeout 1800]
+    dirtywork bench summarize <results.jsonl> [--compare <other.jsonl>]
+
+Runs every (model × task × repeat) combination through the normal
+`dirtywork run --sandbox docker --keep-volume` path against the fixture
+repos under `bench/repos/` (each with a `bench.json` of expected file
+hashes plus an acceptance command), then scores the result: a fresh
+acceptance container mounts the run's volume at `/work` and the fixture's
+own `bench/repos/<task>/acceptance/` read-only at `/acceptance`, hashes the
+worker's copy of `acceptance/` to catch tampering (marked `gamed`), and
+runs the acceptance command from the read-only mount to get `pass`/`fail`.
+Each row also records harness-failure counts (nudges by kind, stalls,
+`max_turns`, `sandbox_error`, aborts). `--models` takes comma-separated
+`model[@provider][=base_url]` specs — anything a spec omits falls back to
+the sweep-wide `--provider`/`--base-url`, which in turn fall back to
+`dirtywork run`'s own defaults. Results append to
+`~/.dirtywork/bench/<UTC-timestamp>.jsonl` (or `--out`); `dirtywork bench
+summarize <file>` prints a per-case table plus a per-model summary
+(completion/acceptance/verdict rates, gamed count, mean tokens/wall time,
+median review seconds). `--compare <other.jsonl>` prints two paired
+`A -> B (Δ)` tables instead — the per-(model, task) table and the paired
+per-model summary — deltas are B minus A, a key only one sweep ran shows
+`-` on the other side, the per-(model, task) table's `outcomes` column
+breaks the acceptance rate down as `pass/fail/gamed/skipped` per side (count
+cells carry a component-wise delta, e.g. `0/0/1/0 -> 1/0/0/0 (+1/0/-1/0)`), and
+its `harness` column reads `-` for a side whose rows never ran the harness
+(bench_error only) or is suffixed `*` when only some of that side's rows did.
+
+`bench` runs from a source checkout only — `bench/` and its fixture repos
+are not part of the installed package.
+
+## Troubleshooting
+
+- **exit 2, "cannot reach LM Studio"** — server not running; check `lms ps`
+  and `curl -s localhost:1234/v1/models`.
+- **exit 2, "model not loaded"** — `lms load <model>` (the error names the
+  loaded models).
+- **exit 2, "ANTHROPIC_API_KEY is not set"** — set that environment variable
+  before running with `--provider anthropic`.
+- **status `max_turns` / `timeout`** — the worktree is kept; read the
+  transcript to see where it stalled, salvage what's useful, or re-run with
+  higher limits.
+- **status `stalled`** — N turns (`--stall-turns`) passed with no file change
+  and no new command output; the worktree is kept. Usually the work is
+  done but the model never called `finish` — inspect the worktree, or
+  `dirtywork resume <slug>`.
+- **status `stuck`** — the same failing `bash` command ran `--stuck-repeats`
+  times in a row (default 4) with output that differed only in timing; the
+  worktree is kept. The payload's `stuck_on` names the command, its output and
+  the repeat count. Usually the worker cannot run the repo's gate at all (a
+  missing dependency in docker mode) or is re-running a test it has no way to
+  pass — read `stuck_on`, fix the environment or the brief, then
+  `dirtywork resume <slug> --feedback "..."`. `--stuck-repeats 0` disables it.
+- **status `verify_failed`** — the worker declared itself done but the
+  `--verify` command exited non-zero on its last allowed run; the worktree is
+  kept and the export still ran. Read `verify.output_tail` in the payload, then
+  `dirtywork resume <slug> --feedback "<what to fix>"` — the resume inherits
+  the same verify command. In docker mode, check first that the command can run
+  at all in the image (`--network none`, nothing installed at run time).
+- **host mode (`--sandbox none`): "No module named pytest", or a
+  `Library/`/`.cache/` directory appears in the worktree** — bash runs with
+  `HOME` set to the worktree on purpose (so `~/.ssh` and friends are out of
+  reach), which is where `$HOME`-keyed caches and `pip install --user` land.
+  The operator's own user-site packages stay importable (they are put on
+  `PYTHONPATH`), and the roots of `$HOME`-keyed toolchain managers are carried
+  over (`VOLTA_HOME`, `RUSTUP_HOME`, `CARGO_HOME`, `NVM_DIR`, `PYENV_ROOT` —
+  kept when set in your shell, else defaulted to `~/.volta`-style directories
+  that exist) so `node`/`cargo` shims do not re-download toolchains into the
+  worktree; if a tool still cannot be found, install it system-wide or in the
+  project's virtualenv rather than with `pip install --user` from inside a run.
+- **status `context_exhausted`** — the task needed more context than the
+  model's window; split the task or use the larger-context model.
+- **status `budget_exceeded`** — the worktree grew past
+  `--max-worktree-mb`/`--max-worktree-files` during a tool call; the
+  worktree and branch are kept for salvage. Raise the limit or investigate
+  what wrote so much.
+- **exit 2, "Docker is the default sandbox since 0.4..."** — Docker
+  Desktop/dockerd isn't running or isn't reachable. Start it, or pass
+  `--sandbox none` to run unsandboxed on the host.
+- **exit 2 with "permission denied while trying to connect to the Docker
+  daemon socket"** (Linux) — the daemon is up but your user can't talk to
+  it. Either add yourself to the `docker` group (`sudo usermod -aG docker
+  $USER`, then log out and back in — `newgrp docker` works for the current
+  shell), or run rootless Docker (`dockerd-rootless-setuptool.sh install`,
+  then `DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock`). Verify with
+  `docker version` before retrying; dirtywork uses the same `docker` CLI
+  and socket you do. On macOS/Windows Docker Desktop this doesn't apply
+  (Desktop owns the socket for your user); if Desktop shows running but
+  `docker version` fails, `DOCKER_HOST` or a stale `~/.docker/config.json`
+  context is the usual culprit (`docker context ls`).
+- **`docker: command not found` / "Cannot connect to the Docker daemon"
+  from inside a run's `bash` tool** — expected in docker mode: the worker
+  has no docker socket and no network by design (the container mounts only
+  the run's volume and the read-only object store; `--network none`).
+  In host mode the worker inherits your PATH, so this means the same
+  socket problem as above.
+- **exit 2, "Build or pull the worker image..."** — the configured
+  `--image` couldn't be resolved (not pullable, or a digest mismatch
+  against `PINNED_DIGEST`). Build/pull it per `docker/README.md`, pass a
+  different `--image`, or use `--sandbox none`.
+- **exit 2, "Check that the repository's git object store is valid..."**
+  — `--repo`'s git object store failed validation (a symlinked or missing
+  `objects` directory, or one that escapes the git common dir). Verify
+  the repo with `git -C <repo> fsck`, or use `--sandbox none`.
+- **status `sandbox_error`** — a docker command failed or timed out mid-run
+  (daemon hang, container killed unexpectedly twice in a row, etc.); the
+  worktree may be partially or not exported. Check `run_end.error` in the
+  transcript and `docker ps -a --filter label=dirtywork.run=<slug>`.
+- **status `export_failed` (in `run.json`'s `export_status`, and as the
+  overall `status` if the agent loop itself otherwise completed)** — the
+  worker's tree could not be validated/exported (e.g. it exceeded
+  `--max-worktree-mb`/`--max-worktree-files`). The Docker volume
+  `dw-<slug>-work` is kept (unless it was already going to be removed).
+  Retry the export in place with `dirtywork runs export <slug>
+  --max-worktree-mb <n> --max-worktree-files <n>` after raising the limit
+  that tripped it (see [Inspecting, cleaning up and re-exporting
+  runs](#inspecting-cleaning-up-and-re-exporting-runs)). To salvage the
+  tree by hand instead, inspect the volume directly (`docker run --rm -v
+  dw-<slug>-work:/work <image> ...`), or discard it with `docker volume rm
+  dw-<slug>-work` once you're done.
+
