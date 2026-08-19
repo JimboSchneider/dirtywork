@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python ≥3.9, stdlib only (`json`, `math`, `os`, `sys`, `urllib.parse`, `xml.etree.ElementTree`). Dev-only dependency: pytest. CI: GitHub Actions.
 
-**Spec:** `docs/superpowers/specs/2026-08-19-tools-context-timeouts-design.md` (v3.1, owner-approved 2026-08-19 12:37 CDT, binding).
+**Spec:** `docs/superpowers/specs/2026-08-19-tools-context-timeouts-design.md` (v3.3, owner-approved 2026-08-19 12:37 CDT, binding; v3.2 ruled on the `1..i-1` wording, v3.3 on the bench cell).
 
 ---
 
@@ -575,7 +575,7 @@ def test_schemas_match_the_frozen_wire_fixture():
     # (it was regenerated in 0.8 and again in 0.9), which is why it is no
     # longer named after 0.5.1: regenerate it with
     #   python3 -c "import json; from dirtywork.builtin_tools import default_registry; \
-    #     open('tests/fixtures/tool_schemas.json','w').write(\
+    #     open('tests/fixtures/tool_schemas.json','w',encoding='utf-8').write(\
     #     json.dumps(default_registry().schemas(), indent=2, ensure_ascii=False) + '\n')"
     # and read the diff before committing it.
     expected = json.loads(FROZEN_SCHEMAS.read_text(encoding="utf-8"))
@@ -613,15 +613,15 @@ git commit -m "feat(registry): nested parameter schemas, recursive validation an
 - Modify: `dirtywork/sandbox/__init__.py` (`:45-73` Protocol)
 - Modify: `dirtywork/sandbox/host.py` (`:52-55` region)
 - Modify: `dirtywork/sandbox/docker.py` (`:15-25` import block; `:457-473` `_transform_file`; `:475-482` region)
-- Modify: `dirtywork/builtin_tools.py` (`:1` docstring; `:11-12` imports; new `MAX_APPLY_EDITS`/`MAX_APPLY_EDITS_INPUT_BYTES`; new `_apply_edits`; new `APPLY_EDITS_SPEC` after `EDIT_FILE_SPEC`; `:197-198` `BUILTIN_SPECS`)
+- Modify: `dirtywork/builtin_tools.py` (`:1` docstring; new `MAX_APPLY_EDITS`/`MAX_APPLY_EDITS_INPUT_BYTES` after `:19-20`; new `_apply_edits`; new `APPLY_EDITS_SPEC` after `EDIT_FILE_SPEC`; `:197-198` `BUILTIN_SPECS`)
 - Modify: `dirtywork/runner.py` (`:153` `_MUTATING_TOOLS`)
-- Modify: `dirtywork/__main__.py` (`:81` system-prompt rule)
+- Modify: `dirtywork/__main__.py` (`:84` system-prompt rule)
 - Regenerate: `tests/fixtures/tool_schemas.json`
 - Modify: `tests/test_tools_files.py`, `tests/test_sandbox_host.py`, `tests/test_docker_sandbox.py`, `tests/test_builtin_tools.py`, `tests/test_transcript_schema.py`
 - Modify: `README.md`, `docs/security.md`, `docs/transcript-schema.md`, `docs/machine-contract.md`, `docs/operating.md`
 
 **Interfaces:**
-- Consumes: `tools.describe_change(path, old_text, new_text, *, verb) -> str` (`tools.py:149`); `tools.MAX_WRITE_BYTES` (`tools.py:28`); `tools._transform_file(worktree, path, transform, *, tool)` (`tools.py:315`); `DockerSandbox._transform_file(path, transform)` (`docker.py:453`); `HostSandbox._check_budget()` (`host.py:39`); `toolspec.ParamSpec.schema` (Task 1).
+- Consumes: `tools.describe_change(path, old_text, new_text, *, verb) -> str` (`tools.py:149`); `tools.MAX_WRITE_BYTES` (`tools.py:28`); `tools._transform_file(worktree, path, transform, *, tool)` (`tools.py:315`); `DockerSandbox._transform_file(path, transform)` (`docker.py:457`); `HostSandbox._check_budget()` (`host.py:39`); `toolspec.ParamSpec.schema` (Task 1).
 - Produces:
   - `tools._check_write_size(new_text: str) -> str | None`
   - `tools._apply_edits_once(path: str, edits: list) -> Callable[[str], tuple]`
@@ -716,7 +716,7 @@ def test_edit_file_result_over_the_write_cap_is_refused(wt: Path):
 - [ ] **Step 2: Run them to verify they fail**
 
 Run: `/usr/bin/python3 -m pytest tests/test_tools_files.py -q -k "apply_edits or over_the_write_cap"`
-Expected: 8 failed — the six `apply_edits` tests with `AttributeError: module 'dirtywork.tools' has no attribute 'apply_edits'`, and `test_edit_file_result_over_the_write_cap_is_refused` with an `AssertionError` showing a successful `Edited grow.txt: …` result (today's host transform path has no write cap at all).
+Expected: 8 failed — the seven `apply_edits` tests with `AttributeError: module 'dirtywork.tools' has no attribute 'apply_edits'`, and `test_edit_file_result_over_the_write_cap_is_refused` with an `AssertionError` showing a successful `Edited grow.txt: …` result (today's host transform path has no write cap at all).
 
 - [ ] **Step 3: Add the shared write-cap helper and the transform factory**
 
@@ -1318,11 +1318,11 @@ BUILTIN_SPECS = (READ_FILE_SPEC, WRITE_FILE_SPEC, EDIT_FILE_SPEC, APPLY_EDITS_SP
 Run:
 
 ```bash
-/usr/bin/python3 -c "import json; from dirtywork.builtin_tools import default_registry; open('tests/fixtures/tool_schemas.json','w').write(json.dumps(default_registry().schemas(), indent=2, ensure_ascii=False) + '\n')"
+/usr/bin/python3 -c "import json; from dirtywork.builtin_tools import default_registry; open('tests/fixtures/tool_schemas.json','w',encoding='utf-8').write(json.dumps(default_registry().schemas(), indent=2, ensure_ascii=False) + '\n')"
 git diff --stat tests/fixtures/tool_schemas.json
 git diff tests/fixtures/tool_schemas.json | grep '^-' | grep -v '^---'
 ```
-Expected: the stat shows insertions only; the third command prints **nothing**. A removed line means an existing tool's schema changed, which this task must not do — investigate before continuing.
+Expected: the stat shows insertions only; the third command prints **nothing**. A removed line means an existing tool's schema changed, which this task must not do — investigate before continuing. (`encoding='utf-8'` is explicit because `ensure_ascii=False` writes the description's U+2192 `→` verbatim; on a runner whose locale encoding is not UTF-8 — the Windows leg — the default would mangle it.)
 
 - [ ] **Step 19: Run the registry tests**
 
@@ -1487,6 +1487,13 @@ locked-down container: `--network none` by default,
 - [ ] **Step 25: Add the Tools subsection to `docs/machine-contract.md`**
 
 Spec §1.7: the machine contract enumerates the flags, the payload and the events but has never listed the tools. Insert the new subsection between the `--allow-commit` bullet and the `**stdout:**` paragraph.
+
+Decision (forward reference, deliberate): the `bash` bullet below describes the
+0.9 timeout text, the `timed_out` event flag and the `timeouts` counter, which
+Task 5 actually implements. Writing the tool list once — here, complete — beats
+splitting one enumeration across two tasks; spec §4.4 names this subsection as
+where the timeout is documented, and Task 5's coverage row points back to it.
+The docs are only shipped by Task 7's release, so nothing is published early.
 
 Before:
 
@@ -1772,7 +1779,7 @@ def test_trimmed_turns_is_zero_on_an_ordinary_run(parts):
 - [ ] **Step 2: Run them to verify they fail**
 
 Run: `/usr/bin/python3 -m pytest tests/test_runner.py -q -k "trim"`
-Expected: 6 failed — `test_trim_messages` with `TypeError: cannot unpack non-sequence bool`, `test_trim_does_not_recount…`/`test_trim_cannot_fit`/`test_trim_counts_tool_call_arguments` with `AssertionError` comparing a bool to a tuple, and the three `trimmed_turns` tests with `KeyError: 'trimmed_turns'`.
+Expected: 7 failed — `test_trim_messages` with `TypeError: cannot unpack non-sequence bool`; `test_trim_does_not_recount…`/`test_trim_cannot_fit`/`test_trim_counts_tool_call_arguments` with `AssertionError` comparing a bool to a tuple; the two scripted counting tests with `IndexError: pop from empty list` (the old call site tests the tuple for truthiness, so `(False, 3)` never ends the run and the FakeProvider runs out of responses on turn 4); and `test_trimmed_turns_is_zero_on_an_ordinary_run` with `KeyError: 'trimmed_turns'`.
 
 - [ ] **Step 3: Make `trim_messages` report what it trimmed**
 
@@ -1935,7 +1942,7 @@ _DEFAULT_EVIDENCE = {
 - [ ] **Step 7: Run it to verify it fails**
 
 Run: `/usr/bin/python3 -m pytest tests/test_main.py -q -k "trimmed_turns or evidence"`
-Expected: 3 failed — `test_trimmed_turns_lands_on_the_payload_run_end_and_run_json` with `KeyError: 'trimmed_turns'` on `run.json`, and the two `_DEFAULT_EVIDENCE` tests with `AssertionError: 'trimmed_turns' missing from payload`.
+Expected: 2 failed — `test_trimmed_turns_lands_on_the_payload_run_end_and_run_json` with `KeyError: 'trimmed_turns'` on `run.json`, and `test_emit_result_seeds_the_six_evidence_keys_with_defaults` with `AssertionError: 'trimmed_turns' missing from payload`. Three more tests call `_assert_default_evidence_keys` without matching this `-k` expression — `test_main_docker_start_failure_is_sandbox_error_exit_1`, `test_transcript_construction_failure_still_prints_json`, `test_llm_error_during_run_prints_model_error_json` — and are also red until Step 9; the full-module run in Step 11 covers them.
 
 - [ ] **Step 8: Add `_contract_fields` and seed the payload**
 
@@ -2169,7 +2176,7 @@ def test_task_size_warning_fires_on_resume(tmp_path, monkeypatch, capsys):
 - [ ] **Step 13: Run them to verify they fail**
 
 Run: `/usr/bin/python3 -m pytest tests/test_main.py -q -k task_size_warning`
-Expected: 3 failed — the two "fires" tests with `AssertionError` on a stderr that carries no such line; `test_task_size_warning_is_silent_under_the_threshold` passes already (it asserts absence) — treat its pass as expected and confirm the other two fail.
+Expected: `2 failed, 1 passed` — the two "fires" tests fail with `AssertionError` on a stderr that carries no such line; `test_task_size_warning_is_silent_under_the_threshold` passes already, because it asserts the line's ABSENCE.
 
 - [ ] **Step 14: Add the warning**
 
@@ -2608,6 +2615,12 @@ RUN_END_FIELDS = ["diff_stat", "untracked", "patch_path", "escaping_symlinks",
 
 - [ ] **Step 26: Write the sizing guide — `docs/operating.md`**
 
+Decision (forward reference, deliberate): two paragraphs of this section
+describe the server probe and `context_window_source`, which Task 4 actually
+implements. The sizing guide is one argument and reads wrong split in half, and
+the docs are only published by Task 7's release, so nothing goes out ahead of
+the code; Task 4's coverage rows point back here.
+
 Insert a new section immediately before `## Benchmarking`.
 
 Before:
@@ -2800,8 +2813,8 @@ After:
 def test_resolve_context_window_uses_the_real_openai_table():
     # The stub transport keeps this a pure unit test: with 0.9's server probe
     # in front of the table, a real client would otherwise try to GET
-    # http://fake/api/v0/models before falling back.
-    from dirtywork.llm import LLMError
+    # http://fake/api/v0/models before falling back. LLMError is already
+    # imported at module scope (tests/test_runner.py:9).
     from dirtywork.providers.openai_compat import OpenAICompatClient
 
     def no_server(url, payload, headers, timeout, *, method="POST"):
@@ -2919,6 +2932,7 @@ def test_loaded_context_window_drops_a_proxy_path_prefix():
     {"data": []},                                             # model absent
     {"data": [{"id": "other", "state": "loaded", "loaded_context_length": 4096}]},
     {"data": [{"id": "m", "state": "loading", "loaded_context_length": 4096}]},
+    {"data": [{"id": "m", "state": None, "loaded_context_length": 4096}]},
     {"data": [{"id": "m", "state": "loaded"}]},                # field missing
     {"data": [{"id": "m", "state": "loaded", "loaded_context_length": None}]},
     {"data": [{"id": "m", "state": "loaded", "loaded_context_length": 0}]},
@@ -2931,8 +2945,9 @@ def test_loaded_context_window_rejects_anything_else(body):
 
 
 def test_loaded_context_window_accepts_an_entry_with_no_state_field():
-    # `state` is only checked WHEN PRESENT: a compatible server that reports the
-    # loaded length without a state field is still answering the question.
+    # The `state` KEY being absent is not the same as `"state": null` (rejected
+    # above): a compatible server that reports the loaded length without a
+    # state field at all is still answering the question.
     body = {"data": [{"id": "m", "loaded_context_length": 8192}]}
     assert _client(RecordingTransport([body])).loaded_context_window("m") == 8192
 
@@ -2943,6 +2958,30 @@ def test_loaded_context_window_is_none_when_the_endpoint_is_unreachable():
 
     client = OpenAICompatClient(base_url="http://fake/v1", http_json=boom)
     assert client.loaded_context_window("m") is None
+
+
+def test_loaded_context_window_is_none_when_the_probe_times_out():
+    # LLMTimeout subclasses LLMError, so one `except LLMError` covers both --
+    # this test is what proves the probe's 2-second budget cannot fail a run.
+    def slow(url, payload, headers, timeout, *, method="POST"):
+        raise LLMTimeout(f"request to {url} exceeded {timeout}s")
+
+    client = OpenAICompatClient(base_url="http://fake/v1", http_json=slow)
+    assert client.loaded_context_window("m") is None
+```
+
+The timeout case needs `LLMTimeout` in scope; extend the module's import.
+
+Before:
+
+```python
+from dirtywork.llm import LLMError, MalformedResponse
+```
+
+After:
+
+```python
+from dirtywork.llm import LLMError, LLMTimeout, MalformedResponse
 ```
 
 Append to `tests/test_provider_anthropic.py`:
@@ -2957,7 +2996,7 @@ def test_loaded_context_window_is_none():
 - [ ] **Step 6: Run them to verify they fail**
 
 Run: `/usr/bin/python3 -m pytest tests/test_provider_openai.py tests/test_provider_anthropic.py -q -k loaded_context_window`
-Expected: 16 failed — every one with `AttributeError: 'OpenAICompatClient' object has no attribute 'loaded_context_window'` / `'AnthropicClient' object has no attribute 'loaded_context_window'`.
+Expected: 18 failed — every one with `AttributeError: 'OpenAICompatClient' object has no attribute 'loaded_context_window'` / `'AnthropicClient' object has no attribute 'loaded_context_window'`.
 
 - [ ] **Step 7: Implement the probe**
 
@@ -3057,8 +3096,11 @@ After:
         for entry in body["data"]:
             if not isinstance(entry, dict) or entry.get("id") != model:
                 continue
-            state = entry.get("state")
-            if state is not None and state != "loaded":
+            # Key PRESENCE, not truthiness: a server that reports no `state`
+            # at all is still answering the question, but an explicit
+            # `"state": null` is a present-and-not-"loaded" state and is
+            # rejected like `"loading"` (spec §3.2).
+            if "state" in entry and entry.get("state") != "loaded":
                 return None
             loaded = entry.get("loaded_context_length")
             if isinstance(loaded, int) and not isinstance(loaded, bool) and loaded > 0:
@@ -3138,7 +3180,7 @@ class Provider(Protocol):
 - [ ] **Step 8: Run the provider tests**
 
 Run: `/usr/bin/python3 -m pytest tests/test_provider_openai.py tests/test_provider_anthropic.py -q`
-Expected: `69 passed` (31 + 22 today, + 15 + 1).
+Expected: `71 passed` (31 + 22 today, + 17 + 1).
 
 - [ ] **Step 9: Write the failing CLI/runs tests**
 
@@ -3686,10 +3728,41 @@ After:
   [Sizing the context window](operating.md#sizing-the-context-window).
 ```
 
+Then the flag block's own comment, which still names only the table.
+
+Before:
+
+```
+    [--context-window <tokens>]       # default: built-in table, else 32768 (+ stderr warning)
+```
+
+After:
+
+```
+    [--context-window <tokens>]       # default: the server's loaded window, else the
+                                       # built-in table, else 32768 (+ stderr warning)
+```
+
+And the `run_start` field enumeration under **Transcript events**.
+
+Before:
+
+```
+`sandbox` — the docker settings dict, or `"none"` — and `provider`,
+`context_window`, `resumed_from`),
+```
+
+After:
+
+```
+`sandbox` — the docker settings dict, or `"none"` — and `provider`,
+`context_window`, `context_window_source`, `resumed_from`),
+```
+
 - [ ] **Step 18: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: `993 passed, 1 skipped, 18 deselected` (964 + 29).
+Expected: `995 passed, 1 skipped, 18 deselected` (964 + 31).
 
 Note that `tests/test_transcript_schema.py` needed no edit for this field: its
 `test_a_real_run_emits_the_documented_events` walks every key a real run emits
@@ -3727,7 +3800,7 @@ git commit -m "feat: use the server's loaded context length and record where the
   - transcript `tool_result.timed_out: true` (sparse, `bash` only) and nudge kind `timeout`
   - `runs._tool_result_outcome` returns the new class `"timed out"`
   - `bench._harness_failures(counts, status, final_message, timeouts=0)` (**signature change**; one call site), `harness["timeouts"]`, `_summarize_model` key `timeouts`, 4-tuple `_harness_counts`
-- Decision (recorded deviation): spec §4.3 says "`_failure_cell` renders `n/s/m/t`, and the legend text becomes `harness: nudges/stalled/max_turns/timeouts` (plain and `--compare`)". `_failure_cell` today renders a comma-joined list of NAMES (`stalled,empty_reply=3,abort=bad_args`) for the plain detail table's FAILURES column; the `n/s/m/t` cell is `_harness_cell`, which only `--compare` prints. Rendering `_failure_cell` as `n/s/m/t` literally would delete shipped output (`abort=`, `sandbox_error`), which the additive-contract rule forbids. So: `_harness_counts`/`_harness_cell` become the 4-tuple and the `--compare` legend becomes `harness: nudges/stalled/max_turns/timeouts` exactly as written; `_failure_cell` gains an additive `timeouts=N` token alongside `empty_reply=N`; and the plain summary's legend block gains the matching lines (its `nudges:` legend must gain `/timeout` regardless, because the NUDGES column joins over `NUDGE_KINDS`).
+- The bench cell follows **spec §4.3 as ruled in v3.3** (this is no longer a plan-level deviation — the spec was amended): `_harness_counts`/`_harness_cell` (the `--compare` harness cell) become the 4-tuple `n/s/m/t` with legend `harness: nudges/stalled/max_turns/timeouts`; the plain FAILURES column (`_failure_cell`) stays additive — it gains a `timeouts=N` token alongside `empty_reply=N`, and the plain legend block gains `/timeout` on its `nudges:` line plus a `failures:` line. v3.1 had said `_failure_cell` itself renders `n/s/m/t`; taken literally that deletes the shipped `abort=`/`sandbox_error` tokens, which the additive-contract rule forbids, hence the ruling.
 
 - [ ] **Step 1: Write the failing host-bash test**
 
@@ -5037,7 +5110,9 @@ After:
 `bash(command, timeout=120)` runs one shell command in the worktree. The
 per-call `timeout` is the model's to set (default 120 s, maximum 600 s, clamped;
 `--timeout` is the separate whole-run wall clock). A command that hits its
-timeout is killed with its whole process group and returns exactly:
+timeout is killed (host mode kills its whole process group; in docker mode the
+`docker exec` is abandoned, which is why the result is *unknown*, not *failed*)
+and returns exactly:
 
     ERROR: command timed out after 120s — it did not finish and its result is unknown. Re-run it with a larger timeout (up to 600) or split it into smaller commands; do not report it as passed.
 
@@ -5048,8 +5123,9 @@ turn also gets a one-line nudge telling the worker in words that the result is
 unknown and must not be reported as a pass, the `tool_result` transcript event
 carries `timed_out: true`, and the run's `timeouts` counter rises — visible on
 the stdout JSON, in `run_end`, in `run.json`, in `dirtywork runs show`
-(where the call renders `[timed out]` rather than `[ERROR]`), and as its own
-column in `dirtywork bench summarize`.
+(where the call renders `[timed out]` rather than `[ERROR]`), and in
+`dirtywork bench summarize` (a `timeouts=N` token in the FAILURES column, and
+the fourth number of the `--compare` harness cell).
 
 A timeout is **not** counted as a model failure: it does not feed the
 consecutive-failure abort, and it resets that streak like any other tool call
@@ -5069,22 +5145,22 @@ crash) keeps its worktree. Continue it on the same worktree and branch:
 
 - [ ] **Step 30: Document the fields — `docs/transcript-schema.md`**
 
-The `tool_result` table, after the `result` row.
+The `tool_result` table gains a row. It must land **inside** the table, so the
+anchor is the tail of the `result` row (as Task 2, Step 22 left it) — not the
+`A finish(...)` paragraph below, which is separated from the table by a blank
+line.
 
 Before:
 
 ```
-A `finish(summary=…)` call is an ordinary tool call: it appears in the
-`assistant` event's `tool_calls` and produces a `tool_result` whose `result` is
+An in-place tool whose RESULT would exceed the 5 MB write limit returns `ERROR: result is <n> bytes, over the <limit>-byte write limit; nothing was written` on both backends (0.9) |
 ```
 
 After:
 
 ```
+An in-place tool whose RESULT would exceed the 5 MB write limit returns `ERROR: result is <n> bytes, over the <limit>-byte write limit; nothing was written` on both backends (0.9) |
 | `timed_out` | | ✓ | boolean | 0.9: `true` on a `bash` tool result whose command hit its timeout. **Sparse** — the key is absent, not `false`, on every other result, including a `grep` timeout (a different wording and a different meaning: the harness's search, not the worker's command) and the `--verify` command (not a tool call, so it produces no `tool_result` at all; its outcome is in `verify`) |
-
-A `finish(summary=…)` call is an ordinary tool call: it appears in the
-`assistant` event's `tool_calls` and produces a `tool_result` whose `result` is
 ```
 
 The `nudge` table's `kind` row.
@@ -5164,7 +5240,7 @@ After:
 - [ ] **Step 32: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: `1006 passed, 1 skipped, 18 deselected` (993 + 13).
+Expected: `1008 passed, 1 skipped, 18 deselected` (995 + 13).
 
 - [ ] **Step 33: Commit**
 
@@ -5218,6 +5294,9 @@ def _load():
     return module
 
 
+# SAMPLE is a plain (non-raw) string, so `\\` is ONE backslash in the XML --
+# exactly what a Windows pytest run writes into `file=`. Doubling it here would
+# make _file_of produce "tests//test_b.py" and every assertion below miss.
 SAMPLE = """<?xml version="1.0" encoding="utf-8"?>
 <testsuites>
   <testsuite name="pytest" errors="1" failures="1" skipped="1" tests="5">
@@ -5225,10 +5304,10 @@ SAMPLE = """<?xml version="1.0" encoding="utf-8"?>
     <testcase classname="tests.test_a" name="test_bad" file="tests/test_a.py">
       <failure message="boom">trace</failure>
     </testcase>
-    <testcase classname="tests.test_b" name="test_err" file="tests\\\\test_b.py">
+    <testcase classname="tests.test_b" name="test_err" file="tests\\test_b.py">
       <error message="kaboom">trace</error>
     </testcase>
-    <testcase classname="tests.test_b" name="test_skip" file="tests\\\\test_b.py">
+    <testcase classname="tests.test_b" name="test_skip" file="tests\\test_b.py">
       <skipped message="no fifo"/>
     </testcase>
     <testcase classname="tests.test_c" name="test_ok2"/>
@@ -5589,7 +5668,7 @@ After:
 - [ ] **Step 11: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: `1014 passed, 1 skipped, 18 deselected` (1006 + 8).
+Expected: `1016 passed, 1 skipped, 18 deselected` (1008 + 8).
 
 - [ ] **Step 12: Commit**
 
@@ -5939,6 +6018,47 @@ the two paths below where `runner.run()` never returns, where they carry
 those same defaults rather than being omitted.
 ```
 
+Then the sentence that immediately follows it, which counts the 0.8 keys.
+
+Before:
+
+```
+The last four of these six
+are there so a run that ends with an empty `final_message` is still
+```
+
+After:
+
+```
+Four of those 0.8 keys
+are there so a run that ends with an empty `final_message` is still
+```
+
+And the paragraph describing the two failure paths, which spec §6 requires to
+name the three 0.9 keys too (Task 3's `_contract_fields` is what makes it true).
+
+Before:
+
+```
+paths where `runner.run()` never returns (sandbox setup fails before it
+starts, or an exception escapes the loop and is caught in `main()`) report
+`base_commit` and `resumed_from`, the six 0.8 evidence keys above (as their
+null/empty defaults), plus `export_status` too if a docker `finalize()` ran
+during that exception recovery — `finalize_error`, `watchdog_violation` and
+```
+
+After:
+
+```
+paths where `runner.run()` never returns (sandbox setup fails before it
+starts, or an exception escapes the loop and is caught in `main()`) report
+`base_commit` and `resumed_from`, the six 0.8 evidence keys above (as their
+null/empty defaults) **and** the three 0.9 contract keys — `trimmed_turns` and
+`timeouts` as `0`, `context_window_source` as the value preflight actually
+resolved — plus `export_status` too if a docker `finalize()` ran
+during that exception recovery — `finalize_error`, `watchdog_violation` and
+```
+
 - [ ] **Step 7: Consolidate the field list — `docs/transcript-schema.md` and `README.md`**
 
 In `docs/transcript-schema.md`, the stdout field list.
@@ -6027,7 +6147,7 @@ Expected: **no output**. Any hit is a mention Step 1 missed; fix it before conti
 - [ ] **Step 10: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: `1014 passed, 1 skipped, 18 deselected` — unchanged from Task 6 (this task adds no test; `test_default_image_and_pinned_digest` and `test_version_is_in_step_with_pyproject` are existing tests that must now pass against the new values).
+Expected: `1016 passed, 1 skipped, 18 deselected` — unchanged from Task 6 (this task adds no test; `test_default_image_and_pinned_digest` and `test_version_is_in_step_with_pyproject` are existing tests that must now pass against the new values).
 
 Then confirm the two version sources agree and the payload carries the full
 0.9 key set, end to end:
@@ -6119,7 +6239,7 @@ Every numbered section of `docs/superpowers/specs/2026-08-19-tools-context-timeo
 | §3.2 `LOADED_CONTEXT_PROBE_TIMEOUT = 2`, GET via `http_json`, `payload=None` | Task 4, Step 7; asserted in Step 5 |
 | §3.2 exact accept rules (`id` equality, `state`, non-bool int > 0) and every reject case | Task 4, Step 7; parametrized test in Step 5 |
 | §3.2 Ollama not probed; documented as a follow-up | Task 3, Step 26 (`docs/operating.md`); Task 4, Step 17 (`docs/machine-contract.md`); Task 7, Step 12 (the issue) |
-| §3.3 precedence + `provider:<name>:server` | Task 4, Step 3; tests in Step 1 |
+| §3.3 precedence + `provider:<name>:server` | Task 4, Step 3; tests in Step 1; `docs/machine-contract.md`'s `--context-window` bullet, its flag-block comment and the `run_start` enumeration in Step 17 |
 | §3.3 the "assuming 32768" warning still fires only for `default` | Task 4, Step 11 (`_resolve_context_window` keeps the `source == "default"` guard) |
 | §3.3 `test_resolve_context_window_uses_the_real_openai_table` gets a stub transport | Task 4, Step 1 |
 | §3.4 `RunContext.context_window_source`, placed before the first defaulted field | Task 4, Step 11 |
@@ -6136,7 +6256,7 @@ Every numbered section of `docs/superpowers/specs/2026-08-19-tools-context-timeo
 | §4.3 one `timeout` nudge per continuing turn, merged via `_join_nudges`, not a FailureTracker event | Task 5, Step 15; tests in Step 13 |
 | §4.3 `timeouts` counter → extra/payload/`run_end`/`run.json` incl. failure-path defaults | Task 5, Steps 15, 19 |
 | §4.3 `runs._tool_result_outcome` → `"timed out"`, `[timed out]` in both views, `SHOW_FIELDS` | Task 5, Step 23; test in Step 21 |
-| §4.3 `bench`: `NUDGE_KINDS`, `timeouts` from the payload, `empty_reply` exclusion, 4-tuple, legends | Task 5, Step 27 (deviation on `_failure_cell` recorded in the task header); tests in Step 25 |
+| §4.3 `bench`: `NUDGE_KINDS`, `timeouts` from the payload, `empty_reply` exclusion, 4-tuple, legends | Task 5, Step 27 (per spec §4.3 as ruled in v3.3 — see the task header); tests in Step 25 |
 | §4.4 `docs/operating.md` "The bash tool" | Task 5, Step 29 |
 | §4.4 `docs/machine-contract.md` (in the Tools subsection) | Task 2, Step 25 (the `bash` bullet states the timeout text, the flag and the counter) |
 | §4.4 `docs/transcript-schema.md` rows + `tests/test_transcript_schema.py` lists | Task 5, Steps 30, 31 |
@@ -6155,7 +6275,7 @@ Every numbered section of `docs/superpowers/specs/2026-08-19-tools-context-timeo
 | §6 `DEFAULT_IMAGE`/CI tag/docs → `:0.9`, `PINNED_DIGEST = None` with the comment updated | Task 7, Steps 1–5, 9 |
 | §6 `tests/test_docker_args.py` / `test_docker_image.py` | Task 7, Steps 2, 3 (the latter proven to need no change) |
 | §6 version `0.9.0` in `pyproject.toml` and `dirtywork/__init__.py` | Task 7, Step 8 |
-| §6 consolidated example JSON + `docs/transcript-schema.md` field lists | Task 7, Steps 6, 7 |
+| §6 consolidated example JSON, the two `docs/machine-contract.md` paragraphs that count the payload keys and the one describing the two `runner.run()`-never-returns paths, + `docs/transcript-schema.md` field lists | Task 7, Steps 6, 7 |
 | §6 full unit suite green on 3.9 after every task | every task's final suite step |
 | §6 follow-up issues (atomic write primitive; Ollama probe) | Task 7, Step 12 |
 

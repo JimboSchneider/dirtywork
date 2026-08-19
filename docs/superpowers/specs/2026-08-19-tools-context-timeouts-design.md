@@ -1,7 +1,7 @@
 # 0.9 — apply_edits, context sizing & server-reported windows, louder timeouts, Windows advisory CI
 
 **Date:** 2026-08-19
-**Status:** Approved design, v3.2 (v3.1 + plan-time ruling on the i=1 wording) (owner approved v3 for planning/execution 2026-08-19 12:37 CDT
+**Status:** Approved design, v3.3 (v3.2 + plan-time ruling on the bench cell, additive) (owner approved v3 for planning/execution 2026-08-19 12:37 CDT
 with three amendments, folded in here: §4.2 DockerError scope covers `grep` too; §1.4 cap scope;
 §1.3 extra-key policy). v2 addressed the owner's conditional-approval review; v3 folded in a
 three-lens red-team of v2 against the code.
@@ -368,9 +368,11 @@ assertion would pass on either branch); a new regression test covers `grep` with
 - `bench`: `NUDGE_KINDS` gains `"timeout"`; `_harness_failures` takes `timeouts` from the **payload**
   (`payload.get("timeouts", 0)` — the runner's count is the single source of truth; no re-derivation
   from events) as its own class and **excludes `timeout` from `empty_reply`** (`empty_reply` =
-  non-stall, non-timeout nudges); `_harness_counts` becomes the 4-tuple `(nudges, stalled,
-  max_turns, timeouts)`, `_failure_cell` renders `n/s/m/t`, and the legend text becomes
-  `harness: nudges/stalled/max_turns/timeouts` (plain and `--compare`).
+  non-stall, non-timeout nudges); `_harness_counts`/`_harness_cell` (the `--compare` harness
+  cell) become the 4-tuple `n/s/m/t` with legend `harness: nudges/stalled/max_turns/timeouts`;
+  the plain FAILURES column (`_failure_cell`) stays additive — it gains a `timeouts=N` token and
+  its legend line gains `/timeout` (a literal `n/s/m/t` replacement there would delete the
+  shipped `abort=`/`sandbox_error` tokens).
 
 ### 4.4 Docs
 
