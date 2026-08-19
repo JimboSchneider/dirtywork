@@ -452,6 +452,25 @@ def test_apply_edits_rejects_an_empty_old(wt: Path):
     assert (wt / "src" / "app.py").read_text() == before
 
 
+def test_apply_edits_rejects_a_malformed_edit_item(wt: Path):
+    # Sandbox.apply_edits is public; a caller that reaches it without going
+    # through the tool registry (spec §1.3) may pass a shape the registry
+    # would have refused. The guard fires before any matching, inside the
+    # same all-or-nothing pass, and never raises.
+    before = (wt / "src" / "app.py").read_text()
+    for edits in (
+        [{"old": "return 42"}],               # missing "new"
+        [{"new": "return 43"}],                # missing "old"
+        ["return 42"],                         # not a dict at all
+        [{"old": "return 42", "new": 43}],     # "new" not a string
+        [{"old": 42, "new": "return 43"}],     # "old" not a string
+    ):
+        out = tools.apply_edits(wt, "src/app.py", edits)
+        assert out == ("ERROR: edit 1 of 1: each edit must be an object with string "
+                       "'old' and 'new'; no edits applied")
+        assert (wt / "src" / "app.py").read_text() == before
+
+
 def test_apply_edits_rejects_a_repeated_old(wt: Path):
     (wt / "dup.txt").write_text("aa\naa\n")
     out = tools.apply_edits(wt, "dup.txt", [{"old": "aa", "new": "bb"}])

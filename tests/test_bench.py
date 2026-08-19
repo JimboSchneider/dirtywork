@@ -741,6 +741,7 @@ def test_summarize_reports_timeouts_in_the_failures_cell_and_the_legends(
     assert bench.cmd_summarize(argparse.Namespace(file=str(results),
                                                   compare=str(other))) == 0
     compare_out = capsys.readouterr().out
-    assert "harness: nudges/stalled/max_turns/timeouts" in compare_out
+    assert ("harness: nudges/stalled/max_turns/timeouts "
+           "(timeout nudges are also counted in nudges)") in compare_out
     assert "1/0/0/3 -> 1/0/0/3 (0/0/0/0)" in compare_out
 

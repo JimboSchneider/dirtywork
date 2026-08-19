@@ -902,7 +902,8 @@ def _add_run_flags(p, *, resume: bool) -> None:
                    help="seconds for the --verify command (default 600, clamped to 1-600; "
                         "resume inherits this from the run it continues)")
     p.add_argument("--context-window", type=_positive_int, default=None,
-                   help="model context window in tokens (default: built-in table, else 32768)")
+                   help="model context window in tokens (default: the server's loaded window, "
+                        "else the built-in table, else 32768)")
     p.add_argument("--max-worktree-mb", type=int, default=DEFAULT_MAX_WORKTREE_MB)
     p.add_argument("--max-worktree-files", type=int, default=DEFAULT_MAX_WORKTREE_FILES)
     p.add_argument("--image", default=None if resume else DEFAULT_IMAGE)

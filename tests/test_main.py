@@ -34,6 +34,17 @@ def _assert_default_evidence_keys(payload: dict) -> None:
         assert payload[key] == default, f"{key!r} was {payload[key]!r}, expected {default!r}"
 
 
+def _assert_context_window_source_is_a_string(payload: dict) -> None:
+    """context_window_source (0.9, spec §6) is resolved in preflight and is a
+    real string on every failure path _fail_setup/_fail_run can reach --
+    unlike the _DEFAULT_EVIDENCE keys, `_emit_result`'s bare seed for it
+    (None) is not what these paths actually carry, so it is asserted
+    separately rather than folded into that dict's exact-equality check."""
+    assert "context_window_source" in payload, "'context_window_source' missing from payload"
+    assert isinstance(payload["context_window_source"], str), (
+        f"context_window_source was {payload['context_window_source']!r}, expected a string")
+
+
 def test_emit_result_seeds_the_six_evidence_keys_with_defaults():
     import dirtywork.__main__ as m
     payload = m._emit_result(
@@ -507,6 +518,7 @@ def test_main_docker_start_failure_is_sandbox_error_exit_1(tmp_path, monkeypatch
     assert "git init failed" in payload["final_message"]
     assert payload["turns"] is None
     _assert_default_evidence_keys(payload)  # fix item 3: _fail_setup path
+    _assert_context_window_source_is_a_string(payload)
     run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
     assert run_json["status"] == "sandbox_error"
 
@@ -991,6 +1003,7 @@ def test_transcript_construction_failure_still_prints_json(tmp_path, monkeypatch
     assert "disk unavailable" in payload["final_message"]
     assert payload["turns"] is None
     _assert_default_evidence_keys(payload)  # fix item 3: _fail_run path
+    _assert_context_window_source_is_a_string(payload)
 
 
 def test_load_repo_context_uses_worktree_not_caller_checkout(tmp_path, monkeypatch):
@@ -1054,6 +1067,7 @@ def test_llm_error_during_run_prints_model_error_json(tmp_path, monkeypatch, cap
     assert "worktree" in payload
     assert payload["turns"] is None
     _assert_default_evidence_keys(payload)  # fix item 3: _fail_run path (LLMError)
+    _assert_context_window_source_is_a_string(payload)
 
 
 def test_run_start_has_all_provenance_fields(tmp_path, monkeypatch):

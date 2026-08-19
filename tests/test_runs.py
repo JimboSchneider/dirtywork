@@ -1313,6 +1313,19 @@ def test_show_renders_trimmed_turns_plain_and_markdown(tmp_path, monkeypatch, ca
     assert "- **trimmed_turns:** 7" in capsys.readouterr().out
 
 
+def test_show_renders_trimmed_turns_zero_without_a_transcript(tmp_path, monkeypatch, capsys):
+    # M3: `data.get(key) or end.get(key)` hid a legitimate 0 whenever there was
+    # no run_end event to fall back to -- e.g. no transcript.jsonl at all, which
+    # is exactly what _write_run produces here. `0` must still render.
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _write_run(tmp_path / "runs", "trim0", {
+        "slug": "trim0", "status": "completed", "task": "small brief",
+        "trimmed_turns": 0,
+    })
+    assert runs.cmd_show(argparse.Namespace(slug="trim0", diff=False, markdown=True)) == 0
+    assert "- **trimmed_turns:** 0" in capsys.readouterr().out
+
+
 def test_show_renders_context_window_with_its_source(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
     _write_run(tmp_path / "runs", "ctx1", {

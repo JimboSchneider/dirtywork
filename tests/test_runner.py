@@ -1355,6 +1355,36 @@ def test_timed_out_is_flagged_on_the_event_and_absent_otherwise(parts):
     assert result2.extra["timeouts"] == 0
 
 
+class _GrepTimeoutSandbox:
+    """grep's OWN (unrelated) timeout wording -- spec §4.2: a grep timeout is
+    the harness searching on the worker's behalf, not a worker-run command, so
+    it must not flag `timed_out` on the tool_result event or count toward the
+    run's `timeouts`."""
+
+    def grep(self, pattern, path=".", glob=None, timeout=30):
+        from dirtywork.tools import grep_timeout_result
+        return grep_timeout_result(timeout)
+
+
+def test_grep_timeout_is_not_flagged_or_counted(parts):
+    # M10: is_timeout_result (and therefore `timed_out`/`timeouts`) keys on
+    # TIMEOUT_PREFIX ("ERROR: command timed out after ..."), which grep's own
+    # wording never starts with -- a grep timeout must read like any other
+    # tool result.
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("g1", "grep", {"pattern": "x"})]),
+        _resp(content="done"),
+    ])
+    r = Runner(provider, registry, _GrepTimeoutSandbox(), transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    events = [e for e in _events(tmp) if e["event"] == "tool_result"]
+    assert "ERROR: grep timed out after 30s" in events[0]["result"]
+    assert "timed_out" not in events[0]
+    assert result.extra["timeouts"] == 0
+
+
 def test_one_timeout_nudge_per_turn_even_with_two_timeouts(parts):
     wt, registry, sandbox, transcript, tmp = parts
     provider = FakeProvider([
@@ -1409,6 +1439,52 @@ def test_no_timeout_nudge_when_the_turn_ends_the_run(parts):
     assert result.status == "completed"
     assert [e for e in _events(tmp) if e["event"] == "nudge"] == []
     assert result.extra["timeouts"] == 1       # the COUNT is unaffected by finishing
+
+
+class _TimeoutThenFailingVerifySandbox:
+    """Worker bash calls time out; the --verify command runs "for real" and
+    fails with a plain nonzero exit -- distinguished by command so the
+    verify-failure text stays clean instead of itself reading as a timeout."""
+
+    def __init__(self, verify_command):
+        self.verify_command = verify_command
+
+    def bash(self, command, timeout=120):
+        if command == self.verify_command:
+            return "exit code: 1\nboom"
+        from dirtywork.tools import timeout_result
+        return timeout_result(timeout)
+
+
+def test_verify_feedback_carries_the_timeout_nudge_from_the_same_turn(parts):
+    # M4 regression: the verify-feedback `continue` path used to return to the
+    # loop top before the timeout-nudge composition ran, so a turn that timed
+    # out a worker bash command AND called finish into a FAILING --verify
+    # continued without ever telling the model about the timeout. Spec §4.3:
+    # the nudge is emitted on turns that continue -- and this turn continues
+    # (verify_rounds=1 leaves a round).
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_bash_call("b1"), _call("f1", "finish", {"summary": "done"})]),
+        _resp(content="ok now"),
+    ])
+    box = _TimeoutThenFailingVerifySandbox("npm test")
+    r = Runner(provider, registry, box, transcript, model="m",
+               verify="npm test", verify_rounds=1)
+    r.run("s", "t")
+    transcript.close()
+
+    # exactly one nudge{kind:timeout} event, for turn 1
+    nudges = [e for e in _events(tmp) if e["event"] == "nudge"]
+    assert [n["kind"] for n in nudges] == ["timeout"]
+    assert nudges[0]["turn"] == 1
+
+    # the next user message carries BOTH texts, merged into one message
+    second_request = provider.requests[1]
+    assert second_request[-1]["role"] == "user"
+    content = second_request[-1]["content"]
+    assert "VERIFY FAILED (round 1 of 2)" in content
+    assert "A command timed out and did not finish" in content
 
 
 def test_a_verify_timeout_is_not_counted(parts):

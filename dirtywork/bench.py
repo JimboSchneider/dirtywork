@@ -707,7 +707,8 @@ def _print_comparison(path_a: Path, rows_a: list, path_b: Path, rows_b: list) ->
     print("cells: A -> B (Δ); Δ = B - A (component-wise for count cells); "
           f"'{MISSING}' = no rows for that key in that file; "
           "outcomes = pass/fail/gamed/skipped")
-    print("harness: nudges/stalled/max_turns/timeouts")
+    print("harness: nudges/stalled/max_turns/timeouts "
+          "(timeout nudges are also counted in nudges)")
     print()
     print(format_table(COMPARE_COLUMNS, _compare_rows(agg_a, agg_b)))
     footnote = _harness_partial_footnote(agg_a, agg_b)

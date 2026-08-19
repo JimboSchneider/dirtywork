@@ -45,8 +45,9 @@ def test_summarize_counts_outcomes_per_file():
     assert table["tests/test_a.py"] == {"passed": 1, "failed": 1, "error": 0, "skipped": 0}
     # Windows backslashes are normalized so the table sorts and reads like the repo
     assert table["tests/test_b.py"] == {"passed": 0, "failed": 0, "error": 1, "skipped": 1}
-    # a writer that emits only classname still gets a row
-    assert table["tests.py"] == {"passed": 1, "failed": 0, "error": 0, "skipped": 0}
+    # a writer that emits only classname still gets a row, under its full
+    # module path -- not collapsed to the top-level package alone
+    assert table["tests/test_c.py"] == {"passed": 1, "failed": 0, "error": 0, "skipped": 0}
 
 
 def test_render_is_a_sorted_markdown_table_with_a_total_row():
@@ -55,10 +56,40 @@ def test_render_is_a_sorted_markdown_table_with_a_total_row():
     lines = text.splitlines()
     assert lines[0] == "| file | passed | failed | error | skipped |"
     assert lines[1] == "|---|---:|---:|---:|---:|"
-    assert lines[2].startswith("| tests.py |")
-    assert lines[3].startswith("| tests/test_a.py |")
-    assert lines[4].startswith("| tests/test_b.py |")
+    assert lines[2].startswith("| tests/test_a.py |")
+    assert lines[3].startswith("| tests/test_b.py |")
+    assert lines[4].startswith("| tests/test_c.py |")
     assert lines[-1] == "| **total** | 2 | 1 | 1 | 1 |"
+
+
+@pytest.mark.parametrize("classname,expected", [
+    ("tests.test_c", "tests/test_c.py"),            # module path, no class
+    ("tests.test_c.TestX", "tests/test_c.py"),       # trailing CapWords class dropped
+    ("test_c", "test_c.py"),                         # single segment, no package
+    ("", "unknown.py"),                              # no classname at all
+])
+def test_file_of_classname_fallback(classname, expected):
+    module = _load()
+    import xml.etree.ElementTree as ET
+    attr = f' classname="{classname}"' if classname else ""
+    case = ET.fromstring(f'<testcase{attr} name="t"/>')
+    assert module._file_of(case) == expected
+
+
+def test_summarize_and_render_on_zero_testcases():
+    module = _load()
+    empty = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="pytest" errors="0" failures="0" skipped="0" tests="0"/>
+</testsuites>
+"""
+    table = module.summarize(empty)
+    assert table == {}
+    text = module.render(table)
+    lines = text.splitlines()
+    assert lines[0] == "| file | passed | failed | error | skipped |"
+    assert lines[1] == "|---|---:|---:|---:|---:|"
+    assert lines[-1] == "| **total** | 0 | 0 | 0 | 0 |"
 
 
 def test_main_prints_the_table_and_appends_to_the_step_summary(tmp_path, monkeypatch, capsys):

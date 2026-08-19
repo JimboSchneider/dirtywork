@@ -111,7 +111,7 @@ def _number_lines(text: str, offset: int, limit: int) -> str:
 
 
 def _lines_keep_newlines(text: str) -> list:
-    """Like `text.splitlines(keepends=True)`, except ONLY `"\n"` is treated
+    r"""Like `text.splitlines(keepends=True)`, except ONLY `"\n"` is treated
     as a line separator. `str.splitlines()` also breaks on `\v`, `\f`,
     `\x1c`-`\x1e`, `\x85`, U+2028 and U+2029 -- a line that merely
     CONTAINS one of those characters (e.g. a form feed) would otherwise be
@@ -423,12 +423,22 @@ def _apply_edits_once(path: str, edits: list):
     The first failure refuses the WHOLE batch: the transform returns None as
     its new text, which both _transform_file implementations treat as "refused,
     do not write". Registry validation (spec §1.3) has already proved every
-    item is exactly {"old": str, "new": str}, so this never re-checks shapes."""
+    item is exactly {"old": str, "new": str} for a call routed through the
+    registry -- but Sandbox.apply_edits is a public method (see its docstring
+    in dirtywork.sandbox.Sandbox), so a malformed item is checked here too,
+    before any matching, inside the same all-or-nothing pass."""
     total = len(edits)
 
     def transform(text: str):
         new_text = text
         for index, edit in enumerate(edits, 1):
+            if (not isinstance(edit, dict)
+                    or not isinstance(edit.get("old"), str)
+                    or not isinstance(edit.get("new"), str)):
+                return None, (
+                    f"ERROR: edit {index} of {total}: each edit must be an object with "
+                    f"string 'old' and 'new'; no edits applied"
+                )
             old = edit["old"]
             if not old:
                 return None, (f"ERROR: edit {index} of {total}: old text is empty; "
@@ -521,7 +531,7 @@ def grep(worktree: Path, pattern: str, path: str = ".", glob: str | None = None,
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return f"ERROR: grep timed out after {timeout}s — narrow the pattern or path."
+        return grep_timeout_result(timeout)
     except OSError as e:
         return f"ERROR: grep failed: {e}"
     if res.returncode not in (0, 1):
@@ -564,6 +574,18 @@ def is_timeout_result(text) -> bool:
     never re-derive this from a substring search somewhere else, or the two
     will drift the first time the wording changes."""
     return isinstance(text, str) and text.startswith(TIMEOUT_PREFIX)
+
+
+# Spec §4.2: grep's own (unchanged) timeout wording -- distinct from
+# TIMEOUT_TEXT because a grep timeout is the harness searching on the
+# worker's behalf, not a worker-run command, and does NOT count toward
+# `timeouts` or the `timeout` nudge. One string shared by both backends.
+GREP_TIMEOUT_TEXT = "ERROR: grep timed out after {timeout}s — narrow the pattern or path."
+
+
+def grep_timeout_result(timeout: int) -> str:
+    """The canonical result for a grep call that hit its timeout."""
+    return GREP_TIMEOUT_TEXT.format(timeout=timeout)
 
 
 def bash(worktree: Path, command: str, timeout: int = 120) -> str:

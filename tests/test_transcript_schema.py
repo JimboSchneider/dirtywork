@@ -26,7 +26,7 @@ RUN_END_FIELDS = ["diff_stat", "untracked", "patch_path", "escaping_symlinks",
                   "export_status", "watchdog_violation", "watchdog_violation_kind",
                   "finalize_error", "stuck_on", "files_changed",
                   "files_changed_truncated", "last_tool_result", "last_assistant_text",
-                  "verify", "trimmed_turns", "timeouts"]
+                  "verify", "trimmed_turns", "timeouts", "context_window_source"]
 
 
 def _doc_tokens():

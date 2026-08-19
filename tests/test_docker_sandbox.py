@@ -1457,6 +1457,9 @@ def test_apply_edits_matches_the_host_text_for_success_and_every_refusal(started
         ("one\ntwo\n", [{"old": "one", "new": "1"}, {"old": "nope", "new": "x"}]),
         ("one\ntwo\n", [{"old": "", "new": "x"}]),
         ("aa\naa\n", [{"old": "aa", "new": "b"}]),
+        ("one\ntwo\n", [{"old": "one"}]),           # missing "new" (host+docker parity, M6)
+        ("one\ntwo\n", ["one"]),                     # not a dict at all
+        ("one\ntwo\n", [{"old": "one", "new": 2}]),  # "new" not a string
     ]
     for content, edits in cases:
         (wt / "f.txt").write_text(content)

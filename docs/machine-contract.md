@@ -16,7 +16,7 @@ dirtywork run --repo <path> "<task>"
     [--verify-rounds 1]               # fix rounds after a failed --verify (0 = verify once, no retry)
     [--verify-timeout 600]            # seconds per --verify run, clamped to 1-600
     [--context-window <tokens>]       # default: the server's loaded window, else the
-                                       # built-in table, else 32768 (+ stderr warning)
+                                      # built-in table, else 32768 (+ stderr warning)
     [--timeout 1800]                  # whole-run wall clock, seconds
     [--temperature <f>]               # omitted by default → server preset
     [--provider openai|anthropic]     # default: openai; anthropic needs ANTHROPIC_API_KEY

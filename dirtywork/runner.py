@@ -729,10 +729,24 @@ class Runner:
                     if abort_reason is not None:
                         return finish("model_error", abort_reason)
 
+                # Composed here (text only, no transcript write yet) so both
+                # paths below that may CONTINUE the run -- the verify-feedback
+                # path just below, and the ordinary nudge path at the bottom --
+                # can carry it. The transcript event itself is written at
+                # exactly one of those two points (never both: they are
+                # mutually exclusive per turn), and never at all on a turn that
+                # ENDS the run (finish/stuck/verify-passed all return above or
+                # below without reaching either write) -- spec §4.3: the nudge
+                # is emitted on turns that continue.
+                timeout_text = TIMEOUT_NUDGE if timed_out_this_turn else None
+
                 if pending_finish is not None:
                     ended, feedback = check_verify(pending_finish)
                     if ended is not None:
                         return ended
+                    if timed_out_this_turn:
+                        self.transcript.write("nudge", kind="timeout", turn=turns)
+                        feedback = _join_nudges(feedback, timeout_text)
                     messages.append({"role": "user", "content": feedback})
                     continue
 
@@ -754,14 +768,9 @@ class Runner:
                     malformed_text = (f"{malformed_count} of your tool calls were malformed "
                                       "(unaddressable: no usable id/name) and were "
                                       "discarded. Re-issue them as valid tool calls.")
-                timeout_text = None
                 if timed_out_this_turn:
-                    # Emitted HERE, past the finish/stuck/abort exits above, so a
-                    # turn that ENDS the run never writes a nudge -- the same
-                    # place and the same reason as the stall nudge. Once per
-                    # turn, however many commands timed out in it.
+                    # Once per turn, however many commands timed out in it.
                     self.transcript.write("nudge", kind="timeout", turn=turns)
-                    timeout_text = TIMEOUT_NUDGE
                 nudge_text = _join_nudges(malformed_text, timeout_text, stall_text)
                 if nudge_text:
                     messages.append({"role": "user", "content": nudge_text})

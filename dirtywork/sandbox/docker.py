@@ -24,6 +24,7 @@ from ..tools import (
     _number_lines,
     _replace_once,
     describe_write,
+    grep_timeout_result,
     timeout_result,
 )
 from . import SandboxError
@@ -584,7 +585,7 @@ class DockerSandbox:
             # `timeouts` or the `timeout` nudge -- those are about commands the
             # WORKER ran, and grep is the harness searching on its behalf.
             if e.timed_out:
-                return f"ERROR: grep timed out after {timeout}s — narrow the pattern or path."
+                return grep_timeout_result(timeout)
             return f"ERROR: grep failed: {e}"
         if captured.returncode not in (0, 1):
             return f"ERROR: grep failed: {captured.output.decode('utf-8', 'replace')[:500]}"

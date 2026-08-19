@@ -469,7 +469,9 @@ def _md_result(data: dict, events: list) -> list:
     end = _last_event(events, "run_end")
     lines = ["## Result", ""]
     for key in MD_RESULT_FIELDS:
-        value = data.get(key) or end.get(key)
+        value = data.get(key)
+        if value is None:
+            value = end.get(key)
         if value not in (None, ""):
             lines.append(f"- **{key}:** {str(value).splitlines()[0]}")
     lines.append("")

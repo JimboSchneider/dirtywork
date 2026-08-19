@@ -48,7 +48,14 @@ class Sandbox(Protocol):
     DockerSandbox (dirtywork.sandbox.docker) both implement it; ToolExecutor
     never knows which one it holds.
 
-    Tool methods (read_file/write_file/edit_file/apply_edits/insert_before/insert_after/list_dir/grep/bash) may raise BudgetExceeded (worktree over budget) or SandboxError (backend failure); the runner catches both."""
+    Tool methods (read_file/write_file/edit_file/apply_edits/insert_before/insert_after/list_dir/grep/bash) may raise BudgetExceeded (worktree over budget) or SandboxError (backend failure); the runner catches both.
+
+    apply_edits(path, edits): a call routed through the tool registry (spec
+    §1.3) has already proved every item of `edits` is exactly {"old": str,
+    "new": str}, but this method is itself public and does not re-require a
+    registry call in front of it -- a caller that reaches it directly (or
+    with hand-built data) may pass a malformed item; the shared transform
+    (tools._apply_edits_once) reports that per-item rather than raising."""
 
     def start(self, worktree: Path, repo: Path, slug: str, base_commit: str, *, branch: str | None = None, seed_from_worktree: bool = False) -> None: ...
 
