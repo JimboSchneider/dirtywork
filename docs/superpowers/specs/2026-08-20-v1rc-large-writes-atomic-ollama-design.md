@@ -1,10 +1,12 @@
 # 0.10 (v1 RC) — large writes recoverable, atomic file writes, Ollama first-class, backlog zero
 
 **Date:** 2026-08-20
-**Status:** Revised design, v2 — v1's decisions were approved in chat (2026-08-20 10:35 CDT:
-`--max-tokens` default 8192; new `--provider ollama`; atomic-write race delta accepted); v2 folds in
-a three-lens Opus red-team of v1 against the code (7 Blockers, 27 Importants — several verified by
-execution). Awaiting owner approval.
+**Status:** Revised design, v3 — v1's decisions were approved in chat (2026-08-20 10:35 CDT:
+`--max-tokens` default 8192; new `--provider ollama`; atomic-write race delta accepted); v2 folded in
+a three-lens Opus red-team (7 Blockers, 27 Importants); v3 folds in the owner's review of v2
+(2026-08-20 12:54 CDT: read-open O_NONBLOCK, new-file mode 0o644, the _write_atomic catch boundary,
+the docker append size mechanism, tools.py in the §1.2 list, docker append FIFO guard). Awaiting
+owner approval.
 **Origin:** milestone **0.10.0 — v1 release candidate**: issues #36, #43, #47, #40, #41, #42.
 #48 (the v1 soak) runs after this ships and is not spec'd here.
 **Parent specs:** `2026-08-19-tools-context-timeouts-design.md` (v3.3),
@@ -52,18 +54,29 @@ abort). No tool can append, so "write it in pieces" is not honest advice for a n
   **unchanged** (so the ELOOP / FIFO / non-regular refusals are byte-identical, re-worded with the
   append verb per §2.2's `verb` parameter; `ENOENT` on the probe is the does-not-exist error above,
   never §2.2's new-file branch). The current content is read through a **second** open of the
-  `_worktree_candidate` path (`O_RDONLY|O_NOFOLLOW|O_CLOEXEC`, `MAX_READ_BYTES` cap, strict UTF-8 —
-  non-UTF-8 → `ERROR: <path> is not valid UTF-8 text; append_file only works on text files`,
-  matching the host transform wording). The read fd's `fstat` must re-confirm `S_ISREG` **and**
-  `st_ino`/`st_dev` equal to the probe's — a swap between the two opens refuses with the generic
-  tail. Then `_write_atomic(target, old_bytes + text.encode(), verb="append")`. `append_file`
+  `_worktree_candidate` path via the existing `_open_regular(p, os.O_RDONLY,
+  max_size=MAX_READ_BYTES)` — which already adds `O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC` (the
+  `O_NONBLOCK` matters: a FIFO swapped in between the two opens must not block the read open),
+  verifies `S_ISREG` via `fstat`, and only then restores blocking mode with
+  `os.set_blocking(fd, True)`. Strict UTF-8 decode — non-UTF-8 → `ERROR: <path> is not valid UTF-8
+  text; append_file only works on text files`, matching the host transform wording. The read fd's
+  `fstat` must additionally match the probe fd's `st_ino`/`st_dev` — a swap between the two opens
+  refuses with the generic tail. Then `_write_atomic(target, old_bytes + text.encode(), verb="append")`. `append_file`
   never creates parent directories.
-- **Docker:** `_append_raw` reuses `_rel(writing=True)`; result cap via `_check_write_size(old_text
-  + text)` after the existing `_read_raw(path, strict=True)` (one read exec, exactly as
-  `write_file`'s pre-read), so docker emits the identical result-cap string; `_oversized` still
-  guards the encoded payload. The §2.6 append script's missing-target guard exits **2**, which
-  `_append_raw` maps to the exact does-not-exist string; any other failure exits 1 and wraps stderr
-  as `ERROR: cannot append to '<path>': {stderr}`.
+- **Docker:** `_append_raw` reuses `_rel(writing=True)` and takes **three execs**: (1) a guard +
+  size exec `sh -c '[ -e "$1" ] || exit 2; [ -f "$1" ] || exit 3; stat -c %s -- "$1"'` — rc 2 →
+  the exact does-not-exist string; rc 3 (FIFO/device/directory, **checked before any read so a
+  FIFO can never block a reader exec**) → `ERROR: cannot append to '<path>': not a regular file`;
+  rc 0 → the exact byte size on stdout, which lets docker produce the **exact** result-cap string
+  even for a file too large to read (`_read_raw` alone discards the size — `head -c N+1` only
+  proves "exceeds"): `size > MAX_READ_BYTES` or `size + len(text) > MAX_WRITE_BYTES` → `ERROR:
+  result is <size + len(text)> bytes, over the <MAX_WRITE_BYTES>-byte write limit; nothing was
+  written`; (2) the existing `_read_raw(path, strict=True)` for the content (its own caps now
+  provably cannot fire first); (3) the §2.6 append write script. Host mirrors the same order with
+  `os.stat` on the probe fd, so both modes emit identical strings from identical conditions.
+  `_oversized` still guards the encoded payload. The write script's missing-target guard exits
+  **2** (mapped to the does-not-exist string — a delete between execs still refuses correctly);
+  any other failure exits 1 and wraps stderr as `ERROR: cannot append to '<path>': {stderr}`.
 - **Result string:** whatever `describe_change(path, old_text, new_text, verb="Appended to")`
   computes. It is `+A -0` only when the file already ended in a newline; when it did not, the final
   line is a replace and the header reads `+A -1 (removed 1 non-blank line)` — the visible
@@ -74,7 +87,8 @@ abort). No tool can append, so "write it in pieces" is not honest advice for a n
   verbatim to the END of an existing file (create the file with write_file first). Nothing is
   inserted between the old content and your text — include a leading newline if the file does not
   end with one. Use write_file + append_file to produce a file too large for one reply."
-  Updates, exhaustively: `Sandbox` Protocol (method + the tool enumeration in its docstring,
+  Updates, exhaustively: `dirtywork/tools.py` (the `append_file` function + `_write_atomic`'s
+  `verb="append"` wording), `Sandbox` Protocol (method + the tool enumeration in its docstring,
   `sandbox/__init__.py:51`), `HostSandbox` (+`_check_budget` wrap), `DockerSandbox`,
   `runner._MUTATING_TOOLS`, the system-prompt file rule (`__main__.py:71`,
   `build_system_prompt`), the wire fixture (regenerated — any `ToolSpec.description` change
@@ -196,10 +210,17 @@ selects the refusal wording (`write` → `cannot write '<path>'`; `append` → `
 3. **Temp:** same directory (same filesystem → atomic rename), name
    `.dw-tmp.<basename>.<8 lowercase hex from os.urandom>`, `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|
    O_CLOEXEC` mode `0o600`; write `data`; then `fchmod(tmp_fd, stat.S_IMODE(st.st_mode))` when
-   the target existed, **else** `fchmod(tmp_fd, 0o666 & ~_UMASK)` where `_UMASK` is read once at
-   import (`os.umask(0)`/restore, before any thread) — a new file lands at today's
-   `0o644 & ~umask`, not `0o600`. Then `os.replace(tmp, target)`.
-4. **Unwind:** from temp creation on, `except BaseException: unlink(tmp); raise`.
+   the target existed, **else** `fchmod(tmp_fd, 0o644 & ~_UMASK)` where `_UMASK` is read once at
+   import (`os.umask(0)`/restore, before any thread) — matching today's `_open_regular(...,
+   O_CREAT, mode=0o644)` exactly (`0o644 & ~umask`; with `umask 0` today yields `0o644`, so
+   `0o666`-based masking would diverge there). Then `os.replace(tmp, target)`.
+4. **Catch boundary and unwind:** from temp creation on, every step (write, `fchmod`,
+   `os.replace`) runs inside one `try`. An **`OSError`** there unlinks the temp and **returns**
+   the generic tail (`ERROR: cannot <verb> '<path>': {e}`) — honouring the `str | None`
+   signature; tool functions never raise. Any **other `BaseException`** (KeyboardInterrupt,
+   `BudgetExceeded`, `SandboxError` from a budget hook) unlinks the temp and **re-raises** — those
+   are run-level signals the runner owns, not tool results. The probe fd closes in `finally`
+   either way.
 5. **Temp-creation failure:** `EACCES`/`EROFS` with a live probe fd (writable file, unwritable
    directory) → fall back to writing through the probe fd (today's semantics for `0555`
    directories). `ENOENT` from the probe means there is no fd — return the generic tail with the
@@ -251,10 +272,11 @@ mkdir -p "$(dirname -- "$1")" && { [ ! -d "$1" ] || { echo "cannot write $1: Is 
   temp+`mv` would silently overwrite a `0444` file, since rename needs only directory write);
   `chmod --reference` + `chmod 644` fallback (new file; GNU coreutils on bookworm); `rm -f` on
   any failure is harmless when the temp never existed.
-- `_append_raw`: `[ -f "$1" ] || exit 2` (also excludes directories — no separate `-d` guard),
-  then `cp -- "$1" "$2" && cat >> "$2"` and the shared chmod/`mv -fT` promote (`cp` without `-p`
-  is fine — the `chmod --reference` step runs after). rc 2 → the §1.2 does-not-exist string;
-  rc 1 → `ERROR: cannot append to '<path>': {stderr}`.
+- `_append_raw` write script: `[ -f "$1" ] || exit 2` (re-checked at write time; also excludes
+  directories and FIFOs — the §1.2 guard exec already refused them before any read), then
+  `cp -- "$1" "$2" && cat >> "$2"` and the shared chmod/`mv -fT` promote (`cp` without `-p` is
+  fine — the `chmod --reference` step runs after). rc 2 → the §1.2 does-not-exist string; rc 1 →
+  `ERROR: cannot append to '<path>': {stderr}`.
 - **Test churn, counted:** the `'cat > "$1"'` matcher appears 12× — an exact-argv assertion at
   `tests/test_docker_sandbox.py:380`, ten substring matchers in that file, one in
   `tests/test_docker_runs.py`. Replace the substring matchers with one shared
