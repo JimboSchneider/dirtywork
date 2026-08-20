@@ -6,15 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.9"
-# Unset for 0.9.0, as for every first release of a minor: the :0.9 image is
-# first published BY the v0.9.0 release, so there is no prior publish to pin
-# against and resolve_image() performs no pin check. The Dockerfile is unchanged
-# in 0.9 -- :0.9 is a rebuild of :0.8 under the tag-tracks-the-minor policy
-# (docker/README.md) -- but the tag is still new, so it must be resolved fresh.
-# Pin in 0.9.1 with the digest publish-image.yml reports:
-# `docker pull ghcr.io/jimboschneider/dirtywork-worker:0.9`
-# `docker image inspect --format '{{json .RepoDigests}}' ghcr.io/jimboschneider/dirtywork-worker:0.9`
-# and set the `sha256:<...>` portion here. This only ever pins a REGISTRY digest
+# Pinned for 0.9.1: the multi-arch index digest of the :0.9 image published by
+# the v0.9.0 release, resolved with
+# `docker pull ghcr.io/jimboschneider/dirtywork-worker:0.9` and cross-checked
+# against `docker image inspect --format '{{json .RepoDigests}}'` and
+# `docker buildx imagetools inspect` (all agree); docker/README.md documents
+# the procedure. This only ever pins a REGISTRY digest
 # -- resolve_image() enforces it against a *pulled* DEFAULT_IMAGE only; a
 # locally built/loaded image warns instead of refusing, and a user-supplied
 # --image is never checked. MUST be re-resolved whenever the :0.9 tag is
@@ -24,7 +21,7 @@ DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.9"
 # sha256:1f7b98898001b7064d8db396a8a5a1a324df4ce48692597fcd4381ea90e4354a;
 # 0.5.x pinned :0.5 at
 # sha256:3b8d019a2f20a9df55a72ed51139076f02f2feb597243a69519bc41db1029648.)
-PINNED_DIGEST: str | None = None
+PINNED_DIGEST: str | None = "sha256:7f73656478d37a9f08769a51ba6b7bca5fceca53f914bdd4b9ef48ec11b6a172"
 # Always passed explicitly on every docker create/run/exec so an image's own
 # ENTRYPOINT/CMD/ENV can never substitute a different PATH for the tether,
 # chown, or an export step (spec §3 "Entrypoint and PATH are always explicit").
