@@ -524,11 +524,27 @@ def test_grep_timeout_returns_error_text(started):
 
     def raise_timeout(argv, *, timeout, stdin=None):
         fake.calls.append((list(argv), timeout, stdin))
-        raise DockerError("docker exec ... timed out after 40s")
+        raise DockerError("docker exec ... timed out after 40s", timed_out=True)
 
     sb._run = raise_timeout
     out = sb.grep("foo", timeout=30)
-    assert "timed out" in out.lower()
+    # Unchanged wording (spec §4.2): a grep timeout is not a bash timeout.
+    assert out == "ERROR: grep timed out after 30s — narrow the pattern or path."
+
+
+def test_grep_generic_docker_error_is_not_reported_as_a_timeout(started):
+    # Spec §4.2: before 0.9 EVERY DockerError out of grep rendered as "timed
+    # out", so a killed container read as a slow search.
+    sb, fake, run_dir = started
+
+    def raise_failure(argv, *, timeout, stdin=None):
+        fake.calls.append((list(argv), timeout, stdin))
+        raise DockerError("No such container: dw-abc123")
+
+    sb._run = raise_failure
+    out = sb.grep("foo", timeout=30)
+    assert out == "ERROR: grep failed: No such container: dw-abc123"
+    assert "timed out" not in out
 
 
 def test_bash_exec_argv_and_shaping(started):
@@ -586,14 +602,37 @@ def test_bash_timeout_returns_text_not_raise(started):
         # Only the model's own bash exec times out; docker top/inspect keep working.
         if "sleep 600" in " ".join(argv):
             fake.calls.append((list(argv), timeout, stdin))
-            raise DockerError("docker exec ... timed out after 1s")
+            raise DockerError("docker exec ... timed out after 1s", timed_out=True)
         return real_run(argv, timeout=timeout, stdin=stdin)
     sb._run = run_with_timeout
     fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
     fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
     out = sb.bash("sleep 600", timeout=1)
-    assert "timed out after 1s" in out
+    # Spec §4.2: the FULL canonical text -- a substring check would pass on the
+    # non-timeout branch too, which is the bug this test now guards.
+    assert out == (
+        "ERROR: command timed out after 1s — it did not finish and its result is "
+        "unknown. Re-run it with a larger timeout (up to 600) or split it into "
+        "smaller commands; do not report it as passed.")
     assert not any(c[0][:1] == ["kill"] for c in fake.calls)  # healthy container: no reset
+
+
+def test_bash_generic_docker_error_is_not_reported_as_a_timeout(started):
+    sb, fake, run_dir = started
+    real_run = sb._run
+
+    def run_with_failure(argv, *, timeout, stdin=None):
+        if "sleep 600" in " ".join(argv):
+            fake.calls.append((list(argv), timeout, stdin))
+            raise DockerError("No such container: dw-abc123")
+        return real_run(argv, timeout=timeout, stdin=stdin)
+
+    sb._run = run_with_failure
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+    out = sb.bash("sleep 600", timeout=1)
+    assert out == "ERROR: bash failed: No such container: dw-abc123"
+    assert "timed out" not in out
 
 
 def test_bash_nonzero_exit_reported(started):
@@ -1381,4 +1420,63 @@ def test_insert_before_refuses_a_repeated_anchor(started):
     fake.script(["exec"], _ok(b"aa\naa\n"))
     out = sb.insert_before("dup.txt", "aa", "x")
     assert out.startswith("ERROR: anchor occurs 2 times in dup.txt")
+    assert not [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+
+
+def test_apply_edits_reads_then_writes(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], [_ok(b"one\ntwo\n"), _ok()])
+    out = sb.apply_edits("batch.txt", [{"old": "one", "new": "1"},
+                                       {"old": "two", "new": "2"}])
+    assert out.startswith("Applied 2 edits to batch.txt: ")
+    heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
+    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    assert len(heads) == 1 and len(writes) == 1        # one read, one write, per batch
+    assert writes[0][2] == b"1\n2\n"                    # the batch's final text
+
+
+def test_apply_edits_rollback_never_writes(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok(b"one\ntwo\n"))
+    out = sb.apply_edits("batch.txt", [{"old": "one", "new": "1"},
+                                       {"old": "nope", "new": "x"}])
+    # Byte-identical to the host's text (spec §1.8 parity), and no write exec.
+    assert out == ("ERROR: edit 2 of 2: old text occurs 0 times in batch.txt; it must "
+                   "occur exactly once (after edits 1..1 are applied); no edits applied")
+    assert not [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+
+
+def test_apply_edits_matches_the_host_text_for_success_and_every_refusal(started, tmp_path):
+    """Spec §1.8: host/docker parity scoped to matching, success and rollback."""
+    from dirtywork import tools
+    sb, fake, run_dir = started
+    wt = tmp_path / "parity"
+    wt.mkdir()
+    cases = [
+        ("one\ntwo\n", [{"old": "one", "new": "1"}, {"old": "two", "new": "2"}]),
+        ("one\ntwo\n", [{"old": "one", "new": "1"}, {"old": "nope", "new": "x"}]),
+        ("one\ntwo\n", [{"old": "", "new": "x"}]),
+        ("aa\naa\n", [{"old": "aa", "new": "b"}]),
+        ("one\ntwo\n", [{"old": "one"}]),           # missing "new" (host+docker parity, M6)
+        ("one\ntwo\n", ["one"]),                     # not a dict at all
+        ("one\ntwo\n", [{"old": "one", "new": 2}]),  # "new" not a string
+    ]
+    for content, edits in cases:
+        (wt / "f.txt").write_text(content)
+        host_out = tools.apply_edits(wt, "f.txt", edits)
+        fake.script(["exec"], [_ok(content.encode("utf-8")), _ok()])
+        docker_out = sb.apply_edits("f.txt", edits)
+        assert docker_out == host_out
+
+
+def test_transform_result_over_the_write_cap_is_refused(started):
+    from dirtywork.tools import MAX_WRITE_BYTES
+    sb, fake, run_dir = started
+    huge = "x" * (MAX_WRITE_BYTES + 1)
+    expected = (f"ERROR: result is {MAX_WRITE_BYTES + 2} bytes, over the "
+                f"{MAX_WRITE_BYTES}-byte write limit; nothing was written")
+    fake.script(["exec"], _ok(b"seed\n"))
+    assert sb.edit_file("grow.txt", "seed", huge) == expected
+    fake.script(["exec"], _ok(b"seed\n"))
+    assert sb.apply_edits("grow.txt", [{"old": "seed", "new": huge}]) == expected
     assert not [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]

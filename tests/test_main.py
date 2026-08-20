@@ -23,6 +23,8 @@ _DEFAULT_EVIDENCE = {
     "last_tool_result": None,
     "last_assistant_text": None,
     "verify": None,
+    "trimmed_turns": 0,
+    "timeouts": 0,
 }
 
 
@@ -30,6 +32,17 @@ def _assert_default_evidence_keys(payload: dict) -> None:
     for key, default in _DEFAULT_EVIDENCE.items():
         assert key in payload, f"{key!r} missing from payload"
         assert payload[key] == default, f"{key!r} was {payload[key]!r}, expected {default!r}"
+
+
+def _assert_context_window_source_is_a_string(payload: dict) -> None:
+    """context_window_source (0.9, spec §6) is resolved in preflight and is a
+    real string on every failure path _fail_setup/_fail_run can reach --
+    unlike the _DEFAULT_EVIDENCE keys, `_emit_result`'s bare seed for it
+    (None) is not what these paths actually carry, so it is asserted
+    separately rather than folded into that dict's exact-equality check."""
+    assert "context_window_source" in payload, "'context_window_source' missing from payload"
+    assert isinstance(payload["context_window_source"], str), (
+        f"context_window_source was {payload['context_window_source']!r}, expected a string")
 
 
 def test_emit_result_seeds_the_six_evidence_keys_with_defaults():
@@ -505,6 +518,7 @@ def test_main_docker_start_failure_is_sandbox_error_exit_1(tmp_path, monkeypatch
     assert "git init failed" in payload["final_message"]
     assert payload["turns"] is None
     _assert_default_evidence_keys(payload)  # fix item 3: _fail_setup path
+    _assert_context_window_source_is_a_string(payload)
     run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
     assert run_json["status"] == "sandbox_error"
 
@@ -989,6 +1003,7 @@ def test_transcript_construction_failure_still_prints_json(tmp_path, monkeypatch
     assert "disk unavailable" in payload["final_message"]
     assert payload["turns"] is None
     _assert_default_evidence_keys(payload)  # fix item 3: _fail_run path
+    _assert_context_window_source_is_a_string(payload)
 
 
 def test_load_repo_context_uses_worktree_not_caller_checkout(tmp_path, monkeypatch):
@@ -1052,6 +1067,7 @@ def test_llm_error_during_run_prints_model_error_json(tmp_path, monkeypatch, cap
     assert "worktree" in payload
     assert payload["turns"] is None
     _assert_default_evidence_keys(payload)  # fix item 3: _fail_run path (LLMError)
+    _assert_context_window_source_is_a_string(payload)
 
 
 def test_run_start_has_all_provenance_fields(tmp_path, monkeypatch):
@@ -2048,3 +2064,123 @@ def test_resume_feedback_file_and_its_refusals(tmp_path, monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert json.loads((Path(out["run_dir"]) / "run.json").read_text())["feedback"] == (
         "Restore the retry loop.\n")
+
+
+def test_trimmed_turns_lands_on_the_payload_run_end_and_run_json(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "t"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["trimmed_turns"] == 0
+    run_dir = Path(payload["run_dir"])
+    assert json.loads((run_dir / "run.json").read_text())["trimmed_turns"] == 0
+    events = [json.loads(line) for line in
+              (run_dir / "transcript.jsonl").read_text().splitlines()]
+    end = [e for e in events if e["event"] == "run_end"][-1]
+    assert end["trimmed_turns"] == 0
+
+
+def test_timeouts_land_on_the_payload_run_end_and_run_json(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "t"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["timeouts"] == 0
+    run_dir = Path(payload["run_dir"])
+    assert json.loads((run_dir / "run.json").read_text())["timeouts"] == 0
+    events = [json.loads(line) for line in
+              (run_dir / "transcript.jsonl").read_text().splitlines()]
+    assert [e for e in events if e["event"] == "run_end"][-1]["timeouts"] == 0
+
+
+def test_task_size_warning_fires_for_a_long_brief(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    task = "x" * 4000                     # ~1000 tokens at 4 chars/token
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                   "--context-window", "2000", task]) == 0
+    err = capsys.readouterr().err
+    assert "warning: the task text is ~1000 tokens, 50% of the 2000-token context window" in err
+    assert "docs/operating.md#sizing-the-context-window" in err
+
+
+def test_task_size_warning_is_silent_under_the_threshold(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    task = "x" * 400                      # ~100 tokens = 5% of 2000
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                   "--context-window", "2000", task]) == 0
+    assert "the task text is" not in capsys.readouterr().err
+
+
+def test_task_size_warning_fires_on_resume(tmp_path, monkeypatch, capsys):
+    # resume has no args.task: the check runs against ctx.task, which
+    # build_resume_task filled with the prior task plus the transcript tail.
+    # The scripted client repeats its one tool call, so both runs end
+    # `max_turns` after a single turn -- resumable, and deterministic.
+    loop = [tool_call_body("read_file", {"path": "README.md"})]
+    m = _install_host_harness(monkeypatch, tmp_path, loop)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+                   "x" * 4000]) == 1
+    prior = json.loads(capsys.readouterr().out)
+    assert m.main(["resume", Path(prior["run_dir"]).name, "--context-window", "2000",
+                   "--max-turns", "1"]) == 1
+    err = capsys.readouterr().err
+    assert "warning: the task text is ~" in err
+    assert "% of the 2000-token context window" in err
+
+
+def test_context_window_source_lands_in_run_json_run_start_and_stdout(
+        tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                   "--context-window", "5000", "t"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["context_window_source"] == "flag"
+    run_dir = Path(payload["run_dir"])
+    data = json.loads((run_dir / "run.json").read_text())
+    assert data["context_window"] == 5000
+    assert data["context_window_source"] == "flag"
+    events = [json.loads(line) for line in
+              (run_dir / "transcript.jsonl").read_text().splitlines()]
+    assert events[0]["event"] == "run_start"
+    assert events[0]["context_window_source"] == "flag"
+    end = [e for e in events if e["event"] == "run_end"][-1]
+    assert end["context_window_source"] == "flag"
+
+
+def test_resume_records_its_own_context_window_source(tmp_path, monkeypatch, capsys):
+    # The window is re-resolved on resume exactly as on a fresh run, so the
+    # source is the resuming invocation's, not the prior run's. Both runs end
+    # `max_turns` after one turn: the scripted client repeats its tool call.
+    loop = [tool_call_body("read_file", {"path": "README.md"})]
+    m = _install_host_harness(monkeypatch, tmp_path, loop)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+                   "t"]) == 1
+    prior = json.loads(capsys.readouterr().out)
+    assert json.loads((Path(prior["run_dir"]) / "run.json").read_text())[
+        "context_window_source"] == "default"
+    assert m.main(["resume", Path(prior["run_dir"]).name, "--context-window", "7000",
+                   "--max-turns", "1"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["context_window_source"] == "flag"
+    assert json.loads((Path(payload["run_dir"]) / "run.json").read_text())[
+        "context_window_source"] == "flag"
+
+
+def test_emit_result_seeds_context_window_source():
+    import dirtywork.__main__ as m
+    payload = m._emit_result(
+        status="sandbox_error", worktree=Path("/wt"), branch="b",
+        transcript_path=Path("/t.jsonl"), run_dir=Path("/rd"), turns=None,
+        usage={}, final_message="boom", provider="openai")
+    assert payload["context_window_source"] is None       # seeded, then overridden
+    payload = m._emit_result(
+        status="sandbox_error", worktree=Path("/wt"), branch="b",
+        transcript_path=Path("/t.jsonl"), run_dir=Path("/rd"), turns=None,
+        usage={}, final_message="boom", provider="openai",
+        context_window_source="provider:openai:server")
+    assert payload["context_window_source"] == "provider:openai:server"

@@ -11,6 +11,7 @@ from .budget import BudgetExceeded
 from .llm import LLMTimeout, MalformedResponse
 from .providers import assistant_message, tool_message
 from .sandbox import SandboxError
+from .tools import is_timeout_result
 
 MAX_ASSISTANT_TEXT_CHARS = 64_000
 # Spec §2: end-of-run evidence caps. These match the transcript's own preview
@@ -149,7 +150,14 @@ VERIFY_FEEDBACK = (
 STALL_NUDGE = ("No progress in the last {n} turns: no file changed and no command produced "
                "new output. If the task is complete, commit (if asked) and call "
                "finish(summary=...); otherwise change your approach.")
-_MUTATING_TOOLS = ("write_file", "edit_file", "insert_before", "insert_after")
+# Spec §4.3: a timed-out command is not a model mistake -- it never reaches
+# FailureTracker and it RESETS the consecutive-failure streak like any other
+# non-failing execution. This exists only so the model is told, in words, that
+# the result it just got is not a result.
+TIMEOUT_NUDGE = ("A command timed out and did not finish; its result is unknown. Re-run it "
+                 "with a larger timeout (up to 600 seconds) or split it into smaller "
+                 "commands. Do not report it as passed.")
+_MUTATING_TOOLS = ("write_file", "edit_file", "apply_edits", "insert_before", "insert_after")
 # Tokens that change between otherwise-identical runs of the same command:
 # durations ("in 24.51s", "0.39s", "12 ms"), clock times / ISO timestamps,
 # and long hex ids (git shas, container ids — at least one a-f letter, so a
@@ -304,10 +312,12 @@ class RepeatTracker:
 
 
 def resolve_context_window(model: str, flag_value, env_value, provider=None) -> tuple:
-    """Precedence: --context-window > DIRTYWORK_CONTEXT_WINDOW > the provider's
-    own table for this model > DEFAULT_WINDOW. Returns (tokens, source) with
-    source in flag|env|provider:<name>|default. Raises ValueError for an env
-    value that is not a positive integer."""
+    """Precedence: --context-window > DIRTYWORK_CONTEXT_WINDOW > what the SERVER
+    reports it actually loaded the model with > the provider's own static table
+    for this model > DEFAULT_WINDOW. Returns (tokens, source) with source in
+    flag|env|provider:<name>:server|provider:<name>|default -- the two provider
+    sources are deliberately distinct strings, so a run record says which one
+    answered. Raises ValueError for an env value that is not a positive integer."""
     if flag_value is not None:
         return int(flag_value), "flag"
     if env_value not in (None, ""):
@@ -320,9 +330,22 @@ def resolve_context_window(model: str, flag_value, env_value, provider=None) -> 
                 f"DIRTYWORK_CONTEXT_WINDOW must be a positive integer, got {env_value!r}")
         return value, "env"
     if provider is not None:
+        name = getattr(provider, "name", "provider")
+        # Spec §3.1: loaded_context_window is OPTIONAL. Third-party providers and
+        # every existing test double simply do not have it; one that raises (an
+        # endpoint behaving unexpectedly, a transport bug) must never fail a run.
+        # Both cases fall through to the static table, exactly as before 0.9.
+        probe = getattr(provider, "loaded_context_window", None)
+        if probe is not None:
+            try:
+                loaded = probe(model)
+            except Exception:
+                loaded = None
+            if isinstance(loaded, int) and not isinstance(loaded, bool) and loaded > 0:
+                return loaded, f"provider:{name}:server"
         window = provider.context_window(model)
         if window:
-            return int(window), f"provider:{getattr(provider, 'name', 'provider')}"
+            return int(window), f"provider:{name}"
     return DEFAULT_WINDOW, "default"
 
 
@@ -346,14 +369,23 @@ def _total_chars(messages: list) -> int:
     return total
 
 
-def trim_messages(messages: list, char_budget: int) -> bool:
-    """Replace oldest tool results with TRIM_MARKER until under budget."""
+def trim_messages(messages: list, char_budget: int) -> tuple:
+    """Replace oldest tool results with TRIM_MARKER until under budget.
+
+    Returns (fits, newly_trimmed) (spec §2.2). `newly_trimmed` counts only the
+    results replaced ON THIS CALL -- a result already holding the marker is
+    never counted twice -- which is what lets the runner report `trimmed_turns`
+    as "turns on which trimming happened" instead of "markers in the history".
+    Trimming is destructive and cumulative, so a running total of markers would
+    say the same thing on every later turn and mean nothing."""
+    newly_trimmed = 0
     for m in messages:
         if _total_chars(messages) <= char_budget:
-            return True
+            return True, newly_trimmed
         if m.get("role") == "tool" and m.get("content") != TRIM_MARKER:
             m["content"] = TRIM_MARKER
-    return _total_chars(messages) <= char_budget
+            newly_trimmed += 1
+    return _total_chars(messages) <= char_budget, newly_trimmed
 
 
 @dataclass
@@ -373,6 +405,7 @@ class Runner:
                  finalize: Callable[[], dict] | None = None,
                  stall_turns: int = DEFAULT_STALL_TURNS,
                  context_window: int | None = None,
+                 context_window_source: str | None = None,
                  stuck_repeats: int = DEFAULT_STUCK_REPEATS,
                  verify: str | None = None,
                  verify_rounds: int = DEFAULT_VERIFY_ROUNDS,
@@ -388,6 +421,11 @@ class Runner:
         self.run_info = run_info
         self.finalize = finalize
         self.stall_turns = stall_turns
+        # Spec §3.4: recorded, never used for a decision. The runner already has
+        # the NUMBER; this only says where it came from, so a run record can be
+        # read without guessing whether anybody chose it. None for a Runner
+        # built directly (tests, embedders) that never resolved a source.
+        self.context_window_source = context_window_source
         self.stuck_repeats = stuck_repeats
         self.verify = verify
         self.verify_rounds = verify_rounds
@@ -408,9 +446,12 @@ class Runner:
         self.transcript.write("run_start", task=task, model=self.model,
                               max_turns=self.max_turns, timeout=self.timeout,
                               context_window=self.context_window,
+                              context_window_source=self.context_window_source,
                               schema_version=2, **(self.run_info or {}))
         usage = {"prompt_tokens": 0, "completion_tokens": 0}
         turns = 0
+        trimmed_turns = 0       # spec §2.2: turns on which trimming happened
+        timeouts = 0            # spec §4.3: worker bash calls that timed out
         failures = FailureTracker()
         progress = ProgressTracker(self.stall_turns)
         repeats = RepeatTracker(self.stuck_repeats)
@@ -442,7 +483,10 @@ class Runner:
             extra: dict = {"stuck_on": stuck,
                            "last_tool_result": last_tool_result,
                            "last_assistant_text": last_assistant_text,
-                           "verify": verify_state}
+                           "verify": verify_state,
+                           "trimmed_turns": trimmed_turns,
+                           "timeouts": timeouts,
+                           "context_window_source": self.context_window_source}
             finalize_error = None
             if self.finalize is not None:
                 try:
@@ -533,7 +577,13 @@ class Runner:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return finish("timeout", "")
-                if not trim_messages(messages, self.char_budget):
+                fits, newly_trimmed = trim_messages(messages, self.char_budget)
+                if newly_trimmed > 0:
+                    # Counted BEFORE the fits check, so the final call that
+                    # trimmed something and still could not fit counts too
+                    # (spec §2.2).
+                    trimmed_turns += 1
+                if not fits:
                     return finish("context_exhausted", "")
 
                 try:
@@ -619,6 +669,7 @@ class Runner:
                     return finish("model_error", abort_reason)
 
                 pending_finish = None
+                timed_out_this_turn = False   # spec §4.3: at most ONE nudge per turn
                 for tc in tool_calls:
                     name = tc.name
                     raw_args = tc.raw_arguments or "{}"
@@ -655,23 +706,47 @@ class Runner:
                         except SandboxError as e:
                             return finish("sandbox_error", str(e))
                     progress.note_call(name, self.registry.canonical_args(name, args), result)
+                    timed_out_fields = {}
                     if name == "bash":
                         command = args.get("command") if isinstance(args, dict) else None
                         if repeats.note_bash(command, result) == "stuck":
                             stuck = repeats.stuck_on()
+                        if is_timeout_result(result):
+                            # Spec §4.3: worker bash TOOL CALLS only. The
+                            # --verify command goes through sandbox.bash
+                            # directly, is never a tool call and is never
+                            # transcribed here, so it can never reach this.
+                            timeouts += 1
+                            timed_out_this_turn = True
+                            timed_out_fields["timed_out"] = True
                     self.transcript.write("tool_result", tool=name,
                                           args=raw_args[:500],
-                                          result=self.registry.transcript_preview(name, result))
+                                          result=self.registry.transcript_preview(name, result),
+                                          **timed_out_fields)
                     if name != FINISH_TOOL:
                         note_last_tool_result(name, raw_args, result)
                     messages.append(tool_message(tc.id, result))
                     if abort_reason is not None:
                         return finish("model_error", abort_reason)
 
+                # Composed here (text only, no transcript write yet) so both
+                # paths below that may CONTINUE the run -- the verify-feedback
+                # path just below, and the ordinary nudge path at the bottom --
+                # can carry it. The transcript event itself is written at
+                # exactly one of those two points (never both: they are
+                # mutually exclusive per turn), and never at all on a turn that
+                # ENDS the run (finish/stuck/verify-passed all return above or
+                # below without reaching either write) -- spec §4.3: the nudge
+                # is emitted on turns that continue.
+                timeout_text = TIMEOUT_NUDGE if timed_out_this_turn else None
+
                 if pending_finish is not None:
                     ended, feedback = check_verify(pending_finish)
                     if ended is not None:
                         return ended
+                    if timed_out_this_turn:
+                        self.transcript.write("nudge", kind="timeout", turn=turns)
+                        feedback = _join_nudges(feedback, timeout_text)
                     messages.append({"role": "user", "content": feedback})
                     continue
 
@@ -693,7 +768,10 @@ class Runner:
                     malformed_text = (f"{malformed_count} of your tool calls were malformed "
                                       "(unaddressable: no usable id/name) and were "
                                       "discarded. Re-issue them as valid tool calls.")
-                nudge_text = _join_nudges(malformed_text, stall_text)
+                if timed_out_this_turn:
+                    # Once per turn, however many commands timed out in it.
+                    self.transcript.write("nudge", kind="timeout", turn=turns)
+                nudge_text = _join_nudges(malformed_text, timeout_text, stall_text)
                 if nudge_text:
                     messages.append({"role": "user", "content": nudge_text})
         except KeyboardInterrupt:

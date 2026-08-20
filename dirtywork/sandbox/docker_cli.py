@@ -20,7 +20,19 @@ T_EXPORT_STEP = 300  # each export docker exec
 class DockerError(SandboxError):
     """Raised on a nonzero docker CLI exit or an expired timeout. Callers
     turn this into status sandbox_error (via the runner catching
-    SandboxError) or, at preflight, into an exit-2 hint."""
+    SandboxError) or, at preflight, into an exit-2 hint.
+
+    `timed_out` (spec §4.2) is True ONLY on run()'s expired-timeout path below --
+    the one place a DockerError means "the command may still be running". Every
+    other raise leaves it False, so DockerSandbox.bash and .grep can tell a real
+    timeout from an ordinary docker failure instead of reporting both as a
+    timeout. Keyword-only with a default, so every existing positional
+    `DockerError("...")` construction and every `except DockerError` in the tree
+    keeps working untouched."""
+
+    def __init__(self, *args, timed_out: bool = False):
+        super().__init__(*args)
+        self.timed_out = timed_out
 
 
 def _warn(msg: str) -> None:
@@ -37,7 +49,9 @@ def run(argv: list, *, timeout: float, stdin: bytes | None = None) -> Captured:
     full = ["docker"] + list(argv)
     captured = run_capped(full, timeout=timeout, stdin=stdin)
     if captured.timed_out:
-        raise DockerError(f"docker {' '.join(str(a) for a in argv)} timed out after {timeout}s")
+        raise DockerError(
+            f"docker {' '.join(str(a) for a in argv)} timed out after {timeout}s",
+            timed_out=True)
     return captured
 
 

@@ -32,8 +32,24 @@ def test_bash_blocked_command(wt: Path):
 
 
 def test_bash_timeout(wt: Path):
+    # Spec §4.1: the exact canonical text, so a wording drift fails here rather
+    # than in a worker's head.
     out = bash(wt, "sleep 5", timeout=1)
-    assert "timed out" in out.lower()
+    assert out == (
+        "ERROR: command timed out after 1s — it did not finish and its result is "
+        "unknown. Re-run it with a larger timeout (up to 600) or split it into "
+        "smaller commands; do not report it as passed.")
+
+
+def test_bash_timeout_appends_no_partial_output(wt: Path):
+    # Spec §4.1: the host CAN produce a tail (it captured one) and docker cannot.
+    # Parity wins: a tail is what a small model misreads as the command's result.
+    out = bash(wt, "echo PARTIAL_MARKER; sleep 5", timeout=1)
+    assert "PARTIAL_MARKER" not in out
+    assert out == (
+        "ERROR: command timed out after 1s — it did not finish and its result is "
+        "unknown. Re-run it with a larger timeout (up to 600) or split it into "
+        "smaller commands; do not report it as passed.")
 
 
 def test_bash_cd_into_worktree_by_absolute_path_allowed(wt: Path):

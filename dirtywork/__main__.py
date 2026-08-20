@@ -5,6 +5,7 @@ import argparse
 import contextlib
 import io
 import json
+import math
 import os
 import sys
 
@@ -26,6 +27,7 @@ from .llm import LLMError
 from .providers import DEFAULT_BASE_URLS, PROVIDER_NAMES, get_provider
 from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json, write_run_json
 from .runner import (
+    CHARS_PER_TOKEN,
     DEFAULT_STALL_TURNS,
     DEFAULT_STUCK_REPEATS,
     DEFAULT_VERIFY_ROUNDS,
@@ -59,6 +61,11 @@ from .workspace import (
 
 DEFAULT_MODEL = "qwen/qwen3-coder-next"
 DOCKER_WORKDIR = "/work"
+# Spec §2.1: a brief past this fraction of the window earns one stderr line.
+# 20% is where SP3's 1,084-line brief started thrashing the prompt cache on a
+# 65k window: every turn re-sent a task that large, the per-turn trim
+# invalidated the cache, and two runs died `context_exhausted`.
+TASK_WARN_FRACTION = 0.20
 
 
 def build_system_prompt(display_root, repo_context: str | None, *, allow_commit: bool = False) -> str:
@@ -81,7 +88,7 @@ def build_system_prompt(display_root, repo_context: str | None, *, allow_commit:
 Complete the task, then reply with a plain-text summary of what you changed and what commands you ran.
 
 Rules:
-- Use edit_file, insert_before, insert_after or write_file for ALL file changes. Never modify files via bash (no sed -i, no echo redirects, no heredocs).
+- Use edit_file, apply_edits (several exact replacements in one file at once), insert_before, insert_after or write_file for ALL file changes. Never modify files via bash (no sed -i, no echo redirects, no heredocs).
 - Paths are relative to {display_root}.
 - Explore before editing: use list_dir, grep, and read_file to understand the code first.
 - Verify your work: run the repo's tests or build via bash before declaring the task complete.
@@ -94,6 +101,23 @@ Rules:
 
 def _err(msg: str) -> None:
     print(f"error: {msg}", file=sys.stderr)
+
+
+def _warn_task_size(ctx) -> None:
+    """Spec §2.1: one advisory stderr line when the brief itself eats too much
+    of the window. Called once, after the RunContext exists, so it covers both
+    `run` (args.task) and `resume` (the marker block build_resume_task made,
+    which is what actually gets sent). Nothing is recorded anywhere: this is
+    advice, and a run that ignores it is not a different kind of run."""
+    task_tokens = math.ceil(len(ctx.task) / CHARS_PER_TOKEN)
+    if task_tokens <= TASK_WARN_FRACTION * ctx.context_window:
+        return
+    pct = round(100 * task_tokens / ctx.context_window)
+    print(f"warning: the task text is ~{task_tokens} tokens, {pct}% of the "
+          f"{ctx.context_window}-token context window; long briefs thrash the prompt "
+          f"cache and risk context_exhausted — split the task or load the model with "
+          f"a larger context (docs/operating.md#sizing-the-context-window)",
+          file=sys.stderr)
 
 
 class PreflightFailure(Exception):
@@ -115,6 +139,12 @@ class RunContext:
     image_digest: str | None
     image_pinned: bool
     context_window: int
+    # Spec §3.4: which precedence step produced `context_window` --
+    # flag|env|provider:<name>:server|provider:<name>|default. REQUIRED (no
+    # default), so it must stay above the first defaulted field below; a run
+    # record that reports 32768 without saying whether anybody chose it is not
+    # a record.
+    context_window_source: str
     branch_from: str | None = None
     branch_from_run: str | None = None   # the @<slug> --branch-from named, if any
     feedback: str | None = None          # resume only: the reviewer's instructions
@@ -163,7 +193,10 @@ def _preflight_llm(args):
     return provider
 
 
-def _resolve_context_window(args, provider=None) -> int:
+def _resolve_context_window(args, provider=None) -> tuple:
+    """(tokens, source). The source was discarded before 0.9; it is now recorded
+    on the run. The "assuming …" warning still fires only for "default" --
+    "provider:openai:server" and "provider:openai" are both known values."""
     try:
         window, source = resolve_context_window(
             args.model, args.context_window, os.environ.get("DIRTYWORK_CONTEXT_WINDOW"),
@@ -173,7 +206,7 @@ def _resolve_context_window(args, provider=None) -> int:
     if source == "default":
         print(f"warning: no known context window for '{args.model}'; assuming {window} tokens "
               f"(set --context-window or DIRTYWORK_CONTEXT_WINDOW)", file=sys.stderr)
-    return window
+    return window, source
 
 
 def _resolve_allow_commit(args) -> None:
@@ -234,7 +267,8 @@ def _resolve_branch_from(args) -> tuple:
     return branch, slug
 
 
-def _workspace_new(args, repo: Path, context_window: int) -> RunContext:
+def _workspace_new(args, repo: Path, context_window: int,
+                   context_window_source: str) -> RunContext:
     # First: it is the cheapest refusal in this function, and its snapshot must
     # happen before the run creates a worktree it might have to roll back.
     branch_from, branch_from_run = _resolve_branch_from(args)
@@ -261,7 +295,8 @@ def _workspace_new(args, repo: Path, context_window: int) -> RunContext:
         repo=repo, slug=slug, branch=branch, worktree=worktree,
         base_commit=worktree_base_commit(worktree), task=args.task,
         sandbox_mode=args.sandbox, provider=args.provider, image_ref=image_ref, image_digest=image_digest,
-        image_pinned=image_pinned, context_window=context_window, branch_from=branch_from,
+        image_pinned=image_pinned, context_window=context_window,
+        context_window_source=context_window_source, branch_from=branch_from,
         branch_from_run=branch_from_run,
     )
 
@@ -393,6 +428,7 @@ def _write_run_json_start(run_dir: Path, ctx: RunContext, args) -> None:
         "model": args.model,
         "provider": args.provider,
         "context_window": ctx.context_window,
+        "context_window_source": ctx.context_window_source,
         "branch_from_run": ctx.branch_from_run,
         "feedback": ctx.feedback,
         "resumed_from": ctx.resumed_from,
@@ -437,7 +473,12 @@ def _emit_result(*, status: str, worktree: Path, branch: str, transcript_path: P
     including `_fail_setup`'s and `_fail_run`'s, where `runner.run()` never
     returned and so never had real values for them — carries the full key
     set; the normal end-of-run path's real values (passed via `extra`) still
-    override these defaults."""
+    override these defaults.
+
+    0.9 seeds three more the same way (spec §6): `trimmed_turns` and `timeouts`
+    (ints, default 0) and `context_window_source` (string). Both failure paths
+    pass real values for all three through `_contract_fields`, so the seeds are
+    only a backstop against a future caller that forgets."""
     payload = {
         "schema_version": 2,
         "status": status,
@@ -455,9 +496,28 @@ def _emit_result(*, status: str, worktree: Path, branch: str, transcript_path: P
         "last_tool_result": None,
         "last_assistant_text": None,
         "verify": None,
+        "trimmed_turns": 0,
+        "timeouts": 0,
+        "context_window_source": None,
     }
     payload.update(extra)
     return payload
+
+
+def _contract_fields(extra: dict, ctx: RunContext) -> dict:
+    """The 0.9 contract fields that ride on EVERY payload, `run_end` event and
+    `run.json` write (spec §6). One dict feeds the stdout payload and the
+    `_update_run_json` call on every path, so those two can never disagree.
+
+    The two failure paths call it with `extra={}`: `runner.run()` never
+    returned there, so the documented defaults are exactly what `.get` yields.
+    `context_window_source` comes from the RunContext instead, because it is
+    resolved in preflight and is therefore known on every path a payload can
+    exist on -- a context-window preflight failure exits 2 with no payload at
+    all, as it did before 0.9."""
+    return {"trimmed_turns": extra.get("trimmed_turns", 0),
+            "timeouts": extra.get("timeouts", 0),
+            "context_window_source": ctx.context_window_source}
 
 
 def _final_status(result) -> str:
@@ -511,19 +571,20 @@ def _fail_setup(e: Exception, ctx: RunContext, *, run_dir, transcript, transcrip
     preflight-shaped failure — roll the worktree back (binding adjustment
     #1) rather than leaving .worktrees/dw-<slug> + its branch orphaned."""
     message = str(e)
+    contract = _contract_fields({}, ctx)
     if transcript is not None:
         try:
-            transcript.write("run_end", status="sandbox_error", error=message)
+            transcript.write("run_end", status="sandbox_error", error=message, **contract)
         except Exception:
             pass
     if ctx.owns_worktree:
         remove_worktree(ctx.repo, ctx.slug)
     _err(message)
-    _update_run_json(run_dir, status="sandbox_error")
+    _update_run_json(run_dir, status="sandbox_error", **contract)
     print(json.dumps(_emit_result(
         status="sandbox_error", worktree=ctx.worktree, branch=ctx.branch, transcript_path=transcript_path,
         run_dir=run_dir, turns=None, usage={}, final_message=message, base_commit=ctx.base_commit,
-        resumed_from=ctx.resumed_from, provider=ctx.provider,
+        resumed_from=ctx.resumed_from, provider=ctx.provider, **contract,
     ), indent=2))
     return 1
 
@@ -551,15 +612,17 @@ def _fail_run(e: Exception, ctx: RunContext, *, sandbox, sandbox_started: bool, 
             sandbox.cfg.keep_volume = True
             message += f" (docker volume kept for recovery: {sandbox.volume})"
 
+    contract = _contract_fields({}, ctx)
     if transcript is not None:
         try:
-            transcript.write("run_end", status=fail_status, error=message)
+            transcript.write("run_end", status=fail_status, error=message, **contract)
         except Exception:
             pass
     _err(message)
 
-    run_json_fields = {"status": fail_status}
-    extra_fields = {"base_commit": ctx.base_commit, "resumed_from": ctx.resumed_from}
+    run_json_fields = dict(contract, status=fail_status)
+    extra_fields = dict(contract, base_commit=ctx.base_commit,
+                        resumed_from=ctx.resumed_from)
     if export_status is not None:
         run_json_fields["export_status"] = export_status
         extra_fields["export_status"] = export_status
@@ -647,7 +710,8 @@ def _load_resume_target(args) -> dict:
     return prior
 
 
-def _workspace_resume(args, prior: dict, context_window: int) -> RunContext:
+def _workspace_resume(args, prior: dict, context_window: int,
+                      context_window_source: str) -> RunContext:
     repo = Path(prior["repo"]).expanduser().resolve()
     if not commit_exists(repo, prior["base_commit"]):
         raise PreflightFailure(f"base commit {prior['base_commit']} no longer exists in {repo}")
@@ -668,7 +732,8 @@ def _workspace_resume(args, prior: dict, context_window: int) -> RunContext:
         repo=repo, slug=slug, branch=prior["branch"], worktree=Path(prior["worktree"]),
         base_commit=prior["base_commit"], task=task, sandbox_mode=args.sandbox,
         provider=args.provider, image_ref=image_ref, image_digest=image_digest, image_pinned=image_pinned,
-        context_window=context_window, resumed_from=prior["slug"], feedback=feedback,
+        context_window=context_window, context_window_source=context_window_source,
+        resumed_from=prior["slug"], feedback=feedback,
         prior_run_dir=Path(prior["run_dir"]), seed_from_worktree=(args.sandbox == "docker"),
         owns_worktree=False,
     )
@@ -737,6 +802,7 @@ def _execute(ctx: RunContext, args, client) -> int:
             },
             finalize=finalize,
             stall_turns=args.stall_turns, context_window=ctx.context_window,
+            context_window_source=ctx.context_window_source,
             stuck_repeats=getattr(args, "stuck_repeats", DEFAULT_STUCK_REPEATS),
             verify=getattr(args, "verify", None),
             verify_rounds=getattr(args, "verify_rounds", DEFAULT_VERIFY_ROUNDS),
@@ -786,6 +852,7 @@ def _execute(ctx: RunContext, args, client) -> int:
         last_assistant_text=extra.get("last_assistant_text"),
         verify=extra.get("verify"),
         turns=result.turns,
+        **_contract_fields(extra, ctx),
     )
 
     print(json.dumps(_emit_result(
@@ -801,6 +868,7 @@ def _execute(ctx: RunContext, args, client) -> int:
         last_assistant_text=extra.get("last_assistant_text"),
         verify=extra.get("verify"),
         resumed_from=ctx.resumed_from, provider=ctx.provider,
+        **_contract_fields(extra, ctx),
     ), indent=2))
     return 0 if final_status == "completed" else 1
 
@@ -834,7 +902,8 @@ def _add_run_flags(p, *, resume: bool) -> None:
                    help="seconds for the --verify command (default 600, clamped to 1-600; "
                         "resume inherits this from the run it continues)")
     p.add_argument("--context-window", type=_positive_int, default=None,
-                   help="model context window in tokens (default: built-in table, else 32768)")
+                   help="model context window in tokens (default: the server's loaded window, "
+                        "else the built-in table, else 32768)")
     p.add_argument("--max-worktree-mb", type=int, default=DEFAULT_MAX_WORKTREE_MB)
     p.add_argument("--max-worktree-files", type=int, default=DEFAULT_MAX_WORKTREE_FILES)
     p.add_argument("--image", default=None if resume else DEFAULT_IMAGE)
@@ -986,12 +1055,13 @@ def main(argv: list | None = None) -> int:
         preflight_repo(repo)
         _resolve_allow_commit(args)
         client = _preflight_llm(args)
-        context_window = _resolve_context_window(args, client)
-        ctx = (_workspace_resume(args, prior, context_window) if prior
-               else _workspace_new(args, repo, context_window))
+        context_window, window_source = _resolve_context_window(args, client)
+        ctx = (_workspace_resume(args, prior, context_window, window_source) if prior
+               else _workspace_new(args, repo, context_window, window_source))
     except (PreflightFailure, WorkspaceError) as e:
         _err(str(e))
         return 2
+    _warn_task_size(ctx)
     return _execute(ctx, args, client)
 
 

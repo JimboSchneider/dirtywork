@@ -330,3 +330,23 @@ def test_validate_objects_dir_refuses_objects_outside_common_dir(repo: Path, tmp
     monkeypatch.setattr("dirtywork.sandbox.docker_cli.subprocess.run", fake_run)
     with pytest.raises(WorkspaceError, match="escapes"):
         validate_objects_dir(repo)
+
+
+def test_docker_error_timed_out_defaults_false_and_run_sets_it(monkeypatch):
+    # Every existing construction is positional and must keep working -- the
+    # new flag is keyword-only with a default precisely so they do.
+    plain = DockerError("docker exec failed: no such container")
+    assert plain.timed_out is False
+    assert str(plain) == "docker exec failed: no such container"
+    assert DockerError("x", timed_out=True).timed_out is True
+
+    import dirtywork.sandbox.docker_cli as mod
+
+    def fake_run_capped(argv, *, timeout=None, stdin=None):
+        return Captured(returncode=None, output=b"", truncated=False, timed_out=True)
+
+    monkeypatch.setattr(mod, "run_capped", fake_run_capped)
+    with pytest.raises(DockerError) as excinfo:
+        run(["exec", "c", "true"], timeout=5)
+    assert excinfo.value.timed_out is True
+    assert "timed out after 5s" in str(excinfo.value)

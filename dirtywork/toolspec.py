@@ -23,9 +23,26 @@ MISSING = _MissingType()
 
 @dataclass(frozen=True)
 class ParamSpec:
+    """``schema`` (spec §1.3) is the parameter's full JSON schema for a
+    parameter whose shape is not a flat scalar -- an array of objects, say.
+    When set, ToolRegistry.schemas() emits it INSTEAD of ``{"type": type}``
+    (with ``description`` merged in exactly as for a flat param) and
+    _validate_args validates against it recursively. ``type`` stays set to the
+    schema's top-level type so canonical_args and any other reader that only
+    knows about flat types keeps working -- canonical_args itself only special-
+    cases "integer"/"number" coercion, so for a schema-bearing param (whose
+    ``type`` is "array"/"object") it passes the raw, unvalidated, uncoerced
+    value straight through rather than the validated/coerced one _validate_args
+    produces. Moot for a mutating tool (ProgressTracker.note_call short-circuits
+    on tool name for anything in runner._MUTATING_TOOLS before it ever hashes
+    canonical_args), which is the only kind of tool a schema-bearing param is
+    expected to belong to. Leave it None for a flat param and nothing about
+    that param changes."""
+
     type: str
     description: str = ""
     default: Any = MISSING
+    schema: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +128,92 @@ def _coerce_numeric_string(ptype: str, value):
     return None
 
 
+def _check_scalar(ptype: str, value, label: str):
+    """The scalar-leaf check shared by the flat-type path (_validate_args) and
+    the nested-schema path (_validate_against_schema): look up ptype in
+    _TYPE_CHECKS, and if the value doesn't already match, try coercing a
+    numeric string via _coerce_numeric_string before giving up. Returns the
+    (possibly coerced) value, or raises ToolValidationError(f"{label} must be
+    {ptype}, got {type(value).__name__}") -- `label` is the caller's own
+    identifier for the value (a flat param's `"parameter 'name'"`, or a nested
+    leaf's dotted/indexed `path`), so both call sites keep their existing,
+    byte-identical messages. A ptype with no _TYPE_CHECKS entry (e.g. "array"/
+    "object" reaching here, which neither caller does today) passes through
+    unchecked, matching prior behaviour at both sites."""
+    check = _TYPE_CHECKS.get(ptype)
+    if check is None or check(value):
+        return value
+    coerced = _coerce_numeric_string(ptype, value)
+    if coerced is None:
+        raise ToolValidationError(f"{label} must be {ptype}, got {type(value).__name__}")
+    return coerced
+
+
+def _validate_against_schema(value, schema: dict, path: str):
+    """Validate `value` against the minimal JSON-Schema subset a ParamSpec.schema
+    may use (spec §1.3): type, minItems, maxItems, items, properties, required,
+    additionalProperties. Deliberately NOT a JSON-Schema library -- anything else
+    in the schema dict is ignored, and the only schemas that reach here are the
+    ones this repo authors.
+
+    Returns the validated value, with numeric strings coerced at every scalar
+    leaf exactly as the top level coerces them, so a tool function may rely on
+    the shape its schema declares. Raises ToolValidationError with a
+    path-qualified message ("edits[2].new must be string, got int") that
+    ToolRegistry.execute turns into a `bad_args` result.
+
+    additionalProperties: false is enforced HERE too, not just on the wire:
+    the registry's drop-unknown-keys policy is a TOP-LEVEL concession to local
+    models that attach stray parameters from other harnesses' schemas, and a
+    nested object is authored per call, so it gets the strict rule."""
+    ptype = schema.get("type")
+    if ptype == "array":
+        if not isinstance(value, list):
+            raise ToolValidationError(f"{path} must be array, got {type(value).__name__}")
+        minimum = schema.get("minItems")
+        if isinstance(minimum, int) and len(value) < minimum:
+            raise ToolValidationError(f"{path} must have at least {minimum} item(s)")
+        maximum = schema.get("maxItems")
+        if isinstance(maximum, int) and len(value) > maximum:
+            raise ToolValidationError(f"{path} must have at most {maximum} item(s)")
+        item_schema = schema.get("items")
+        if not isinstance(item_schema, dict):
+            return value
+        return [_validate_against_schema(item, item_schema, f"{path}[{i}]")
+                for i, item in enumerate(value)]
+    if ptype == "object":
+        if not isinstance(value, dict):
+            raise ToolValidationError(f"{path} must be an object")
+        properties = schema.get("properties") or {}
+        for name in schema.get("required") or ():
+            if name not in value:
+                raise ToolValidationError(f"{path} is missing required property {name!r}")
+        if schema.get("additionalProperties") is False:
+            for name in value:
+                if name not in properties:
+                    raise ToolValidationError(f"{path} has unexpected property {name!r}")
+        out = {}
+        for name, item in value.items():
+            sub = properties.get(name)
+            out[name] = (_validate_against_schema(item, sub, f"{path}.{name}")
+                         if isinstance(sub, dict) else item)
+        return out
+    return _check_scalar(ptype, value, path)
+
+
+def _input_bytes(value) -> int:
+    """UTF-8 length of every str VALUE inside `value`, recursively (spec §1.4).
+    Dict KEYS and non-string scalars do not count: the cap exists to bound the
+    text a model sent, and a key is this repo's schema, not the model's."""
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    if isinstance(value, dict):
+        return sum(_input_bytes(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(_input_bytes(item) for item in value)
+    return 0
+
+
 def _validate_args(spec: ToolSpec, args: dict) -> dict:
     """Effective keyword arguments for spec.fn. Unknown keys are DROPPED, not
     rejected (SP1, commit 23a9c22): local models routinely attach parameters
@@ -127,13 +230,12 @@ def _validate_args(spec: ToolSpec, args: dict) -> dict:
             if value is None and pspec.default is None:
                 call_args[pname] = None          # the model spelled out the default
                 continue
-            check = _TYPE_CHECKS.get(pspec.type)
-            if check is not None and not check(value):
-                coerced = _coerce_numeric_string(pspec.type, value)
-                if coerced is None:
-                    raise ToolValidationError(
-                        f"parameter '{pname}' must be {pspec.type}, got {type(value).__name__}")
-                value = coerced
+            if pspec.schema is not None:
+                # Spec §1.3: the whole shape is proved here, before spec.fn runs,
+                # so a tool function never has to re-check nested item shapes.
+                call_args[pname] = _validate_against_schema(value, pspec.schema, pname)
+                continue
+            value = _check_scalar(pspec.type, value, f"parameter '{pname}'")
             call_args[pname] = value
         elif pspec.default is not MISSING:
             call_args[pname] = pspec.default
@@ -163,7 +265,12 @@ class ToolRegistry:
         for spec in self._table.values():
             properties = {}
             for pname, pspec in spec.params.items():
-                prop = {"type": pspec.type}
+                # A schema-bearing param renders its own schema verbatim; the
+                # copy matters because `description` is merged in below and the
+                # ParamSpec's dict is shared with every future call. The merge
+                # runs last for both kinds of param, so `description` is always
+                # the final key -- flat and nested render the same way.
+                prop = dict(pspec.schema) if pspec.schema is not None else {"type": pspec.type}
                 if pspec.description:
                     prop["description"] = pspec.description
                 properties[pname] = prop
@@ -240,8 +347,9 @@ class ToolRegistry:
 
         caps = spec.caps
         if caps.max_input_bytes is not None:
-            total = sum(len(v.encode("utf-8")) for v in call_args.values()
-                        if isinstance(v, str))
+            # Spec §1.4: recursive, so a batch tool's nested strings count too.
+            # Top-level strings (e.g. `path`) still count exactly as before.
+            total = _input_bytes(call_args)
             if total > caps.max_input_bytes:
                 return ToolResult(
                     text=(f"ERROR: bad arguments for {name}: input is {total} bytes, "

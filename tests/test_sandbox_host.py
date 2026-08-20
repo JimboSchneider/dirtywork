@@ -97,3 +97,13 @@ def test_host_sandbox_insert_before_and_after(wt: Path):
     assert "Inserted into" in sb.insert_after("hello.txt", "hi", "there")
     assert "Inserted into" in sb.insert_before("hello.txt", "there", "before-there")
     assert (wt / "hello.txt").read_text() == "hi\nbefore-there\nthere\n"
+
+
+def test_host_sandbox_apply_edits(wt: Path):
+    sb = HostSandbox(wt)
+    sb.start(wt, wt, "slug", "deadbeef")
+    (wt / "batch.txt").write_text("one\ntwo\n")
+    out = sb.apply_edits("batch.txt", [{"old": "one", "new": "1"},
+                                       {"old": "two", "new": "2"}])
+    assert out.startswith("Applied 2 edits to batch.txt: ")
+    assert (wt / "batch.txt").read_text() == "1\n2\n"

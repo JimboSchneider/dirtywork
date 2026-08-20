@@ -426,7 +426,7 @@ def test_summarize_prints_detail_table_and_per_model_stats(tmp_path, monkeypatch
     out = capsys.readouterr().out
     # detail table
     assert "MODEL" in out and "NUDGES" in out and "FAILURES" in out
-    assert "2/1/0/0" in out            # m2's nudge counts
+    assert "2/1/0/0/0" in out          # m2's nudge counts (0.9 added the timeout kind)
     assert "stalled" in out
     assert "accept" in out and "reject" in out
     # per-model block
@@ -610,7 +610,7 @@ def test_summarize_compare_harness_cell_missing_for_bench_error_only_side(
     rc = bench.cmd_summarize(argparse.Namespace(file=str(a), compare=str(b)))
     assert rc == 0
     out = capsys.readouterr().out
-    assert "- -> 0/0/0" in out and "- -> 0/0/0 (" not in out   # no delta against an unknown side
+    assert "- -> 0/0/0/0" in out and "- -> 0/0/0/0 (" not in out  # no delta against an unknown side
     assert "harness data present for" not in out   # no partial side, no footnote
 
 
@@ -635,7 +635,7 @@ def test_summarize_compare_harness_cell_partial_side_gets_asterisk_and_footnote(
     rc = bench.cmd_summarize(argparse.Namespace(file=str(a), compare=str(b)))
     assert rc == 0
     out = capsys.readouterr().out
-    assert "1/0/0* -> 0/0/0 (-1/0/0)" in out   # A partial (1 of 2 rows), B full; delta on the known counts
+    assert "1/0/0/0* -> 0/0/0/0 (-1/0/0/0)" in out   # A partial (1 of 2 rows), B full; delta on the known counts
     assert "* harness data present for 1 of 2 runs" in out
 
 
@@ -672,4 +672,76 @@ def test_fmt_component_delta_signs():
     assert bench._fmt_component_delta((1, 0, 0), (0, 0, 0)) == "-1/0/0"
     assert bench._fmt_component_delta((0, 0, 1, 0), (1, 0, 0, 0)) == "+1/0/-1/0"
     assert bench._fmt_component_delta((2, 2), (2, 2)) == "0/0"
+
+
+def test_bench_row_records_trimmed_turns_and_summarize_reports_its_mean(
+        tmp_path, monkeypatch, capsys):
+    _fake_run_environment(tmp_path, monkeypatch, payload={
+        "status": "completed", "turns": 3, "trimmed_turns": 4,
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1}, "provider": "openai"})
+    row = bench.run_one_bench_case("m1", "sh-fix-script", 0, provider="openai",
+                                   base_url=None, stamp="s", max_turns=40, timeout=1800)
+    assert row["trimmed_turns"] == 4
+
+    monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs2")
+    results = tmp_path / "r.jsonl"
+    results.write_text("\n".join(json.dumps(r) for r in [
+        _result_row(slug=None, trimmed_turns=2),
+        _result_row(slug=None, repeat=1, trimmed_turns=4),
+    ]) + "\n")
+    assert bench.cmd_summarize(argparse.Namespace(file=str(results))) == 0
+    assert "mean trimmed_turns: 3.0" in capsys.readouterr().out
+
+
+def test_summarize_compare_pairs_trimmed_turns(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs")
+    a, b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    a.write_text(json.dumps(_result_row(slug=None, trimmed_turns=6)) + "\n")
+    b.write_text(json.dumps(_result_row(slug=None, trimmed_turns=2)) + "\n")
+    assert bench.cmd_summarize(argparse.Namespace(file=str(a), compare=str(b))) == 0
+    out = capsys.readouterr().out
+    assert "TRIMMED" in out
+    assert "6.0 -> 2.0 (-4.0)" in out
+
+
+def test_harness_timeouts_come_from_the_payload_and_are_excluded_from_empty_reply(
+        tmp_path, monkeypatch):
+    events = [
+        {"event": "nudge", "kind": "timeout", "turn": 3},
+        {"event": "nudge", "kind": "empty", "turn": 4},
+        {"event": "run_end", "status": "completed"},
+    ]
+    _fake_run_environment(tmp_path, monkeypatch, transcript_events=events, payload={
+        "status": "completed", "turns": 5, "timeouts": 4, "usage": {},
+        "final_message": "done"})
+    row = bench.run_one_bench_case("m1", "sh-fix-script", 0, provider=None, base_url=None,
+                                   stamp="s", max_turns=40, timeout=1800)
+    harness = row["harness"]
+    assert harness["nudge_timeout"] == 1        # one nudge event on that turn
+    assert harness["timeouts"] == 4             # the RUNNER's count, off the payload
+    assert harness["empty_reply"] == 1          # the `empty` nudge only, not the timeout
+
+
+def test_summarize_reports_timeouts_in_the_failures_cell_and_the_legends(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs")
+    results = tmp_path / "r.jsonl"
+    harness = {"nudge_stall": 0, "nudge_empty": 0, "nudge_truncated": 0,
+               "nudge_text_tool_call": 0, "nudge_timeout": 1, "nudge_other": 0,
+               "empty_reply": 0, "timeouts": 3, "stalled": 0, "max_turns": 0,
+               "sandbox_error": 0, "abort_kind": None}
+    results.write_text(json.dumps(_result_row(slug=None, harness=harness)) + "\n")
+    assert bench.cmd_summarize(argparse.Namespace(file=str(results))) == 0
+    out = capsys.readouterr().out
+    assert "nudges: stall/empty/truncated/text_tool_call/timeout" in out
+    assert "timeouts=3" in out
+
+    other = tmp_path / "b.jsonl"
+    other.write_text(json.dumps(_result_row(slug=None, harness=harness)) + "\n")
+    assert bench.cmd_summarize(argparse.Namespace(file=str(results),
+                                                  compare=str(other))) == 0
+    compare_out = capsys.readouterr().out
+    assert ("harness: nudges/stalled/max_turns/timeouts "
+           "(timeout nudges are also counted in nudges)") in compare_out
+    assert "1/0/0/3 -> 1/0/0/3 (0/0/0/0)" in compare_out
 

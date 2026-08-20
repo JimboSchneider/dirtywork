@@ -32,6 +32,28 @@ Day-to-day usage once dirtywork is installed: running a task, reviewing and resu
 - **All flags, stdout JSON, exit codes, transcript events:** see
   [Machine contract](machine-contract.md#machine-contract).
 
+#### Editing files
+
+The worker changes files only through tools — `write_file`, `edit_file`,
+`apply_edits`, `insert_before`, `insert_after` — never through `bash`. When a
+brief lists several exact replacements in one file, say so and expect one
+`apply_edits` call rather than a run of `edit_file` calls: the edits are applied
+**in order on the running text** (edit 3 may depend on what edit 1 produced),
+each `old` must match exactly once at its turn, and the whole batch is
+all-or-nothing before the write — the first failure writes nothing and the
+result names it. That is one turn instead of five, and one prompt-cache hit
+instead of five, which is most of the difference on a small local model.
+
+> **In-place edits are atomic *before* the write, not *through* it.** Every
+> refusal — validation, a non-matching `old`, an unreadable or non-UTF-8 file,
+> a result over the 5 MB write limit — happens before the file is opened, so
+> the file is untouched. Once the write starts, an I/O error or a kill can
+> still leave the file truncated; that is true of `edit_file`, `insert_*` and
+> `write_file` too and is unchanged in 0.9. The worktree is a scratch branch,
+> so the recovery is `git -C <worktree> checkout -- <path>`. A temp-file/rename
+> primitive was considered and deferred: done naively it re-opens the
+> final-component symlink race that the current `O_NOFOLLOW` write closes.
+
 #### Verifying a run
 
     dirtywork run --repo ~/repos/someproject --verify 'npm test' "Add a unit test for X"
@@ -51,6 +73,38 @@ the ordinary `--max-turns`/`--timeout` budget (the command may run N+1 times);
 1–600) bounds each run. In docker mode the command can only use what the image
 ships — see the callout under *Review a run*. `dirtywork resume` inherits the
 verify command from the run it continues.
+
+#### The bash tool
+
+`bash(command, timeout=120)` runs one shell command in the worktree. The
+per-call `timeout` is the model's to set (default 120 s, maximum 600 s, clamped;
+`--timeout` is the separate whole-run wall clock). A command that hits its
+timeout is killed (host mode kills its whole process group; in docker mode the
+`docker exec` is abandoned, which is why the result is *unknown*, not *failed*)
+and returns exactly:
+
+    ERROR: command timed out after 120s — it did not finish and its result is unknown. Re-run it with a larger timeout (up to 600) or split it into smaller commands; do not report it as passed.
+
+**No partial output is appended**, deliberately: the host backend could produce
+a tail and the container backend cannot, and a tail is exactly what a small
+model reads as "the command's result" when the command never finished. The same
+turn also gets a one-line nudge telling the worker in words that the result is
+unknown and must not be reported as a pass, the `tool_result` transcript event
+carries `timed_out: true`, and the run's `timeouts` counter rises — visible on
+the stdout JSON, in `run_end`, in `run.json`, in `dirtywork runs show`
+(where the call renders `[timed out]` rather than `[ERROR]`), and in
+`dirtywork bench summarize` (a `timeouts=N` token in the FAILURES column, and
+the fourth number of the `--compare` harness cell).
+
+A timeout is **not** counted as a model failure: it does not feed the
+consecutive-failure abort, and it resets that streak like any other tool call
+that executed. It does count toward `--stuck-repeats` — the same command timing
+out four times in a row ends the run `stuck`, which is the honest outcome.
+
+In docker mode, only a real expired timeout renders that way; any other docker
+failure (a killed container, an exec that could not start) returns
+`ERROR: bash failed: …` instead, so an ordinary failure is never read as "it
+might still be running".
 
 ### Resuming a run
 
@@ -171,6 +225,51 @@ of whether the run is still going:
   a worktree with a pre-resume stash beside it, and one the export never
   populated. Mostly you will not call it by hand: `--branch-from @<slug>` calls
   it for you.
+
+## Sizing the context window
+
+**One slot loaded with the largest context your machine holds beats more slots
+with smaller ones.** These numbers are from the SP3 build record
+(`docs/superpowers/bench/2026-08-17-sp3-worker-scoreboard.md` and
+`-run-split.md`), measured on a 128 GB Apple Silicon machine with LM Studio
+serving `qwen/qwen3-coder-next`:
+
+| Loaded context | Per turn | Prompt throughput | Outcome on a 1,084-line brief |
+|---|---|---|---|
+| 65k | 15–17 s | ~3k tok/s | `context_exhausted` twice — the per-turn trim invalidated the prompt cache, so every turn re-read the whole history from scratch |
+| 131k | 2.6–5 s | ~13k tok/s | no exhaustion |
+
+The 65k number is not a slow model; it is a *cache-miss* number. Once the
+history stops fitting, dirtywork trims the oldest tool results every turn, the
+prompt prefix changes every turn, and the server re-processes it every turn.
+The fix is a bigger window, not a faster machine.
+
+Two 131k slots do **not** fit on 128 GB: loading the second one crashed LM
+Studio (55.9 GB wired, 1.2 GB free just before the crash), while a single 131k
+slot peaks around 66 GB wired. Load one:
+
+    lms load qwen/qwen3-coder-next -c 131072
+
+dirtywork asks the server what it actually loaded (LM Studio's
+`GET /api/v0/models` reports `loaded_context_length`) and uses that, so you do
+not have to repeat the number as `--context-window`. The run records where the
+value came from in `context_window_source` — `provider:openai:server` when the
+server answered, `provider:openai` when the built-in table did, `flag`/`env`
+when you said so, `default` when nothing knew. Ollama is not probed in 0.9: its
+`/api/show` reports the model's architectural maximum rather than the loaded
+`num_ctx`, so pass `--context-window` there.
+
+**Rules of thumb**
+
+- Keep a dispatched brief under ~450 lines. Past roughly 20% of the window
+  dirtywork prints a `warning: the task text is ~N tokens, P% of the …` line on
+  stderr; that is the same signal, earlier.
+- Bias briefs toward whole-file writes and `apply_edits` batches rather than
+  long prose: the model re-reads the task every turn, so a compact brief is
+  cheaper on every turn, not just the first.
+- Watch `trimmed_turns` on the run's stdout JSON (and in `dirtywork runs show`).
+  A run with a non-zero count paid the cache-miss tax on that many turns; a run
+  with a large one wanted a bigger window or a smaller brief.
 
 ## Benchmarking
 

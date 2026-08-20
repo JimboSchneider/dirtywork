@@ -17,7 +17,7 @@ DOC = Path(__file__).parent.parent / "docs" / "transcript-schema.md"
 
 EVENT_NAMES = ["run_start", "assistant", "tool_result", "guardrail_block", "nudge",
                "sandbox_reset", "verify", "run_end"]
-NUDGE_KINDS = ["truncated", "empty", "text_tool_call", "stall"]
+NUDGE_KINDS = ["truncated", "empty", "text_tool_call", "stall", "timeout"]
 STATUSES = ["completed", "max_turns", "timeout", "context_exhausted", "model_error",
             "interrupted", "stalled", "stuck", "verify_failed", "budget_exceeded",
             "sandbox_error", "export_failed"]
@@ -26,7 +26,7 @@ RUN_END_FIELDS = ["diff_stat", "untracked", "patch_path", "escaping_symlinks",
                   "export_status", "watchdog_violation", "watchdog_violation_kind",
                   "finalize_error", "stuck_on", "files_changed",
                   "files_changed_truncated", "last_tool_result", "last_assistant_text",
-                  "verify"]
+                  "verify", "trimmed_turns", "timeouts", "context_window_source"]
 
 
 def _doc_tokens():
@@ -53,10 +53,10 @@ def test_doc_documents_schema_version_v1_v2_statuses_and_nudge_kinds():
         assert field in tokens, f"run_end field '{field}' is not documented"
 
 
-def test_doc_documents_the_finish_tool_and_the_nine_tools():
+def test_doc_documents_the_finish_tool_and_the_ten_tools():
     tokens = _doc_tokens()
-    for name in ("read_file", "write_file", "edit_file", "insert_before", "insert_after",
-                 "list_dir", "grep", "bash", "finish"):
+    for name in ("read_file", "write_file", "edit_file", "apply_edits", "insert_before",
+                 "insert_after", "list_dir", "grep", "bash", "finish"):
         assert name in tokens, f"tool '{name}' is not documented"
 
 

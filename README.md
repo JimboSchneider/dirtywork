@@ -44,9 +44,9 @@ macOS (Windows unsupported — see below).
 ## Security & trust
 
 **Docker is the default sandbox as of 0.4 — a breaking change from 0.2.**
-Every tool call (`read_file`/`write_file`/`edit_file`/`insert_before`/
-`insert_after`/`list_dir`/`grep`/`bash`) runs inside a locked-down
-container: `--network none` by default,
+Every tool call (`read_file`/`write_file`/`edit_file`/`apply_edits`/
+`insert_before`/`insert_after`/`list_dir`/`grep`/`bash`) runs inside a
+locked-down container: `--network none` by default,
 `--read-only` root filesystem, `--cap-drop ALL`, kernel-enforced memory/CPU/
 process-count/per-file-size limits, and no host path mounted in except the
 parent repository's read-only git object store.
@@ -60,7 +60,7 @@ Full model, known exposures and the host-mode caveats:
 |---|---|---|
 | Developed & benchmarked | macOS on Apple Silicon (M-series, unified memory) with LM Studio | all worker/bench numbers and model-sizing guidance in `docs/superpowers/bench/` were measured here |
 | CI-tested | Linux x86_64 (Ubuntu, Python 3.9 + 3.13) and macOS | unit suite on every push; the Docker sandbox live tests run on Linux in CI |
-| Unsupported | Windows | until a Windows integration suite passes (see the note in [Security & trust](https://github.com/JimboSchneider/dirtywork/blob/main/docs/security.md#security--trust)) |
+| Unsupported | Windows | the unit suite also runs on `windows-latest` in CI as an advisory (allowed-to-fail) job that publishes a per-file pass/fail/error/skip table; Windows remains unsupported until an integration suite passes (see the note in [Security & trust](https://github.com/JimboSchneider/dirtywork/blob/main/docs/security.md#security--trust)) |
 
 Other OpenAI-compatible servers (Ollama, vLLM, llama.cpp) should work via
 `--base-url`/`--provider`; only LM Studio and the Anthropic API adapter
@@ -77,7 +77,10 @@ exercised by the test suites.
 - [LM Studio](https://lmstudio.ai) serving its OpenAI-compatible API at
   `localhost:1234` with a tool-calling-capable model loaded. Verified
   working: `qwen/qwen3-coder-next` (65k context, default) and
-  `mistralai/devstral-small-2-2512` (32k context)
+  `mistralai/devstral-small-2-2512` (32k context). One slot loaded with the
+  largest context your machine holds beats several smaller ones — see
+  [Sizing the context window](https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md#sizing-the-context-window)
+  for the measured numbers
 - `--provider anthropic` needs the `ANTHROPIC_API_KEY` environment variable
   set; the default (`--provider openai`, LM Studio or any OpenAI-compatible
   server) needs no key.
@@ -153,16 +156,23 @@ stdout JSON and exit codes: [docs/machine-contract.md](https://github.com/JimboS
    `.git/info/exclude` automatically. If the repo has a `CLAUDE.md` or
    `AGENTS.md` at its base commit, its content is injected into the
    worker's system prompt so it inherits your conventions.
-3. **The loop** — the model gets nine tools (`read_file`, `write_file`,
-   `edit_file`, `insert_before`, `insert_after`, `list_dir`, `grep`, `bash`,
-   `finish`) via OpenAI function-calling. `insert_before`/`insert_after` add
+3. **The loop** — the model gets ten tools (`read_file`, `write_file`,
+   `edit_file`, `apply_edits`, `insert_before`, `insert_after`, `list_dir`,
+   `grep`, `bash`, `finish`) via OpenAI function-calling.
+   `insert_before`/`insert_after` add
    whole lines around a unique anchor without touching the anchor's own line
    — the primitive for "add a line here", which `edit_file` could only express
-   as a replace. Every successful `edit_file`/`write_file`/`insert_*` result
+   as a replace. `apply_edits` takes a brief's whole numbered list of exact
+   replacements to one file in a single call, applied in order, all-or-nothing:
+   if any `old` does not match exactly once at its turn, nothing is written and
+   the result names the first failure. Every successful
+   `edit_file`/`apply_edits`/`write_file`/`insert_*` result
    echoes a capped unified diff of what actually changed, so a replace that
    silently deleted a line is visible to the worker in the same turn.
-   Context is budgeted per model (oldest tool results get
-   trimmed first); three consecutive tool failures of one kind (malformed
+   Context is budgeted per model — dirtywork asks the server what window it
+   actually loaded and reports both the value and its source, and the payload's
+   `trimmed_turns` says on how many turns the oldest tool results had to be
+   dropped to fit. Three consecutive tool failures of one kind (malformed
    call, malformed arguments, unknown tool, bad arguments, empty reply) or
    six in total abort the run. The model ends a run by calling the
    `finish(summary=...)` tool (a plain reply with no tool call also ends it);

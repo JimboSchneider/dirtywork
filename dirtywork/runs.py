@@ -25,14 +25,16 @@ from . import rundir
 from .resume import (ResumeError, find_stashes, load_prior_run, pid_alive,
                       preflight_run_worktree, stash_dir_for, worktree_belongs_to_repo)
 from .sandbox import docker_args, docker_cli, export
+from .tools import is_timeout_result
 from .workspace import WorkspaceError, host_worktree_dirty, snapshot_worktree
 
 COLUMN_GAP = "  "
 LIST_COLUMNS = ("slug", "status", "started", "resumed", "branch", "worktree",
                 "container", "volume")
-SHOW_FIELDS = ("slug", "status", "sandbox", "task", "model", "provider", "turns",
+SHOW_FIELDS = ("slug", "status", "sandbox", "task", "model", "provider",
+               "context_window", "turns",
                "resumed_from", "resumed_by", "branch", "worktree", "started", "ended",
-               "stuck_on", "files_changed", "verify")
+               "stuck_on", "files_changed", "verify", "trimmed_turns", "timeouts")
 TASK_PREVIEW_CHARS = 200
 
 
@@ -234,6 +236,12 @@ def _summary_value(key: str, data: dict) -> str:
     if key == "verify" and isinstance(value, dict):
         state = "passed" if value.get("passed") else "failed"
         return f"{state} (exit {value.get('exit_code')})"
+    if key == "context_window":
+        # 0.9: the number alone cannot be read -- 32768 may be the model's real
+        # window or the fallback nobody chose. The source says which. A run.json
+        # written before 0.9 has no source and renders the bare number.
+        source = data.get("context_window_source")
+        return f"{value} ({source})" if source else str(value)
     text = str(value)
     if key == "task" and len(text) > TASK_PREVIEW_CHARS:
         text = text[:TASK_PREVIEW_CHARS].replace("\n", " ") + " ... (full text below)"
@@ -265,9 +273,15 @@ def read_transcript_events(path) -> tuple:
 
 
 def _tool_result_outcome(result_text) -> str:
-    """ERROR / BLOCKED / ok, from the tool result's leading token -- the one
-    classification both the text timeline and the Markdown export use."""
+    """'timed out' / ERROR / BLOCKED / ok, from the tool result's leading token
+    -- the one classification both the text timeline and the Markdown export
+    use, composed into `[{outcome}]` by each. The timeout class is checked FIRST
+    because a timed-out result also starts with ERROR, and "the command never
+    finished, so its result is unknown" is a different thing to an operator than
+    "the command failed" (spec §4.3). No emoji, one rule, both views."""
     text = str(result_text or "")
+    if is_timeout_result(text):
+        return "timed out"
     if text.startswith("ERROR"):
         return "ERROR"
     if text.startswith("BLOCKED"):
@@ -298,10 +312,16 @@ def _timeline_line(event: dict) -> str:
     return f"{ts}  {name}"
 
 
-MD_HEADER_FIELDS = ("status", "task", "model", "provider", "sandbox", "turns",
-                    "base_commit", "branch", "worktree", "resumed_from", "resumed_by")
+MD_HEADER_FIELDS = ("status", "task", "model", "provider", "context_window", "sandbox",
+                    "turns", "base_commit", "branch", "worktree", "resumed_from",
+                    "resumed_by")
 MD_VERDICT_FIELDS = ("verdict", "note")
-MD_RESULT_FIELDS = ("status", "error", "export_status", "finalize_error", "watchdog_violation")
+# `trimmed_turns` and `timeouts` (0.9) are ints that are meaningful at 0, and
+# _md_result's loop prints anything not None/"" -- so they render "0" rather
+# than disappearing, which is the point: "nothing was trimmed" and "nothing
+# timed out" are facts worth reading.
+MD_RESULT_FIELDS = ("status", "error", "export_status", "finalize_error",
+                    "watchdog_violation", "trimmed_turns", "timeouts")
 MD_ARGS_CHARS = 200      # the transcript already caps `args` at 500
 MD_RESULT_CHARS = 2000   # the transcript's own `preview` cap for a tool result
 
@@ -449,7 +469,9 @@ def _md_result(data: dict, events: list) -> list:
     end = _last_event(events, "run_end")
     lines = ["## Result", ""]
     for key in MD_RESULT_FIELDS:
-        value = data.get(key) or end.get(key)
+        value = data.get(key)
+        if value is None:
+            value = end.get(key)
         if value not in (None, ""):
             lines.append(f"- **{key}:** {str(value).splitlines()[0]}")
     lines.append("")

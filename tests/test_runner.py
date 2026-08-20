@@ -166,16 +166,30 @@ def test_trim_messages():
         {"role": "assistant", "content": "a" * 100},
         {"role": "tool", "tool_call_id": "2", "content": "y" * 1000},
     ]
-    fits = trim_messages(msgs, char_budget=1300)
-    assert fits
+    fits, newly_trimmed = trim_messages(msgs, char_budget=1300)
+    assert fits is True
+    assert newly_trimmed == 1                      # spec §2.2: replaced ON THIS CALL
     assert msgs[1]["content"] == TRIM_MARKER      # oldest trimmed first
     assert msgs[3]["content"] == "y" * 1000        # newer kept
     assert msgs[0]["content"] == "s" * 100         # system never trimmed
 
 
+def test_trim_does_not_recount_a_result_it_already_trimmed():
+    # The count is what makes `trimmed_turns` mean "turns on which trimming
+    # happened" rather than "markers currently in the history".
+    msgs = [
+        {"role": "system", "content": "s" * 100},
+        {"role": "tool", "tool_call_id": "1", "content": "x" * 1000},
+        {"role": "assistant", "content": "a" * 100},
+        {"role": "tool", "tool_call_id": "2", "content": "y" * 1000},
+    ]
+    assert trim_messages(msgs, char_budget=1300) == (True, 1)
+    assert trim_messages(msgs, char_budget=1300) == (True, 0)
+
+
 def test_trim_cannot_fit():
     msgs = [{"role": "system", "content": "s" * 5000}]
-    assert trim_messages(msgs, char_budget=100) is False
+    assert trim_messages(msgs, char_budget=100) == (False, 0)
 
 
 def test_trim_counts_tool_call_arguments():
@@ -186,7 +200,55 @@ def test_trim_counts_tool_call_arguments():
     ]
     # No role=="tool" messages exist to trim, so this only passes if the
     # tool_call arguments are counted toward the budget in the first place.
-    assert trim_messages(msgs, char_budget=500) is False
+    assert trim_messages(msgs, char_budget=500) == (False, 0)
+
+
+def _scripted_trim(monkeypatch, script):
+    """Drive Runner.run's trim bookkeeping with a scripted trim_messages, so
+    the counting rule is tested without also re-testing the trim arithmetic
+    (which the four unit tests above already pin). The runner looks the name up
+    on the module at call time, so patching the module attribute is enough."""
+    import dirtywork.runner as runner_mod
+    steps = iter(script)
+    monkeypatch.setattr(runner_mod, "trim_messages",
+                        lambda messages, char_budget: next(steps))
+
+
+def test_trimmed_turns_counts_the_final_failing_call_when_it_trimmed(parts, monkeypatch):
+    wt, registry, sandbox, transcript, tmp = parts
+    _scripted_trim(monkeypatch, [(True, 0), (True, 2), (True, 1), (False, 3)])
+    provider = FakeProvider([_resp(tool_calls=[_call(f"c{i}", "read_file", {"path": "f.txt"})])
+                             for i in range(3)])
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_turns=10)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "context_exhausted"
+    # turns 2 and 3 trimmed, and so did the call that then gave up
+    assert result.extra["trimmed_turns"] == 3
+    end = [e for e in _events(tmp) if e["event"] == "run_end"][-1]
+    assert end["trimmed_turns"] == 3
+
+
+def test_trimmed_turns_ignores_a_final_failing_call_that_trimmed_nothing(parts, monkeypatch):
+    wt, registry, sandbox, transcript, tmp = parts
+    _scripted_trim(monkeypatch, [(True, 0), (True, 1), (True, 1), (False, 0)])
+    provider = FakeProvider([_resp(tool_calls=[_call(f"c{i}", "read_file", {"path": "f.txt"})])
+                             for i in range(3)])
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_turns=10)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "context_exhausted"
+    assert result.extra["trimmed_turns"] == 2
+
+
+def test_trimmed_turns_is_zero_on_an_ordinary_run(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(content="all done")])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert result.extra["trimmed_turns"] == 0
 
 
 def test_malformed_tool_call_entry_recovers(parts):
@@ -360,6 +422,8 @@ def test_finalize_merges_into_run_end_and_result_extra(parts):
     transcript.close()
     assert result.extra == {"stuck_on": None, "last_tool_result": None,
                             "last_assistant_text": "done", "verify": None,
+                            "trimmed_turns": 0, "timeouts": 0,
+                            "context_window_source": None,
                             "diff_stat": " 1 file changed"}
     events = _events(tmp)
     run_end = next(e for e in events if e["event"] == "run_end")
@@ -786,8 +850,16 @@ def test_resolve_context_window_without_a_provider_falls_back_to_default():
 
 
 def test_resolve_context_window_uses_the_real_openai_table():
+    # The stub transport keeps this a pure unit test: with 0.9's server probe
+    # in front of the table, a real client would otherwise try to GET
+    # http://fake/api/v0/models before falling back. LLMError is already
+    # imported at module scope (tests/test_runner.py:9).
     from dirtywork.providers.openai_compat import OpenAICompatClient
-    provider = OpenAICompatClient(base_url="http://fake/v1")
+
+    def no_server(url, payload, headers, timeout, *, method="POST"):
+        raise LLMError(f"cannot reach {url}")
+
+    provider = OpenAICompatClient(base_url="http://fake/v1", http_json=no_server)
     assert resolve_context_window("qwen/qwen3-coder-next", None, None, provider) == \
         (CONTEXT_WINDOWS["qwen/qwen3-coder-next"], "provider:openai")
 
@@ -1192,3 +1264,238 @@ def test_verify_on_a_plain_answer_completion_and_error_passthrough(parts):
     transcript2.close()
     assert result2.status == "budget_exceeded"
     assert result2.extra["verify"] is None
+
+
+class _ServerProvider(FakeProvider):
+    """A provider that also implements the optional loaded_context_window hook
+    (spec §3.1). `loaded` may be an int, None, or an Exception to raise."""
+
+    def __init__(self, loaded, context_window=65536):
+        super().__init__([], context_window=context_window)
+        self._loaded = loaded
+
+    def loaded_context_window(self, model):
+        if isinstance(self._loaded, Exception):
+            raise self._loaded
+        return self._loaded
+
+
+def test_resolve_context_window_prefers_what_the_server_loaded():
+    provider = _ServerProvider(131072)
+    assert resolve_context_window("qwen/qwen3-coder-next", None, None, provider) == \
+        (131072, "provider:fake:server")
+
+
+@pytest.mark.parametrize("loaded", [None, 0, -1, True, "65536", RuntimeError("boom")])
+def test_resolve_context_window_falls_back_to_the_table_when_the_probe_says_nothing(loaded):
+    provider = _ServerProvider(loaded)
+    assert resolve_context_window("qwen/qwen3-coder-next", None, None, provider) == \
+        (65536, "provider:fake")
+
+
+def test_resolve_context_window_without_the_hook_uses_the_table():
+    # Every existing double and every third-party provider is this case.
+    provider = FakeProvider([], context_window=65536)
+    assert not hasattr(provider, "loaded_context_window")
+    assert resolve_context_window("qwen/qwen3-coder-next", None, None, provider) == \
+        (65536, "provider:fake")
+
+
+def test_flag_and_env_still_beat_the_server_report():
+    provider = _ServerProvider(131072)
+    assert resolve_context_window("m", 8000, None, provider) == (8000, "flag")
+    assert resolve_context_window("m", None, "9000", provider) == (9000, "env")
+
+
+class _TimeoutSandbox:
+    """A sandbox whose bash always times out (or never does), with the canonical
+    text the real backends produce. Only `bash` is needed: the registry calls
+    exactly the method the tool dispatches to."""
+
+    def __init__(self, timing_out=True):
+        self.timing_out = timing_out
+        self.commands = []
+
+    def bash(self, command, timeout=120):
+        self.commands.append(command)
+        if self.timing_out:
+            from dirtywork.tools import timeout_result
+            return timeout_result(timeout)
+        return "exit code: 0\nfine"
+
+
+def _bash_call(call_id, command="sleep 999"):
+    return _call(call_id, "bash", {"command": command})
+
+
+def test_timed_out_is_flagged_on_the_event_and_absent_otherwise(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_bash_call("b1")]),
+        _resp(content="done"),
+    ])
+    r = Runner(provider, registry, _TimeoutSandbox(), transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    events = [e for e in _events(tmp) if e["event"] == "tool_result"]
+    assert events[0]["timed_out"] is True
+    assert result.extra["timeouts"] == 1
+
+    # and a normal bash result carries no such key at all (sparse, additive)
+    transcript2 = Transcript(tmp / "t2.jsonl")
+    registry2 = default_registry(transcript=transcript2)
+    provider2 = FakeProvider([_resp(tool_calls=[_bash_call("b2")]), _resp(content="ok")])
+    r2 = Runner(provider2, registry2, _TimeoutSandbox(timing_out=False), transcript2,
+                model="m")
+    result2 = r2.run("s", "t")
+    transcript2.close()
+    events2 = [json.loads(l) for l in (tmp / "t2.jsonl").read_text().splitlines()]
+    tool_events = [e for e in events2 if e["event"] == "tool_result"]
+    assert "timed_out" not in tool_events[0]
+    assert result2.extra["timeouts"] == 0
+
+
+class _GrepTimeoutSandbox:
+    """grep's OWN (unrelated) timeout wording -- spec §4.2: a grep timeout is
+    the harness searching on the worker's behalf, not a worker-run command, so
+    it must not flag `timed_out` on the tool_result event or count toward the
+    run's `timeouts`."""
+
+    def grep(self, pattern, path=".", glob=None, timeout=30):
+        from dirtywork.tools import grep_timeout_result
+        return grep_timeout_result(timeout)
+
+
+def test_grep_timeout_is_not_flagged_or_counted(parts):
+    # M10: is_timeout_result (and therefore `timed_out`/`timeouts`) keys on
+    # TIMEOUT_PREFIX ("ERROR: command timed out after ..."), which grep's own
+    # wording never starts with -- a grep timeout must read like any other
+    # tool result.
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("g1", "grep", {"pattern": "x"})]),
+        _resp(content="done"),
+    ])
+    r = Runner(provider, registry, _GrepTimeoutSandbox(), transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    events = [e for e in _events(tmp) if e["event"] == "tool_result"]
+    assert "ERROR: grep timed out after 30s" in events[0]["result"]
+    assert "timed_out" not in events[0]
+    assert result.extra["timeouts"] == 0
+
+
+def test_one_timeout_nudge_per_turn_even_with_two_timeouts(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_bash_call("b1", "sleep 1"), _bash_call("b2", "sleep 2")]),
+        _resp(content="done"),
+    ])
+    r = Runner(provider, registry, _TimeoutSandbox(), transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    nudges = [e for e in _events(tmp) if e["event"] == "nudge"]
+    assert [n["kind"] for n in nudges] == ["timeout"]
+    assert nudges[0]["turn"] == 1
+    assert result.extra["timeouts"] == 2        # the COUNT is per call, not per turn
+    # the nudge text reached the model as the next user message
+    second_request = provider.requests[1]
+    assert second_request[-1]["role"] == "user"
+    assert second_request[-1]["content"] == (
+        "A command timed out and did not finish; its result is unknown. Re-run it "
+        "with a larger timeout (up to 600 seconds) or split it into smaller "
+        "commands. Do not report it as passed.")
+
+
+def test_timeout_nudge_merges_with_the_stall_nudge(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    # stall_turns=2 nudges at turn 1 (2 // 2); the same turn also timed out.
+    provider = FakeProvider([_resp(tool_calls=[_bash_call("b1")]),
+                             _resp(content="done")])
+    r = Runner(provider, registry, _TimeoutSandbox(), transcript, model="m",
+               stall_turns=2)
+    r.run("s", "t")
+    transcript.close()
+    kinds = [e["kind"] for e in _events(tmp) if e["event"] == "nudge"]
+    # Both events are written; their ORDER follows the code path (check_progress
+    # runs first, because it may end the run), while the merged MESSAGE leads
+    # with the timeout, which is the more actionable of the two.
+    assert sorted(kinds) == ["stall", "timeout"]
+    text = provider.requests[1][-1]["content"]
+    assert text.startswith("A command timed out and did not finish;")
+    assert "No progress in the last 1 turns" in text
+    assert "\n\n" in text                      # merged through _join_nudges
+
+
+def test_no_timeout_nudge_when_the_turn_ends_the_run(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_bash_call("b1"),
+                          _call("f1", "finish", {"summary": "done anyway"})]),
+    ])
+    r = Runner(provider, registry, _TimeoutSandbox(), transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert [e for e in _events(tmp) if e["event"] == "nudge"] == []
+    assert result.extra["timeouts"] == 1       # the COUNT is unaffected by finishing
+
+
+class _TimeoutThenFailingVerifySandbox:
+    """Worker bash calls time out; the --verify command runs "for real" and
+    fails with a plain nonzero exit -- distinguished by command so the
+    verify-failure text stays clean instead of itself reading as a timeout."""
+
+    def __init__(self, verify_command):
+        self.verify_command = verify_command
+
+    def bash(self, command, timeout=120):
+        if command == self.verify_command:
+            return "exit code: 1\nboom"
+        from dirtywork.tools import timeout_result
+        return timeout_result(timeout)
+
+
+def test_verify_feedback_carries_the_timeout_nudge_from_the_same_turn(parts):
+    # M4 regression: the verify-feedback `continue` path used to return to the
+    # loop top before the timeout-nudge composition ran, so a turn that timed
+    # out a worker bash command AND called finish into a FAILING --verify
+    # continued without ever telling the model about the timeout. Spec §4.3:
+    # the nudge is emitted on turns that continue -- and this turn continues
+    # (verify_rounds=1 leaves a round).
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_bash_call("b1"), _call("f1", "finish", {"summary": "done"})]),
+        _resp(content="ok now"),
+    ])
+    box = _TimeoutThenFailingVerifySandbox("npm test")
+    r = Runner(provider, registry, box, transcript, model="m",
+               verify="npm test", verify_rounds=1)
+    r.run("s", "t")
+    transcript.close()
+
+    # exactly one nudge{kind:timeout} event, for turn 1
+    nudges = [e for e in _events(tmp) if e["event"] == "nudge"]
+    assert [n["kind"] for n in nudges] == ["timeout"]
+    assert nudges[0]["turn"] == 1
+
+    # the next user message carries BOTH texts, merged into one message
+    second_request = provider.requests[1]
+    assert second_request[-1]["role"] == "user"
+    content = second_request[-1]["content"]
+    assert "VERIFY FAILED (round 1 of 2)" in content
+    assert "A command timed out and did not finish" in content
+
+
+def test_a_verify_timeout_is_not_counted(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(content="all done")])
+    box = _TimeoutSandbox()
+    r = Runner(provider, registry, box, transcript, model="m",
+               verify="npm test", verify_rounds=0)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "verify_failed"
+    assert box.commands == ["npm test"]        # it DID run, and it DID time out
+    assert result.extra["timeouts"] == 0       # spec §4.3: worker tool calls only
+    assert [e for e in _events(tmp) if e["event"] == "nudge"] == []

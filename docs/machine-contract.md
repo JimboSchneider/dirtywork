@@ -15,16 +15,17 @@ dirtywork run --repo <path> "<task>"
     [--verify "<cmd>"]                # run this in the sandbox on completion; non-zero → `verify_failed`
     [--verify-rounds 1]               # fix rounds after a failed --verify (0 = verify once, no retry)
     [--verify-timeout 600]            # seconds per --verify run, clamped to 1-600
-    [--context-window <tokens>]       # default: built-in table, else 32768 (+ stderr warning)
+    [--context-window <tokens>]       # default: the server's loaded window, else the
+                                      # built-in table, else 32768 (+ stderr warning)
     [--timeout 1800]                  # whole-run wall clock, seconds
     [--temperature <f>]               # omitted by default → server preset
     [--provider openai|anthropic]     # default: openai; anthropic needs ANTHROPIC_API_KEY
     [--base-url <url>]                # default depends on --provider (LM Studio for openai,
-                                       # https://api.anthropic.com for anthropic)
+                                      # https://api.anthropic.com for anthropic)
     [--max-worktree-mb 2048]
     [--max-worktree-files 200000]
     [--sandbox docker|none]           # default: docker
-    [--image ghcr.io/jimboschneider/dirtywork-worker:0.8]  # docker mode only
+    [--image ghcr.io/jimboschneider/dirtywork-worker:0.9]  # docker mode only
     [--allow-network]                 # docker mode only; default --network none
     [--memory 4g]                     # docker mode only
     [--cpus 2]                        # docker mode only
@@ -58,19 +59,19 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   the same worktree.
 
 - `--image REF` (docker mode) — the worker image, default
-  `ghcr.io/jimboschneider/dirtywork-worker:0.8`. The image is the worker's
+  `ghcr.io/jimboschneider/dirtywork-worker:0.9`. The image is the worker's
   whole toolchain: with `--network none` and no host mounts, nothing can be
   installed during a run. To add a tool, derive an image once:
 
   ```Dockerfile
-  FROM ghcr.io/jimboschneider/dirtywork-worker:0.8
+  FROM ghcr.io/jimboschneider/dirtywork-worker:0.9
   USER root
   RUN apt-get update && apt-get install -y --no-install-recommends <packages> \
       && rm -rf /var/lib/apt/lists/*
   USER worker
   ```
 
-  then `docker build -t my-worker:0.8 .` and `--image my-worker:0.8`. A custom
+  then `docker build -t my-worker:0.9 .` and `--image my-worker:0.9`. A custom
   `--image` is never digest-pinned — `PINNED_DIGEST` protects the maintained
   default image only.
 
@@ -95,8 +96,17 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   explicit flag on `resume` overrides the inherited value.
 - `--context-window TOKENS` — the model's context window, used to size the
   transcript trimming budget. Precedence: flag, then `DIRTYWORK_CONTEXT_WINDOW`,
-  then a built-in table for the known LM Studio models, then 32768 (with a
-  warning on stderr).
+  then **what the server reports it actually loaded the model with** (LM Studio's
+  `GET /api/v0/models` → `loaded_context_length`, probed once at preflight with
+  a 2-second timeout; any failure is silently no answer), then a built-in table
+  for the known LM Studio models, then 32768 (with a warning on stderr — only
+  this last step warns). Which step answered is recorded as
+  `context_window_source` on `run_start`, `run.json`, every payload and
+  `run_end`: `flag`, `env`, `provider:<name>:server`, `provider:<name>`, or
+  `default`. Ollama is not probed in 0.9 — its `/api/show` reports the model's
+  architectural maximum rather than the loaded `num_ctx` — so pass
+  `--context-window` there. See
+  [Sizing the context window](operating.md#sizing-the-context-window).
 
 - `--allow-commit` (host mode only) — replaces the prompt's "leave all changes
   uncommitted for review" rule with "commit your work in small conventional
@@ -105,6 +115,44 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   carries files, not commits (its archive can never contain a `.git` entry), so
   a container's commits could not reach the host anyway. `dirtywork resume`
   inherits the setting from the run it continues.
+
+**Tools:** the worker is advertised exactly ten tools, in this order. They are
+not configurable; a run's tool surface is the same in host and docker mode.
+
+- `read_file(path, offset=0, limit=400)` — numbered lines; files over ~5 MB and
+  non-regular files are refused.
+- `write_file(path, content)` — create or overwrite; parent directories are
+  created. The result echoes a capped unified diff (a new file reports its byte
+  and line count instead).
+- `edit_file(path, old_string, new_string)` — one exact replacement;
+  `old_string` must occur exactly once.
+- `apply_edits(path, edits)` — several exact replacements to ONE file in one
+  call, applied **in order on the running text** (edit *i* sees the text after
+  edits 1…*i−1*), each `old` matching exactly once at its turn. All-or-nothing
+  before the write: the first failure writes nothing and the result names it
+  (`ERROR: edit i of N: …`). At most 100 edits and 2 MiB of argument text per
+  call. This is the tool for a brief's numbered edit list.
+- `insert_before(path, anchor, text)` / `insert_after(path, anchor, text)` —
+  insert whole line(s) around the line holding a unique `anchor`, never
+  modifying the anchor's own line.
+- `list_dir(path=".")` — entries, directories suffixed `/`.
+- `grep(pattern, path=".", glob=None)` — regex search (ripgrep when the image
+  has it, `grep -rn` otherwise).
+- `bash(command, timeout=120)` — a shell command in the worktree; 600 s
+  maximum. A command that hits its timeout returns
+  `ERROR: command timed out after <n>s — it did not finish and its result is
+  unknown. …` with **no partial output**, the `tool_result` event carries
+  `timed_out: true`, and the run's `timeouts` counter rises.
+- `finish(summary)` — ends the run.
+
+The four in-place tools (`edit_file`, `apply_edits`, `insert_before`,
+`insert_after`) share one read→transform→write path per backend, so they refuse
+an oversized result with the same string
+(`ERROR: result is <n> bytes, over the <limit>-byte write limit; nothing was
+written`) and produce byte-identical success text on the host and in the
+container. "Nothing was written" covers every failure **before** the write
+begins; a failure *during* the write (I/O error, kill) can still leave a
+truncated file — see `docs/operating.md`.
 
 **stdout:** on any run that gets past preflight, exactly one JSON object is
 printed to stdout (nothing else goes to stdout):
@@ -141,16 +189,24 @@ printed to stdout (nothing else goes to stdout):
     "output_tail": "exit code: 0\n12 passing",
     "rounds": 1,
     "passed": true
-  }
+  },
+  "trimmed_turns": 0,
+  "timeouts": 0,
+  "context_window_source": "provider:openai:server"
 }
 ```
 
-The last six keys are 0.8 additions (`stuck_on`, `files_changed`,
+Six of those keys are 0.8 additions (`stuck_on`, `files_changed`,
 `files_changed_truncated`, `last_tool_result`, `last_assistant_text`,
-`verify`). Every one of them is present on every payload — `null` when it
-does not apply, `[]`/`false` for the list and its flag — including the two
-paths where `runner.run()` never returns (see below), where they carry those
-same null/empty defaults rather than being omitted.
+`verify`) and the last three are 0.9's (`trimmed_turns`, `timeouts`,
+`context_window_source`). Every one of them is present on every payload —
+`null` when it does not apply, `[]`/`false` for the list and its flag, `0` for
+the two counters — including the two paths where `runner.run()` never returns
+(see below), where they carry those same defaults rather than being omitted.
+`trimmed_turns` is how many turns had to drop tool results to fit the context
+budget, `timeouts` how many `bash` calls never finished, and
+`context_window_source` which precedence step produced `context_window`
+(`flag` | `env` | `provider:<name>:server` | `provider:<name>` | `default`).
 
 `status` is one of: `completed`, `max_turns`, `timeout`, `stalled`, `stuck`,
 `verify_failed`, `context_exhausted`, `model_error`, `interrupted`,
@@ -169,10 +225,11 @@ the slug of the run this one continued, or `null` if this was a fresh run.
 added on the normal end-of-run path — i.e. whenever `runner.run()` returns a
 result, `completed` or not — normally `null`; see `run_end` below for what
 each means. `stuck_on`, `files_changed`, `files_changed_truncated`,
-`last_tool_result`, `last_assistant_text` and `verify` are present on
-**every** payload (`null`/`[]`/`false` when they do not apply) — including
+`last_tool_result`, `last_assistant_text`, `verify`, `trimmed_turns`,
+`timeouts` and `context_window_source` are present on
+**every** payload (`null`/`[]`/`false`/`0` when they do not apply) — including
 the two paths below where `runner.run()` never returns, where they carry
-those same defaults rather than being omitted. The last four of these six
+those same defaults rather than being omitted. Four of those 0.8 keys
 are there so a run that ends with an empty `final_message` is still
 triageable without opening the transcript: what it changed, what it last ran
 and what it last said. On a `completed` run they are just as useful — "the
@@ -182,7 +239,9 @@ The two
 paths where `runner.run()` never returns (sandbox setup fails before it
 starts, or an exception escapes the loop and is caught in `main()`) report
 `base_commit` and `resumed_from`, the six 0.8 evidence keys above (as their
-null/empty defaults), plus `export_status` too if a docker `finalize()` ran
+null/empty defaults) **and** the three 0.9 contract keys — `trimmed_turns` and
+`timeouts` as `0`, `context_window_source` as the value preflight actually
+resolved — plus `export_status` too if a docker `finalize()` ran
 during that exception recovery — `finalize_error`, `watchdog_violation` and
 `watchdog_violation_kind` are not present on these two paths, since they
 never got far enough to know.
@@ -212,7 +271,7 @@ Full field-by-field schema, including every v1→v2 addition and the
 config, `schema_version: 2`, plus provenance: `worktree`, `base_commit`,
 `branch`, `branch_from`, `base_url`, `dirtywork_version`, `temperature`,
 `sandbox` — the docker settings dict, or `"none"` — and `provider`,
-`context_window`, `resumed_from`),
+`context_window`, `context_window_source`, `resumed_from`),
 `assistant` (text + tool calls — text capped at 64 000 chars in the
 transcript only, the full text is still sent to the model), `tool_result`
 (truncated), `guardrail_block`, `nudge` (`{"event": "nudge", "kind":

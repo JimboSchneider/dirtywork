@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -70,7 +71,14 @@ def test_measure_does_not_report_internal_symlink(wt: Path):
     assert report.escaping_symlinks == []
 
 
-@pytest.mark.skipif(os.getuid() == 0, reason="root ignores directory permissions")
+# `os.getuid` does not exist on Windows, and this decorator is evaluated at
+# COLLECTION time -- calling it unguarded makes the whole module fail to import
+# there, which would hide every other budget test from the advisory Windows run
+# (spec §5). `chmod 000` does not deny access on Windows either, so the test is
+# skipped rather than fixed.
+@pytest.mark.skipif(getattr(os, "getuid", lambda: -1)() == 0 or sys.platform == "win32",
+                    reason="root (or Windows, where chmod 000 does not deny access) "
+                           "ignores directory permissions")
 def test_measure_unreadable_dir_is_violation(wt: Path):
     locked = wt / "locked"
     locked.mkdir()

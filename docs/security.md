@@ -11,15 +11,20 @@ dirtywork's containment model — what Docker mode locks down, what it doesn't, 
 > not show the worker.
 
 > **Windows: designed for Docker Desktop on Windows; not supported until a
-> Windows integration suite passes.** Items that need real Windows testing:
-> Git for Windows paths and `\\?\` handling, `docker` CLI behavior, uid
+> Windows integration suite passes.** Since 0.9 the unit suite also runs on
+> `windows-latest` in CI as an **advisory (allowed-to-fail) job**: it is a
+> separate job that the release gate does not require, and it publishes a
+> per-file pass/fail/error/skip table (`tools/junit_summary.py`) plus the raw
+> JUnit XML as an artifact. That measures the gap; it does not close it, and no
+> production code is changed for Windows. Items that still need real Windows
+> testing: Git for Windows paths and `\\?\` handling, `docker` CLI behavior, uid
 > `1000:1000`, symlink-as-file export, case-insensitivity, long paths,
 > `core.symlinks=false`, `core.longpaths`.
 
 **Docker is the default sandbox as of 0.4 — a breaking change from 0.2.**
-Every tool call (`read_file`/`write_file`/`edit_file`/`insert_before`/
-`insert_after`/`list_dir`/`grep`/`bash`) runs inside a locked-down
-container: `--network none` by default,
+Every tool call (`read_file`/`write_file`/`edit_file`/`apply_edits`/
+`insert_before`/`insert_after`/`list_dir`/`grep`/`bash`) runs inside a
+locked-down container: `--network none` by default,
 `--read-only` root filesystem, `--cap-drop ALL`, kernel-enforced memory/CPU/
 process-count/per-file-size limits, and no host path mounted in except the
 parent repository's read-only git object store. The worker's tree lives on

@@ -17,11 +17,15 @@ from ..tools import (
     MAX_LIST_ENTRIES,
     MAX_READ_BYTES,
     MAX_WRITE_BYTES,
+    _apply_edits_once,
     _cap,
+    _check_write_size,
     _insert_once,
     _number_lines,
     _replace_once,
     describe_write,
+    grep_timeout_result,
+    timeout_result,
 )
 from . import SandboxError
 from . import docker_args
@@ -467,6 +471,13 @@ class DockerSandbox:
         new_text, result = transform(text)
         if new_text is None:
             return result
+        # Spec §1.5: the shared cap fires BEFORE _write_raw's own _oversized
+        # check, so all four in-place tools refuse an oversized result with the
+        # same string here as on the host. write_file still reaches _oversized
+        # with its own wording, which is why that check stays where it is.
+        too_big = _check_write_size(new_text)
+        if too_big:
+            return too_big
         err = self._write_raw(path, new_text.encode("utf-8"))
         if err:
             return err
@@ -474,6 +485,9 @@ class DockerSandbox:
 
     def edit_file(self, path: str, old_string: str, new_string: str) -> str:
         return self._transform_file(path, _replace_once(path, old_string, new_string))
+
+    def apply_edits(self, path: str, edits: list) -> str:
+        return self._transform_file(path, _apply_edits_once(path, edits))
 
     def insert_before(self, path: str, anchor: str, text: str) -> str:
         return self._transform_file(path, _insert_once(path, anchor, text, "before"))
@@ -565,8 +579,14 @@ class DockerSandbox:
         argv = docker_args.exec_argv(self.container, cmd)
         try:
             captured = self._run(argv, timeout=timeout + 10)
-        except docker_cli.DockerError:
-            return f"ERROR: grep timed out after {timeout}s — narrow the pattern or path."
+        except docker_cli.DockerError as e:
+            # Spec §4.2: the same discrimination as bash below. A grep timeout
+            # keeps its own (unchanged) wording and does NOT count toward
+            # `timeouts` or the `timeout` nudge -- those are about commands the
+            # WORKER ran, and grep is the harness searching on its behalf.
+            if e.timed_out:
+                return grep_timeout_result(timeout)
+            return f"ERROR: grep failed: {e}"
         if captured.returncode not in (0, 1):
             return f"ERROR: grep failed: {captured.output.decode('utf-8', 'replace')[:500]}"
         text = captured.output.decode("utf-8", errors="replace")
@@ -767,10 +787,16 @@ class DockerSandbox:
             self.watchdog.note_bash_start()
         try:
             captured = self._run(argv, timeout=timeout + 10)
-        except docker_cli.DockerError:
+        except docker_cli.DockerError as e:
             if self.watchdog is not None:
                 self.watchdog.note_bash_end()
-            result = _cap(f"ERROR: command timed out after {timeout}s.", cap=MAX_BASH_CHARS)
+            # Spec §4.2: only a REAL expired timeout renders as the canonical
+            # timeout text. Any other DockerError (a killed container, an exec
+            # that could not start) gets the host's own non-timeout wording, so
+            # an ordinary failure is never read as "it might still be running"
+            # -- and never counts as a timeout downstream.
+            result = (timeout_result(timeout) if e.timed_out
+                      else f"ERROR: bash failed: {e}")
             self._after_bash()
             return result
         if self.watchdog is not None:

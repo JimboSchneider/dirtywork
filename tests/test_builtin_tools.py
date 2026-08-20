@@ -11,7 +11,7 @@ from dirtywork.builtin_tools import default_registry
 from dirtywork.sandbox.host import HostSandbox
 from dirtywork.transcript import Transcript
 
-FROZEN_SCHEMAS = Path(__file__).parent / "fixtures" / "tool_schemas_v051.json"
+FROZEN_SCHEMAS = Path(__file__).parent / "fixtures" / "tool_schemas.json"
 
 
 class FakeSandbox:
@@ -29,6 +29,10 @@ class FakeSandbox:
     def edit_file(self, path, old_string, new_string):
         self.calls.append(("edit_file", path, old_string, new_string))
         return f"edited:{path}"
+
+    def apply_edits(self, path, edits):
+        self.calls.append(("apply_edits", path, edits))
+        return f"applied:{path}:{len(edits)}"
 
     def insert_before(self, path, anchor, text):
         self.calls.append(("insert_before", path, anchor, text))
@@ -57,9 +61,15 @@ def wt(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_schemas_match_the_frozen_v051_wire_contract():
+def test_schemas_match_the_frozen_wire_fixture():
     # The model-facing contract must not drift without a deliberate, matching
-    # change to builtin_tools.py AND to this fixture.
+    # change to builtin_tools.py AND to this fixture. The fixture tracks HEAD
+    # (it was regenerated in 0.8 and again in 0.9), which is why it is no
+    # longer named after 0.5.1: regenerate it with
+    #   python3 -c "import json; from dirtywork.builtin_tools import default_registry; \
+    #     open('tests/fixtures/tool_schemas.json','w',encoding='utf-8').write(\
+    #     json.dumps(default_registry().schemas(), indent=2, ensure_ascii=False) + '\n')"
+    # and read the diff before committing it.
     expected = json.loads(FROZEN_SCHEMAS.read_text(encoding="utf-8"))
     assert default_registry().schemas() == expected
 
@@ -67,11 +77,28 @@ def test_schemas_match_the_frozen_v051_wire_contract():
 def test_schemas_shape():
     schemas = default_registry().schemas()
     names = {s["function"]["name"] for s in schemas}
-    assert names == {"read_file", "write_file", "edit_file", "insert_before", "insert_after",
-                     "list_dir", "grep", "bash", "finish"}
+    assert names == {"read_file", "write_file", "edit_file", "apply_edits", "insert_before",
+                     "insert_after", "list_dir", "grep", "bash", "finish"}
     for s in schemas:
         assert s["type"] == "function"
         assert "parameters" in s["function"]
+
+
+def test_apply_edits_dispatches_and_declares_its_caps():
+    sandbox = FakeSandbox()
+    registry = default_registry()
+    result = registry.execute(
+        "apply_edits", {"path": "a.py", "edits": [{"old": "x", "new": "y"}]},
+        sandbox=sandbox, deadline=None)
+    assert result.kind == "ok" and result.text == "applied:a.py:1"
+    assert sandbox.calls == [("apply_edits", "a.py", [{"old": "x", "new": "y"}])]
+    caps = registry.spec("apply_edits").caps
+    assert caps.fs == "write"
+    assert caps.max_input_bytes == 2 * 1024 * 1024
+    assert caps.transcript == "preview"
+    # order is significant and documented in BUILTIN_SPECS
+    names = registry.names()
+    assert names[names.index("edit_file") + 1] == "apply_edits"
 
 
 def test_bash_schema_mentions_reset_behavior():

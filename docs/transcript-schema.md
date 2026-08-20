@@ -39,7 +39,8 @@ One per run, always the first line.
 | `repo` | ✓ | ✓ | string | absolute path |
 | `worktree` | ✓ | ✓ | string | absolute path |
 | `schema_version` | | ✓ | `2` | present from v2 onward; its absence marks v1 |
-| `context_window` | | ✓ | integer | tokens; the resolved value (`--context-window` > `DIRTYWORK_CONTEXT_WINDOW` > the provider's table > 32768) |
+| `context_window` | | ✓ | integer | tokens; the resolved value (`--context-window` > `DIRTYWORK_CONTEXT_WINDOW` > what the server reports it loaded the model with > the provider's static table > 32768) |
+| `context_window_source` | | ✓ | string \| null | 0.9: which of those steps answered — `flag`, `env`, `provider:<name>:server` (the server's own report, e.g. LM Studio's `loaded_context_length`), `provider:<name>` (the built-in table), or `default` (nothing knew; the "assuming 32768 tokens" warning fires only for this one). `null` only for a `Runner` constructed directly without a source |
 | `base_commit` | | ✓ | string | resolved commit the worktree branched from |
 | `branch` | | ✓ | string | `dirtywork/<slug>` |
 | `branch_from` | | ✓ | string \| null | the ref the worktree was branched from, or null for repo HEAD. For `--branch-from @<slug>` this is the **resolved branch name** of that run, not the `@<slug>` text; `run.json`'s `branch_from_run` records the slug |
@@ -66,9 +67,10 @@ One per tool call executed, plus one per malformed tool-call entry discarded.
 
 | Field | v1 | v2 | Type | Notes |
 |---|---|---|---|---|
-| `tool` | ✓ | ✓ | string | tool name — one of `read_file`, `write_file`, `edit_file`, `insert_before`, `insert_after`, `list_dir`, `grep`, `bash`, `finish` (`insert_before`/`insert_after` are v2, added in 0.8); `""` for a discarded malformed entry |
+| `tool` | ✓ | ✓ | string | tool name — one of `read_file`, `write_file`, `edit_file`, `apply_edits`, `insert_before`, `insert_after`, `list_dir`, `grep`, `bash`, `finish` (`insert_before`/`insert_after` are v2, added in 0.8; `apply_edits` in 0.9); `""` for a discarded malformed entry |
 | `args` | ✓ | ✓ | string | the raw JSON argument string, capped at 500 chars; `""` for a discarded malformed entry |
-| `result` | ✓ | ✓ | string | the tool's result, trimmed per the tool's `Caps.transcript` setting. All built-in tools declare `preview`, which caps the record at 2000 chars; the registry also supports `full` and `none`, unused by any shipped tool. Since 0.8 a successful `edit_file`/`write_file` result is `<Verb> <path>: +A -D [(removed N non-blank lines)]` followed by a unified diff (capped at 40 lines / 3000 chars, then `[diff truncated: N more lines]`); `write_file` on a new file returns `Wrote N bytes to <path> (new file, M lines)` with no diff. When either side of the edit exceeds 20000 lines, the diff itself is never computed (it is quadratic-ish on files with popular repeated lines) — the result is just `<Verb> <path>: <N> lines (diff omitted: file too large)` |
+| `result` | ✓ | ✓ | string | the tool's result, trimmed per the tool's `Caps.transcript` setting. All built-in tools declare `preview`, which caps the record at 2000 chars; the registry also supports `full` and `none`, unused by any shipped tool. Since 0.8 a successful `edit_file`/`write_file` result is `<Verb> <path>: +A -D [(removed N non-blank lines)]` followed by a unified diff (capped at 40 lines / 3000 chars, then `[diff truncated: N more lines]`); `write_file` on a new file returns `Wrote N bytes to <path> (new file, M lines)` with no diff. 0.9's `apply_edits` uses the same shape with the verb `Applied N edits to` (`Applied 1 edit to` for a single edit). When either side of the edit exceeds 20000 lines, the diff itself is never computed (it is quadratic-ish on files with popular repeated lines) — the result is just `<Verb> <path>: <N> lines (diff omitted: file too large)`. An in-place tool whose RESULT would exceed the 5 MB write limit returns `ERROR: result is <n> bytes, over the <limit>-byte write limit; nothing was written` on both backends (0.9) |
+| `timed_out` | | ✓ | boolean | 0.9: `true` on a `bash` tool result whose command hit its timeout. **Sparse** — the key is absent, not `false`, on every other result, including a `grep` timeout (a different wording and a different meaning: the harness's search, not the worker's command) and the `--verify` command (not a tool call, so it produces no `tool_result` at all; its outcome is in `verify`) |
 
 A `finish(summary=…)` call is an ordinary tool call: it appears in the
 `assistant` event's `tool_calls` and produces a `tool_result` whose `result` is
@@ -84,7 +86,7 @@ messages), but each is recorded here separately.
 
 | Field | v1 | v2 | Type | Notes |
 |---|---|---|---|---|
-| `kind` | | ✓ | string | `truncated` (the reply hit the token limit), `empty` (no tool call and no answer), `text_tool_call` (a tool call written as prose instead of through the tools API), `stall` (no progress for `--stall-turns // 2` turns) |
+| `kind` | | ✓ | string | `truncated` (the reply hit the token limit), `empty` (no tool call and no answer), `text_tool_call` (a tool call written as prose instead of through the tools API), `stall` (no progress for `--stall-turns // 2` turns), `timeout` (0.9: at least one `bash` command timed out on this turn — exactly one per turn however many timed out, and only on a turn that continues; a timeout is not a `FailureTracker` event) |
 | `turn` | | ✓ | integer | 1-based turn number the nudge was issued on |
 
 ### `guardrail_block`
@@ -124,7 +126,8 @@ the export runs.
 
 One per run, always the last line. Written by the runner on every terminal
 status, and by the CLI's failure paths when the runner never returned (in that
-case it carries `status` and `error` only).
+case it carries `status`, `error` and the rows marked **always** below —
+run-level fields that are known even when the agent loop never started).
 
 | Field | v1 | v2 | Type | Notes |
 |---|---|---|---|---|
@@ -150,6 +153,9 @@ case it carries `status` and `error` only).
 | `last_tool_result` | | ✓ | object \| null | 0.8: `{tool, args, result}` for the last tool call the runner executed other than `finish` (`args` ≤500 chars, `result` ≤2000 chars); `null` if no tool ever ran |
 | `last_assistant_text` | | ✓ | string \| null | 0.8: the model's last non-empty assistant text, capped at 2000 chars; `null` if there was none |
 | `verify` | | ✓ | object \| null | 0.8: `{command, exit_code, output_tail, rounds, passed}` for the LAST `--verify` execution (`output_tail` capped at 4000 chars); `null` when `--verify` was not given |
+| `trimmed_turns` | | ✓ | integer | **always** — 0.9: the number of turns on which the runner had to replace at least one tool result with `[result trimmed — re-run the tool if needed]` to fit the char budget. A result already trimmed is never recounted, and the final failing trim (the one that ends the run `context_exhausted`) counts if it trimmed anything. `0` on a run that never trimmed, and on the two failure paths where the runner never returned |
+| `context_window_source` | | ✓ | string | **always** — 0.9: the same value as `run_start.context_window_source`, repeated at the end so a consumer that reads only the last line still knows where the window came from |
+| `timeouts` | | ✓ | integer | **always** — 0.9: how many `bash` TOOL CALLS timed out during the run (per call, not per turn). `grep` timeouts and the `--verify` command are excluded. `0` on a run where nothing timed out, and on the two failure paths where the runner never returned |
 
 ## Statuses
 
@@ -177,6 +183,7 @@ case it carries `status` and `error` only).
 `base_commit`, `resumed_from`, `finalize_error`, `watchdog_violation`,
 `watchdog_violation_kind`, `stuck_on`, `files_changed`,
 `files_changed_truncated`, `last_tool_result`, `last_assistant_text`, `verify`,
+`trimmed_turns`, `timeouts`, `context_window_source`,
 and `export_status` on the exception-recovery path.
 Per this project's compatibility rule the stdout JSON may only gain fields,
 never lose or rename `status`, `worktree`, `branch`, `transcript`, `turns`,
@@ -200,6 +207,7 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `model` | start | |
 | `provider` | start | `"openai"` \| `"anthropic"` |
 | `context_window` | start | resolved tokens |
+| `context_window_source` | start, end | 0.9: `flag` \| `env` \| `provider:<name>:server` \| `provider:<name>` \| `default` — which precedence step produced `context_window`. Written at start and repeated at end (including on the two failure paths) so the plain `dirtywork runs show`, which reads only `run.json`, never shows `-` |
 | `resumed_from` | start | slug of the run this one continues, or null |
 | `resumed_by` | — | written onto the **prior** run's `run.json` when a resume starts |
 | `branch_from_run` | start | 0.8: the slug `--branch-from @<slug>` named, or null. The resolved branch itself is `run_start.branch_from` |
@@ -233,6 +241,8 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `last_tool_result` | end | 0.8: `{tool, args, result}` for the last non-`finish` tool call, or null |
 | `last_assistant_text` | end | 0.8: the last non-empty assistant text (≤2000 chars), or null |
 | `verify` | end | 0.8: `{command, exit_code, output_tail, rounds, passed}` for the last `--verify` execution, or null (null whenever verify never ran, even if `--verify` was given — see `verify_command` above, which `dirtywork resume` reads from instead) |
+| `trimmed_turns` | end | 0.9: turns on which at least one tool result was trimmed to fit the context budget; `0` when nothing was trimmed |
+| `timeouts` | end | 0.9: how many `bash` tool calls timed out; `0` when none did |
 | `allow_commit` | start | (bool) records whether the run's system prompt told the worker to commit as it went (`--allow-commit`, host mode only — see [docs/machine-contract.md](machine-contract.md)). A run that predates the flag has no such key. |
 | `verdict` | verdict | written by `dirtywork runs verdict`: `"accept"` \| `"reject"` \| `"cleanup"` |
 | `note` | verdict | `--note` text, or null |

@@ -111,7 +111,7 @@ def _number_lines(text: str, offset: int, limit: int) -> str:
 
 
 def _lines_keep_newlines(text: str) -> list:
-    """Like `text.splitlines(keepends=True)`, except ONLY `"\n"` is treated
+    r"""Like `text.splitlines(keepends=True)`, except ONLY `"\n"` is treated
     as a line separator. `str.splitlines()` also breaks on `\v`, `\f`,
     `\x1c`-`\x1e`, `\x85`, U+2028 and U+2029 -- a line that merely
     CONTAINS one of those characters (e.g. a form feed) would otherwise be
@@ -318,7 +318,8 @@ def _transform_file(worktree: Path, path: str, transform, *, tool: str) -> str:
     transform refused and `result` (an 'ERROR: …' string) is returned without
     writing anything. Every check edit_file used to perform itself lives here,
     unchanged: worktree containment, the regular-file/symlink refusals, the
-    5 MB read limit, UTF-8 validation, and the O_NOFOLLOW write."""
+    5 MB read limit, UTF-8 validation, and the O_NOFOLLOW write -- plus, since
+    0.9, the shared output cap (_check_write_size, spec §1.5)."""
     try:
         p = resolve_in_worktree(path, worktree, writing=True)
     except GuardrailError as e:
@@ -338,6 +339,9 @@ def _transform_file(worktree: Path, path: str, transform, *, tool: str) -> str:
     new_text, result = transform(text)
     if new_text is None:
         return result
+    too_big = _check_write_size(new_text)
+    if too_big:
+        return too_big
     write_target = _worktree_candidate(path, worktree)
     try:
         wfh = _open_regular(write_target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
@@ -388,6 +392,79 @@ def _insert_once(path: str, anchor: str, insert: str, where: str):
     return transform
 
 
+def _check_write_size(new_text: str):
+    """Spec §1.5: the one over-the-limit refusal for the shared transform path,
+    or None. Both backends' _transform_file call it immediately before the
+    write, so edit_file, insert_before, insert_after and apply_edits refuse an
+    oversized RESULT with the identical string on the host and in the
+    container.
+
+    write_file keeps its own (backend-specific) oversized wording: it refuses
+    the model's own `content` before any read, which is a different event with
+    a different fix ("write the file in smaller pieces")."""
+    size = len(new_text.encode("utf-8"))
+    if size > MAX_WRITE_BYTES:
+        return (f"ERROR: result is {size} bytes, over the {MAX_WRITE_BYTES}-byte "
+                f"write limit; nothing was written")
+    return None
+
+
+def _apply_edits_once(path: str, edits: list):
+    """apply_edits' transform (spec §1.1). Defined here, not in a backend, so
+    the host and the container share one ordering rule, one uniqueness rule and
+    one set of error strings.
+
+    Every edit is applied IN ORDER on the RUNNING text -- edit i sees the text
+    after edits 1..i-1 -- because that is what a brief's numbered list means:
+    edit 3 may legitimately depend on what edit 1 produced. Each `old` must
+    occur exactly once in the text as it stands at its turn, counted with
+    str.count (the same non-overlapping count edit_file uses).
+
+    The first failure refuses the WHOLE batch: the transform returns None as
+    its new text, which both _transform_file implementations treat as "refused,
+    do not write". Registry validation (spec §1.3) has already proved every
+    item is exactly {"old": str, "new": str} for a call routed through the
+    registry -- but Sandbox.apply_edits is a public method (see its docstring
+    in dirtywork.sandbox.Sandbox), so a malformed item is checked here too,
+    before any matching, inside the same all-or-nothing pass."""
+    total = len(edits)
+
+    def transform(text: str):
+        new_text = text
+        for index, edit in enumerate(edits, 1):
+            if (not isinstance(edit, dict)
+                    or not isinstance(edit.get("old"), str)
+                    or not isinstance(edit.get("new"), str)):
+                return None, (
+                    f"ERROR: edit {index} of {total}: each edit must be an object with "
+                    f"string 'old' and 'new'; no edits applied"
+                )
+            old = edit["old"]
+            if not old:
+                return None, (f"ERROR: edit {index} of {total}: old text is empty; "
+                              f"no edits applied")
+            count = new_text.count(old)
+            if count == 0:
+                # The "after edits 1..i-1" qualifier only makes sense from the
+                # second edit on (spec §1.2, v3.2 ruling).
+                applied = (f" (after edits 1..{index - 1} are applied)"
+                           if index > 1 else "")
+                return None, (
+                    f"ERROR: edit {index} of {total}: old text occurs 0 times in {path}; "
+                    f"it must occur exactly once{applied}; no edits applied"
+                )
+            if count > 1:
+                return None, (
+                    f"ERROR: edit {index} of {total}: old text occurs {count} times in "
+                    f"{path}; it must occur exactly once. Include more surrounding "
+                    f"context to make it unique; no edits applied"
+                )
+            new_text = new_text.replace(old, edit["new"], 1)
+        verb = f"Applied {total} edit{'' if total == 1 else 's'} to"
+        return new_text, describe_change(path, text, new_text, verb=verb)
+    return transform
+
+
 def edit_file(worktree: Path, path: str, old_string: str, new_string: str) -> str:
     return _transform_file(worktree, path, _replace_once(path, old_string, new_string),
                            tool="edit_file")
@@ -401,6 +478,11 @@ def insert_before(worktree: Path, path: str, anchor: str, text: str) -> str:
 def insert_after(worktree: Path, path: str, anchor: str, text: str) -> str:
     return _transform_file(worktree, path, _insert_once(path, anchor, text, "after"),
                            tool="insert_after")
+
+
+def apply_edits(worktree: Path, path: str, edits: list) -> str:
+    return _transform_file(worktree, path, _apply_edits_once(path, edits),
+                           tool="apply_edits")
 
 
 def list_dir(worktree: Path, path: str = ".") -> str:
@@ -449,7 +531,7 @@ def grep(worktree: Path, pattern: str, path: str = ".", glob: str | None = None,
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return f"ERROR: grep timed out after {timeout}s — narrow the pattern or path."
+        return grep_timeout_result(timeout)
     except OSError as e:
         return f"ERROR: grep failed: {e}"
     if res.returncode not in (0, 1):
@@ -467,6 +549,43 @@ MAX_BASH_CHARS = 10000
 # the process. We drain the pipe on a thread (so the child never blocks on a full
 # pipe) but keep only the first MAX_BASH_CAPTURE_BYTES.
 MAX_BASH_CAPTURE_BYTES = 1024 * 1024
+
+# Spec §4.1: ONE canonical timed-out-command result, identical on both backends.
+# TIMEOUT_PREFIX is the predicate everything downstream keys on -- the
+# tool_result flag, the `timeout` nudge, the run's `timeouts` counter,
+# `runs show`'s outcome class and the bench scoreboard -- so there is exactly
+# one string in this codebase to keep in step.
+TIMEOUT_PREFIX = "ERROR: command timed out after "
+TIMEOUT_TEXT = (TIMEOUT_PREFIX + "{timeout}s — it did not finish and its result is "
+                "unknown. Re-run it with a larger timeout (up to 600) or split it "
+                "into smaller commands; do not report it as passed.")
+
+
+def timeout_result(timeout: int) -> str:
+    """The canonical result for a command that hit its timeout. No partial
+    output is appended: the host CAN produce a tail (it captured one) and docker
+    cannot, and parity wins -- a tail is exactly what a small model reads as
+    "the command's result" when the truth is that the command never finished."""
+    return TIMEOUT_TEXT.format(timeout=timeout)
+
+
+def is_timeout_result(text) -> bool:
+    """True for a bash result produced by timeout_result(). The ONE predicate --
+    never re-derive this from a substring search somewhere else, or the two
+    will drift the first time the wording changes."""
+    return isinstance(text, str) and text.startswith(TIMEOUT_PREFIX)
+
+
+# Spec §4.2: grep's own (unchanged) timeout wording -- distinct from
+# TIMEOUT_TEXT because a grep timeout is the harness searching on the
+# worker's behalf, not a worker-run command, and does NOT count toward
+# `timeouts` or the `timeout` nudge. One string shared by both backends.
+GREP_TIMEOUT_TEXT = "ERROR: grep timed out after {timeout}s — narrow the pattern or path."
+
+
+def grep_timeout_result(timeout: int) -> str:
+    """The canonical result for a grep call that hit its timeout."""
+    return GREP_TIMEOUT_TEXT.format(timeout=timeout)
 
 
 def bash(worktree: Path, command: str, timeout: int = 120) -> str:
@@ -486,9 +605,9 @@ def bash(worktree: Path, command: str, timeout: int = 120) -> str:
     out = captured.output.decode("utf-8", errors="replace").strip()
     note = " — bash output capped" if captured.truncated else ""
     if captured.timed_out:
-        tail = f"\n{out}" if out else ""
-        return _cap(f"ERROR: command timed out after {timeout}s.{tail}",
-                    cap=MAX_BASH_CHARS, note=note)
+        # Spec §4.1: no partial output, and no cap -- the canonical text is a
+        # couple of hundred characters, far under MAX_BASH_CHARS.
+        return timeout_result(timeout)
     if captured.returncode is None and not captured.timed_out:
         return _cap(f"ERROR: bash failed: {captured.output.decode('utf-8', 'replace').strip()}", cap=MAX_BASH_CHARS, note=note)
     return _cap(f"exit code: {captured.returncode}\n{out}", cap=MAX_BASH_CHARS, note=note)
