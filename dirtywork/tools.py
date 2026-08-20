@@ -509,6 +509,18 @@ def list_dir(worktree: Path, path: str = ".") -> str:
     return _cap("\n".join(rows) or "(empty directory)")
 
 
+# Spec §4.2: grep's own (unchanged) timeout wording -- distinct from
+# TIMEOUT_TEXT because a grep timeout is the harness searching on the
+# worker's behalf, not a worker-run command, and does NOT count toward
+# `timeouts` or the `timeout` nudge. One string shared by both backends.
+GREP_TIMEOUT_TEXT = "ERROR: grep timed out after {timeout}s — narrow the pattern or path."
+
+
+def grep_timeout_result(timeout: int) -> str:
+    """The canonical result for a grep call that hit its timeout."""
+    return GREP_TIMEOUT_TEXT.format(timeout=timeout)
+
+
 def grep(worktree: Path, pattern: str, path: str = ".", glob: str | None = None,
          timeout: int = 30) -> str:
     try:
@@ -575,17 +587,6 @@ def is_timeout_result(text) -> bool:
     will drift the first time the wording changes."""
     return isinstance(text, str) and text.startswith(TIMEOUT_PREFIX)
 
-
-# Spec §4.2: grep's own (unchanged) timeout wording -- distinct from
-# TIMEOUT_TEXT because a grep timeout is the harness searching on the
-# worker's behalf, not a worker-run command, and does NOT count toward
-# `timeouts` or the `timeout` nudge. One string shared by both backends.
-GREP_TIMEOUT_TEXT = "ERROR: grep timed out after {timeout}s — narrow the pattern or path."
-
-
-def grep_timeout_result(timeout: int) -> str:
-    """The canonical result for a grep call that hit its timeout."""
-    return GREP_TIMEOUT_TEXT.format(timeout=timeout)
 
 
 def bash(worktree: Path, command: str, timeout: int = 120) -> str:

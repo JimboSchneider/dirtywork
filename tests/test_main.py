@@ -45,7 +45,7 @@ def _assert_context_window_source_is_a_string(payload: dict) -> None:
         f"context_window_source was {payload['context_window_source']!r}, expected a string")
 
 
-def test_emit_result_seeds_the_six_evidence_keys_with_defaults():
+def test_emit_result_seeds_the_contract_keys_with_defaults():
     import dirtywork.__main__ as m
     payload = m._emit_result(
         status="sandbox_error", worktree=Path("/wt"), branch="b",
