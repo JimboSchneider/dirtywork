@@ -2168,8 +2168,12 @@ def test_resume_records_its_own_context_window_source(tmp_path, monkeypatch, cap
                    "--max-tokens", "1000", "--max-turns", "1"]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["context_window_source"] == "flag"
-    assert json.loads((Path(payload["run_dir"]) / "run.json").read_text())[
-        "context_window_source"] == "flag"
+    resumed = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert resumed["context_window_source"] == "flag"
+    # The prior run's max_tokens was the 8192 default; an explicit --max-tokens
+    # on the resuming invocation overrides inheritance rather than being
+    # shadowed by it.
+    assert resumed["max_tokens"] == 1000
 
 
 def test_emit_result_seeds_context_window_source():
@@ -2244,3 +2248,26 @@ def test_resume_inherits_max_tokens_and_a_pre_0_10_run_falls_back_to_the_default
     assert m.main(["resume", run_dir.name]) == 0
     third = json.loads(capsys.readouterr().out)
     assert json.loads((Path(third["run_dir"]) / "run.json").read_text())["max_tokens"] == 8192
+
+    # An explicit null (a hand-edited run.json, not merely a missing key) also
+    # falls back to the default -- this is the branch `prior.get(k) if … is
+    # not None else DEFAULT` exists for; a plain `prior.get(k, default)` would
+    # inherit None here and traceback in the char_budget arithmetic.
+    prior["max_tokens"] = None
+    prior["status"] = "max_turns"
+    (run_dir / "run.json").write_text(json.dumps(prior))
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url))
+    assert m.main(["resume", run_dir.name]) == 0
+    fourth = json.loads(capsys.readouterr().out)
+    assert json.loads((Path(fourth["run_dir"]) / "run.json").read_text())["max_tokens"] == 8192
+
+    # A hand-edited run.json can carry anything JSON allows for this key, not
+    # just null or a missing key. A non-int inherited value also falls back to
+    # the default rather than tracebacking in preflight's `>=` comparison.
+    prior["max_tokens"] = "lots"
+    prior["status"] = "max_turns"
+    (run_dir / "run.json").write_text(json.dumps(prior))
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url))
+    assert m.main(["resume", run_dir.name]) == 0
+    fifth = json.loads(capsys.readouterr().out)
+    assert json.loads((Path(fifth["run_dir"]) / "run.json").read_text())["max_tokens"] == 8192

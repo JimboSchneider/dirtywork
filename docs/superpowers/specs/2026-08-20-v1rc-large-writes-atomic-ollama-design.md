@@ -177,6 +177,12 @@ helper (adapters stay dumb; `raw_arguments` is a neutral `ToolCall` field) recov
   is not None else DEFAULT_MAX_TOKENS` — the §6 hardened shape, which also covers pre-0.10
   `run.json` files. **Stated consequence:** resuming a 0.9 run silently moves the effective cap
   4096 → 8192 (the new default; the resume transcript records the value used).
+
+  (Execution amendment, 2026-08-23: fix round 1 for Task 7 hardens the inherited value itself, not
+  just its presence — a non-`int` (bool excluded), zero, or negative `prior.get("max_tokens")` now
+  also falls back to `DEFAULT_MAX_TOKENS`, since a hand-edited `run.json` can carry anything JSON
+  allows for this key and would otherwise traceback preflight's `>=` comparison or bypass
+  `_positive_int` into a cap-blind or inflated budget.)
 - Threaded `__main__` → `Runner.__init__(max_tokens=…)` → the single `provider.chat` call site
   (`runner.py:590-592`) as an explicit kwarg. Both adapters already accept it; their own defaults
   stay 4096 for direct callers (`tests/test_llm.py`'s `payload["max_tokens"] == 4096` stays

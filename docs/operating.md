@@ -281,7 +281,9 @@ buys longer single replies at the cost of prompt room, and decode is the slow
 half on a local model: a cap you never reach costs nothing, but a cap you do
 reach costs seconds per turn. Lower it when a model rejects it (some older
 Claude models cap output at 4096) or when you would rather spend the window on
-context than on one long reply.
+context than on one long reply. The refusal is flat, with no small-window
+exemption: a server-reported context window at or below 8192 refuses every run
+until you pass `--max-tokens` and lower it below that window.
 
 **Rules of thumb**
 

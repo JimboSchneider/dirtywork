@@ -115,7 +115,9 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   can no longer run off the end of a window the prompt already filled. Preflight
   refuses `--max-tokens` at or above the window with
   `--max-tokens <N> must be smaller than the <W>-token context window` (exit 2).
-  Recorded on `run_start` and in `run.json`; **not** echoed on the stdout payload
+  The rule is flat, with no small-window exemption: a server-reported context
+  window at or below 8192 refuses every run until `--max-tokens` is passed and
+  lowered below it. Recorded on `run_start` and in `run.json`; **not** echoed on the stdout payload
   (it is configuration, not evidence). `dirtywork resume` inherits it; a run
   recorded before 0.10 has no value to inherit and gets the 8192 default, which
   raises its effective cap from the adapters' old 4096. Pass `--max-tokens 4096`

@@ -211,7 +211,11 @@ def _resolve_context_window(args, provider=None) -> tuple:
     # Spec §1.4: prompt and reply share the window, so a cap at or above it
     # leaves no room for a prompt at all. Refused here, after the warning, so
     # an operator with an unknown model still sees which window was assumed.
-    # Read with getattr: `runs`/`bench` build Namespaces without this attribute.
+    # Read with getattr: this defends a directly-built Namespace (e.g. in a
+    # test that skips argparse), which may lack the attribute entirely. A
+    # real CLI invocation always has it -- `_add_run_flags` sets a default for
+    # both `run` and `resume` -- and `runs`/`bench` never reach this function
+    # at all: `main()` dispatches and returns for both before this call.
     max_tokens = getattr(args, "max_tokens", None)
     if max_tokens is None:
         max_tokens = DEFAULT_MAX_TOKENS
@@ -715,11 +719,20 @@ def _load_resume_target(args) -> dict:
     if getattr(args, "verify_timeout", None) is None:
         args.verify_timeout = prior.get("verify_timeout", DEFAULT_VERIFY_TIMEOUT)
     if getattr(args, "max_tokens", None) is None:
-        # Spec §1.4/§6: `.get(k) if … is not None else default` rather than
-        # `.get(k, default)`, so a pre-0.10 run.json (no key) AND a
-        # hand-edited one carrying an explicit null both land on the default.
-        args.max_tokens = (prior.get("max_tokens") if prior.get("max_tokens") is not None
-                           else DEFAULT_MAX_TOKENS)
+        # Spec §1.4/§6, hardened in fix round 1: a hand-edited run.json can
+        # carry anything JSON allows for this key -- a string, a float, a
+        # bool, zero, a negative number -- not just a missing key or an
+        # explicit null. Only a real positive int (bool excluded, since
+        # `isinstance(True, int)` is True) is inherited; everything else
+        # falls back to the default rather than tracebacking in preflight's
+        # `>=` comparison or bypassing `_positive_int` into a cap-blind or
+        # inflated budget.
+        inherited = prior.get("max_tokens")
+        if (isinstance(inherited, int) and not isinstance(inherited, bool)
+                and inherited > 0):
+            args.max_tokens = inherited
+        else:
+            args.max_tokens = DEFAULT_MAX_TOKENS
     # Last, so the earlier refusals (still running, missing worktree, provider
     # switch) keep their own messages when they apply too.
     args.feedback_text = _load_feedback(args)
