@@ -510,3 +510,245 @@ def test_edit_file_result_over_the_write_cap_is_refused(wt: Path):
     assert out == (f"ERROR: result is {expected} bytes, over the "
                    f"{tools.MAX_WRITE_BYTES}-byte write limit; nothing was written")
     assert (wt / "grow.txt").read_text() == "seed\n"
+
+
+# --- spec §2.2/§2.5/§1.2: the shared write primitive and the shared strings.
+# --- Nothing in dirtywork calls _write_atomic yet (Tasks 2, 3, 4 and 6 wire it
+# --- up); these tests are the primitive's own contract.
+
+import stat as _stat
+
+
+def _temp_leftovers(directory: Path) -> list:
+    return sorted(p.name for p in directory.iterdir() if p.name.startswith(tools.TMP_PREFIX))
+
+
+def test_tmp_name_has_the_generated_shape_and_is_random(wt: Path):
+    first = tools.tmp_name("app.py")
+    second = tools.tmp_name("app.py")
+    assert re.fullmatch(r"\.dw-tmp\.app\.py\.[0-9a-f]{8}", first)
+    assert first != second          # the worker controls sibling names
+    assert tools.is_temp_name(first) and tools.is_temp_name(second)
+
+
+def test_is_temp_name_ignores_a_worker_file_that_only_starts_like_one(wt: Path):
+    # Spec §2.5: the sweep matches the FULL generated shape, never a bare glob.
+    assert not tools.is_temp_name(".dw-tmp.notes")
+    assert not tools.is_temp_name(".dw-tmp.notes.txt")
+    assert not tools.is_temp_name(".dw-tmp.app.py.DEADBEEF")   # we only ever emit lowercase
+    assert not tools.is_temp_name("app.py")
+
+
+def test_write_atomic_creates_a_new_file_with_umask_default_mode(wt: Path):
+    target = wt / "new.txt"
+    assert tools._write_atomic(target, b"hello\n", path="new.txt") is None
+    assert target.read_bytes() == b"hello\n"
+    # Exactly what _open_regular(..., O_CREAT, mode=0o644) produced before 0.10.
+    assert _stat.S_IMODE(target.stat().st_mode) == 0o644 & ~tools._UMASK
+    assert _temp_leftovers(wt) == []
+
+
+def test_write_atomic_preserves_an_existing_files_mode(wt: Path):
+    target = wt / "script.sh"
+    target.write_text("#!/bin/sh\n")
+    target.chmod(0o755)
+    assert tools._write_atomic(target, b"#!/bin/sh\necho hi\n", path="script.sh") is None
+    assert target.read_bytes() == b"#!/bin/sh\necho hi\n"
+    assert _stat.S_IMODE(target.stat().st_mode) == 0o755
+    assert _temp_leftovers(wt) == []
+
+
+def test_write_atomic_promotes_by_rename_so_the_inode_changes(wt: Path):
+    target = wt / "swap.txt"
+    target.write_text("old\n")
+    before = target.stat().st_ino
+    assert tools._write_atomic(target, b"new\n", path="swap.txt") is None
+    assert target.read_bytes() == b"new\n"
+    assert target.stat().st_ino != before   # spec §2.3: os.replace changes the inode
+
+
+def test_write_atomic_refuses_a_symlink_with_the_shipped_wording(wt: Path):
+    real = wt / "real.txt"
+    real.write_text("original")
+    link = wt / "link.txt"
+    os.symlink(real, link)
+    out = tools._write_atomic(link, b"new", path="link.txt")
+    assert out == ("ERROR: 'link.txt' is a symlink; writing through a symlink is not "
+                   "allowed even when its target is inside the worktree")
+    assert real.read_text() == "original"
+    assert _temp_leftovers(wt) == []
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs require a POSIX OS")
+def test_write_atomic_refuses_a_fifo_with_the_shipped_wording(wt: Path):
+    fifo = wt / "pipe"
+    os.mkfifo(fifo)
+    with _hang_guard():
+        out = tools._write_atomic(fifo, b"new", path="pipe")
+    assert out == "ERROR: 'pipe' is not a regular file (refusing FIFO/device/socket)"
+    assert _temp_leftovers(wt) == []
+
+
+def test_write_atomic_writes_through_a_hardlinked_target(wt: Path):
+    # Spec §2.2 step 2: a hardlink is MEANT to see the write, so shared-inode
+    # semantics (and today's non-atomicity) are preserved on purpose.
+    a = wt / "a.txt"
+    a.write_text("old\n")
+    b = wt / "b.txt"
+    os.link(a, b)
+    before = a.stat().st_ino
+    assert tools._write_atomic(a, b"new\n", path="a.txt") is None
+    assert a.read_bytes() == b"new\n"
+    assert b.read_bytes() == b"new\n"          # the link sees it
+    assert a.stat().st_ino == before           # no rename happened
+    assert _temp_leftovers(wt) == []
+
+
+# `os.geteuid` does not exist on Windows and this decorator runs at COLLECTION
+# time, so it is guarded exactly the way tests/test_budget.py:79 guards its own.
+@pytest.mark.skipif(getattr(os, "geteuid", lambda: -1)() == 0 or os.name == "nt",
+                    reason="root (and Windows) ignore directory permissions")
+def test_write_atomic_falls_back_to_the_fd_in_an_unwritable_directory(wt: Path):
+    # Spec §2.2 step 5: a writable file in a 0555 directory cannot be renamed
+    # into place, so the probe fd is used -- today's semantics, preserved.
+    sub = wt / "locked"
+    sub.mkdir()
+    target = sub / "f.txt"
+    target.write_text("old\n")
+    sub.chmod(0o555)
+    try:
+        assert tools._write_atomic(target, b"new\n", path="locked/f.txt") is None
+        assert target.read_bytes() == b"new\n"
+    finally:
+        sub.chmod(0o755)
+
+
+@pytest.mark.skipif(getattr(os, "geteuid", lambda: -1)() == 0 or os.name == "nt",
+                    reason="root (and Windows) ignore directory permissions")
+def test_write_atomic_refuses_a_new_file_in_an_unwritable_directory(wt: Path):
+    # No probe fd exists (ENOENT), so there is nothing to fall back to: the
+    # temp-creation errno is reported, preserving today's EACCES refusal.
+    sub = wt / "locked2"
+    sub.mkdir()
+    sub.chmod(0o555)
+    try:
+        out = tools._write_atomic(sub / "new.txt", b"x", path="locked2/new.txt")
+    finally:
+        sub.chmod(0o755)
+    assert out.startswith("ERROR: cannot write 'locked2/new.txt': ")
+    assert "Permission denied" in out
+    assert not (sub / "new.txt").exists()
+
+
+def test_write_atomic_creates_parents_only_when_asked(wt: Path):
+    made = wt / "deep" / "new" / "f.txt"
+    assert tools._write_atomic(made, b"hi", path="deep/new/f.txt",
+                               create_parents=True) is None
+    assert made.read_bytes() == b"hi"
+    missing = wt / "other" / "f.txt"
+    out = tools._write_atomic(missing, b"hi", path="other/f.txt")
+    assert out.startswith("ERROR: cannot write 'other/f.txt': ")
+    assert not (wt / "other").exists()
+
+
+def test_write_atomic_append_verb_changes_only_the_generic_tail(wt: Path, monkeypatch):
+    target = wt / "f.txt"
+    target.write_text("old\n")
+
+    def _boom(fd, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(tools, "_write_all", _boom)
+    out = tools._write_atomic(target, b"new\n", path="f.txt", verb="append")
+    assert out.startswith("ERROR: cannot append to 'f.txt': ")
+    assert "No space left on device" in out
+
+
+def test_write_atomic_returns_an_error_string_on_an_oserror_during_the_write(wt: Path, monkeypatch):
+    target = wt / "f.txt"
+    target.write_text("old\n")
+
+    def _boom(fd, data):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(tools, "_write_all", _boom)
+    out = tools._write_atomic(target, b"new\n", path="f.txt")
+    assert out.startswith("ERROR: cannot write 'f.txt': ")
+    assert target.read_bytes() == b"old\n"     # spec §2.3: byte-identical
+    assert _temp_leftovers(wt) == []           # the temp was unlinked in-call
+
+
+def test_write_atomic_surfaces_a_close_failure_without_raising(wt: Path, monkeypatch):
+    # Spec §2.2: the temp fd is closed BEFORE the promote precisely so a
+    # DEFERRED write error surfaces while the target is still untouched. The
+    # handle is cleared before that close, so the except arm's own cleanup
+    # never closes an already-closed fd -- an EBADF escaping the handler would
+    # be a tool function raising, which the contract forbids.
+    target = wt / "deferred.txt"
+    target.write_text("old\n")
+    staged = {}
+    real_write_all = tools._write_all
+    real_close = os.close
+
+    def _record(fd, data):
+        staged["fd"] = fd            # _write_all only ever gets the temp fd
+        return real_write_all(fd, data)
+
+    def _closing(fd):
+        real_close(fd)
+        if fd == staged.get("fd"):
+            raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(tools, "_write_all", _record)
+    monkeypatch.setattr(os, "close", _closing)
+    out = tools._write_atomic(target, b"new\n", path="deferred.txt")
+    assert out.startswith("ERROR: cannot write 'deferred.txt': ")
+    assert "Input/output error" in out
+    assert target.read_bytes() == b"old\n"     # never promoted
+    assert _temp_leftovers(wt) == []
+
+
+def test_write_atomic_reraises_a_non_oserror_and_unlinks_its_temp(wt: Path, monkeypatch):
+    # Spec §2.2 step 4: KeyboardInterrupt / BudgetExceeded / SandboxError are
+    # run-level signals the runner owns, NOT tool results.
+    target = wt / "f.txt"
+    target.write_text("old\n")
+
+    def _boom(fd, data):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(tools, "_write_all", _boom)
+    with pytest.raises(KeyboardInterrupt):
+        tools._write_atomic(target, b"new\n", path="f.txt")
+    assert target.read_bytes() == b"old\n"
+    assert _temp_leftovers(wt) == []
+
+
+def test_append_oversized_wording_is_not_the_write_file_wording(wt: Path):
+    # Spec §1.2 cap 1: an append's fix is "append in smaller pieces", never
+    # write_file's "write the file in smaller pieces".
+    assert tools._append_oversized(b"x" * 10) is None
+    out = tools._append_oversized(b"x" * (tools.MAX_WRITE_BYTES + 1))
+    assert out == (f"ERROR: text is {tools.MAX_WRITE_BYTES + 1} bytes, over the "
+                   f"{tools.MAX_WRITE_BYTES}-byte write limit; append in smaller pieces")
+    assert "write the file in smaller pieces" not in out
+
+
+def test_result_too_big_is_the_shared_transform_string(wt: Path):
+    # The same sentence _check_write_size has emitted since 0.9, now built in
+    # one place so docker's append (which learns the size from `stat`, not from
+    # a buffer) can render it byte-identically.
+    assert tools._result_too_big(99) == (
+        f"ERROR: result is 99 bytes, over the {tools.MAX_WRITE_BYTES}-byte "
+        f"write limit; nothing was written")
+    huge = "x" * (tools.MAX_WRITE_BYTES + 1)
+    assert tools._check_write_size(huge) == tools._result_too_big(tools.MAX_WRITE_BYTES + 1)
+    assert tools._check_write_size("small") is None
+
+
+def test_append_missing_and_not_utf8_strings(wt: Path):
+    assert tools._append_missing("notes.md") == (
+        "ERROR: cannot append to 'notes.md': it does not exist; create it with "
+        "write_file first")
+    assert tools._not_utf8("bin.dat", "append_file") == (
+        "ERROR: bin.dat is not valid UTF-8 text; append_file only works on text files")

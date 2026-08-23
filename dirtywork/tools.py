@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import errno
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -27,6 +28,43 @@ DESCRIBE_DIFF_MAX_LINES = 20000
 MAX_READ_BYTES = 5 * 1024 * 1024
 MAX_WRITE_BYTES = 5 * 1024 * 1024
 MAX_LIST_ENTRIES = 2000
+
+# Read ONCE, at import, before any thread exists: os.umask is process-global
+# and changing it is not thread-safe, so it can never be queried lazily inside
+# a tool call. A brand-new file staged through _write_atomic is chmod'd to
+# `0o644 & ~_UMASK`, which is exactly the mode
+# _open_regular(..., O_CREAT, mode=0o644) produced before 0.10 -- masking a
+# 0o666 base instead would silently drop the group/other read bits under a
+# `umask 0` operator.
+_UMASK = os.umask(0)
+os.umask(_UMASK)
+
+# Spec §2.2/§2.5: every staged write lands in a sibling temp named
+# `.dw-tmp.<basename>.<8 lowercase hex>`. The random suffix is required because
+# the WORKER controls sibling names; the sweep matches the full generated shape
+# with an anchored regex (never a bare glob), so a worker file literally named
+# `.dw-tmp.notes` is left alone.
+TMP_PREFIX = ".dw-tmp."
+TMP_NAME_RE = re.compile(r"\.dw-tmp\..+\.[0-9a-f]{8}")
+# The same shape as TMP_NAME_RE written as the POSIX extended regex GNU
+# `find -regex` wants (it matches the WHOLE path, hence the leading `.*/`).
+# Kept here, beside TMP_NAME_RE, so the host sweep and the container sweep can
+# never drift apart.
+TMP_FIND_REGEX = r".*/\.dw-tmp\..+\.[0-9a-f]{8}"
+
+
+def tmp_name(basename: str) -> str:
+    """The staging name for a write to `basename`. The ONE generator: the host
+    primitive uses it directly and DockerSandbox generates the name host-side
+    with it too, passing it into the container as "$2" so worker-controlled
+    bytes never reach the script text."""
+    return f"{TMP_PREFIX}{basename}.{os.urandom(4).hex()}"
+
+
+def is_temp_name(name: str) -> bool:
+    """True for a name tmp_name() generated (spec §2.5). Anchored on the FULL
+    shape: `.dw-tmp.notes` is a worker's file, not ours, and is never swept."""
+    return bool(TMP_NAME_RE.fullmatch(name))
 
 
 def _cap(text: str, cap: int = MAX_RESULT_CHARS, note: str = "") -> str:
@@ -96,6 +134,158 @@ def _worktree_candidate(path_str: str, worktree: Path) -> Path:
     # dereferenced now, at check time, like resolve_in_worktree did) but keep
     # the final component unresolved so O_NOFOLLOW can refuse a symlink there.
     return candidate.parent.resolve() / candidate.name
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """os.write may write fewer bytes than asked; loop until the buffer is
+    gone. Raw os.write is used rather than a buffered file object precisely so
+    there is no userspace buffer left to flush -- which is what lets
+    _write_atomic surface a deferred write error from its os.close BEFORE it
+    promotes the temp over the target."""
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
+def _unlink_quietly(p: Path) -> None:
+    """Remove a staging temp, ignoring the case where it is already gone. Never
+    raises: it only ever runs on an unwind path that has its own outcome."""
+    try:
+        os.unlink(str(p))
+    except OSError:
+        pass
+
+
+def _write_atomic(target: Path, data: bytes, *, path: str, verb: str = "write",
+                  create_parents: bool = False, must_exist: bool = False):
+    """Spec §2.2: write `data` to `target` so a failure or a kill during the
+    write leaves the file byte-identical instead of truncated. Returns None on
+    success or an `ERROR: …` string -- never an OSError, because a tool
+    function's contract is to return its failure as text.
+
+    `target` is the caller's already-containment-checked `_worktree_candidate`
+    path (callers keep their own `resolve_in_worktree` call). `path` is the
+    MODEL-FACING path string every message renders -- the caller's own
+    argument -- so the refusals read exactly as they did before 0.10 rather
+    than leaking an absolute host path. `verb` picks the generic wording:
+    "write" -> `cannot write '<path>'`, "append" -> `cannot append to
+    '<path>'`; the ELOOP and non-regular-file strings are shared verbatim
+    between the two.
+
+    `must_exist=True` turns off §2.2's new-file branch: an ENOENT probe then
+    returns `_append_missing(path)` instead of staging a temp and creating the
+    target. Spec §1.2 requires it -- "ENOENT on the probe is the does-not-exist
+    error above, never §2.2's new-file branch" -- and it is what makes the host
+    refuse the delete-between-read-and-write race the container already refuses
+    with the append script's `[ -f "$1" ] || exit 2`. `append_file` is the only
+    caller that passes it.
+
+    Two branches deliberately keep today's in-place, non-atomic behaviour and
+    are named in docs/machine-contract.md and docs/operating.md:
+      * `st_nlink > 1` -- a hardlink is MEANT to see the write, so the shared
+        inode is written through rather than replaced;
+      * a directory this process cannot create a temp in (0555) -- a rename is
+        impossible there, so the probe fd is the only write left.
+
+    Robustness, not a security fix (spec §2.1): the O_NOFOLLOW refusals stay
+    exactly as deterministic as today. A symlink present at call time refuses
+    below; one that appears between the probe and os.replace is replaced AS A
+    LINK, because rename(2) does not dereference its destination -- so nothing
+    is ever written through it (spec §2.4)."""
+    lead = "cannot write" if verb == "write" else "cannot append to"
+    if create_parents:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return f"ERROR: {lead} '{path}': {e}"
+    probe_fd = None
+    try:
+        # Side-effect-free probe: no O_CREAT, so a refusal never leaves a file
+        # behind. O_NONBLOCK makes a FIFO with no reader fail with ENXIO
+        # instead of hanging; O_NOFOLLOW closes the final-component symlink
+        # TOCTOU.
+        probe_fd = os.open(str(target),
+                           os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            return (f"ERROR: '{path}' is a symlink; writing through a symlink is not "
+                    f"allowed even when its target is inside the worktree")
+        if e.errno == errno.ENXIO:
+            return f"ERROR: '{path}' is not a regular file (refusing FIFO/device/socket)"
+        if e.errno != errno.ENOENT:
+            return f"ERROR: {lead} '{path}': {e}"
+        if must_exist:
+            # Spec §1.2: for an append, ENOENT is the does-not-exist refusal,
+            # never the new-file branch below -- the target must not be created
+            # by a write that was only ever meant to extend it.
+            return _append_missing(path)
+        # ENOENT: there is no file yet. Fall through to the temp with no mode
+        # to preserve and no fd to fall back to.
+    try:
+        st = None
+        if probe_fd is not None:
+            st = os.fstat(probe_fd)
+            if not stat.S_ISREG(st.st_mode):
+                return (f"ERROR: {lead} '{path}': '{target}' is not a regular file "
+                        f"(refusing FIFO/device/socket)")
+            if st.st_nlink > 1:
+                try:
+                    os.ftruncate(probe_fd, 0)
+                    _write_all(probe_fd, data)
+                except OSError as e:
+                    return f"ERROR: {lead} '{path}': {e}"
+                return None
+        tmp = target.parent / tmp_name(target.name)
+        try:
+            tmp_fd = os.open(
+                str(tmp),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600)
+        except OSError as e:
+            if probe_fd is not None and e.errno in (errno.EACCES, errno.EROFS):
+                try:
+                    os.ftruncate(probe_fd, 0)
+                    _write_all(probe_fd, data)
+                except OSError as e2:
+                    return f"ERROR: {lead} '{path}': {e2}"
+                return None
+            return f"ERROR: {lead} '{path}': {e}"
+        # One catch boundary from here on (spec §2.2 step 4).
+        try:
+            _write_all(tmp_fd, data)
+            os.fchmod(tmp_fd, stat.S_IMODE(st.st_mode) if st is not None
+                      else 0o644 & ~_UMASK)
+            # Closed BEFORE the promote so a deferred write error surfaces
+            # while the target is still untouched. The handle is CLEARED
+            # first: os.close consumes the fd whether or not it raises, so if
+            # this close is the one that reports the deferred error, the
+            # handlers below must not try to close it a second time -- an
+            # EBADF out of an except arm would be a tool function raising.
+            fd, tmp_fd = tmp_fd, None
+            os.close(fd)
+            os.replace(str(tmp), str(target))
+        except OSError as e:
+            if tmp_fd is not None:
+                # Defensive: cleanup must not replace the real diagnosis with
+                # its own errno.
+                try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
+            _unlink_quietly(tmp)
+            return f"ERROR: {lead} '{path}': {e}"
+        except BaseException:
+            if tmp_fd is not None:
+                try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
+            _unlink_quietly(tmp)
+            raise
+        return None
+    finally:
+        if probe_fd is not None:
+            os.close(probe_fd)
 
 
 def _number_lines(text: str, offset: int, limit: int) -> str:
@@ -335,7 +525,7 @@ def _transform_file(worktree: Path, path: str, transform, *, tool: str) -> str:
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
-        return f"ERROR: {path} is not valid UTF-8 text; {tool} only works on text files"
+        return _not_utf8(path, tool)
     new_text, result = transform(text)
     if new_text is None:
         return result
@@ -392,6 +582,52 @@ def _insert_once(path: str, anchor: str, insert: str, where: str):
     return transform
 
 
+def _result_too_big(size: int) -> str:
+    """Spec §1.5/§1.2 cap 3: the ONE place the over-the-write-limit RESULT
+    sentence is built. `_check_write_size` renders it from a buffer it holds;
+    `append_file` renders it from a size it learned some other way (an
+    `os.stat` on the host, a `stat -c %s` exec in the container), so both modes
+    can refuse a file too large to even read with the same bytes."""
+    return (f"ERROR: result is {size} bytes, over the {MAX_WRITE_BYTES}-byte "
+            f"write limit; nothing was written")
+
+
+def _append_oversized(encoded: bytes):
+    """Spec §1.2 cap 1: append_file's own refusal for the `text` ARGUMENT, or
+    None. Imported by dirtywork.sandbox.docker the way MAX_WRITE_BYTES already
+    is, so both backends emit the byte-identical string.
+
+    Deliberately NOT any of the three write-side strings, because an append's
+    fix is a different action from a write's. The three, verbatim, are:
+    docker._oversized's `ERROR: content is <n> bytes, over the <limit>-byte
+    write limit` (no trailing advice); tools.write_file's own inline
+    `ERROR: content is <n> bytes, over the <limit>-byte write limit; write the
+    file in smaller pieces` (the `; write the file in smaller pieces` tail is
+    host-only and exists nowhere in docker.py); and _result_too_big's
+    `…; nothing was written`. None of them may ever surface from an append."""
+    if len(encoded) > MAX_WRITE_BYTES:
+        return (f"ERROR: text is {len(encoded)} bytes, over the {MAX_WRITE_BYTES}-byte "
+                f"write limit; append in smaller pieces")
+    return None
+
+
+def _append_missing(path: str) -> str:
+    """Spec §1.2: the does-not-exist refusal. Three call sites -- the host
+    probe's ENOENT branch, docker's guard exec (rc 2) and docker's write exec
+    (rc 2, which is how a delete BETWEEN the two execs still refuses
+    correctly) -- so it is built here once."""
+    return (f"ERROR: cannot append to '{path}': it does not exist; create it with "
+            f"write_file first")
+
+
+def _not_utf8(path: str, tool: str) -> str:
+    """Spec §5.1: the ONE non-UTF-8 refusal. The host transform path has always
+    worded it this way; from 0.10 docker's `_read_raw` renders it from here too
+    (with the tool it was called for), so a binary file refuses identically in
+    both modes and names the tool the model actually called."""
+    return f"ERROR: {path} is not valid UTF-8 text; {tool} only works on text files"
+
+
 def _check_write_size(new_text: str):
     """Spec §1.5: the one over-the-limit refusal for the shared transform path,
     or None. Both backends' _transform_file call it immediately before the
@@ -404,8 +640,7 @@ def _check_write_size(new_text: str):
     a different fix ("write the file in smaller pieces")."""
     size = len(new_text.encode("utf-8"))
     if size > MAX_WRITE_BYTES:
-        return (f"ERROR: result is {size} bytes, over the {MAX_WRITE_BYTES}-byte "
-                f"write limit; nothing was written")
+        return _result_too_big(size)
     return None
 
 
