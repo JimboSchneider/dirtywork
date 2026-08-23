@@ -1008,3 +1008,48 @@ def test_write_file_still_creates_parents_and_uses_the_umask_default_mode(wt: Pa
     made = wt / "a" / "b" / "c.txt"
     assert made.read_text() == "deep\n"
     assert _stat.S_IMODE(made.stat().st_mode) == 0o644 & ~tools._UMASK
+
+
+# --- spec §5.2/§5.3: single-pass diff rendering, proved byte-identical.
+
+
+def test_format_range_unified_matches_the_stdlibs_two_special_cases():
+    import difflib
+    for start, stop in [(0, 0), (0, 1), (0, 3), (5, 5), (5, 6), (5, 9), (12, 12)]:
+        assert tools._format_range_unified(start, stop) == \
+            difflib._format_range_unified(start, stop), (start, stop)
+
+
+def test_unified_diff_lines_match_difflib_on_seeded_random_pairs():
+    """Spec §5.2: the single-pass renderer must be BYTE-identical to
+    difflib.unified_diff(..., n=2, lineterm=''). Seeded, so any failure is
+    reproducible from the printed (index, old, new)."""
+    import difflib
+    import random
+    rng = random.Random(20260823)
+    # A vocabulary with a DUPLICATE ("alpha") and blank-ish lines, because
+    # popular repeated lines are exactly where opcode grouping gets
+    # interesting.
+    vocab = ["alpha\n", "beta\n", "gamma\n", "alpha\n", "\n", "  \n", "x = 1\n"]
+    for i in range(1000):
+        old = [rng.choice(vocab) for _ in range(rng.randint(0, 12))]
+        new = [rng.choice(vocab) for _ in range(rng.randint(0, 12))]
+        # roughly a third of the sides lose their trailing newline, like a real
+        # file's final line
+        if old and rng.random() < 0.33:
+            old[-1] = old[-1].rstrip("\n")
+        if new and rng.random() < 0.33:
+            new[-1] = new[-1].rstrip("\n")
+        matcher = difflib.SequenceMatcher(a=old, b=new)
+        mine = tools._unified_diff_lines(matcher, old, new, "f.txt")
+        theirs = list(difflib.unified_diff(old, new, fromfile="a/f.txt",
+                                           tofile="b/f.txt", n=2, lineterm=""))
+        assert mine == theirs, (i, old, new)
+
+
+def test_describe_change_renders_crlf_as_git_does():
+    # Spec §5.3: only "\n" is the separator, so a CRLF line keeps its "\r".
+    out = tools.describe_change("f.txt", "a\r\nb\r\n", "a\r\nc\r\n", verb="Edited")
+    assert out.startswith("Edited f.txt: +1 -1 (removed 1 non-blank line)")
+    assert "-b\r" in out
+    assert "+c\r" in out

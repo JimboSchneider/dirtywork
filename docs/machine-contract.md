@@ -193,7 +193,14 @@ The four in-place tools (`edit_file`, `apply_edits`, `insert_before`,
 an oversized result with the same string
 (`ERROR: result is <n> bytes, over the <limit>-byte write limit; nothing was
 written`) and produce byte-identical success text on the host and in the
-container. Since 0.10 "nothing was written" also covers a failure **during**
+container. Diff bodies use `\n` as the only line separator, so **CRLF content
+keeps its carriage return**: a line ending `\r\n` renders as `-foo\r` /
+`+foo\r`, exactly as `git diff` shows it, and a line that merely *contains* a
+form feed or other vertical whitespace is never split. A final line with no
+trailing newline is followed by git's own `\ No newline at end of file` marker
+on its own output line.
+
+Since 0.10 "nothing was written" also covers a failure **during**
 the write: every host write and every container write is staged in a sibling
 temp file and promoted with an atomic rename, so an I/O error or a kill leaves
 the target byte-identical. Two branches (host mode only) keep the old in-place

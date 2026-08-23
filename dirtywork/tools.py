@@ -347,20 +347,75 @@ def _lines_keep_newlines(text: str) -> list:
     return [p + "\n" for p in parts[:-1]] + [parts[-1]]
 
 
-def _line_counts(old_lines: list, new_lines: list) -> tuple:
-    """(added, deleted, removed_non_blank) from SequenceMatcher opcodes. A
-    REPLACED non-blank line counts as removed: the counter exists to answer
-    'did I delete content I did not mean to delete', and a replace deletes
-    before it inserts."""
+# The unified diff's context width. difflib's own default is 3; dirtywork has
+# echoed n=2 since 0.8, and _unified_diff_lines must be called with the same
+# value the old difflib.unified_diff(..., n=2) call used.
+DIFF_CONTEXT_LINES = 2
+
+
+def _count_opcodes(opcodes, old_lines: list) -> tuple:
+    """(added, deleted, removed_non_blank) from opcodes the CALLER already has
+    (spec §5.2 -- one SequenceMatcher per describe_change, not two). A REPLACED
+    non-blank line counts as removed: the counter exists to answer 'did I
+    delete content I did not mean to delete', and a replace deletes before it
+    inserts."""
     added = deleted = removed_non_blank = 0
-    matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+    for tag, i1, i2, j1, j2 in opcodes:
         if tag in ("delete", "replace"):
             deleted += i2 - i1
             removed_non_blank += sum(1 for line in old_lines[i1:i2] if line.strip())
         if tag in ("insert", "replace"):
             added += j2 - j1
     return added, deleted, removed_non_blank
+
+
+def _format_range_unified(start: int, stop: int) -> str:
+    """difflib._format_range_unified, reproduced. Copied rather than imported
+    because it is a PRIVATE stdlib name; its two special cases -- a length of 1
+    renders as a bare number, and an EMPTY range begins one line earlier -- are
+    exactly what make the `@@` headers byte-identical to
+    difflib.unified_diff's. A seeded property test pins that."""
+    beginning = start + 1                 # lines are numbered from one
+    length = stop - start
+    if length == 1:
+        return str(beginning)
+    if not length:
+        beginning -= 1                    # an empty range begins just before it
+    return f"{beginning},{length}"
+
+
+def _unified_diff_lines(matcher, old_lines: list, new_lines: list, path: str) -> list:
+    """Exactly what `difflib.unified_diff(old_lines, new_lines,
+    fromfile=f"a/{path}", tofile=f"b/{path}", n=DIFF_CONTEXT_LINES,
+    lineterm="")` yields -- rendered from a matcher the caller ALREADY built.
+
+    Spec §5.2: that is the whole point. SequenceMatcher caches its opcodes, so
+    describe_change's get_opcodes() (for the counts) and this function's
+    get_grouped_opcodes() (for the hunks) share ONE matching-block
+    computation instead of building a second matcher over the same two lists.
+    The header lines are emitted lazily, on the first group, so an unchanged
+    pair returns [] exactly as unified_diff does."""
+    out = []
+    for group in matcher.get_grouped_opcodes(DIFF_CONTEXT_LINES):
+        if not out:
+            out.append(f"--- a/{path}")
+            out.append(f"+++ b/{path}")
+        first, last = group[0], group[-1]
+        out.append("@@ -{} +{} @@".format(
+            _format_range_unified(first[1], last[2]),
+            _format_range_unified(first[3], last[4])))
+        for tag, i1, i2, j1, j2 in group:
+            if tag == "equal":
+                for line in old_lines[i1:i2]:
+                    out.append(" " + line)
+                continue
+            if tag in ("replace", "delete"):
+                for line in old_lines[i1:i2]:
+                    out.append("-" + line)
+            if tag in ("replace", "insert"):
+                for line in new_lines[j1:j2]:
+                    out.append("+" + line)
+    return out
 
 
 def describe_change(path: str, old_text: str, new_text: str, *, verb: str) -> str:
@@ -382,13 +437,16 @@ def describe_change(path: str, old_text: str, new_text: str, *, verb: str) -> st
         # SequenceMatcher/unified_diff are omitted entirely: even the O(n)
         # line-count pass is skipped so this stays cheap regardless of content.
         return f"{verb} {path}: {len(new_lines)} lines (diff omitted: file too large)"
-    added, deleted, removed_non_blank = _line_counts(old_lines, new_lines)
+    # ONE matcher for both the counts and the hunks (spec §5.2): get_opcodes()
+    # caches, and get_grouped_opcodes() reads that cache, so the matching
+    # blocks are computed once per call instead of twice.
+    matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines)
+    added, deleted, removed_non_blank = _count_opcodes(matcher.get_opcodes(), old_lines)
     head = f"{verb} {path}: +{added} -{deleted}"
     if removed_non_blank > 0:
         plural = "" if removed_non_blank == 1 else "s"
         head += f" (removed {removed_non_blank} non-blank line{plural})"
-    diff_lines = list(difflib.unified_diff(
-        old_lines, new_lines, fromfile=f"a/{path}", tofile=f"b/{path}", n=2, lineterm=""))
+    diff_lines = _unified_diff_lines(matcher, old_lines, new_lines, path)
     if not diff_lines:
         return head
     # The first two entries (fromfile/tofile) and every "@@ ... @@" hunk
