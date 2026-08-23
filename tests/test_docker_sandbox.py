@@ -1115,6 +1115,7 @@ def test_sample_worktree_still_retries_once_with_reset_when_no_reset_yet_this_ca
 
 def test_finalize_stops_container_calls_export_run_and_host_read_tree(started, monkeypatch):
     from dirtywork.sandbox import RunArtifacts
+    from dirtywork.tools import TMP_FIND_REGEX
     sb, fake, run_dir = started
     seen = {}
 
@@ -1135,6 +1136,20 @@ def test_finalize_stops_container_calls_export_run_and_host_read_tree(started, m
     assert seen["export_kwargs"]["slug"] == "abc123"
     assert seen["host_read_tree_worktree"] == sb._worktree
     assert any(c[0][:2] == ["rm", "-f"] for c in fake.calls)  # worker container removed
+
+    # Fix round 1 (spec §2.5 execution amendment): the stale-temp sweep runs
+    # against the still-alive WORKER container -- the export container's
+    # /work is readonly by design, so a sweep exec there would silently
+    # no-op. One exec, same argv shape as the host sweep's regex, and it
+    # must land BEFORE the `rm -f` that stops the worker container.
+    argvs = [c[0] for c in fake.calls]
+    sweeps = [a for a in argvs if "-regextype" in a]
+    removes = [a for a in argvs if a[:2] == ["rm", "-f"]]
+    assert len(sweeps) == 1
+    assert sweeps[0] == ["exec", "-w", "/work", "dw-abc123", "/usr/bin/find", "/work",
+                         "-type", "f", "-regextype", "posix-extended", "-regex",
+                         TMP_FIND_REGEX, "-print", "-delete"]
+    assert argvs.index(sweeps[0]) < argvs.index(removes[0])
 
 
 def test_stop_after_finalize_keeps_volume_when_export_failed(started, monkeypatch):

@@ -32,7 +32,9 @@ Restated from the spec named above. Section numbers below are the spec's.
 
 **§2.3/§2.4** "Nothing was written" now covers a failure *during* the write, except the two named fd-fallback branches. `os.replace` changes the inode, so a worker-held fd on the old file keeps seeing old content. A symlink present at call time refuses exactly as today; one that appears between probe and `os.replace` gets replaced *as a link* — `rename(2)` does not dereference its destination, so nothing is ever written through it.
 
-**§2.5** The sweep matches the full generated shape with an anchored regex (a worker file named `.dw-tmp.notes` is left alone) and runs where a leftover can actually exist — after a kill: `HostSandbox.start()` and, folded into `measure_worktree`'s existing walk, `HostSandbox.finalize()`; in docker, one `find … -delete` exec immediately before the export's `git add -A`. The count goes to stderr, never silent.
+**§2.5** The sweep matches the full generated shape with an anchored regex (a worker file named `.dw-tmp.notes` is left alone) and runs where a leftover can actually exist — after a kill: `HostSandbox.start()` and, folded into `measure_worktree`'s existing walk, `HostSandbox.finalize()`; in docker, one `find … -delete` exec against the still-alive worker container, immediately before `DockerSandbox.finalize()` stops it. The count goes to stderr, never silent.
+
+(Execution amendment, 2026-08-23: Task 6's fix round 1 relocated the docker sweep and tightened its regex. Originally placed inside `export_run`, immediately before the export's `git add -A` — but export's `/work` volume mount is readonly by design, so a `find … -delete` there gets EROFS on every match and silently does nothing. The sweep instead runs against the still-alive WORKER container, ahead of export entirely. Reporting is never silent on a partial failure: the swept-N note fires whenever the sweep printed any lines regardless of exit code, and a non-zero rc additionally notes `sweep incomplete (rc N)`. The same review found `TMP_FIND_REGEX`'s basename component (`.+`) over-matching across a directory boundary — `find -regex` matches the whole path and POSIX ERE `.` crosses `/` — and tightened it to `[^/]+`.)
 
 **§2.6** Docker's write script becomes `&&`-chained temp+`mv -fT` with a directory guard, a writability guard (host parity: today an unwritable file refuses `EACCES`), `chmod --reference` with a `chmod 644` fallback, and `rm -f` of the temp on any failure. Each guard echoes its own diagnostic so the stderr wrap never renders empty. The append write script re-checks `[ -f "$1" ]` at write time (rc 2 → the does-not-exist string) and uses `cp` + `cat >>` before the shared promote.
 
@@ -124,8 +126,11 @@ dirtywork/
     __init__.py            # MODIFIED — T5 (Protocol.append_file + docstring enumeration)
     host.py                # MODIFIED — T2 (append_file), T6 (sweep at start/finalize)
     docker.py              # MODIFIED — T3 (_read_raw tool=, _transform_file tool=, WRITE_SCRIPT),
-                           #   T4 (_append_guard, _append_write, append_file)
-    export.py              # MODIFIED — T6 (temp sweep before git add -A)
+                           #   T4 (_append_guard, _append_write, append_file), T6 fix round 1
+                           #   (temp sweep in finalize() before _stop_container() -- moved here
+                           #   from export.py, whose /work mount is readonly)
+    export.py              # MODIFIED — T6 (temp sweep before git add -A; reverted in fix round 1,
+                           #   see the Task 6 amendment note -- export's /work mount is readonly)
     docker_args.py         # MODIFIED — T13 (:0.10, PINNED_DIGEST = None)
   providers/
     __init__.py            # MODIFIED — T9 (PROVIDER_NAMES, DEFAULT_BASE_URLS, get_provider)
@@ -1320,7 +1325,7 @@ from ..tools import (
 )
 ```
 
-(`_append_missing`, `_append_oversized`, `_result_too_big` and `describe_change` are used by Task 4; importing them now keeps this sorted block edited once instead of twice. `dirtywork/sandbox/export.py` imports `TMP_FIND_REGEX` from `..tools` for itself in Task 6.)
+(`_append_missing`, `_append_oversized`, `_result_too_big` and `describe_change` are used by Task 4; importing them now keeps this sorted block edited once instead of twice. `dirtywork/sandbox/export.py` imports `TMP_FIND_REGEX` from `..tools` for itself in Task 6. Execution amendment, 2026-08-23: Task 6's fix round 1 removed that import from `export.py` — the sweep it supported moved to the WORKER container, so `dirtywork/sandbox/docker.py` imports `TMP_FIND_REGEX` from `..tools` instead; see the Task 6 amendment note.)
 
 Then add the scripts immediately **after** `_oversized` (which ends with `return None`) and immediately **before** `class DockerSandbox:`.
 
@@ -3300,6 +3305,17 @@ git commit -m "feat: stage every write through _write_atomic, and sweep stale te
 ```
 
 ---
+
+**Task 6 amendment (executed 2026-08-23):** review found a BLOCKER in Step 9's location — the sweep exec ran in the EXPORT container, whose `/work` volume mount is readonly by design (`docker_args.export_create_argv`, pinned by its own tests). `find … -delete` gets `EROFS` on every match and exits non-zero, so Step 9's `sweep_captured.returncode == 0` gate silently suppressed the note and `git add -A` went on to stage any `.dw-tmp.…` straight into the export — a guaranteed silent no-op, not the fix §2.5 asked for. Fix round 1 (one commit, `fix(sweep): run the docker temp sweep in the worker container (export /work is readonly); TMP_FIND_REGEX is per-component (spec/plan amended)`):
+
+1. Removed the sweep exec from `dirtywork/sandbox/export.py` entirely (reverting Step 9's `export.py` diff).
+2. Added it to `dirtywork/sandbox/docker.py`'s `DockerSandbox.finalize()`, one exec against the still-alive WORKER container (`self.container`, not the export container) immediately before `self._stop_container()` — ahead of export starting at all. Same find argv, built with `docker_args.exec_argv` (`-w /work` default).
+3. Reporting is no longer silent on a partial failure: the swept-N note now fires whenever the sweep printed any lines, **regardless of exit code**, and a non-zero rc additionally notes `sweep incomplete (rc N)` to stderr — so an `EROFS` (or any other mid-sweep error) is never mistaken for "nothing to sweep".
+4. `TMP_FIND_REGEX` itself over-matched: `find -regex` matches the WHOLE path and POSIX ERE `.` crosses `/`, so the original `.+` basename component could match INTO a `.dw-tmp.`-named DIRECTORY and delete a worker's own file underneath it (e.g. `/work/.dw-tmp.build.1234abcd/out/asset.deadbeef`) — a case `is_temp_name`'s name-only match never had, since a single path component can never contain `/`. Tightened to `[^/]+`; one new pinning test (`test_tmp_find_regex_is_per_component_not_greedy_across_a_slash`, `tests/test_tools_files.py`) fixtures `re.fullmatch` against two true positives and three negatives, confirmed red against the old pattern before the fix.
+5. `tests/test_export_flow.py`'s `test_export_sweeps_stale_temps_before_git_add` renamed to `test_export_run_never_execs_a_sweep_the_export_volume_is_readonly` and rewritten to assert the negative (`export_run`'s own exec stream never contains a `-regextype` call); `tests/test_docker_sandbox.py`'s `test_finalize_stops_container_calls_export_run_and_host_read_tree` extended in place (no new test function — this is why the net test-count delta is +1, not +2) with assertions that the sweep exec appears in the WORKER container's exec stream and precedes the `rm -f` that stops it.
+6. `docs/machine-contract.md`'s §2.3 paragraph now scopes "Two branches (host mode only) keep the old in-place behaviour" — the docker-mode delta (no fd fallback) sits in the sentences immediately after it.
+
+Net new tests this round: 1 (the regex-pin test) — Task 6's `1091 passed` becomes `1092 passed, 1 skipped, 18 deselected` after this fix round; every gate-count number inside Task 6's own step list above is left as originally executed and not restated here.
 
 ### Task 7: `--max-tokens` and `finish_reason` on the transcript (spec §1.4, §1.5)
 
@@ -6847,7 +6863,7 @@ Every numbered item of `docs/superpowers/specs/2026-08-20-v1rc-large-writes-atom
 | §2.4 the accepted race delta, stated in `docs/security.md`'s host-mode notes | Task 6, Step 11 |
 | §2.5 anchored full-shape regex, never a bare glob | Task 1, Step 4; test `test_is_temp_name_ignores_a_worker_file_that_only_starts_like_one` |
 | §2.5 sweep at `HostSandbox.start()` and folded into `measure_worktree`'s walk at `finalize` | Task 6, Steps 6–8; tests `test_host_sandbox_start_sweeps_a_leftover_temp_and_says_so`, `test_host_sandbox_finalize_sweeps_and_reports` |
-| §2.5 docker: one `find … -delete` immediately before the export's `git add -A` | Task 6, Step 9; test `test_export_sweeps_stale_temps_before_git_add` |
+| §2.5 docker: one `find … -delete` against the still-alive worker container, immediately before `DockerSandbox.finalize()` stops it (execution amendment, 2026-08-23: relocated from `export_run`, whose `/work` mount is readonly, in Task 6's fix round 1; `TMP_FIND_REGEX` also tightened to `[^/]+`) | Task 6, Step 9 as amended; tests `test_finalize_stops_container_calls_export_run_and_host_read_tree` (worker-side sweep, extended in the fix round), `test_export_run_never_execs_a_sweep_the_export_volume_is_readonly` (the negative), `test_tmp_find_regex_is_per_component_not_greedy_across_a_slash` |
 | §2.5 swept count → stderr, never silent | Task 6, Steps 8 and 9 |
 | §2.6 the `_write_raw` script, verbatim, with every guard | Task 3, Step 4 (`WRITE_SCRIPT`); test `test_write_exec_uses_the_atomic_script_and_a_sibling_temp` |
 | §2.6 host-generated temp name passed as `$2`; worker data never in the script | Task 1 Step 4 (`tmp_name`), Task 3 Step 4 (`_sibling_tmp`), Step 6 |

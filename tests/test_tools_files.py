@@ -539,6 +539,20 @@ def test_is_temp_name_ignores_a_worker_file_that_only_starts_like_one(wt: Path):
     assert not tools.is_temp_name("app.py")
 
 
+def test_tmp_find_regex_is_per_component_not_greedy_across_a_slash():
+    # Fix round 1: `find -regex` matches the WHOLE path and POSIX ERE `.`
+    # crosses `/`, so a greedy `.+` basename would match INTO a
+    # `.dw-tmp.`-named directory and delete a worker's own file underneath
+    # it. `is_temp_name` (name-only, no `/` possible in a single component)
+    # was never wrong; only the find-regex translation was.
+    assert re.fullmatch(tools.TMP_FIND_REGEX, "/work/.dw-tmp.app.py.deadbeef")
+    assert re.fullmatch(tools.TMP_FIND_REGEX, "/work/sub/.dw-tmp.a.b.12345678")
+    assert not re.fullmatch(tools.TMP_FIND_REGEX,
+                            "/work/.dw-tmp.build.1234abcd/out/asset.deadbeef")
+    assert not re.fullmatch(tools.TMP_FIND_REGEX, "/work/.dw-tmp.notes/data.abcdef12")
+    assert not re.fullmatch(tools.TMP_FIND_REGEX, "/work/.dw-tmp.notes")
+
+
 def test_write_atomic_creates_a_new_file_with_umask_default_mode(wt: Path):
     target = wt / "new.txt"
     assert tools._write_atomic(target, b"hello\n", path="new.txt") is None

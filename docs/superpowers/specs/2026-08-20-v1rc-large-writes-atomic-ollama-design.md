@@ -289,9 +289,24 @@ never a bare glob — a worker file named `.dw-tmp.notes` is left alone). Becaus
 in-call, the only producers of leftovers are kills — so the sweep runs where it can actually help:
 `HostSandbox.start()` (resumed runs) and, folded into `measure_worktree`'s existing walk (no
 second traversal), at `finalize` before `_measure()`/`host_files_changed`; docker: one
-`find /work -regextype posix-extended -regex … -delete` exec immediately before the export's
-`git add -A`, alongside the existing `.git`-entry sweep. Swept count → stderr note
-(`swept N stale temp file(s)`), never silent.
+`find /work -regextype posix-extended -regex … -delete` exec against the still-alive WORKER
+container, in `DockerSandbox.finalize()` immediately before it stops the container — ahead of
+export entirely. Swept count → stderr note (`swept N stale temp file(s)`), never silent.
+
+(Execution amendment, 2026-08-23: fix round 1 relocated the docker sweep and tightened its regex.
+Originally specified as one exec inside `export_run`, immediately before the export's `git add -A`
+alongside the existing `.git`-entry sweep — but the export container's `/work` volume mount is
+readonly by design (`docker_args.export_create_argv`), so a `find … -delete` there gets EROFS on
+every match, exits non-zero, and the sweep silently does nothing while `git add -A` still stages
+`.dw-tmp.…` into the export. The sweep instead runs against the still-alive WORKER container: one
+exec in `DockerSandbox.finalize()`, immediately before `_stop_container()` — before export starts
+at all, not alongside it. Reporting is never silent on a partial failure: the swept-N note fires
+whenever the sweep printed any lines, regardless of exit code, and a non-zero rc additionally notes
+`sweep incomplete (rc N)`. The same review found `TMP_FIND_REGEX` over-matching across a directory
+boundary — `find -regex` matches the WHOLE path and POSIX ERE `.` crosses `/`, so a greedy `.+`
+basename component would match INTO a `.dw-tmp.`-named directory and delete a worker's own file
+underneath it; the basename component is now `[^/]+`. `is_temp_name`'s name-only match was never
+affected — a single path component can never contain `/`.)
 
 ### 2.6 Docker scripts
 

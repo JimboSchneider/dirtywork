@@ -5,6 +5,7 @@ import os
 import posixpath
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ from ..tools import (
     MAX_LIST_ENTRIES,
     MAX_READ_BYTES,
     MAX_WRITE_BYTES,
+    TMP_FIND_REGEX,
     _apply_edits_once,
     _append_missing,
     _append_oversized,
@@ -346,7 +348,30 @@ class DockerSandbox:
         Read and clear it here, right after the thread is guaranteed dead,
         so a violation that landed while idle still surfaces instead of
         being silently reported `completed`. The export still runs — the
-        volume is intact and the work is worth salvaging regardless."""
+        volume is intact and the work is worth salvaging regardless.
+
+        Spec §2.5 (execution amendment, fix round 1): the stale-temp sweep
+        runs HERE, one exec against the still-alive WORKER container, right
+        before `_stop_container()` below -- not in export_run. The EXPORT
+        container's `/work` volume mount is readonly by design
+        (docker_args.export_create_argv), so a `find … -delete` there would
+        get EROFS on every match and silently do nothing. Reporting is never
+        silent on a partial failure: the swept-N note fires whenever the
+        sweep printed anything, regardless of exit code, and a non-zero rc
+        gets its own note so an EROFS or other mid-sweep error is never
+        mistaken for "nothing to sweep"."""
+        sweep_argv = docker_args.exec_argv(
+            self.container, ["/usr/bin/find", "/work", "-type", "f", "-regextype",
+                             "posix-extended", "-regex", TMP_FIND_REGEX, "-print", "-delete"])
+        sweep_captured = self._run(sweep_argv, timeout=docker_cli.T_EXPORT_STEP)
+        swept = [line for line
+                in sweep_captured.output.decode("utf-8", errors="replace").splitlines()
+                if line.strip()]
+        if swept:
+            plural = "" if len(swept) == 1 else "s"
+            print(f"swept {len(swept)} stale temp file{plural}", file=sys.stderr)
+        if sweep_captured.returncode != 0:
+            print(f"sweep incomplete (rc {sweep_captured.returncode})", file=sys.stderr)
         self._stop_container()
         watchdog_violation = self.watchdog.violation if self.watchdog is not None else None
         # D1: only meaningful when watchdog_violation itself is set -- see

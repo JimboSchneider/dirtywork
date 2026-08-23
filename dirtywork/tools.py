@@ -49,10 +49,16 @@ TMP_NAME_RE = re.compile(r"\.dw-tmp\..+\.[0-9a-f]{8}")
 # The same shape as TMP_NAME_RE written as a POSIX extended regex (it matches
 # the WHOLE path, hence the leading `.*/`). GNU find's DEFAULT regextype is
 # Emacs, which treats `{8}` literally and matches nothing -- the consumer MUST
-# pass `-regextype posix-extended` alongside `-regex` (as the Task 6 sweep
-# exec does). Kept here, beside TMP_NAME_RE, so the host sweep and the
-# container sweep can never drift apart.
-TMP_FIND_REGEX = r".*/\.dw-tmp\..+\.[0-9a-f]{8}"
+# pass `-regextype posix-extended` alongside `-regex` (as the docker sweep
+# exec does). The basename component is `[^/]+`, NOT `.+`: `find -regex`
+# matches the whole path, and POSIX ERE `.` crosses `/` just like any other
+# character, so a greedy `.+` there would match into a `.dw-tmp.`-NAMED
+# DIRECTORY and delete a worker's own file underneath it (e.g.
+# `/work/.dw-tmp.build.1234abcd/out/asset.deadbeef`) -- exactly the
+# over-match `is_temp_name`'s name-only fullmatch already refuses. Kept here,
+# beside TMP_NAME_RE, so the host sweep and the container sweep can never
+# drift apart.
+TMP_FIND_REGEX = r".*/\.dw-tmp\.[^/]+\.[0-9a-f]{8}"
 
 
 def tmp_name(basename: str) -> str:

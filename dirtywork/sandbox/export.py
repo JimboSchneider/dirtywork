@@ -12,7 +12,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..tools import TMP_FIND_REGEX
 from ..workspace import MAX_FILES_CHANGED
 from . import RunArtifacts, SandboxError, docker_args, docker_cli, lifecycle
 
@@ -255,25 +254,6 @@ def export_run(cfg, *, slug, base_commit, worktree: Path, run_dir: Path, objects
                 if not line:
                     continue
                 dropped_git_entries.append(line[len("/work/"):] if line.startswith("/work/") else line)
-
-        # Spec §2.5: remove any staging temp a kill left behind, immediately
-        # before the index is built, so `.dw-tmp.…` can never land in
-        # files_changed/diff.patch. One exec, anchored on the full generated
-        # shape (`find -regex` matches the WHOLE path), `-type f` so a
-        # similarly-named directory is never touched, `-print` so the count is
-        # reportable. A failure here is not fatal: an unswept temp is untidy,
-        # not wrong.
-        sweep_argv = docker_args.exec_argv(
-            name, ["/usr/bin/find", "/work", "-type", "f", "-regextype", "posix-extended",
-                   "-regex", TMP_FIND_REGEX, "-print", "-delete"])
-        sweep_captured = run(sweep_argv, timeout=docker_cli.T_EXPORT_STEP)
-        if sweep_captured.returncode == 0:
-            swept = [line for line
-                     in sweep_captured.output.decode("utf-8", errors="replace").splitlines()
-                     if line.strip()]
-            if swept:
-                plural = "" if len(swept) == 1 else "s"
-                print(f"swept {len(swept)} stale temp file{plural}", file=sys.stderr)
 
         add_argv = docker_args.exec_argv(name, ["/usr/bin/git", "add", "-A"])
         add_captured = run(add_argv, timeout=docker_cli.T_EXPORT_STEP)

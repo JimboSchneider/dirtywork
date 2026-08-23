@@ -353,14 +353,19 @@ def test_export_run_reports_files_changed(tmp_path, empty_worktree):
     assert add_index < names_index
 
 
-def test_export_sweeps_stale_temps_before_git_add(tmp_path, empty_worktree):
-    from dirtywork.tools import TMP_FIND_REGEX
+def test_export_run_never_execs_a_sweep_the_export_volume_is_readonly(tmp_path, empty_worktree):
+    # Fix round 1: the sweep moved OUT of export_run entirely -- the export
+    # container's /work volume mount is readonly by design
+    # (docker_args.export_create_argv), so a `find -delete` exec here would
+    # get EROFS on every match and silently do nothing while `git add -A`
+    # still staged `.dw-tmp.…` into the export. The sweep now runs in the
+    # WORKER container, before it stops, ahead of export_run entirely (see
+    # test_docker_sandbox.py). This is the negative half of that fix: prove
+    # export_run's own exec stream never execs a sweep, so a future
+    # regression that reintroduces one here is caught.
     fake = FakeDocker()
     fake.script(["create"], _ok())
     fake.script(["exec"], _ok())
-    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/usr/bin/find", "/work",
-                 "-type", "f", "-regextype", "posix-extended", "-regex", TMP_FIND_REGEX],
-                _ok(b"/work/src/.dw-tmp.app.py.deadbeef\n"))
     fake.script(["exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "write-tree"],
                 _ok(b"treehash1234\n"))
     fake.script(["exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "diff", "--stat",
@@ -375,18 +380,16 @@ def test_export_sweeps_stale_temps_before_git_add(tmp_path, empty_worktree):
     run_dir = tmp_path / "rundir"
     run_dir.mkdir()
 
-    export_run(
+    artifacts = export_run(
         DockerConfig(), slug="abc123", base_commit="deadbeef" * 5, worktree=empty_worktree,
         run_dir=run_dir, objects_dir=Path("/repo/.git/objects"),
         image_ref="dirtywork/worker@sha256:" + "a" * 64, uid=501, gid=20,
         repo_label="deadbeef", run=fake.run, popen=fake.popen,
     )
 
+    assert artifacts.export_status == "ok"
     argvs = [c[0] for c in fake.calls]
     sweeps = [a for a in argvs if "-regextype" in a]
     adds = [a for a in argvs if a[-3:] == ["/usr/bin/git", "add", "-A"]]
-    assert len(sweeps) == 1 and len(adds) == 1
-    assert sweeps[0][4:] == ["/usr/bin/find", "/work", "-type", "f", "-regextype",
-                             "posix-extended", "-regex", TMP_FIND_REGEX,
-                             "-print", "-delete"]
-    assert argvs.index(sweeps[0]) < argvs.index(adds[0])
+    assert sweeps == []
+    assert len(adds) == 1
