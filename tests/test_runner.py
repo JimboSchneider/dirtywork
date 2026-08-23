@@ -1499,3 +1499,11 @@ def test_a_verify_timeout_is_not_counted(parts):
     assert box.commands == ["npm test"]        # it DID run, and it DID time out
     assert result.extra["timeouts"] == 0       # spec §4.3: worker tool calls only
     assert [e for e in _events(tmp) if e["event"] == "nudge"] == []
+
+
+def test_mutating_tools_includes_every_tool_that_changes_a_file():
+    # Spec §6: a run whose only progress is inserts/batches/appends must not be
+    # called stalled. _MUTATING_TOOLS is what ProgressTracker reads.
+    from dirtywork.runner import _MUTATING_TOOLS
+    assert set(_MUTATING_TOOLS) == {"write_file", "append_file", "edit_file",
+                                    "apply_edits", "insert_before", "insert_after"}

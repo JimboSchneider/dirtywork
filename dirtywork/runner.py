@@ -157,7 +157,8 @@ STALL_NUDGE = ("No progress in the last {n} turns: no file changed and no comman
 TIMEOUT_NUDGE = ("A command timed out and did not finish; its result is unknown. Re-run it "
                  "with a larger timeout (up to 600 seconds) or split it into smaller "
                  "commands. Do not report it as passed.")
-_MUTATING_TOOLS = ("write_file", "edit_file", "apply_edits", "insert_before", "insert_after")
+_MUTATING_TOOLS = ("write_file", "append_file", "edit_file", "apply_edits",
+                   "insert_before", "insert_after")
 # Tokens that change between otherwise-identical runs of the same command:
 # durations ("in 24.51s", "0.39s", "12 ms"), clock times / ISO timestamps,
 # and long hex ids (git shas, container ids — at least one a-f letter, so a

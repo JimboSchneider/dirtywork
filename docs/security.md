@@ -22,7 +22,7 @@ dirtywork's containment model — what Docker mode locks down, what it doesn't, 
 > `core.symlinks=false`, `core.longpaths`.
 
 **Docker is the default sandbox as of 0.4 — a breaking change from 0.2.**
-Every tool call (`read_file`/`write_file`/`edit_file`/`apply_edits`/
+Every tool call (`read_file`/`write_file`/`append_file`/`edit_file`/`apply_edits`/
 `insert_before`/`insert_after`/`list_dir`/`grep`/`bash`) runs inside a
 locked-down container: `--network none` by default,
 `--read-only` root filesystem, `--cap-drop ALL`, kernel-enforced memory/CPU/

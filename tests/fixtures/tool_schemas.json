@@ -51,6 +51,28 @@
   {
     "type": "function",
     "function": {
+      "name": "append_file",
+      "description": "Append text verbatim to the END of an existing file (create the file with write_file first). Nothing is inserted between the old content and your text — include a leading newline if the file does not end with one. Use write_file + append_file to produce a file too large for one reply.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "text"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "edit_file",
       "description": "Replace old_string with new_string in a file. old_string must occur exactly once — include surrounding context.",
       "parameters": {

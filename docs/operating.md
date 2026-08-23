@@ -34,8 +34,13 @@ Day-to-day usage once dirtywork is installed: running a task, reviewing and resu
 
 #### Editing files
 
-The worker changes files only through tools — `write_file`, `edit_file`,
-`apply_edits`, `insert_before`, `insert_after` — never through `bash`. When a
+The worker changes files only through tools — `write_file`, `append_file`,
+`edit_file`, `apply_edits`, `insert_before`, `insert_after` — never through
+`bash`. A file larger than one reply is `write_file` for the first part and
+`append_file` for each part after it; `append_file` adds text verbatim to the
+end of an EXISTING file, inserting nothing between the old content and the
+new, so `text` needs a leading newline when the file does not end with one.
+When a
 brief lists several exact replacements in one file, say so and expect one
 `apply_edits` call rather than a run of `edit_file` calls: the edits are applied
 **in order on the running text** (edit 3 may depend on what edit 1 produced),

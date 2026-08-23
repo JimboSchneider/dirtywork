@@ -44,7 +44,7 @@ macOS (Windows unsupported — see below).
 ## Security & trust
 
 **Docker is the default sandbox as of 0.4 — a breaking change from 0.2.**
-Every tool call (`read_file`/`write_file`/`edit_file`/`apply_edits`/
+Every tool call (`read_file`/`write_file`/`append_file`/`edit_file`/`apply_edits`/
 `insert_before`/`insert_after`/`list_dir`/`grep`/`bash`) runs inside a
 locked-down container: `--network none` by default,
 `--read-only` root filesystem, `--cap-drop ALL`, kernel-enforced memory/CPU/
@@ -156,9 +156,13 @@ stdout JSON and exit codes: [docs/machine-contract.md](https://github.com/JimboS
    `.git/info/exclude` automatically. If the repo has a `CLAUDE.md` or
    `AGENTS.md` at its base commit, its content is injected into the
    worker's system prompt so it inherits your conventions.
-3. **The loop** — the model gets ten tools (`read_file`, `write_file`,
-   `edit_file`, `apply_edits`, `insert_before`, `insert_after`, `list_dir`,
-   `grep`, `bash`, `finish`) via OpenAI function-calling.
+3. **The loop** — the model gets eleven tools (`read_file`, `write_file`,
+   `append_file`, `edit_file`, `apply_edits`, `insert_before`, `insert_after`,
+   `list_dir`, `grep`, `bash`, `finish`) via OpenAI function-calling.
+   `append_file` adds text verbatim to the end of an existing file, so a file
+   larger than one reply is `write_file` for the first part and `append_file`
+   for each part after it — the recovery a truncated `write_file` is now told
+   to use by name.
    `insert_before`/`insert_after` add
    whole lines around a unique anchor without touching the anchor's own line
    — the primitive for "add a line here", which `edit_file` could only express
@@ -166,9 +170,11 @@ stdout JSON and exit codes: [docs/machine-contract.md](https://github.com/JimboS
    replacements to one file in a single call, applied in order, all-or-nothing:
    if any `old` does not match exactly once at its turn, nothing is written and
    the result names the first failure. Every successful
-   `edit_file`/`apply_edits`/`write_file`/`insert_*` result
+   `edit_file`/`apply_edits`/`write_file`/`append_file`/`insert_*` result
    echoes a capped unified diff of what actually changed, so a replace that
-   silently deleted a line is visible to the worker in the same turn.
+   silently deleted a line is visible to the worker in the same turn — except
+   `write_file` on a NEW file, which has nothing to diff against and reports
+   its byte and line count instead.
    Context is budgeted per model — dirtywork asks the server what window it
    actually loaded and reports both the value and its source, and the payload's
    `trimmed_turns` says on how many turns the oldest tool results had to be

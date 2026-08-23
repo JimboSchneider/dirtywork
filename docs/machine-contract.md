@@ -116,7 +116,7 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   a container's commits could not reach the host anyway. `dirtywork resume`
   inherits the setting from the run it continues.
 
-**Tools:** the worker is advertised exactly ten tools, in this order. They are
+**Tools:** the worker is advertised exactly eleven tools, in this order. They are
 not configurable; a run's tool surface is the same in host and docker mode.
 
 - `read_file(path, offset=0, limit=400)` — numbered lines; files over ~5 MB and
@@ -124,6 +124,17 @@ not configurable; a run's tool surface is the same in host and docker mode.
 - `write_file(path, content)` — create or overwrite; parent directories are
   created. The result echoes a capped unified diff (a new file reports its byte
   and line count instead).
+- `append_file(path, text)` — append `text` **verbatim** to the end of an
+  EXISTING file; nothing is inserted between the old content and the new, so a
+  file that does not end in a newline needs one at the start of `text`. A
+  missing target refuses with `ERROR: cannot append to '<path>': it does not
+  exist; create it with write_file first` — `append_file` never creates a file
+  or a parent directory. Three caps, in order and identical in both modes: the
+  `text` argument (`ERROR: text is <n> bytes, over the <limit>-byte write
+  limit; append in smaller pieces`), the current file's size, and the result
+  size (both of the latter render `ERROR: result is <n> bytes, over the
+  <limit>-byte write limit; nothing was written`). This is the second half of
+  the large-file recipe: `write_file` the first part, `append_file` the rest.
 - `edit_file(path, old_string, new_string)` — one exact replacement;
   `old_string` must occur exactly once.
 - `apply_edits(path, edits)` — several exact replacements to ONE file in one

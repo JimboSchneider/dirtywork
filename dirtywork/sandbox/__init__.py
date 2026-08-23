@@ -48,7 +48,7 @@ class Sandbox(Protocol):
     DockerSandbox (dirtywork.sandbox.docker) both implement it; ToolExecutor
     never knows which one it holds.
 
-    Tool methods (read_file/write_file/edit_file/apply_edits/insert_before/insert_after/list_dir/grep/bash) may raise BudgetExceeded (worktree over budget) or SandboxError (backend failure); the runner catches both.
+    Tool methods (read_file/write_file/append_file/edit_file/apply_edits/insert_before/insert_after/list_dir/grep/bash) may raise BudgetExceeded (worktree over budget) or SandboxError (backend failure); the runner catches both.
 
     apply_edits(path, edits): a call routed through the tool registry (spec
     §1.3) has already proved every item of `edits` is exactly {"old": str,
@@ -62,6 +62,8 @@ class Sandbox(Protocol):
     def read_file(self, path: str, offset: int = 0, limit: int = 400) -> str: ...
 
     def write_file(self, path: str, content: str) -> str: ...
+
+    def append_file(self, path: str, text: str) -> str: ...
 
     def edit_file(self, path: str, old_string: str, new_string: str) -> str: ...
 

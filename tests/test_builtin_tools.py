@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from dirtywork.budget import BudgetExceeded
-from dirtywork.builtin_tools import default_registry
+from dirtywork.builtin_tools import TOOL_OUTPUT_CAP, default_registry
 from dirtywork.sandbox.host import HostSandbox
 from dirtywork.transcript import Transcript
 
@@ -25,6 +25,10 @@ class FakeSandbox:
     def write_file(self, path, content):
         self.calls.append(("write_file", path, content))
         return f"wrote:{path}:{len(content)}"
+
+    def append_file(self, path, text):
+        self.calls.append(("append_file", path, text))
+        return f"appended:{path}:{len(text)}"
 
     def edit_file(self, path, old_string, new_string):
         self.calls.append(("edit_file", path, old_string, new_string))
@@ -77,8 +81,8 @@ def test_schemas_match_the_frozen_wire_fixture():
 def test_schemas_shape():
     schemas = default_registry().schemas()
     names = {s["function"]["name"] for s in schemas}
-    assert names == {"read_file", "write_file", "edit_file", "apply_edits", "insert_before",
-                     "insert_after", "list_dir", "grep", "bash", "finish"}
+    assert names == {"read_file", "write_file", "append_file", "edit_file", "apply_edits",
+                     "insert_before", "insert_after", "list_dir", "grep", "bash", "finish"}
     for s in schemas:
         assert s["type"] == "function"
         assert "parameters" in s["function"]
@@ -292,3 +296,30 @@ def test_insert_after_dispatches():
         sandbox=sandbox, deadline=None)
     assert result.kind == "ok"
     assert sandbox.calls == [("insert_after", "a.txt", "x", "y")]
+
+
+def test_append_file_dispatches_and_declares_its_caps():
+    sandbox = FakeSandbox()
+    registry = default_registry()
+    result = registry.execute("append_file", {"path": "notes.md", "text": "more\n"},
+                              sandbox=sandbox, deadline=None)
+    assert result.kind == "ok" and result.text == "appended:notes.md:5"
+    assert sandbox.calls == [("append_file", "notes.md", "more\n")]
+    caps = registry.spec("append_file").caps
+    assert caps.fs == "write"
+    assert caps.max_output_chars == TOOL_OUTPUT_CAP
+    assert caps.transcript == "preview"
+    # order is significant and documented in BUILTIN_SPECS (spec §1.2)
+    names = registry.names()
+    assert names[names.index("write_file") + 1] == "append_file"
+    assert len(names) == 11
+
+
+def test_append_file_description_warns_about_the_leading_newline():
+    spec = default_registry().spec("append_file")
+    assert spec.description == (
+        "Append text verbatim to the END of an existing file (create the file "
+        "with write_file first). Nothing is inserted between the old content and "
+        "your text — include a leading newline if the file does not end with one. "
+        "Use write_file + append_file to produce a file too large for one reply.")
+    assert set(spec.required) == {"path", "text"}
