@@ -1719,6 +1719,14 @@ def test_append_file_write_script_shape(started):
     assert 'cp -- "$1" "$2" && cat >> "$2"' in docker_mod.APPEND_WRITE_SCRIPT
     assert docker_mod.APPEND_WRITE_SCRIPT.endswith(docker_mod._PROMOTE)
     assert docker_mod.WRITE_SCRIPT.endswith(docker_mod._PROMOTE)
+    # Fix round 1: the write script's own writability guard (WRITE_SCRIPT's
+    # counterpart) sits between the missing-target check and the copy.
+    assert ('[ -w "$1" ] || { echo "cannot append to $1: Permission denied" '
+            '>&2; exit 1; }') in docker_mod.APPEND_WRITE_SCRIPT
+    # Fix round 1: the guard script refuses a symlink (dangling included)
+    # BEFORE the existence/regular-file checks, and stats through -L.
+    assert docker_mod.APPEND_GUARD_SCRIPT.startswith('[ ! -h "$1" ] || exit 3; ')
+    assert docker_mod.APPEND_GUARD_SCRIPT.endswith('stat -Lc %s -- "$1"')
 
 
 def test_append_file_guard_rc2_is_the_does_not_exist_string(started):
@@ -1848,7 +1856,48 @@ def test_append_file_matches_the_host_text_for_every_shared_refusal(started, tmp
     _script_append_guard(fake, _ok(b"8\n"))
     fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"], _ok(b"\xff\xfe old"))
     assert sb.append_file("f.txt", "text") == tools.append_file(wt, "f.txt", "text")
+
+
+# --- Fix round 1 (spec/plan amended 2026-08-23): post-read result re-check
+# restores cap-3 parity when the guard's snapshot goes stale between the
+# guard exec and the read exec.
+
+
+def test_append_file_read_exceeds_traps_to_result_cap(started):
+    # The guard approved a small size, but the read exec's own cap fires
+    # (a race: the file grew between the two execs). This must surface the
+    # result-cap string -- never _read_raw's "exceeds ... refusing to read",
+    # which is read_file's noun, not append's -- and must cost no write exec.
+    from dirtywork.tools import MAX_READ_BYTES, MAX_WRITE_BYTES
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(b"4\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"],
+                _ok(b"x" * (MAX_READ_BYTES + 1)))
+    out = sb.append_file("racy.txt", "y")
+    assert out == (f"ERROR: result is 5 bytes, over the "
+                   f"{MAX_WRITE_BYTES}-byte write limit; nothing was written")
+    assert not [c for c in fake.calls if _is_append_write_exec(c)]
+
+
+def test_append_file_post_read_size_over_the_write_cap_traps_to_result_cap(started):
+    # The guard approved a small size, the read exec itself stays under
+    # MAX_READ_BYTES (so _read_raw succeeds), but the ACTUAL content read
+    # plus the new text exceeds MAX_WRITE_BYTES -- the guard's snapshot was a
+    # moment old. Must refuse with the recomputed sum and cost no write exec.
+    from dirtywork.tools import MAX_READ_BYTES, MAX_WRITE_BYTES
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(b"4\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"],
+                _ok(b"x" * MAX_READ_BYTES))
+    out = sb.append_file("racy2.txt", "y" * 100)
+    assert out == (f"ERROR: result is {MAX_READ_BYTES + 100} bytes, over the "
+                   f"{MAX_WRITE_BYTES}-byte write limit; nothing was written")
+    assert not [c for c in fake.calls if _is_append_write_exec(c)]
 ```
+
+(These two tests were added in Task 4's fix round 1, after the original Step 3 red
+gate below — which still reads "12 failed" for the original 12, unrenumbered; see
+the amendment note after Step 8.)
 
 - [ ] **Step 3: Run them to verify they fail**
 
@@ -1860,22 +1909,41 @@ Expected: 12 failed, every one with `AttributeError: module 'dirtywork.sandbox.d
 In `dirtywork/sandbox/docker.py`, immediately **after** `_sibling_tmp` and immediately **before** `class DockerSandbox:`.
 
 ```python
-# Spec §1.2: exec 1 of three. `[ -e ]` then `[ -f ]` -- so a FIFO, device or
-# directory is refused with exit 3 BEFORE any reader exec exists that a FIFO
-# could block -- then the EXACT byte size on stdout. The size matters because
-# `_read_raw` alone discards it (`head -c N+1` only proves "exceeds"), and
-# docker must be able to name the exact result size for a file it will never
-# read.
-APPEND_GUARD_SCRIPT = '[ -e "$1" ] || exit 2; [ -f "$1" ] || exit 3; stat -c %s -- "$1"'
+# Spec §1.2: exec 1 of three. `[ ! -h ]` FIRST refuses any symlink (dangling
+# included) as exit 3, restoring parity with the host's O_NOFOLLOW probe
+# (which refuses symlinks too) and closing a cap bypass: plain `stat -c %s`
+# is an lstat, so a symlink to an oversized file dodged caps 2 and 3. Then
+# `[ -e ]` then `[ -f ]` -- so a FIFO, device or directory is refused with
+# exit 3 BEFORE any reader exec exists that a FIFO could block -- then the
+# EXACT byte size on stdout via `stat -Lc`, which follows the link as
+# belt-and-suspenders for a race after the `-h` check. The size matters
+# because `_read_raw` alone discards it (`head -c N+1` only proves
+# "exceeds"), and docker must be able to name the exact result size for a
+# file it will never read.
+APPEND_GUARD_SCRIPT = ('[ ! -h "$1" ] || exit 3; [ -e "$1" ] || exit 2; '
+                       '[ -f "$1" ] || exit 3; stat -Lc %s -- "$1"')
 
 # Spec §2.6: exec 3 of three. `[ -f "$1" ]` is re-checked here so a delete
 # between the guard exec and this one still refuses as "does not exist"
 # (exit 2) rather than silently creating the file; `-f` also re-excludes
-# directories and FIFOs. `cp` without `-p` is fine -- the shared promote's
-# `chmod --reference` runs afterward.
-APPEND_WRITE_SCRIPT = ('[ -f "$1" ] || exit 2; '
-                       'cp -- "$1" "$2" && cat >> "$2" && ' + _PROMOTE)
+# directories and FIFOs. The writability guard is WRITE_SCRIPT's
+# counterpart: without it a 0444 target either leaks a temp-path in a
+# cp/cat stderr wrap or, run as root, silently succeeds -- neither is the
+# EACCES parity spec §2.6 asks for. `cp` without `-p` is fine -- the shared
+# promote's `chmod --reference` runs afterward.
+APPEND_WRITE_SCRIPT = (
+    '[ -f "$1" ] || exit 2; '
+    '[ -w "$1" ] || { echo "cannot append to $1: Permission denied" >&2; exit 1; }; '
+    'cp -- "$1" "$2" && cat >> "$2" && ' + _PROMOTE
+)
 ```
+
+**Fix round 1 (executed 2026-08-23):** the code block above is the FINAL shipped
+text; it originally read `APPEND_GUARD_SCRIPT = '[ -e "$1" ] || exit 2; [ -f "$1" ]
+|| exit 3; stat -c %s -- "$1"'` and an `APPEND_WRITE_SCRIPT` with no writability
+guard. Post-review, the reviewer proved in-container that plain `stat -c %s` is an
+lstat: a symlink to an oversized file dodged both size caps. See this task's
+amendment note after Step 8 for the full fix-round writeup.
 
 - [ ] **Step 5: Add the three methods**
 
@@ -1937,22 +2005,43 @@ In `dirtywork/sandbox/docker.py`, immediately **after** `write_file` (which ends
         rel, err = _rel(path, writing=True)
         if err:
             return err
-        _size, err = self._append_guard(path, rel, len(encoded))
+        size, err = self._append_guard(path, rel, len(encoded))
         if err:
             return err
         # The guard already refused a file over MAX_READ_BYTES with the
-        # result-cap string, so _read_raw's own caps provably cannot fire
-        # first; `tool="append_file"` is what makes a non-UTF-8 file refuse
-        # with the host's append wording rather than the legacy
-        # `refusing to edit` (spec §5.1).
+        # result-cap string; the exceeds-trap just below covers the race
+        # where the file grows between that exec and this one.
+        # `tool="append_file"` is what makes a non-UTF-8 file refuse with
+        # the host's append wording rather than the legacy `refusing to
+        # edit` (spec §5.1).
         old_text, err = self._read_raw(path, strict=True, tool="append_file")
         if err:
+            if err.startswith(f"ERROR: '{path}' exceeds "):
+                # TOCTOU: the guard's snapshot approved a size that
+                # _read_raw's own cap disproved a moment later. Trapped
+                # here so read_file's "refusing to read" wording -- the
+                # wrong noun for an append -- can never surface; reported
+                # against the guard's last-known size, the best number
+                # available (mirrors tools.append_file's probe-then-read
+                # race handling, spec §2.6).
+                return _result_too_big(size + len(encoded))
             return err
+        # Re-checked against what was actually read, mirroring
+        # tools.append_file: the guard's size is a moment old, and the file
+        # may have grown in place since ("the probe's size is a moment
+        # old", spec §2.6).
+        if len(old_text.encode("utf-8")) + len(encoded) > MAX_WRITE_BYTES:
+            return _result_too_big(len(old_text.encode("utf-8")) + len(encoded))
         err = self._append_write(path, rel, encoded)
         if err:
             return err
         return describe_change(path, old_text, old_text + text, verb="Appended to")
 ```
+
+**Fix round 1 (executed 2026-08-23):** `append_file`'s body above is the FINAL
+shipped text; the `_size, err = ...` local was originally discarded (named `_size`)
+and there was no exceeds-trap or post-read re-check. See the amendment note after
+Step 8.
 
 - [ ] **Step 6: Run the module and see it pass**
 
@@ -1972,6 +2061,37 @@ git commit -m "feat(docker): append_file — guard+size exec, tool-aware read, a
 ```
 
 ---
+
+**Task 4 amendment (fix round 1, executed 2026-08-23):** post-review found two
+Important cap-bypass defects, both spec-authored (the transcription into code was
+faithful), plus a missing writability guard, and fixed all three in one round: (1)
+`APPEND_GUARD_SCRIPT`'s original `stat -c %s` was an **lstat** — a symlink to an
+oversized file dodged both size caps, since the guard never dereferenced it; fixed
+by refusing any symlink (dangling included) with `[ ! -h "$1" ] || exit 3` FIRST
+(restoring parity with the host's O_NOFOLLOW probe, which also refuses symlinks)
+and switching the size read to `stat -Lc`. (2) `APPEND_WRITE_SCRIPT` was missing
+WRITE_SCRIPT's own writability guard, so a 0444 target either leaked a temp path
+in a `cp`/`cat` stderr wrap or, run as root, silently succeeded; fixed by adding
+`[ -w "$1" ] || { echo "cannot append to $1: Permission denied" >&2; exit 1; }`
+right after the missing-target check. (3) `append_file` trusted the guard's
+snapshot with no re-check: a race between the guard exec and the read exec (the
+file grows in between) could surface `_read_raw`'s own "exceeds ... refusing to
+read" wording — read_file's noun, not append's — or silently write a result over
+`MAX_WRITE_BYTES`. Fixed by trapping `_read_raw`'s exceeds error and remapping it
+to the result-cap string built from the guard's last-known size, and by
+re-checking `len(old_text.encode("utf-8")) + len(encoded)` against
+`MAX_WRITE_BYTES` after a successful read, before the write exec — both mirror
+`tools.append_file`'s own probe-then-read race handling (tools.py ~:830). Two new
+tests were added (`test_append_file_read_exceeds_traps_to_result_cap`,
+`test_append_file_post_read_size_over_the_write_cap_traps_to_result_cap`), plus
+two pin assertions in `test_append_file_write_script_shape`. Commit:
+`fix(docker): append guard refuses symlinks and stats through -L; writability
+guard in the append script; post-read result re-check restores cap-3 parity
+(spec/plan amended)`. This task's own gates now read `105 passed` for the module
+(103 + 2) and `1078 passed, 1 skipped, 18 deselected` for the full suite (1076 +
+2); the Step 7 gate above and every downstream task's documented count are left
+as originally written — renumbering the plan's global count chain is the
+controller's call, not this fix round's.
 
 ### Task 5: register `append_file` as the eleventh tool (spec §1.2 registration, §7 contract)
 

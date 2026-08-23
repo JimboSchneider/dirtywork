@@ -71,9 +71,11 @@ abort). No tool can append, so "write it in pieces" is not honest advice for a n
   refuses with the generic tail. Then `_write_atomic(target, old_bytes + text.encode(), verb="append")`. `append_file`
   never creates parent directories.
 - **Docker:** `_append_raw` reuses `_rel(writing=True)` and takes **three execs**: (1) a guard +
-  size exec `sh -c '[ -e "$1" ] || exit 2; [ -f "$1" ] || exit 3; stat -c %s -- "$1"'` — rc 2 →
-  the exact does-not-exist string; rc 3 (FIFO/device/directory, **checked before any read so a
-  FIFO can never block a reader exec**) → `ERROR: cannot append to '<path>': not a regular file`;
+  size exec `sh -c '[ ! -h "$1" ] || exit 3; [ -e "$1" ] || exit 2; [ -f "$1" ] || exit 3; stat -Lc
+  %s -- "$1"'` — rc 2 →
+  the exact does-not-exist string; rc 3 (a symlink — dangling included — or a FIFO/device/directory,
+  **checked before any read so a FIFO can never block a reader exec**) → `ERROR: cannot append to
+  '<path>': not a regular file`;
   rc 0 → the exact byte size on stdout, which lets docker produce the **exact** result-cap string
   even for a file too large to read (`_read_raw` alone discards the size — `head -c N+1` only
   proves "exceeds"): `size > MAX_READ_BYTES` or `size + len(text) > MAX_WRITE_BYTES` → `ERROR:
@@ -81,13 +83,33 @@ abort). No tool can append, so "write it in pieces" is not honest advice for a n
   written`; (2) the existing `_read_raw(path, strict=True,
   tool="append_file")` — the §5.1 `tool` parameter, so invalid UTF-8 refuses with `ERROR: <path>
   is not valid UTF-8 text; append_file only works on text files`, matching the host append
-  wording, never the legacy `refusing to edit` (its own caps now provably cannot fire first); (3) the §2.6 append write script. Host mirrors the same order with
-  `os.stat` on the probe fd, so both modes emit identical strings from identical conditions.
+  wording, never the legacy `refusing to edit`; a race between the guard exec and this one (the
+  file grew past `MAX_READ_BYTES` in between) is trapped by matching `_read_raw`'s "exceeds"
+  refusal and remapping it to the result-cap string built from the guard's last-known size, so
+  `_read_raw`'s own read-limit wording can never surface from an append; (3) the §2.6 append write
+  script. Before it, the text just read is re-summed against `MAX_WRITE_BYTES` (the guard's size
+  is a moment old — the file may have grown in place since the guard exec) and refused with the
+  result-cap string on the recomputed sum if it now exceeds the cap. Host mirrors the same order
+  with `os.stat` on the probe fd, so both modes emit identical strings from identical conditions.
   The `text` argument is capped by `_append_oversized` **before any exec**; `_append_raw` never
   routes the payload through `_oversized`, whose write-file wording must not surface from an
   append. The write script's missing-target guard exits
   **2** (mapped to the does-not-exist string — a delete between execs still refuses correctly);
-  any other failure exits 1 and wraps stderr as `ERROR: cannot append to '<path>': {stderr}`.
+  the write script also re-checks writability (`[ -w "$1" ]`, WRITE_SCRIPT's own guard's
+  counterpart) so an unwritable target refuses `EACCES` instead of either leaking a temp path in a
+  `cp`/`cat` stderr wrap or, run as root, silently succeeding; any other failure exits 1 and wraps
+  stderr as `ERROR: cannot append to '<path>': {stderr}`.
+
+  (Execution amendment, 2026-08-23: the guard's original `stat -c %s` was an **lstat** — a symlink
+  to an oversized file dodged both size caps, since the guard never dereferenced it to see the real
+  target size. Fix round 1 for Task 4 adds the `[ ! -h "$1" ] || exit 3` check FIRST (restoring
+  parity with the host's `O_NOFOLLOW` probe, which also refuses symlinks, and closing the
+  cap-bypass) and switches the final `stat` to `-Lc` — belt-and-suspenders for a race after the
+  `-h` check, now that the guard is trusted to dereference. The same review found the append write
+  script missing WRITE_SCRIPT's writability guard, and the read/write execs trusting the guard's
+  snapshot with no re-check against a file that changed size in between — both are fixed above and
+  mirror `tools.append_file`'s own probe-then-read handling, which already re-checks after the
+  read (`len(raw) + len(encoded) > MAX_WRITE_BYTES`, tools.py ~:830).)
 - **Result string:** whatever `describe_change(path, old_text, new_text, verb="Appended to")`
   computes. It is `+A -0` only when the file already ended in a newline; when it did not, the final
   line is a replace and the header reads `+A -1 (removed 1 non-blank line)` — the visible
@@ -289,9 +311,15 @@ mkdir -p "$(dirname -- "$1")" && { [ ! -d "$1" ] || { echo "cannot write $1: Is 
   any failure is harmless when the temp never existed.
 - `_append_raw` write script: `[ -f "$1" ] || exit 2` (re-checked at write time; also excludes
   directories and FIFOs — the §1.2 guard exec already refused them before any read), then
+  `[ -w "$1" ] || { echo "cannot append to $1: Permission denied" >&2; exit 1; }` (WRITE_SCRIPT's
+  own writability guard's counterpart — without it a `0444` target either leaks a temp path in a
+  `cp`/`cat` stderr wrap or, run as root, silently succeeds), then
   `cp -- "$1" "$2" && cat >> "$2"` and the shared chmod/`mv -fT` promote (`cp` without `-p` is
   fine — the `chmod --reference` step runs after). rc 2 → the §1.2 does-not-exist string; rc 1 →
   `ERROR: cannot append to '<path>': {stderr}`.
+
+  (Execution amendment, 2026-08-23: the writability guard line was added in Task 4's fix round 1,
+  the same review that added the guard exec's symlink refusal — see the §1.2 amendment note above.)
 - **Test churn, counted:** the `'cat > "$1"'` matcher appears 12× — an exact-argv assertion at
   `tests/test_docker_sandbox.py:380`, ten substring matchers in that file, one in
   `tests/test_docker_runs.py`. Replace the substring matchers with one shared

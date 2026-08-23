@@ -1617,6 +1617,14 @@ def test_append_file_write_script_shape(started):
     assert 'cp -- "$1" "$2" && cat >> "$2"' in docker_mod.APPEND_WRITE_SCRIPT
     assert docker_mod.APPEND_WRITE_SCRIPT.endswith(docker_mod._PROMOTE)
     assert docker_mod.WRITE_SCRIPT.endswith(docker_mod._PROMOTE)
+    # Fix round 1: the write script's own writability guard (WRITE_SCRIPT's
+    # counterpart) sits between the missing-target check and the copy.
+    assert ('[ -w "$1" ] || { echo "cannot append to $1: Permission denied" '
+            '>&2; exit 1; }') in docker_mod.APPEND_WRITE_SCRIPT
+    # Fix round 1: the guard script refuses a symlink (dangling included)
+    # BEFORE the existence/regular-file checks, and stats through -L.
+    assert docker_mod.APPEND_GUARD_SCRIPT.startswith('[ ! -h "$1" ] || exit 3; ')
+    assert docker_mod.APPEND_GUARD_SCRIPT.endswith('stat -Lc %s -- "$1"')
 
 
 def test_append_file_guard_rc2_is_the_does_not_exist_string(started):
@@ -1746,3 +1754,40 @@ def test_append_file_matches_the_host_text_for_every_shared_refusal(started, tmp
     _script_append_guard(fake, _ok(b"8\n"))
     fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"], _ok(b"\xff\xfe old"))
     assert sb.append_file("f.txt", "text") == tools.append_file(wt, "f.txt", "text")
+
+
+# --- Fix round 1 (spec/plan amended 2026-08-23): post-read result re-check
+# restores cap-3 parity when the guard's snapshot goes stale between the
+# guard exec and the read exec.
+
+
+def test_append_file_read_exceeds_traps_to_result_cap(started):
+    # The guard approved a small size, but the read exec's own cap fires
+    # (a race: the file grew between the two execs). This must surface the
+    # result-cap string -- never _read_raw's "exceeds ... refusing to read",
+    # which is read_file's noun, not append's -- and must cost no write exec.
+    from dirtywork.tools import MAX_READ_BYTES, MAX_WRITE_BYTES
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(b"4\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"],
+                _ok(b"x" * (MAX_READ_BYTES + 1)))
+    out = sb.append_file("racy.txt", "y")
+    assert out == (f"ERROR: result is 5 bytes, over the "
+                   f"{MAX_WRITE_BYTES}-byte write limit; nothing was written")
+    assert not [c for c in fake.calls if _is_append_write_exec(c)]
+
+
+def test_append_file_post_read_size_over_the_write_cap_traps_to_result_cap(started):
+    # The guard approved a small size, the read exec itself stays under
+    # MAX_READ_BYTES (so _read_raw succeeds), but the ACTUAL content read
+    # plus the new text exceeds MAX_WRITE_BYTES -- the guard's snapshot was a
+    # moment old. Must refuse with the recomputed sum and cost no write exec.
+    from dirtywork.tools import MAX_READ_BYTES, MAX_WRITE_BYTES
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(b"4\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"],
+                _ok(b"x" * MAX_READ_BYTES))
+    out = sb.append_file("racy2.txt", "y" * 100)
+    assert out == (f"ERROR: result is {MAX_READ_BYTES + 100} bytes, over the "
+                   f"{MAX_WRITE_BYTES}-byte write limit; nothing was written")
+    assert not [c for c in fake.calls if _is_append_write_exec(c)]
