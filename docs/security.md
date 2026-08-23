@@ -125,9 +125,11 @@ the container has no host filesystem or shared parent repo to escape into.
 - Every denylist rejection is logged to the transcript as a
   `guardrail_block` event, so attempted escapes are visible at review time.
 - File tools refuse to operate on anything that isn't a regular file (FIFOs,
-  devices, sockets) and refuse to write through a symlink at the final path
-  component, even when its target is inside the worktree. As of 0.10 a write is
-  staged in a sibling temp and promoted with `rename(2)`; a symlink present at
+  devices, sockets); host tools, and docker's `append_file`, refuse to write
+  through a symlink at the final path component outright, even when its
+  target is inside the worktree — docker's `write_file` and transforms
+  replace it instead (below), never writing through it either way. As of
+  0.10 a write is staged in a sibling temp and promoted with `rename(2)`; a symlink present at
   call time refuses exactly as before, and one that appears in the gap between
   the check and the promote gets **replaced as a link** — `rename(2)` does not
   follow its destination, so nothing is ever written through it. That is a

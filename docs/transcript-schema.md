@@ -48,7 +48,7 @@ One per run, always the first line.
 | `base_url` | | ✓ | string | the provider endpoint actually used (after the per-provider default is applied) |
 | `dirtywork_version` | | ✓ | string | `dirtywork.__version__` |
 | `temperature` | | ✓ | number \| null | omitted from the request when null |
-| `provider` | | ✓ | `"openai"` \| `"anthropic"` | |
+| `provider` | | ✓ | `"openai"` \| `"anthropic"` \| `"ollama"` | |
 | `resumed_from` | | ✓ | string \| null | slug of the run this one continues |
 | `feedback` | | ✓ | string \| null | 0.8: `resume --feedback`/`--feedback-file` text, verbatim (max 64 000 chars); null on a fresh run or a resume without feedback. Since 0.10 an EMPTY or whitespace-only `--feedback`/`--feedback-file` is normalized to null at parse, so it is treated as absent everywhere — including by the gate that refuses to resume a `completed` run without feedback |
 | `sandbox` | | ✓ | `"none"` \| object | `"none"` in host mode; in Docker mode `{backend, image, image_digest, image_pinned, network, memory, cpus, pids_limit, tmp_size, gitdir_size, max_worktree_mb, max_worktree_files, user}` |
@@ -207,7 +207,7 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `base_commit` | start | |
 | `task` | start | |
 | `model` | start | |
-| `provider` | start | `"openai"` \| `"anthropic"` |
+| `provider` | start | `"openai"` \| `"anthropic"` \| `"ollama"` |
 | `context_window` | start | resolved tokens |
 | `max_tokens` | start | 0.10: `--max-tokens`, the per-reply output cap. `dirtywork resume` inherits it; a `run.json` written before 0.10 has no such key, and the resume falls back to the 8192 default |
 | `context_window_source` | start, end | 0.9: `flag` \| `env` \| `provider:<name>:server` \| `provider:<name>` \| `default` — which precedence step produced `context_window`. Written at start and repeated at end (including on the two failure paths) so the plain `dirtywork runs show`, which reads only `run.json`, never shows `-` |

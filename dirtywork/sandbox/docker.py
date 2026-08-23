@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import posixpath
+import re
 import shutil
 import subprocess
 import sys
@@ -55,6 +56,13 @@ from ..resume import stash_dir_for
 READ_EXEC_TIMEOUT = 30
 WRITE_EXEC_TIMEOUT = 30
 LIST_EXEC_TIMEOUT = 30
+
+# Matches a full swept temp-file path, and only that -- `Captured.output`
+# merges stderr into the same stream (procs.py runs with
+# stderr=subprocess.STDOUT), so a `find: '/work/x': Permission denied` line
+# or other daemon chatter sits in the same output as the real `-print`ed
+# paths. Anchored with fullmatch() below rather than trusted as a substring.
+_SWEEP_PATTERN = re.compile(TMP_FIND_REGEX + r"\Z")
 
 
 def _rel(path: str, *, writing: bool = False):
@@ -356,22 +364,35 @@ class DockerSandbox:
         container's `/work` volume mount is readonly by design
         (docker_args.export_create_argv), so a `find … -delete` there would
         get EROFS on every match and silently do nothing. Reporting is never
-        silent on a partial failure: the swept-N note fires whenever the
-        sweep printed anything, regardless of exit code, and a non-zero rc
-        gets its own note so an EROFS or other mid-sweep error is never
-        mistaken for "nothing to sweep"."""
+        silent on a partial failure: the swept-N note fires whenever at least
+        one real temp-file line was seen, regardless of exit code, and a
+        non-zero rc gets its own note so an EROFS or other mid-sweep error is
+        never mistaken for "nothing to sweep". The count itself is filtered
+        through `_SWEEP_PATTERN` -- `Captured.output` merges stderr, so a
+        `find: permission denied` or daemon error line must never inflate
+        the swept count.
+
+        The sweep is best-effort, not part of the run's success/failure
+        boundary: a `DockerError` here (timeout, daemon hiccup) is caught
+        and reported, never allowed to escape and skip export -- the salvage
+        path (export -> host_read_tree) is what actually protects the run's
+        output, and it must still run."""
         sweep_argv = docker_args.exec_argv(
             self.container, ["/usr/bin/find", "/work", "-type", "f", "-regextype",
                              "posix-extended", "-regex", TMP_FIND_REGEX, "-print", "-delete"])
-        sweep_captured = self._run(sweep_argv, timeout=docker_cli.T_EXPORT_STEP)
-        swept = [line for line
-                in sweep_captured.output.decode("utf-8", errors="replace").splitlines()
-                if line.strip()]
-        if swept:
-            plural = "" if len(swept) == 1 else "s"
-            print(f"swept {len(swept)} stale temp file{plural}", file=sys.stderr)
-        if sweep_captured.returncode != 0:
-            print(f"sweep incomplete (rc {sweep_captured.returncode})", file=sys.stderr)
+        try:
+            sweep_captured = self._run(sweep_argv, timeout=docker_cli.T_EXPORT_STEP)
+        except docker_cli.DockerError as e:
+            print(f"sweep failed: {e}", file=sys.stderr)
+        else:
+            swept = [line for line
+                    in sweep_captured.output.decode("utf-8", errors="replace").splitlines()
+                    if line.strip() and _SWEEP_PATTERN.fullmatch(line.strip())]
+            if swept:
+                plural = "" if len(swept) == 1 else "s"
+                print(f"swept {len(swept)} stale temp file{plural}", file=sys.stderr)
+            if sweep_captured.returncode != 0:
+                print(f"sweep incomplete (rc {sweep_captured.returncode})", file=sys.stderr)
         self._stop_container()
         watchdog_violation = self.watchdog.violation if self.watchdog is not None else None
         # D1: only meaningful when watchdog_violation itself is set -- see

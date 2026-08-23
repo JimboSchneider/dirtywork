@@ -280,7 +280,7 @@ transcript can't be created), or any other exception escapes the run
 still populated so the worktree and run directory can be located for
 salvage.
 
-`base_commit` and `provider` (`"openai"` or `"anthropic"`) are present on
+`base_commit` and `provider` (`"openai"`, `"anthropic"`, or `"ollama"`) are present on
 every post-preflight payload. `resumed_from` is
 the slug of the run this one continued, or `null` if this was a fresh run.
 `finalize_error`, `watchdog_violation` and `watchdog_violation_kind` are

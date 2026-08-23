@@ -284,6 +284,12 @@ telling anyone.
     dirtywork run --provider ollama --model gemma4:latest \
       --repo ~/repos/someproject "Add a unit test for X"
 
+Some Ollama builds load a model with a small default `num_ctx` (4096 or
+lower); if the probed window comes back at or below 8192 the flat
+`--max-tokens` refusal exits 2 (it defaults to 8192, and the check is
+`max_tokens >= window`), so on such setups pass `--max-tokens` below the
+loaded window — or raise `num_ctx` before loading.
+
 The full tag is required — `gemma4` and `gemma4:latest` are different ids to
 Ollama, and `--model` must match what `/v1/models` lists. Parallel tool calls
 are not verified on Ollama; if a model emits them, dirtywork parses them the

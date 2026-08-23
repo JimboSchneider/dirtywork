@@ -203,6 +203,8 @@ stdout JSON and exit codes: [docs/machine-contract.md](https://github.com/JimboS
                                           # includes a real end-to-end agent run)
     python3 -m pytest -m docker -v       # docker suite (requires a running Docker
                                           # daemon; host-sentinel and lifecycle tests)
+    python3 -m pytest -m ollama -v       # ollama suite (requires a running Ollama
+                                          # server; opt-in, same shape as -m live)
 
 Design docs: `docs/superpowers/specs/2026-08-13-localagent-design.md`
 (architecture and contracts) and

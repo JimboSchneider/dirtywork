@@ -1152,6 +1152,77 @@ def test_finalize_stops_container_calls_export_run_and_host_read_tree(started, m
     assert argvs.index(sweeps[0]) < argvs.index(removes[0])
 
 
+def test_finalize_sweep_docker_error_is_contained_export_still_runs(started, monkeypatch, capsys):
+    # Fix wave: a DockerError out of the best-effort sweep exec (timeout,
+    # daemon hiccup) must never escape finalize() and skip export -- doing
+    # so would leave _export_failed False while nothing was ever exported,
+    # and stop() would then delete the volume out from under a transient
+    # docker hiccup, destroying the run's real output. The sweep is
+    # best-effort; the salvage path (export -> host_read_tree) is sacred.
+    from dirtywork.sandbox import RunArtifacts
+    sb, fake, run_dir = started
+    real_run = sb._run
+
+    def sweep_raises(argv, *, timeout, stdin=None):
+        if "-regextype" in argv:
+            fake.calls.append((list(argv), timeout, stdin))
+            raise DockerError("docker exec ... timed out after 40s", timed_out=True)
+        return real_run(argv, timeout=timeout, stdin=stdin)
+
+    sb._run = sweep_raises
+
+    export_called = []
+
+    def fake_export_run(cfg, **kwargs):
+        export_called.append(True)
+        return RunArtifacts(export_status="ok", diff_stat="stat", worktree_bytes=10, worktree_files=1)
+
+    monkeypatch.setattr(docker_mod.export, "export_run", fake_export_run)
+    monkeypatch.setattr(docker_mod, "host_read_tree", lambda worktree: None)
+
+    artifacts = sb.finalize()
+
+    assert export_called == [True]
+    assert artifacts.export_status == "ok"
+    assert sb._export_failed is False
+    assert "sweep failed: docker exec ... timed out after 40s" in capsys.readouterr().err
+
+    # Volume-preserving path intact: export succeeded, so stop() removes the
+    # volume exactly as it would with no sweep failure at all.
+    fake.calls.clear()
+    sb.stop()
+    assert any(c[0][:2] == ["volume", "rm"] for c in fake.calls)
+
+
+def test_finalize_sweep_counts_only_real_temp_paths(started, monkeypatch, capsys):
+    # Fix wave: Captured.output merges stderr (procs.py runs the exec with
+    # stderr=subprocess.STDOUT), so a `find: permission denied` line or other
+    # daemon chatter sits in the same stream as the real -print'ed paths. The
+    # swept count must be lines that actually match TMP_FIND_REGEX, not just
+    # non-blank lines -- one real temp path plus one permission-denied line
+    # must count as 1 swept, not 2.
+    from dirtywork.sandbox import RunArtifacts
+    from dirtywork.tools import TMP_FIND_REGEX
+    sb, fake, run_dir = started
+
+    sweep_argv = ["exec", "-w", "/work", "dw-abc123", "/usr/bin/find", "/work",
+                  "-type", "f", "-regextype", "posix-extended", "-regex",
+                  TMP_FIND_REGEX, "-print", "-delete"]
+    fake.script(sweep_argv, _rc(1, b"/work/.dw-tmp.foo.a1b2c3d4\n"
+                                   b"find: '/work/x': Permission denied\n"))
+
+    monkeypatch.setattr(docker_mod.export, "export_run",
+                         lambda cfg, **kw: RunArtifacts(export_status="ok"))
+    monkeypatch.setattr(docker_mod, "host_read_tree", lambda worktree: None)
+
+    sb.finalize()
+
+    err = capsys.readouterr().err
+    assert "swept 1 stale temp file" in err
+    assert "stale temp files" not in err  # would only appear if the count were != 1
+    assert "sweep incomplete (rc 1)" in err
+
+
 def test_stop_after_finalize_keeps_volume_when_export_failed(started, monkeypatch):
     from dirtywork.sandbox import RunArtifacts
     sb, fake, run_dir = started
