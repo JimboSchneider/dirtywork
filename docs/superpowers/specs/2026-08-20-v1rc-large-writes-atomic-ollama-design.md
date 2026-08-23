@@ -5,8 +5,10 @@
 `--max-tokens` default 8192; new `--provider ollama`; atomic-write race delta accepted); v2 folded in
 a three-lens Opus red-team (7 Blockers, 27 Importants); v3 folds in the owner's review of v2
 (2026-08-20 12:54 CDT: read-open O_NONBLOCK, new-file mode 0o644, the _write_atomic catch boundary,
-the docker append size mechanism, tools.py in the §1.2 list, docker append FIFO guard). Awaiting
-owner approval.
+the docker append size mechanism, tools.py in the §1.2 list, docker append FIFO guard). Approved
+2026-08-23 (09:51 CDT) with three clarifications folded below: an append-specific argument-cap path
+shared by both backends with exact parity tests (never `_oversized`'s write-file wording); docker's
+append read is tool-aware (`tool="append_file"`); the temp fd is closed before `os.replace`.
 **Origin:** milestone **0.10.0 — v1 release candidate**: issues #36, #43, #47, #40, #41, #42.
 #48 (the v1 soak) runs after this ships and is not spec'd here.
 **Parent specs:** `2026-08-19-tools-context-timeouts-design.md` (v3.3),
@@ -43,7 +45,12 @@ abort). No tool can append, so "write it in pieces" is not honest advice for a n
 - **Caps, in this order on both backends** (so neither mode ever surfaces the read-limit wording
   from an append):
   1. the `text` **argument**: `len(text.encode()) > MAX_WRITE_BYTES` → `ERROR: text is <n> bytes,
-     over the <MAX_WRITE_BYTES>-byte write limit; append in smaller pieces`;
+     over the <MAX_WRITE_BYTES>-byte write limit; append in smaller pieces` — emitted by a shared
+     `_append_oversized(encoded)` helper in `tools.py`, imported by `docker.py` the way
+     `MAX_WRITE_BYTES` already is, so both backends produce the byte-identical string. The shared
+     `_oversized`'s write-file wording (`content is …; write the file in smaller pieces`) must
+     never surface from an append. **Parity tests:** host-mode and docker-mode tests assert the
+     byte-identical string for each of the three caps;
   2. the **current file** must be readable under `MAX_READ_BYTES` (5 MB) — a larger file is
      un-appendable in both modes (host: `os.stat` size pre-check; docker: the existing
      `_read_raw` cap) and refuses with the **result**-cap string;
@@ -71,10 +78,14 @@ abort). No tool can append, so "write it in pieces" is not honest advice for a n
   even for a file too large to read (`_read_raw` alone discards the size — `head -c N+1` only
   proves "exceeds"): `size > MAX_READ_BYTES` or `size + len(text) > MAX_WRITE_BYTES` → `ERROR:
   result is <size + len(text)> bytes, over the <MAX_WRITE_BYTES>-byte write limit; nothing was
-  written`; (2) the existing `_read_raw(path, strict=True)` for the content (its own caps now
-  provably cannot fire first); (3) the §2.6 append write script. Host mirrors the same order with
+  written`; (2) the existing `_read_raw(path, strict=True,
+  tool="append_file")` — the §5.1 `tool` parameter, so invalid UTF-8 refuses with `ERROR: <path>
+  is not valid UTF-8 text; append_file only works on text files`, matching the host append
+  wording, never the legacy `refusing to edit` (its own caps now provably cannot fire first); (3) the §2.6 append write script. Host mirrors the same order with
   `os.stat` on the probe fd, so both modes emit identical strings from identical conditions.
-  `_oversized` still guards the encoded payload. The write script's missing-target guard exits
+  The `text` argument is capped by `_append_oversized` **before any exec**; `_append_raw` never
+  routes the payload through `_oversized`, whose write-file wording must not surface from an
+  append. The write script's missing-target guard exits
   **2** (mapped to the does-not-exist string — a delete between execs still refuses correctly);
   any other failure exits 1 and wraps stderr as `ERROR: cannot append to '<path>': {stderr}`.
 - **Result string:** whatever `describe_change(path, old_text, new_text, verb="Appended to")`
@@ -213,9 +224,11 @@ selects the refusal wording (`write` → `cannot write '<path>'`; `append` → `
    the target existed, **else** `fchmod(tmp_fd, 0o644 & ~_UMASK)` where `_UMASK` is read once at
    import (`os.umask(0)`/restore, before any thread) — matching today's `_open_regular(...,
    O_CREAT, mode=0o644)` exactly (`0o644 & ~umask`; with `umask 0` today yields `0o644`, so
-   `0o666`-based masking would diverge there). Then `os.replace(tmp, target)`.
+   `0o666`-based masking would diverge there). Then **`os.close(tmp_fd)`** — writes go through
+   raw `os.write`, so there is no userspace buffer to flush, and the close surfaces any deferred
+   write error **before** the promote — then `os.replace(tmp, target)`.
 4. **Catch boundary and unwind:** from temp creation on, every step (write, `fchmod`,
-   `os.replace`) runs inside one `try`. An **`OSError`** there unlinks the temp and **returns**
+   the temp-fd `os.close`, `os.replace`) runs inside one `try`. An **`OSError`** there unlinks the temp and **returns**
    the generic tail (`ERROR: cannot <verb> '<path>': {e}`) — honouring the `str | None`
    signature; tool functions never raise. Any **other `BaseException`** (KeyboardInterrupt,
    `BudgetExceeded`, `SandboxError` from a budget hook) unlinks the temp and **re-raises** — those
@@ -386,7 +399,7 @@ verified against a live Ollama v0.32.x:
    `apply_edits`, `insert_before`, `insert_after`); `write_file`'s discarded pre-read passes
    `tool="write_file"`. Docker's wording becomes the host's (`ERROR: <path> is not valid UTF-8
    text; <tool> only works on text files`); the docker docstring sentence claiming no tool name is
-   needed is removed. Docker-mode tests for the non-UTF-8 case on the insert/apply tools added.
+   needed is removed. Docker-mode tests for the non-UTF-8 case on the insert/apply tools **and `append_file`** added.
 2. **Single-pass `describe_change`:** reuse the one `SequenceMatcher` via
    `get_grouped_opcodes(n)` and mirror `difflib._format_range_unified`'s two special cases
    (length 1 → bare number; length 0 → start−1). Verified by prototype: 3000 randomized pairs,
