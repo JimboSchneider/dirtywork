@@ -124,6 +124,23 @@ def _sibling_tmp(rel: str) -> str:
     return posixpath.join(posixpath.dirname(rel), tmp_name(posixpath.basename(rel)))
 
 
+# Spec §1.2: exec 1 of three. `[ -e ]` then `[ -f ]` -- so a FIFO, device or
+# directory is refused with exit 3 BEFORE any reader exec exists that a FIFO
+# could block -- then the EXACT byte size on stdout. The size matters because
+# `_read_raw` alone discards it (`head -c N+1` only proves "exceeds"), and
+# docker must be able to name the exact result size for a file it will never
+# read.
+APPEND_GUARD_SCRIPT = '[ -e "$1" ] || exit 2; [ -f "$1" ] || exit 3; stat -c %s -- "$1"'
+
+# Spec §2.6: exec 3 of three. `[ -f "$1" ]` is re-checked here so a delete
+# between the guard exec and this one still refuses as "does not exist"
+# (exit 2) rather than silently creating the file; `-f` also re-excludes
+# directories and FIFOs. `cp` without `-p` is fine -- the shared promote's
+# `chmod --reference` runs afterward.
+APPEND_WRITE_SCRIPT = ('[ -f "$1" ] || exit 2; '
+                       'cp -- "$1" "$2" && cat >> "$2" && ' + _PROMOTE)
+
+
 class DockerSandbox:
     """Every tool call and the run lifecycle for docker mode. Constructed
     with injectable `run`/`popen` so unit tests never touch a real daemon —
@@ -505,6 +522,77 @@ class DockerSandbox:
         if err:
             return err
         return describe_write(path, old_text, content, len(encoded))
+
+    def _append_guard(self, path: str, rel: str, text_len: int):
+        """Spec §1.2 exec 1: (size, None) or (None, error). Decides existence,
+        regular-file-ness and both size caps before anything is read."""
+        argv = docker_args.exec_argv(
+            self.container, ["/bin/sh", "-c", APPEND_GUARD_SCRIPT, "_", rel])
+        captured = self._run(argv, timeout=READ_EXEC_TIMEOUT)
+        if captured.returncode == 2:
+            return None, _append_missing(path)
+        if captured.returncode == 3:
+            return None, f"ERROR: cannot append to '{path}': not a regular file"
+        text = captured.output.decode("utf-8", "replace")
+        if captured.returncode != 0:
+            return None, f"ERROR: cannot append to '{path}': {text[:500]}"
+        try:
+            size = int(text.strip())
+        except ValueError:
+            return None, f"ERROR: cannot append to '{path}': {text[:500]}"
+        if size > MAX_READ_BYTES or size + text_len > MAX_WRITE_BYTES:
+            # Caps 2 and 3 share one sentence, exactly as on the host, so a
+            # file too large to read reads as un-appendable rather than
+            # surfacing _read_raw's "refusing to read" wording.
+            return None, _result_too_big(size + text_len)
+        return size, None
+
+    def _append_write(self, path: str, rel: str, encoded: bytes) -> str:
+        """Spec §2.6 exec 3: '' on success, an 'ERROR: …' string otherwise."""
+        argv = docker_args.exec_argv(
+            self.container,
+            ["/bin/sh", "-c", APPEND_WRITE_SCRIPT, "_", rel, _sibling_tmp(rel)],
+            stdin=True,
+        )
+        captured = self._run(argv, timeout=WRITE_EXEC_TIMEOUT, stdin=encoded)
+        if captured.returncode == 2:
+            return _append_missing(path)
+        if captured.returncode != 0:
+            return (f"ERROR: cannot append to '{path}': "
+                    f"{captured.output.decode('utf-8', 'replace')[:500]}")
+        return ""
+
+    def append_file(self, path: str, text: str) -> str:
+        """Spec §1.2: three execs, in the same cap order tools.append_file
+        uses, so both modes emit identical strings from identical conditions.
+        The `text` argument is capped by _append_oversized BEFORE any exec;
+        this path never routes the payload through _oversized, which says
+        `ERROR: content is <n> bytes, over the <limit>-byte write limit` --
+        write_file's noun, and the wrong fix for an append. (The longer
+        host-only form with the `; write the file in smaller pieces` tail
+        lives in tools.write_file and has no counterpart in this module.)"""
+        encoded = text.encode("utf-8")
+        too_big = _append_oversized(encoded)
+        if too_big:
+            return too_big
+        rel, err = _rel(path, writing=True)
+        if err:
+            return err
+        _size, err = self._append_guard(path, rel, len(encoded))
+        if err:
+            return err
+        # The guard already refused a file over MAX_READ_BYTES with the
+        # result-cap string, so _read_raw's own caps provably cannot fire
+        # first; `tool="append_file"` is what makes a non-UTF-8 file refuse
+        # with the host's append wording rather than the legacy
+        # `refusing to edit` (spec §5.1).
+        old_text, err = self._read_raw(path, strict=True, tool="append_file")
+        if err:
+            return err
+        err = self._append_write(path, rel, encoded)
+        if err:
+            return err
+        return describe_change(path, old_text, old_text + text, verb="Appended to")
 
     def _transform_file(self, path: str, transform, *, tool: str) -> str:
         """Read → transform → write inside the container: the same shape as

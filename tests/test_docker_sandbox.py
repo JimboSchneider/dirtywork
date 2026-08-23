@@ -12,7 +12,7 @@ from dirtywork.sandbox import SandboxError
 from dirtywork.sandbox import docker as docker_mod
 from dirtywork.sandbox.docker import DockerSandbox, docker_cli
 from dirtywork.sandbox.docker_args import DockerConfig
-from tests.docker_fakes import FakeDocker, FakePopen, _fail, _ok
+from tests.docker_fakes import FakeDocker, FakePopen, _fail, _ok, _rc
 
 DockerError = docker_cli.DockerError
 
@@ -30,6 +30,17 @@ def _is_write_exec(call) -> bool:
     membership -- not a substring search over a joined string -- is the exact
     test."""
     return docker_mod.WRITE_SCRIPT in call[0]
+
+
+def _is_append_write_exec(call) -> bool:
+    """True for a recorded docker call that ran the append write script."""
+    return docker_mod.APPEND_WRITE_SCRIPT in call[0]
+
+
+def _script_append_guard(fake, response) -> None:
+    """Script the append guard exec (the FIRST of append_file's three)."""
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
+                 docker_mod.APPEND_GUARD_SCRIPT], response)
 
 
 @pytest.fixture()
@@ -1565,3 +1576,173 @@ def test_read_raw_without_a_tool_keeps_the_legacy_wording(started):
     text, err = sb._read_raw("bin.dat", strict=True)
     assert text is None
     assert err == "ERROR: 'bin.dat' is not valid UTF-8; refusing to edit"
+
+
+# --- spec §1.2 (docker half) / §2.6: append_file in the container.
+
+
+def test_append_file_takes_three_execs_guard_read_write(started):
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(b"4\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"], _ok(b"one\n"))
+    fake.script(["exec", "-w", "/work", "-i", "dw-abc123", "/bin/sh", "-c",
+                 docker_mod.APPEND_WRITE_SCRIPT], _ok())
+    out = sb.append_file("notes.md", "two\n")
+    assert out.startswith("Appended to notes.md: +1 -0")
+    guards = [c for c in fake.calls if docker_mod.APPEND_GUARD_SCRIPT in c[0]]
+    heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
+    writes = [c for c in fake.calls if _is_append_write_exec(c)]
+    assert len(guards) == 1 and len(heads) == 1 and len(writes) == 1
+    assert fake.calls.index(guards[0]) < fake.calls.index(heads[0]) < fake.calls.index(writes[0])
+    assert writes[0][2] == b"two\n"          # only the NEW bytes go on stdin
+    assert not [c for c in fake.calls if _is_write_exec(c)]   # never write_file's script
+
+
+def test_append_file_write_script_shape(started):
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(b"4\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"], _ok(b"one\n"))
+    fake.script(["exec", "-w", "/work", "-i", "dw-abc123", "/bin/sh", "-c",
+                 docker_mod.APPEND_WRITE_SCRIPT], _ok())
+    sb.append_file("deep/notes.md", "two\n")
+    argv = [c for c in fake.calls if _is_append_write_exec(c)][0][0]
+    assert argv[:8] == ["exec", "-w", "/work", "-i", "dw-abc123",
+                        "/bin/sh", "-c", docker_mod.APPEND_WRITE_SCRIPT]
+    assert argv[8] == "_" and argv[9] == "deep/notes.md"
+    assert re.fullmatch(r"deep/\.dw-tmp\.notes\.md\.[0-9a-f]{8}", argv[10])
+    assert len(argv) == 11
+    # Spec §2.6: the missing-target guard is re-checked at write time, the copy
+    # is made before the append, and the promote tail is shared with WRITE_SCRIPT.
+    assert docker_mod.APPEND_WRITE_SCRIPT.startswith('[ -f "$1" ] || exit 2; ')
+    assert 'cp -- "$1" "$2" && cat >> "$2"' in docker_mod.APPEND_WRITE_SCRIPT
+    assert docker_mod.APPEND_WRITE_SCRIPT.endswith(docker_mod._PROMOTE)
+    assert docker_mod.WRITE_SCRIPT.endswith(docker_mod._PROMOTE)
+
+
+def test_append_file_guard_rc2_is_the_does_not_exist_string(started):
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _rc(2))
+    out = sb.append_file("nope.md", "x")
+    assert out == ("ERROR: cannot append to 'nope.md': it does not exist; create it "
+                   "with write_file first")
+    assert not [c for c in fake.calls if "/usr/bin/head" in c[0]]      # no read
+    assert not [c for c in fake.calls if _is_append_write_exec(c)]     # no write
+
+
+def test_append_file_guard_rc3_refuses_before_any_read(started):
+    # Spec §1.2: a FIFO/device/directory is refused by the GUARD, before any
+    # reader exec exists that a FIFO could block.
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _rc(3))
+    out = sb.append_file("pipe", "x")
+    assert out == "ERROR: cannot append to 'pipe': not a regular file"
+    assert not [c for c in fake.calls if "/usr/bin/head" in c[0]]
+    assert not [c for c in fake.calls if _is_append_write_exec(c)]
+
+
+def test_append_file_guard_size_over_the_read_cap_uses_the_result_wording(started):
+    from dirtywork.tools import MAX_READ_BYTES, MAX_WRITE_BYTES
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(f"{MAX_READ_BYTES + 1}\n".encode()))
+    out = sb.append_file("huge.txt", "y")
+    # `_read_raw` alone discards the size (`head -c N+1` only proves "exceeds"),
+    # which is exactly why the guard exec reports it: docker can name the
+    # EXACT number even for a file it will never read.
+    assert out == (f"ERROR: result is {MAX_READ_BYTES + 2} bytes, over the "
+                   f"{MAX_WRITE_BYTES}-byte write limit; nothing was written")
+    assert not [c for c in fake.calls if "/usr/bin/head" in c[0]]
+
+
+def test_append_file_guard_size_plus_text_over_the_write_cap(started):
+    from dirtywork.tools import MAX_READ_BYTES, MAX_WRITE_BYTES
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(f"{MAX_READ_BYTES}\n".encode()))
+    out = sb.append_file("atlimit.txt", "y" * 100)
+    assert out == (f"ERROR: result is {MAX_READ_BYTES + 100} bytes, over the "
+                   f"{MAX_WRITE_BYTES}-byte write limit; nothing was written")
+    assert not [c for c in fake.calls if "/usr/bin/head" in c[0]]
+
+
+def test_append_file_oversized_text_argument_costs_no_exec(started):
+    from dirtywork.tools import MAX_WRITE_BYTES
+    sb, fake, run_dir = started
+    out = sb.append_file("notes.md", "x" * (MAX_WRITE_BYTES + 1))
+    assert out == (f"ERROR: text is {MAX_WRITE_BYTES + 1} bytes, over the "
+                   f"{MAX_WRITE_BYTES}-byte write limit; append in smaller pieces")
+    assert not fake.calls                       # capped BEFORE any exec
+    assert "write the file in smaller pieces" not in out   # never _oversized's wording
+
+
+def test_append_file_non_utf8_names_append_file(started):
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(b"8\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"], _ok(b"\xff\xfe old"))
+    out = sb.append_file("bin.dat", "text")
+    assert out == ("ERROR: bin.dat is not valid UTF-8 text; append_file only works "
+                   "on text files")
+    assert "refusing to edit" not in out
+    assert not [c for c in fake.calls if _is_append_write_exec(c)]
+
+
+def test_append_file_write_exec_rc2_still_refuses_as_missing(started):
+    # Spec §2.6: a delete BETWEEN the guard exec and the write exec still
+    # refuses correctly, because the write script re-checks `[ -f "$1" ]`.
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(b"4\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"], _ok(b"one\n"))
+    fake.script(["exec", "-w", "/work", "-i", "dw-abc123", "/bin/sh", "-c",
+                 docker_mod.APPEND_WRITE_SCRIPT], _rc(2))
+    out = sb.append_file("notes.md", "two\n")
+    assert out == ("ERROR: cannot append to 'notes.md': it does not exist; create it "
+                   "with write_file first")
+
+
+def test_append_file_write_exec_failure_wraps_stderr(started):
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(b"4\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"], _ok(b"one\n"))
+    fake.script(["exec", "-w", "/work", "-i", "dw-abc123", "/bin/sh", "-c",
+                 docker_mod.APPEND_WRITE_SCRIPT], _fail(b"cp: cannot stat: I/O error"))
+    out = sb.append_file("notes.md", "two\n")
+    assert out == "ERROR: cannot append to 'notes.md': cp: cannot stat: I/O error"
+
+
+def test_append_file_refuses_dot_git(started):
+    sb, fake, run_dir = started
+    out = sb.append_file(".git/config", "\tfoo = bar\n")
+    assert out == "ERROR: writing inside .git/ is not allowed (got '.git/config')"
+    assert not fake.calls
+
+
+def test_append_file_matches_the_host_text_for_every_shared_refusal(started, tmp_path):
+    """Spec §1.2: the three caps, the does-not-exist string and the non-UTF-8
+    string are byte-identical in both modes. (The non-regular-file refusal is
+    deliberately NOT shared -- see this task's header.)"""
+    from dirtywork import tools
+    sb, fake, run_dir = started
+    wt = tmp_path / "appendparity"
+    wt.mkdir()
+
+    # Cap 1: the text argument.
+    huge_text = "x" * (tools.MAX_WRITE_BYTES + 1)
+    assert sb.append_file("f.txt", huge_text) == tools.append_file(wt, "f.txt", huge_text)
+
+    # The does-not-exist refusal.
+    _script_append_guard(fake, _rc(2))
+    assert sb.append_file("f.txt", "x") == tools.append_file(wt, "f.txt", "x")
+
+    # Cap 2: a file too large to read.
+    (wt / "f.txt").write_bytes(b"x" * (tools.MAX_READ_BYTES + 1))
+    _script_append_guard(fake, _ok(f"{tools.MAX_READ_BYTES + 1}\n".encode()))
+    assert sb.append_file("f.txt", "y") == tools.append_file(wt, "f.txt", "y")
+
+    # Cap 3: the result over the write limit.
+    (wt / "f.txt").write_bytes(b"x" * tools.MAX_READ_BYTES)
+    _script_append_guard(fake, _ok(f"{tools.MAX_READ_BYTES}\n".encode()))
+    assert sb.append_file("f.txt", "y" * 100) == tools.append_file(wt, "f.txt", "y" * 100)
+
+    # The non-UTF-8 refusal.
+    (wt / "f.txt").write_bytes(b"\xff\xfe old")
+    _script_append_guard(fake, _ok(b"8\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"], _ok(b"\xff\xfe old"))
+    assert sb.append_file("f.txt", "text") == tools.append_file(wt, "f.txt", "text")

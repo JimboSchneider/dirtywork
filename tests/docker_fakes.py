@@ -124,3 +124,10 @@ def _ok(output: bytes = b"") -> Captured:
 
 def _fail(output: bytes = b"error") -> Captured:
     return Captured(returncode=1, output=output, truncated=False, timed_out=False)
+
+
+def _rc(code: int, output: bytes = b"") -> Captured:
+    """A Captured with an arbitrary exit code. `_ok`/`_fail` only cover 0 and
+    1; DockerSandbox's append guard exec signals "does not exist" with 2 and
+    "not a regular file" with 3 (spec §1.2)."""
+    return Captured(returncode=code, output=output, truncated=False, timed_out=False)
