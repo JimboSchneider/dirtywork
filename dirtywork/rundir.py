@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -63,6 +64,35 @@ def create_run_dir(runs_dir: Path, slug: str) -> Path:
         raise RunDirError(f"{run_dir} already exists — slug collision")
     except OSError as e:
         raise RunDirError(f"cannot create {run_dir}: {e}")
+    return run_dir
+
+
+# Spec §4.1. A slug arrives from the command line (`runs show <slug>`,
+# `--branch-from @<slug>`) or from a results file; it must never be able to
+# name a path outside `runs_dir`.
+_SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def run_dir_for(slug: str, runs_dir: Path) -> Path:
+    """`<runs_dir>/<slug>` for a plain slug ONLY. Raises RunDirError.
+
+    The ONE rule, in one place: `dirtywork runs …` reaches it through
+    `runs._run_dir_for` (re-raised as RunsError) and `--branch-from @<slug>`
+    through `__main__._resolve_branch_from` (re-raised as PreflightFailure).
+    Before 0.10 the second route went through the path-permissive
+    `resume.resolve_run_dir`, so `@../x` and `@/etc` were accepted by one
+    entry point and refused by the other. This does NOT require the directory
+    to exist -- a syntactically valid slug that names no run gets each
+    caller's own "unknown run" message."""
+    if not _SLUG_RE.fullmatch(slug) or slug in (".", ".."):
+        raise RunDirError(f"invalid run slug '{slug}'")
+    runs_dir = Path(runs_dir)
+    run_dir = runs_dir / slug
+    try:
+        if run_dir.resolve().parent != runs_dir.resolve():
+            raise RunDirError(f"invalid run slug '{slug}'")
+    except OSError as e:
+        raise RunDirError(f"cannot resolve run '{slug}': {e}")
     return run_dir
 
 

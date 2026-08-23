@@ -864,3 +864,143 @@ def test_host_worktree_dirty_fails_closed_on_a_timeout(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(workspace_mod.subprocess, "run", _hangs)
     assert workspace_mod.host_worktree_dirty(tmp_path) is True
+
+
+def _loose_objects(repo: Path) -> int:
+    for line in _git(repo, "count-objects", "-v").splitlines():
+        if line.startswith("count: "):
+            return int(line[len("count: "):])
+    raise AssertionError("git count-objects printed no count")
+
+
+def test_snapshot_worktree_writes_no_loose_objects_on_a_no_op(tmp_path: Path):
+    # Spec §4.3: a snapshot that changes nothing must not litter the object
+    # store. Pass 1 hashes WITHOUT -w purely to decide.
+    from dirtywork.workspace import snapshot_worktree
+    repo, wt = _snapshot_repo(tmp_path)
+    assert snapshot_worktree(wt, "dirtywork/snap", "wip: one") is not None
+    before = _loose_objects(repo)
+    assert snapshot_worktree(wt, "dirtywork/snap", "wip: two") is None
+    assert _loose_objects(repo) == before
+
+
+def test_snapshot_worktree_tree_only_references_written_blobs(tmp_path: Path):
+    # Spec §4.3: the entries are rebuilt from the SECOND (-w) pass's shas, so
+    # the tree can never point at a blob that was only ever hashed.
+    from dirtywork.workspace import snapshot_worktree
+    repo, wt = _snapshot_repo(tmp_path)
+    sha = snapshot_worktree(wt, "dirtywork/snap", "wip: one")
+    assert sha is not None
+    for line in _git(repo, "ls-tree", "-r", sha).splitlines():
+        meta, _tab, _name = line.partition("\t")
+        _mode, _kind, blob = meta.split()
+        _git(repo, "cat-file", "-e", blob)      # check=True: raises if absent
+
+
+def test_snapshot_worktree_computes_the_empty_tree_id_per_invocation(tmp_path: Path):
+    # Spec §4.2: the hard-coded SHA-1 empty tree is gone, so a SHA-256 repo
+    # gets the right id.
+    import dirtywork.workspace as workspace_mod
+    from dirtywork.workspace import snapshot_worktree
+    assert not hasattr(workspace_mod, "EMPTY_TREE_SHA")
+    repo = tmp_path / "repo_empty"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "commit", "--allow-empty", "-m", "init")
+    wt = tmp_path / "wt_empty"
+    _git(repo, "worktree", "add", "-b", "dirtywork/snapE", str(wt))
+    # An empty worktree over an empty head is a genuine no-op, not a refusal.
+    assert snapshot_worktree(wt, "dirtywork/snapE", "wip: nothing") is None
+
+
+def test_snapshot_worktree_prunes_an_ignored_directory_before_descending(tmp_path: Path):
+    # Spec §4.4: the ignore check happens per DEPTH, before the walk descends.
+    # The proof is a file whose name holds a newline: reaching it at all would
+    # raise WorkspaceError from the control-character guard.
+    from dirtywork.workspace import snapshot_worktree
+    repo = tmp_path / "repo_prune"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / ".gitignore").write_text("build/\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "init")
+    wt = tmp_path / "wt_prune"
+    _git(repo, "worktree", "add", "-b", "dirtywork/snapP", str(wt))
+    (wt / "build").mkdir()
+    (wt / "build" / "we\nird.o").write_text("junk\n")
+    (wt / "keep.txt").write_text("keep\n")
+
+    sha = snapshot_worktree(wt, "dirtywork/snapP", "wip: pruned")
+    assert sha is not None
+    names = _git(repo, "ls-tree", "-r", "--name-only", sha).splitlines()
+    assert "keep.txt" in names
+    assert not any(n.startswith("build/") for n in names)
+
+
+def test_snapshot_worktree_keeps_a_tracked_file_inside_an_ignored_directory(tmp_path: Path):
+    # Spec §4.4's named regression: check-ignore is INDEX-AWARE, so `build`
+    # is NOT reported ignored while a tracked file lives in it -- which is what
+    # keeps depth-pruning from dropping tracked content. `--no-index` here
+    # would silently delete build/keep.txt from every snapshot.
+    from dirtywork.workspace import snapshot_worktree
+    repo = tmp_path / "repo_tracked"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / ".gitignore").write_text("build/\n")
+    (repo / "build").mkdir()
+    (repo / "build" / "keep.txt").write_text("keep\n")
+    _git(repo, "add", "-f", ".gitignore", "build/keep.txt")
+    _git(repo, "commit", "-m", "init")
+    wt = tmp_path / "wt_tracked"
+    _git(repo, "worktree", "add", "-b", "dirtywork/snapT", str(wt))
+    (wt / "build" / "out.o").write_text("junk\n")
+    (wt / "build" / "keep.txt").write_text("changed\n")
+
+    sha = snapshot_worktree(wt, "dirtywork/snapT", "wip: tracked inside ignored")
+    assert sha is not None
+    names = _git(repo, "ls-tree", "-r", "--name-only", sha).splitlines()
+    assert "build/keep.txt" in names
+    assert "build/out.o" not in names
+
+
+def test_snapshot_worktree_runs_one_check_ignore_per_tree_depth(tmp_path: Path, monkeypatch):
+    # Spec §4.4: batched per DEPTH, not per directory and not per file.
+    import dirtywork.workspace as workspace_mod
+    from dirtywork.workspace import snapshot_worktree
+    repo = tmp_path / "repo_depth"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "seed.txt").write_text("seed\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "init")
+    wt = tmp_path / "wt_depth"
+    _git(repo, "worktree", "add", "-b", "dirtywork/snapD", str(wt))
+    (wt / "a").mkdir()
+    (wt / "b").mkdir()
+    (wt / "a" / "x").mkdir()
+    (wt / "top.txt").write_text("t\n")
+    (wt / "a" / "f.txt").write_text("f\n")
+    (wt / "a" / "x" / "g.txt").write_text("g\n")
+
+    calls = []
+    real = workspace_mod._ignored_relpaths
+
+    def _counting(worktree, rels):
+        calls.append(list(rels))
+        return real(worktree, rels)
+
+    monkeypatch.setattr(workspace_mod, "_ignored_relpaths", _counting)
+    assert snapshot_worktree(wt, "dirtywork/snapD", "wip: depths") is not None
+    # depth 1 (a, b), depth 2 (a/x), then snapshot_worktree's own file batch.
+    assert len(calls) == 3
+    assert calls[0] == ["a", "b"]
+    assert calls[1] == ["a/x"]
+    assert sorted(calls[2]) == ["a/f.txt", "a/x/g.txt", "seed.txt", "top.txt"]

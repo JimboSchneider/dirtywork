@@ -346,86 +346,102 @@ def commit_exists(repo: Path, sha: str) -> bool:
 SNAPSHOT_AUTHOR = ("dirtywork", "dirtywork@localhost")
 
 
+def _check_snapshot_path(worktree: Path, rel: str) -> None:
+    """Refuse a repo-relative path git's stdin protocols cannot carry safely.
+
+    Factored out of snapshot_worktree (spec §4.4) so the breadth-first walk can
+    run it on every DIRECTORY path before that path reaches `check-ignore` --
+    preserving this module's promise that an unsafe name raises WorkspaceError,
+    never a UnicodeEncodeError from inside a text=True _git call."""
+    if any(ord(c) < 32 for c in rel):
+        raise WorkspaceError(
+            f"cannot snapshot {worktree}: path {rel!r} contains a control character, "
+            f"which git's stdin path protocols cannot carry safely"
+        )
+    try:
+        rel.encode("utf-8")
+    except UnicodeEncodeError:
+        # An undecodable filename (surrogate-escaped by os.fsdecode) is
+        # ord(c) >= 32 for every char, so the guard above lets it through;
+        # _git's text=True calls would then raise UnicodeEncodeError themselves
+        # (not a WorkspaceError) trying to encode it for git's stdin.
+        raise WorkspaceError(
+            f"cannot snapshot {worktree}: path {rel!r} is not valid UTF-8 "
+            f"(undecodable filename), which git's stdin path protocols "
+            f"cannot carry safely"
+        )
+
+
 def _walk_worktree(worktree: Path) -> tuple:
     """(files, links, skipped, unreadable_dirs) for everything under
-    `worktree`.
+    `worktree`, walked breadth-first ONE TREE DEPTH at a time (spec §4.4).
 
     `files` is [(repo-relative path, is_executable)], `links` is
     [(repo-relative path, link target string)], `skipped` counts entries that
     are neither a regular file nor a symlink (FIFOs, sockets, devices) or that
-    failed `os.lstat`/`os.readlink` outright — an entry that DOES lstat but is
-    later unreadable (e.g. `chmod 000` on the FILE) is NOT skipped: it fails
-    the whole snapshot with `WorkspaceError` when `hash-object` chokes on it,
-    since silently dropping a file from a snapshot is worse than a loud
-    failure. A DIRECTORY that cannot be listed (`chmod 000` on the directory
-    itself) is NOT raised on here: `os.walk`'s default `onerror` is a no-op
-    that would silently drop it from the walk (which would make the snapshot
-    commit its files' DELETION), but raising unconditionally here would also
-    hard-fail a directory that turns out to be ignored (e.g. a root-owned
-    directory inside an ignored `build/`/`.venv/`) even though nothing under
-    it would ever be committed. So `onerror` only RECORDS the directory's
-    repo-relative path in `unreadable_dirs` instead of raising;
-    `snapshot_worktree` runs it through the same ignore-rule check as every
-    other path afterward and raises `WorkspaceError` itself, but only for one
-    that is NOT ignored. The TOP-LEVEL `.git` entry is skipped and nothing
-    else is skipped by name; ignore rules are not applied here —
-    `snapshot_worktree` filters ignored paths (and decides about unreadable
-    directories) afterward, via `git check-ignore`, matching what `git add
-    -A` would keep. Symlinks — including symlinked directories — are
-    recorded by their target string and never followed or descended into
-    (os.lstat/os.readlink only)."""
+    failed `os.stat`/`os.readlink` outright.
+
+    Why breadth-first: each level's candidate DIRECTORIES go through ONE
+    batched `git check-ignore` call, and an ignored directory is dropped before
+    it is descended into -- so an ignored `node_modules/` costs one path in one
+    batch instead of a full traversal plus a per-file filter. The check is
+    deliberately INDEX-AWARE (never `--no-index`): `check-ignore` does not
+    report a directory as ignored while a TRACKED file lives inside it, which
+    is exactly what keeps a tracked `build/keep.txt` in the snapshot when
+    `build/` matches an ignore pattern. Every directory path passes
+    `_check_snapshot_path` BEFORE it reaches `check-ignore`, so the module's
+    WorkspaceError-not-UnicodeEncodeError promise holds for directories too.
+    Files and symlinks are NOT filtered here -- snapshot_worktree still runs
+    its own single batch over them, unchanged.
+
+    A DIRECTORY that cannot be listed (`chmod 000` on the directory itself) is
+    recorded in `unreadable_dirs` rather than raised on: snapshot_worktree runs
+    it through the ignore check afterward and raises only for one that is NOT
+    ignored. An ignored directory is never listed at all, so it can never be
+    recorded. The TOP-LEVEL `.git` entry is skipped and nothing else is skipped
+    by name. Symlinks -- including symlinked directories -- are recorded by
+    their target string and never followed or descended into."""
     files, links, skipped, unreadable_dirs = [], [], 0, []
-
-    def _onerror(exc: OSError) -> None:
-        path = exc.filename or str(worktree)
-        try:
-            rel = Path(path).relative_to(worktree).as_posix()
-        except ValueError:
-            rel = path
-        unreadable_dirs.append((rel, exc))
-
-    for root, dirnames, filenames in os.walk(worktree, followlinks=False, onerror=_onerror):
-        root_path = Path(root)
-        rel_root = root_path.relative_to(worktree)
-        if root_path == worktree:
-            dirnames[:] = [d for d in dirnames if d != ".git"]
-        for name in list(dirnames):
-            entry = root_path / name
-            if os.path.islink(entry):
-                dirnames.remove(name)
-                try:
-                    links.append(((rel_root / name).as_posix(), os.readlink(entry)))
-                except OSError:
-                    skipped += 1
-        for name in filenames:
-            if root_path == worktree and name == ".git":
-                continue
-            entry = root_path / name
-            rel = (rel_root / name).as_posix()
+    level = [""]                       # "" is the worktree root itself
+    while level:
+        children = []
+        for rel_dir in level:
+            here = worktree / rel_dir if rel_dir else worktree
             try:
-                st = os.lstat(entry)
-            except OSError:
-                skipped += 1
+                with os.scandir(str(here)) as it:
+                    entries = sorted(it, key=lambda e: e.name)
+            except OSError as e:
+                unreadable_dirs.append((rel_dir or ".", e))
                 continue
-            if stat.S_ISLNK(st.st_mode):
+            for entry in entries:
+                if not rel_dir and entry.name == ".git":
+                    continue
+                rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
                 try:
-                    links.append((rel, os.readlink(entry)))
+                    st = entry.stat(follow_symlinks=False)
                 except OSError:
                     skipped += 1
-            elif stat.S_ISREG(st.st_mode):
-                files.append((rel, bool(st.st_mode & 0o111)))
-            else:
-                skipped += 1
+                    continue
+                if stat.S_ISLNK(st.st_mode):
+                    try:
+                        links.append((rel, os.readlink(entry.path)))
+                    except OSError:
+                        skipped += 1
+                elif stat.S_ISDIR(st.st_mode):
+                    children.append(rel)
+                elif stat.S_ISREG(st.st_mode):
+                    files.append((rel, bool(st.st_mode & 0o111)))
+                else:
+                    skipped += 1
+        if not children:
+            break
+        for rel in children:
+            _check_snapshot_path(worktree, rel)
+        ignored = _ignored_relpaths(worktree, children)
+        level = [rel for rel in children if rel not in ignored]
     files.sort()
     links.sort()
     return files, links, skipped, unreadable_dirs
-
-
-# The well-known SHA of `git write-tree` on an empty index — content-addressed,
-# so this is the same value in every git repository. Used by snapshot_worktree
-# to tell "this branch's head genuinely has no files" from "there would be
-# something to delete" without needing a git call to compute it.
-EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
 def _ignored_relpaths(worktree: Path, rels: list) -> set:
@@ -459,6 +475,65 @@ def _check(res: subprocess.CompletedProcess, what: str, worktree: Path) -> None:
     `what` names the git subcommand (plus any call-specific detail)."""
     if res.returncode != 0:
         raise WorkspaceError(f"git {what} failed in {worktree}: {res.stderr.strip()}")
+
+
+def _hash_entries(worktree: Path, files: list, links: list, env: dict, *,
+                  write: bool) -> list:
+    """The `<mode> <sha>\\t<relpath>` index lines for `files` + `links`.
+
+    `write` selects `-w` (write each blob into the object store) or not. Spec
+    §4.3 calls this TWICE: once WITHOUT -w, only to decide whether anything
+    changed at all (a no-op snapshot must not litter the object store with
+    loose objects), and then -- only when something did -- once WITH -w,
+    rebuilding the entries from the SECOND pass's shas. Rebuilding is
+    load-bearing: a file that changed between the two passes must not leave the
+    tree pointing at a blob that was never written. (Verified: `write-tree`
+    fails on absent blobs, so the no-op decision cannot instead be made after a
+    -w-less update-index.)
+
+    `--no-filters` is load-bearing too: the filter that would otherwise run is
+    configured REPO-locally, which GIT_CONFIG_GLOBAL=/dev/null does not
+    disable. `worktree` is absolute, so every line handed to `--stdin-paths`
+    starts with `/` and a worker-chosen filename can never be the FIRST
+    character of that line -- which neutralises `--stdin-paths`' own C-quoting
+    of a leading `"`."""
+    hash_argv = ["hash-object"] + (["-w"] if write else []) + ["--no-filters"]
+    entries = []
+    if files:
+        paths = "".join(str(worktree / rel) + "\n" for rel, _ in files)
+        res = _git(worktree, *GIT_NEUTRAL_FLAGS, *hash_argv, "--stdin-paths",
+                   env=env, stdin_text=paths)
+        _check(res, "hash-object", worktree)
+        shas = res.stdout.split()
+        if len(shas) != len(files):
+            raise WorkspaceError(
+                f"git hash-object returned {len(shas)} hashes for {len(files)} files "
+                f"in {worktree}")
+        for (rel, is_exec), sha in zip(files, shas):
+            entries.append(f"{'100755' if is_exec else '100644'} {sha}\t{rel}")
+    for rel, target in links:
+        res = _git(worktree, *GIT_NEUTRAL_FLAGS, *hash_argv, "--stdin",
+                   env=env, stdin_text=target)
+        _check(res, f"hash-object for symlink {rel}", worktree)
+        entries.append(f"120000 {res.stdout.strip()}\t{rel}")
+    return entries
+
+
+def _head_entries(worktree: Path, head_tree: str, env: dict) -> list:
+    """`head_tree`'s contents in the SAME normalized form _hash_entries
+    produces, so the two can be compared directly (spec §4.3). `-r -z`: `-r`
+    because _hash_entries lists leaves only, `-z` because a path with a
+    newline or a quote in it must round-trip literally."""
+    res = _git(worktree, *GIT_NEUTRAL_FLAGS, "ls-tree", "-r", "-z", head_tree, env=env)
+    _check(res, f"ls-tree {head_tree}", worktree)
+    out = []
+    for record in res.stdout.split("\0"):
+        if not record:
+            continue
+        meta, _tab, rel = record.partition("\t")
+        mode, _kind, sha = meta.split(" ", 2)
+        out.append(f"{mode} {sha}\t{rel}")
+    return out
 
 
 def snapshot_worktree(worktree: Path, branch: str, message: str,
@@ -509,30 +584,22 @@ def snapshot_worktree(worktree: Path, branch: str, message: str,
             f"refusing to commit its content onto a branch it is not on"
         )
 
+    # Spec §4.2: the empty tree's id is content-addressed, so it depends on the
+    # repo's OBJECT FORMAT -- the well-known 4b825dc… is the SHA-1 answer only.
+    # Computed here, once per call, from the repo itself. `--stdin` with empty
+    # stdin (never a /dev/null path) and no `-w`: this asks for an id, it does
+    # not write an object.
+    empty_tree_res = _git(worktree, *GIT_NEUTRAL_FLAGS, "hash-object", "-t", "tree",
+                          "--stdin", env=env, stdin_text="")
+    _check(empty_tree_res, "hash-object -t tree", worktree)
+    empty_tree = empty_tree_res.stdout.strip()
+
     files, links, skipped, unreadable_dirs = _walk_worktree(worktree)
     if report is not None:
         report["skipped"] = skipped
     unreadable_rels = [rel for rel, _exc in unreadable_dirs]
     for rel in [r for r, _ in files] + [r for r, _ in links] + unreadable_rels:
-        if any(ord(c) < 32 for c in rel):
-            raise WorkspaceError(
-                f"cannot snapshot {worktree}: path {rel!r} contains a control character, "
-                f"which git's stdin path protocols cannot carry safely"
-            )
-        try:
-            rel.encode("utf-8")
-        except UnicodeEncodeError:
-            # An undecodable filename (surrogate-escaped by os.fsdecode) is
-            # ord(c) >= 32 for every char, so the guard above lets it through;
-            # _git's text=True calls below would then raise UnicodeEncodeError
-            # themselves (not a WorkspaceError) trying to encode it for git's
-            # stdin. Refuse it here with the same error type every other
-            # unsafe path in this function raises.
-            raise WorkspaceError(
-                f"cannot snapshot {worktree}: path {rel!r} is not valid UTF-8 "
-                f"(undecodable filename), which git's stdin path protocols "
-                f"cannot carry safely"
-            )
+        _check_snapshot_path(worktree, rel)
 
     # Spec §6.1 step 1 / fix item 1: apply the repo's ignore rules like
     # `git add -A` would, via ONE batch `git check-ignore` call, only now that
@@ -563,7 +630,7 @@ def snapshot_worktree(worktree: Path, branch: str, message: str,
     _check(head_tree_res, f"rev-parse {head}^{{tree}}", worktree)
     head_tree = head_tree_res.stdout.strip()
 
-    if not files and not links and head_tree != EMPTY_TREE_SHA:
+    if not files and not links and head_tree != empty_tree:
         # An index built from zero entries writes the empty tree. Comparing
         # that against a NON-empty head_tree below would look like a real
         # change and commit "delete everything" — refuse before hashing (there
@@ -573,24 +640,16 @@ def snapshot_worktree(worktree: Path, branch: str, message: str,
             f"({worktree} holds nothing snapshot_worktree can see)"
         )
 
-    entries = []
-    if files:
-        paths = "".join(str(worktree / rel) + "\n" for rel, _ in files)
-        res = _git(worktree, *GIT_NEUTRAL_FLAGS, "hash-object", "-w", "--no-filters",
-                   "--stdin-paths", env=env, stdin_text=paths)
-        _check(res, "hash-object", worktree)
-        shas = res.stdout.split()
-        if len(shas) != len(files):
-            raise WorkspaceError(
-                f"git hash-object returned {len(shas)} hashes for {len(files)} files "
-                f"in {worktree}")
-        for (rel, is_exec), sha in zip(files, shas):
-            entries.append(f"{'100755' if is_exec else '100644'} {sha}\t{rel}")
-    for rel, target in links:
-        res = _git(worktree, *GIT_NEUTRAL_FLAGS, "hash-object", "-w", "--no-filters", "--stdin",
-                   env=env, stdin_text=target)
-        _check(res, f"hash-object for symlink {rel}", worktree)
-        entries.append(f"120000 {res.stdout.strip()}\t{rel}")
+    # Spec §4.3, pass 1: hash WITHOUT -w and compare against the head tree. If
+    # they agree there is nothing to snapshot, and returning here means a no-op
+    # call has written no objects at all.
+    probe_entries = _hash_entries(worktree, files, links, env, write=False)
+    if sorted(probe_entries) == sorted(_head_entries(worktree, head_tree, env)):
+        return None
+    # Pass 2: the same hashing WITH -w, and the entries rebuilt from THESE
+    # shas -- a file that changed between the passes must not leave the tree
+    # pointing at a blob that was never written.
+    entries = _hash_entries(worktree, files, links, env, write=True)
 
     with tempfile.TemporaryDirectory(prefix="dirtywork-snapshot-") as tmpdir:
         index_env = dict(env)

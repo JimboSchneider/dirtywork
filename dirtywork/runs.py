@@ -63,25 +63,18 @@ def _iter_run_dirs(runs_dir: Path):
             yield d
 
 
-_SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _DOCKER_ABSENT_RE = re.compile(r"no such (?:object|container|volume)\b", re.IGNORECASE)
 
 
 def _run_dir_for(slug: str) -> Path:
-    """`<RUNS_DIR>/<slug>` for a plain slug ONLY. A slug is data from the
-    command line (or a results file); it must never be able to name a path
-    outside RUNS_DIR (`../x`, `/etc`, `.`), so `runs clean --force <slug>`
-    can only ever operate on a managed run directory."""
-    if not _SLUG_RE.fullmatch(slug) or slug in (".", ".."):
-        raise RunsError(f"invalid run slug '{slug}'")
-    runs_dir = Path(rundir.RUNS_DIR)
-    run_dir = runs_dir / slug
+    """`<RUNS_DIR>/<slug>` via the ONE shared rule (rundir.run_dir_for, spec
+    §4.1), re-raised as the RunsError every `dirtywork runs` subcommand
+    reports. RUNS_DIR is read from the module here (not captured at import) so
+    a test can point it at a tmp_path."""
     try:
-        if run_dir.resolve().parent != runs_dir.resolve():
-            raise RunsError(f"invalid run slug '{slug}'")
-    except OSError as e:
-        raise RunsError(f"cannot resolve run '{slug}': {e}")
-    return run_dir
+        return rundir.run_dir_for(slug, Path(rundir.RUNS_DIR))
+    except rundir.RunDirError as e:
+        raise RunsError(str(e))
 
 
 def _existing_run_dir(slug: str) -> Path:

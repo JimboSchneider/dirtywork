@@ -25,7 +25,8 @@ from . import __version__
 from .budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB
 from .llm import LLMError
 from .providers import DEFAULT_BASE_URLS, PROVIDER_NAMES, get_provider
-from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json, write_run_json
+from .rundir import (RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json,
+                     run_dir_for, write_run_json)
 from .runner import (
     CHARS_PER_TOKEN,
     DEFAULT_MAX_TOKENS,
@@ -274,7 +275,13 @@ def _resolve_branch_from(args) -> tuple:
     if not isinstance(value, str) or not value.startswith("@"):
         return value, None
     slug = value[1:]
-    run_dir = resolve_run_dir(slug, RUNS_DIR)
+    # Spec §4.1: the SAME rule `runs snapshot` uses. resolve_run_dir treats
+    # anything with a separator as a path, which is right for
+    # `dirtywork resume <run-dir>` and wrong for an `@<slug>` reference.
+    try:
+        run_dir = run_dir_for(slug, RUNS_DIR)
+    except RunDirError as e:
+        raise PreflightFailure(str(e))
     if not run_dir.is_dir():
         raise PreflightFailure(f"unknown run '{slug}' (no run dir under {RUNS_DIR})")
     try:

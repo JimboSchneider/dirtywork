@@ -2306,3 +2306,17 @@ def test_resume_refuses_switching_between_openai_and_ollama(tmp_path, monkeypatc
     (run_dir / "run.json").write_text(json.dumps(prior))
     assert m.main(["resume", run_dir.name, "--provider", "ollama"]) == 2
     assert "resume it with that provider" in capsys.readouterr().err
+
+
+def test_branch_from_an_invalid_slug_exits_2_and_creates_nothing(tmp_path, monkeypatch, capsys):
+    # Spec §4.1: `--branch-from @<slug>` now goes through the SAME rule
+    # `runs snapshot` uses, instead of resume.resolve_run_dir, which treats
+    # anything with a separator as a path.
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                 "--branch-from", "@../escape", "t"])
+    assert rc == 2
+    assert "invalid run slug '../escape'" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()
+    assert not (repo / ".worktrees").exists()
