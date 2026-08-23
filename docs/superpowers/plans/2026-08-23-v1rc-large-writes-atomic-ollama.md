@@ -775,6 +775,8 @@ git commit -m "feat(tools): _write_atomic and the shared write/append strings bo
 
 ---
 
+**Task 1 amendment (executed 2026-08-23):** the post-review fix round (commit `4b3070d`) restructured `_write_atomic`'s probe-fd close — in the two in-place branches the close is the write's completion (`OSError` → the generic tail, never a raise) and the function-level `finally` close is defensive — and added a 19th test (`test_write_atomic_surfaces_a_close_failure_on_the_hardlink_path_too`). Task 1 therefore ends at `1045 passed`, and every full-suite gate below reads +1 relative to the original chain (final: 1154). The `TMP_FIND_REGEX` comment now names the `-regextype posix-extended` requirement.
+
 ### Task 2: host `append_file` (spec §1.2, host half)
 
 The tool is not registered yet (Task 5 does that, once both backends have it), so nothing in the run loop can reach it until then. `HostSandbox.append_file` exists from this task on so the two backends can be built and tested independently.
@@ -1091,7 +1093,7 @@ Expected: exit code 0.
 - [ ] **Step 6: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1060 passed, 1 skipped, 18 deselected` (1044 + 16).
+Expected: exit code 0; `1061 passed, 1 skipped, 18 deselected` (1045 + 16).
 
 - [ ] **Step 7: Commit**
 
@@ -1603,7 +1605,7 @@ Expected: exit code 0.
 - [ ] **Step 12: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1063 passed, 1 skipped, 18 deselected` (1060 + 3).
+Expected: exit code 0; `1064 passed, 1 skipped, 18 deselected` (1061 + 3).
 
 - [ ] **Step 13: Commit**
 
@@ -1960,7 +1962,7 @@ Expected: exit code 0.
 - [ ] **Step 7: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1075 passed, 1 skipped, 18 deselected` (1063 + 12).
+Expected: exit code 0; `1076 passed, 1 skipped, 18 deselected` (1064 + 12).
 
 - [ ] **Step 8: Commit**
 
@@ -2403,7 +2405,7 @@ Expected: exit code 0.
 - [ ] **Step 14: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1078 passed, 1 skipped, 18 deselected` (1075 + 3).
+Expected: exit code 0; `1079 passed, 1 skipped, 18 deselected` (1076 + 3).
 
 - [ ] **Step 15: Commit**
 
@@ -3165,7 +3167,7 @@ Expected: exit code 0.
 - [ ] **Step 13: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1088 passed, 1 skipped, 18 deselected` (1078 + 10).
+Expected: exit code 0; `1089 passed, 1 skipped, 18 deselected` (1079 + 10).
 
 - [ ] **Step 14: Commit**
 
@@ -3936,7 +3938,7 @@ After:
 - [ ] **Step 10: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1098 passed, 1 skipped, 18 deselected` (1088 + 10).
+Expected: exit code 0; `1099 passed, 1 skipped, 18 deselected` (1089 + 10).
 
 - [ ] **Step 11: Commit**
 
@@ -4267,7 +4269,7 @@ Expected: exit code 0.
 - [ ] **Step 9: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1104 passed, 1 skipped, 18 deselected` (1098 + 6).
+Expected: exit code 0; `1105 passed, 1 skipped, 18 deselected` (1099 + 6).
 
 - [ ] **Step 10: Commit**
 
@@ -5132,7 +5134,7 @@ actually exercised by the test suites. Reports welcome.
 - [ ] **Step 14: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1126 passed, 1 skipped, 20 deselected` (1104 + 22 passed; 18 + 2 deselected, the two `tests/test_live_ollama.py` tests).
+Expected: exit code 0; `1127 passed, 1 skipped, 20 deselected` (1105 + 22 passed; 18 + 2 deselected, the two `tests/test_live_ollama.py` tests).
 
 - [ ] **Step 15: Commit**
 
@@ -5865,7 +5867,7 @@ Expected: exit code 0.
 - [ ] **Step 14: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1141 passed, 1 skipped, 20 deselected` (1126 + 15: `tests/test_rundir.py` contributes 8 — one direct test plus the seven parametrized slug cases — `tests/test_main.py` 1, and `tests/test_workspace.py` 6).
+Expected: exit code 0; `1142 passed, 1 skipped, 20 deselected` (1127 + 15: `tests/test_rundir.py` contributes 8 — one direct test plus the seven parametrized slug cases — `tests/test_main.py` 1, and `tests/test_workspace.py` 6).
 
 - [ ] **Step 15: Commit**
 
@@ -6131,7 +6133,7 @@ Since 0.8 a successful `edit_file`/`write_file`/`insert_before`/`insert_after` r
 - [ ] **Step 8: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1144 passed, 1 skipped, 20 deselected` (1141 + 3).
+Expected: exit code 0; `1145 passed, 1 skipped, 20 deselected` (1142 + 3).
 
 - [ ] **Step 9: Commit**
 
@@ -6411,7 +6413,7 @@ Expected: exit code 0.
 - [ ] **Step 7: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1153 passed, 1 skipped, 20 deselected` (1144 + 9).
+Expected: exit code 0; `1154 passed, 1 skipped, 20 deselected` (1145 + 9).
 
 - [ ] **Step 8: Commit**
 
@@ -6610,7 +6612,7 @@ Expected: **no output**. (Without the `grep -v`, the only remaining hits are thi
 - [ ] **Step 8: Run the full suite and confirm the two version sources agree**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1153 passed, 1 skipped, 20 deselected` — unchanged from Task 12 (this task adds no test).
+Expected: exit code 0; `1154 passed, 1 skipped, 20 deselected` — unchanged from Task 12 (this task adds no test).
 
 Then:
 
