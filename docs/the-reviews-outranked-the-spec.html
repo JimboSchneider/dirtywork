@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Reviews Outranked the Spec</title>
+<meta name="description" content="A follow-up to What the Meter Said: the approved 0.10 spec still picked up six dated amendments from the review layers built not to trust it — plan red-team, per-task review, mutation testing, and the owner's own second look.">
+<link rel="canonical" href="https://dirtywork.run/the-reviews-outranked-the-spec.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="The Reviews Outranked the Spec">
+<meta property="og:description" content="A follow-up to What the Meter Said: the approved 0.10 spec still picked up six dated amendments from the review layers built not to trust it — plan red-team, per-task review, mutation testing, and the owner's own second look.">
+<meta property="og:url" content="https://dirtywork.run/the-reviews-outranked-the-spec.html">
+<meta property="og:image" content="https://dirtywork.run/og-card.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="The Reviews Outranked the Spec">
+<meta name="twitter:description" content="A follow-up to What the Meter Said: the approved 0.10 spec still picked up six dated amendments from the review layers built not to trust it — plan red-team, per-task review, mutation testing, and the owner's own second look.">
+<meta name="twitter:image" content="https://dirtywork.run/og-card.png">
+<style>
+  :root {
+    --bg: #F7F8F6;
+    --bg-raise: #FFFFFF;
+    --bg-inset: #EEF1ED;
+    --ink: #1B221D;
+    --ink-soft: #4A544D;
+    --ink-faint: #657069;
+    --line: #D9DFDA;
+    --local: #0E7A4E;
+    --local-soft: #E2F0E8;
+    --frontier: #A66A1E;
+    --frontier-soft: #F4EBDD;
+    --code-bg: #10150F;
+    --code-ink: #D6E2D6;
+    --code-accent: #7FC79E;
+    --code-dim: #7C8A7D;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111611;
+      --bg-raise: #171D17;
+      --bg-inset: #1C231C;
+      --ink: #E4EAE4;
+      --ink-soft: #A7B2A8;
+      --ink-faint: #828E84;
+      --line: #2A322A;
+      --local: #4EC58C;
+      --local-soft: #17251D;
+      --frontier: #D9A468;
+      --frontier-soft: #272015;
+      --code-bg: #0B0F0B;
+      --code-ink: #CFDCCF;
+      --code-accent: #7FC79E;
+      --code-dim: #6E7B6F;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111611;
+    --bg-raise: #171D17;
+    --bg-inset: #1C231C;
+    --ink: #E4EAE4;
+    --ink-soft: #A7B2A8;
+    --ink-faint: #828E84;
+    --line: #2A322A;
+    --local: #4EC58C;
+    --local-soft: #17251D;
+    --frontier: #D9A468;
+    --frontier-soft: #272015;
+    --code-bg: #0B0F0B;
+    --code-ink: #CFDCCF;
+    --code-accent: #7FC79E;
+    --code-dim: #6E7B6F;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Charter", "Iowan Old Style", Georgia, "Times New Roman", serif;
+    font-size: 1.0625rem;
+    line-height: 1.65;
+  }
+  .wrap { max-width: 44rem; margin: 0 auto; padding: 0 1.25rem 6rem; }
+
+  .display, h1, h2, h3 {
+    font-family: "Avenir Next", "Avenir", "Segoe UI", "Helvetica Neue", sans-serif;
+  }
+  h1, h2, h3 { text-wrap: balance; }
+  .mono, code, pre, .stat-num { font-family: ui-monospace, "SF Mono", "Menlo", "Cascadia Mono", monospace; }
+
+  header { padding: 4.5rem 0 2.5rem; }
+  .eyebrow {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--local);
+    margin: 0 0 1.1rem;
+  }
+  h1 {
+    font-size: clamp(2.2rem, 6vw, 3.1rem);
+    font-weight: 700;
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    margin: 0 0 1.2rem;
+  }
+  .standfirst {
+    font-size: 1.2rem;
+    line-height: 1.55;
+    color: var(--ink-soft);
+    margin: 0 0 2.2rem;
+    max-width: 38rem;
+  }
+  .standfirst strong { color: var(--ink); font-weight: 600; }
+
+  .terminal {
+    background: var(--code-bg);
+    border-radius: 8px;
+    padding: 1.1rem 1.25rem 1.2rem;
+    overflow-x: auto;
+    box-shadow: 0 1px 0 var(--line);
+  }
+  .terminal pre {
+    margin: 0;
+    color: var(--code-ink);
+    font-size: 0.82rem;
+    line-height: 1.6;
+  }
+  .terminal .c { color: var(--code-dim); }
+  .terminal .k { color: var(--code-accent); }
+  .terminal .err { color: #E08A8A; }
+  .term-cap {
+    font-size: 0.8rem;
+    color: var(--ink-faint);
+    margin: 0.6rem 0 0;
+    font-style: italic;
+  }
+
+  section { margin-top: 3.6rem; }
+  .sec-mark {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    border-top: 1px solid var(--line);
+    padding-top: 1.6rem;
+  }
+  .sec-mark .n {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.78rem;
+    color: var(--local);
+    letter-spacing: 0.08em;
+  }
+  h2 { font-size: 1.5rem; font-weight: 600; margin: 0; }
+  h3 { font-size: 1.05rem; font-weight: 600; margin: 2rem 0 0.6rem; }
+  p { margin: 1rem 0; }
+  a { color: var(--local); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--local); outline-offset: 2px; border-radius: 2px; }
+  ul, ol { padding-left: 1.4rem; margin: 1rem 0; }
+  li { margin: 0.45rem 0; }
+  li::marker { color: var(--ink-faint); }
+  strong { font-weight: 600; }
+  em { font-style: italic; }
+
+  code {
+    background: var(--bg-inset);
+    border-radius: 4px;
+    padding: 0.1em 0.35em;
+    font-size: 0.86em;
+  }
+
+  blockquote {
+    margin: 1.4rem 0;
+    padding: 0.1rem 0 0.1rem 1.1rem;
+    border-left: 3px solid var(--local);
+    color: var(--ink-soft);
+    font-style: italic;
+  }
+
+  .tiers { display: grid; grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr)); gap: 1rem; margin: 1.5rem 0; }
+  @media (max-width: 560px) { .tiers { grid-template-columns: 1fr; } }
+  .tier {
+    border-radius: 8px;
+    padding: 1.1rem 1.2rem 1.2rem;
+    border: 1px solid var(--line);
+    background: var(--bg-raise);
+  }
+  .tier .who {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin: 0 0 0.5rem;
+  }
+  .tier.frontier .who { color: var(--frontier); }
+  .tier.local .who { color: var(--local); }
+  .tier.human .who { color: var(--ink-faint); }
+  .tier .role { font-size: 0.9rem; color: var(--ink-soft); margin: 0; }
+  .tier .cost {
+    font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+    font-size: 0.76rem;
+    margin: 0.8rem 0 0;
+  }
+  .tier.frontier .cost { color: var(--frontier); }
+  .tier.local .cost { color: var(--local); }
+  .tier.human .cost { color: var(--ink-faint); }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 1.6rem 0;
+  }
+  .stat { background: var(--bg-raise); padding: 0.95rem 1rem 1rem; }
+  .stat-num {
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: var(--local);
+    font-variant-numeric: tabular-nums;
+    display: block;
+  }
+  .stat.amber .stat-num { color: var(--frontier); }
+  .stat-cap { font-size: 0.78rem; color: var(--ink-faint); line-height: 1.35; display: block; margin-top: 0.15rem;
+    font-family: "Avenir Next", "Avenir", "Segoe UI", sans-serif; }
+
+  .tblwrap { overflow-x: auto; margin: 1.5rem 0; border: 1px solid var(--line); border-radius: 8px; }
+  table.runs { width: 100%; border-collapse: collapse; font-size: 0.82rem; background: var(--bg-raise); }
+  table.runs caption { display: none; }
+  table.runs th, table.runs td { padding: 0.55rem 0.75rem; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  table.runs th {
+    font-family: "Avenir Next", "Avenir", "Segoe UI", sans-serif;
+    font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--ink-faint); background: var(--bg-inset);
+  }
+  table.runs td.review { white-space: normal; color: var(--ink-soft); min-width: 16rem; }
+  table.runs td.num { font-family: ui-monospace, "SF Mono", "Menlo", monospace; font-variant-numeric: tabular-nums; }
+  table.runs tr.totals td { font-weight: 600; border-top: 2px solid var(--line); background: var(--bg-inset); }
+  table.runs tr:last-child td { border-bottom: none; }
+
+  .footnote {
+    margin-top: 4rem;
+    border-top: 1px solid var(--line);
+    padding-top: 1.3rem;
+    font-size: 0.88rem;
+    color: var(--ink-faint);
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">Session postmortem · 2026-08-23 · part five</p>
+  <h1>The Reviews Outranked the Spec</h1>
+  <p class="standfirst">A follow-up to <a href="what-the-meter-said.html">What the Meter Said</a>. The last two posts were about local workers doing the typing while a frontier model planned and reviewed. This one is about what happens when the review machinery gets pointed at its own paperwork — because the most-corrected document in this release wasn't code. It was the spec I had already approved.</p>
+</header>
+
+<section>
+  <div class="sec-mark"><span class="n">01</span><h2>The spec was approved. Then it kept losing arguments.</h2></div>
+  <p>0.10 is the release that closes the last core-job holes before 1.0: <code>append_file</code> and a tool-aware truncation recovery, so a file larger than one reply is a recoverable two-step instead of a silent failure; atomic writes, so a run killed mid-write leaves files byte-identical instead of truncated; <code>--max-tokens</code> with an honest budget; <code>--provider ollama</code> as a first-class citizen; and a pile of snapshot and tooling follow-ups. Thirteen tasks, 34 commits, tests from 1,026 to 1,164 — green at every one of the gates in between.</p>
+  <p>One honesty note before the fun part: unlike SP2.5 and SP3, the typing this time was Claude subagents, not the local models — the release that makes local workers better at their jobs was built by the frontier side of the house. The local models weren't idle, though: a live Ollama on this box verified the new provider end to end, twice. The soak that comes next (#48) puts dirtywork back to building with dirtywork.</p>
+  <p>The 0.10 spec went through the full ceremony: a design conversation, a three-lens red-team, my own line-by-line review (which sent it back once — four required corrections), and a second pass where I approved it with three clarifications folded in. At that point it was, by every process we have, <em>done</em>. The binding authority.</p>
+  <p>By the end of the day it carried <strong>six dated execution amendments</strong> — six places where someone downstream proved the approved document wrong and the document had to yield. That's not the spec failing. That's the entire point of layering reviews that don't trust each other. Here's the ladder, one representative catch per rung:</p>
+  <p><strong>The plan red-team caught the spec's arithmetic.</strong> The plan's Task 7 introduced a flat <code>--max-tokens &gt;= context-window</code> refusal, exactly as spec'd. Nobody had noticed that seven shipped tests run with tiny context windows — the refusal would have broken the suite mid-execution, with the implementer holding the bag. The red-team also found a real bug in code that existed only as a plan listing: <code>_write_atomic</code> closed a file descriptor, <em>then</em> nulled the handle, so a failing close would double-close and raise <code>EBADF</code> out of a function whose entire contract is "never raises." Caught before a single line was typed into the repo.</p>
+  <p><strong>A per-task reviewer with a container caught a cap bypass.</strong> The docker <code>append_file</code> guard used <code>stat -c %s</code> for its size check. <code>stat</code> without <code>-L</code> is <code>lstat</code>: on a symlink it returns the length of the <em>link text</em>. So a worker could point a symlink at a 6 MB file and the "un-appendable over 5 MB" refusal would read the size as 30 bytes and wave it through — the reviewer demonstrated a 5 MB + 100 byte append landing on disk, in a real bookworm container, past a cap three review layers had signed off on. The guard now refuses symlinks first (matching the host's <code>O_NOFOLLOW</code> behaviour) and stats through <code>-L</code>.</p>
+  <p><strong>Another one caught the spec aiming a delete at a readonly mount.</strong> The spec placed the stale-temp sweep "in the export container, immediately before <code>git add -A</code>." The export container mounts the work volume readonly — a deliberate security property that a different section of the same spec insists on. So the sweep as specified was a guaranteed silent no-op: every <code>find -delete</code> would EROFS, the non-zero exit would suppress the report, and the temps would be staged into the export anyway. The sweep now runs in the worker container, while the volume is still writable, and the readonly export mount stays exactly as paranoid as it was.</p>
+  <p><strong>A mutation battery caught the one test that couldn't fail.</strong> Task 7's implementer slipped once — implemented before running the red gates, and disclosed it. The review response was to mutate the implementation fourteen ways and check a test went red each time. Thirteen mutations died. One survived: the resume path that inherits <code>max_tokens</code> from an old <code>run.json</code> had its explicit-<code>null</code> branch completely untested — downgrade the code to a plain <code>.get(key, default)</code> and the whole suite stayed green. That branch is precisely what the skipped red gates would have exposed. It has a test now.</p>
+  <p><strong>The empirical pass caught the spec believing its own story.</strong> The spec's §4.3 sold two-pass snapshot hashing as "a no-op snapshot writes no loose objects." The final per-task reviewer built throwaway repos and measured old-versus-new: the old code <em>also</em> wrote no loose objects on a no-op, because git's object store is content-addressed and always has been. The claimed benefit was free all along; the regression test pinning it was vacuous (it passed against the old code). What the change actually buys — measured, not asserted — is skipping the temp index and <code>write-tree</code> on a no-op, about 21% faster at 20k files, in exchange for a second read-and-hash on changed trees. The spec now says that instead. I'd rather amend the premise than ship a myth with a test attached.</p>
+  <p><strong>The whole-branch review caught the seams.</strong> Per-task reviews can't see across tasks; the final six-hundred-line-of-findings pass exists for exactly that. Its two real catches were both born from the sweep relocation above: the sweep exec sat outside export's failure boundary, so a transient docker timeout during the sweep would have skipped the salvage path and <em>deleted the volume</em> — a robustness feature converting a hiccup into total loss of the worker's output. And the swept-file count was computed over merged stdout+stderr, so <code>find: Permission denied</code> counted as a swept file — the "never silent, never wrong" report line was reliably wrong on exactly the failures it was added to report. Both proven in a container before fixing.</p>
+  <p><strong>And the human caught what all of it missed.</strong> My review of the finished PR flagged that docker <code>append_file</code> could return a wrong diff for files between 1 and 5 MB. The root cause was better than the symptom: every docker exec's output capture silently stopped at a 1 MB default, with the truncation flag ignored. Which meant the 5 MB read refusal was dead code — and, worse, the edit tools read a file, transform it, and write it <em>back</em>, so editing a 1–5 MB file in docker mode had been silently truncating it to 1 MB. That bug shipped in 0.9. It predates this branch entirely. Six layers of review built this release, and the data-loss bug they surfaced was one nobody was looking for, found because a seventh layer — a person reading the finished PR — asked why a diff looked short.</p>
+</section>
+
+<section>
+  <div class="sec-mark"><span class="n">02</span><h2>The scoreboard</h2></div>
+
+  <div class="tblwrap">
+  <table class="runs">
+  <caption>0.10 review-layer scoreboard, one representative catch per layer</caption>
+  <thead><tr><th>Layer</th><th>Representative catch</th></tr></thead>
+  <tbody>
+  <tr><td>Owner spec review (×2)</td><td class="review">O_NONBLOCK on the second open; the append cap's exact wording path</td></tr>
+  <tr><td>Plan red-team (3 lenses)</td><td class="review">7 shipped tests broken by a spec'd refusal; the EBADF double-close</td></tr>
+  <tr><td>Per-task reviews (13 tasks)</td><td class="review">symlink cap bypass; readonly-mount sweep; <code>mv</code> option injection</td></tr>
+  <tr><td>Mutation battery</td><td class="review">the untested explicit-<code>null</code> inheritance branch</td></tr>
+  <tr><td>Empirical measurement</td><td class="review">§4.3's premise was already true before the change</td></tr>
+  <tr><td>Whole-branch review</td><td class="review">sweep failure deleting the volume; false swept counts</td></tr>
+  <tr><td>Owner PR review</td><td class="review">the 1 MB capture cap hiding a pre-existing data-loss bug</td></tr>
+  </tbody>
+  </table>
+  </div>
+
+  <p>Every row is a defect that survived every layer above it. The plan's authorship doesn't get to grade the plan's output — that was the SP3 lesson. The 0.10 lesson is one turn stronger: the <em>spec's</em> authorship doesn't either, and neither does its approver. I approved that spec twice. Six amendments later, I'm glad approval isn't the last word.</p>
+  <p>End to end: thirteen tasks executed with a fresh implementer per task and red-gate-first TDD, a final review and fix wave, then the PR. Roughly six million subagent tokens across about forty agent seats — approximate, from the session's own dispatch records — spent almost entirely on review and verification rather than typing. Same rationing argument as last time: frontier attention went where the judgment lives. The typing was the cheap part.</p>
+  <p>0.10.0 shipped the same day: <a href="https://github.com/JimboSchneider/dirtywork/releases/tag/v0.10.0">the release</a>, squash of the 34-commit branch in <a href="https://github.com/JimboSchneider/dirtywork/pull/56">PR #56</a>, suite re-verified on the merged main: 1,164 passed.</p>
+  <p>If you want to check the arithmetic: the six amendments are dated inline in <a href="https://github.com/JimboSchneider/dirtywork/blob/main/docs/superpowers/specs/2026-08-20-v1rc-large-writes-atomic-ollama-design.md">the spec</a>, each at the section it corrects, and the PR description itemizes them with their evidence. The parked list — the things we deliberately did <em>not</em> fix, with reasons — is there too. A release that hides its corrections is asking you to re-find them.</p>
+</section>
+
+<p>One caveat, same as always: this is one repo, one release cycle, one stack of reviewers with one orchestrator. It is a record, not a benchmark.</p>
+
+<p>A frontier model planned, reviewed, and ruled — and got overruled six times by its own reviewers, each time with receipts. I approved the spec, twice, and caught the bug that mattered most anyway. The document that ships is the one that lost every argument it deserved to lose.</p>
+
+<p><strong>Previous:</strong> <a href="what-the-meter-said.html">What the Meter Said</a> —
+part four, the day the run measured itself while it ran.</p>
+
+<p class="footnote">Claude (Fable 5) orchestrated the release — spec, plan, thirteen
+implementer and nineteen reviewer dispatches — and drafted this post from the session
+record. Jim reviewed the spec twice, found the capture-cap bug at PR review, edited this
+post, and decided what merged. Same process as the earlier posts. Source:
+<a href="https://github.com/JimboSchneider/dirtywork">github.com/JimboSchneider/dirtywork</a> ·
+install: <span class="mono">pipx install dirtywork</span> ·
+<a href="https://dirtywork.run">dirtywork.run</a></p>
+</div>
+
+</body>
+</html>
