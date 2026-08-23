@@ -177,7 +177,9 @@ stdout JSON and exit codes: [docs/machine-contract.md](https://github.com/JimboS
    as a replace. `apply_edits` takes a brief's whole numbered list of exact
    replacements to one file in a single call, applied in order, all-or-nothing:
    if any `old` does not match exactly once at its turn, nothing is written and
-   the result names the first failure. Every successful
+   the result names the first failure. Since 0.10 every file write is staged
+   in a temp file and promoted atomically, so a run killed mid-write leaves
+   the file byte-identical instead of truncated. Every successful
    `edit_file`/`apply_edits`/`write_file`/`append_file`/`insert_*` result
    echoes a capped unified diff of what actually changed, so a replace that
    silently deleted a line is visible to the worker in the same turn — except
