@@ -514,13 +514,21 @@ class DockerSandbox:
         argv = docker_args.exec_argv(
             self.container, ["/usr/bin/head", "-c", str(MAX_READ_BYTES + 1), "--", rel]
         )
-        captured = self._run(argv, timeout=READ_EXEC_TIMEOUT)
+        # docker_cli.run's default capture cap (procs.MAX_CAPTURE_BYTES, 1 MiB)
+        # is meant for ordinary exec output, not a file body -- request a cap
+        # above what `head` can ever emit (MAX_READ_BYTES + 1) so a 1-5 MiB
+        # file is never silently cut short at 1 MiB. With that explicit cap
+        # the exceeds check below is live again (it was dead code under the
+        # 1 MiB default, since captured.output could never exceed it); a
+        # `truncated` Captured is refused defensively even though the exec
+        # itself should never produce one now.
+        captured = self._run(argv, timeout=READ_EXEC_TIMEOUT, cap=MAX_READ_BYTES + 1)
         if captured.returncode != 0:
             return None, (
                 f"ERROR: cannot read '{path}': "
                 f"{captured.output.decode('utf-8', 'replace')[:500]}"
             )
-        if len(captured.output) > MAX_READ_BYTES:
+        if captured.truncated or len(captured.output) > MAX_READ_BYTES:
             return None, (
                 f"ERROR: '{path}' exceeds {MAX_READ_BYTES} bytes; refusing to read"
             )

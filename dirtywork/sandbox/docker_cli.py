@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ..procs import Captured, run_capped
+from ..procs import Captured, MAX_CAPTURE_BYTES, run_capped
 from ..workspace import WorkspaceError
 from . import SandboxError
 
@@ -41,13 +41,17 @@ def _warn(msg: str) -> None:
     print(f"warning: {msg}", file=sys.stderr)
 
 
-def run(argv: list, *, timeout: float, stdin: bytes | None = None) -> Captured:
+def run(argv: list, *, timeout: float, stdin: bytes | None = None,
+        cap: int = MAX_CAPTURE_BYTES) -> Captured:
     """The one entry point to the docker CLI. Prefixes argv with "docker" and
     converts a timeout into a DockerError naming the command, instead of
     silently returning a Captured with timed_out=True — every docker call in
-    this codebase must fail loud, not be ignored by an incomplete caller."""
+    this codebase must fail loud, not be ignored by an incomplete caller. The
+    default capture cap protects host memory against arbitrary worker
+    output; callers that need to read a larger file back whole (e.g. a
+    docker exec) pass an explicit larger cap."""
     full = ["docker"] + list(argv)
-    captured = run_capped(full, timeout=timeout, stdin=stdin)
+    captured = run_capped(full, timeout=timeout, stdin=stdin, cap=cap)
     if captured.timed_out:
         raise DockerError(
             f"docker {' '.join(str(a) for a in argv)} timed out after {timeout}s",

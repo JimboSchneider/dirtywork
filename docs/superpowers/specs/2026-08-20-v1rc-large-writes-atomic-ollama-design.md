@@ -110,6 +110,24 @@ abort). No tool can append, so "write it in pieces" is not honest advice for a n
   snapshot with no re-check against a file that changed size in between — both are fixed above and
   mirror `tools.append_file`'s own probe-then-read handling, which already re-checks after the
   read (`len(raw) + len(encoded) > MAX_WRITE_BYTES`, tools.py ~:830).)
+
+  (Execution amendment, 2026-08-23: the owner's PR review of `append_file` (PR #56) found that
+  "the existing `_read_raw` cap" above was never actually `MAX_READ_BYTES` in practice —
+  `docker_cli.run` called `run_capped` with no explicit `cap` at all, so EVERY docker exec's
+  capture, `_read_raw`'s `head -c MAX_READ_BYTES+1` read included, silently stopped at
+  `procs.MAX_CAPTURE_BYTES` (1 MiB) with `Captured.truncated` set and ignored. A 1–5 MiB file
+  therefore "read" as its first 1 MiB: `append_file`'s diff was built from a truncated copy, and
+  worse, `_transform_file` (edit_file/apply_edits/insert_before/insert_after) would write that
+  truncated copy back — silent data loss on any in-place edit of a 1–5 MiB file. The
+  `len(captured.output) > MAX_READ_BYTES` refusal a few paragraphs up was consequently dead code:
+  a 6 MiB file was never refused, since the capture never got that far. Fix: `docker_cli.run` gains
+  an explicit `cap` keyword (default `procs.MAX_CAPTURE_BYTES`, forwarded to `run_capped`) so a
+  caller reading a whole file back can ask for a cap above what it expects to receive; `_read_raw`
+  now requests `cap=MAX_READ_BYTES + 1` — exactly what `head` can ever emit — so its capture is
+  never cut short and the exceeds-refusal is live again. `Captured.truncated` is also refused
+  defensively (`if captured.truncated or len(captured.output) > MAX_READ_BYTES`), even though the
+  exec itself should never produce one under the new cap. Export's own patch-streaming path has its
+  own cap and was untouched.)
 - **Result string:** whatever `describe_change(path, old_text, new_text, verb="Appended to")`
   computes. It is `+A -0` only when the file already ended in a newline; when it did not, the final
   line is a replace and the header reads `+A -1 (removed 1 non-blank line)` — the visible

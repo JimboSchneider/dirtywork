@@ -83,6 +83,7 @@ def started(docker, tmp_path: Path):
     worktree.mkdir()
     sb.start(worktree, repo, "abc123", "deadbeef" * 5)
     fake.calls.clear()
+    fake.call_caps.clear()
     return sb, fake, run_dir
 
 
@@ -109,6 +110,7 @@ def started_with_transcript(tmp_path: Path):
     worktree.mkdir()
     sb.start(worktree, repo, "abc123", "deadbeef" * 5)
     fake.calls.clear()
+    fake.call_caps.clear()
     return sb, fake, run_dir, transcript
 
 
@@ -297,6 +299,7 @@ def test_stop_is_idempotent_and_removes_container_and_volume(docker, tmp_path):
     worktree.mkdir()
     sb.start(worktree, repo, "abc123", "deadbeef" * 5)
     fake.calls.clear()
+    fake.call_caps.clear()
 
     sb.stop()
     sb.stop()  # second call must no-op, not re-issue docker commands
@@ -483,6 +486,66 @@ def test_read_file_oversize(started):
     assert f"exceeds {MAX_READ_BYTES} bytes" in out
 
 
+def test_read_exec_requests_a_capture_cap_above_max_read_bytes(started):
+    """PR #56 review: docker_cli.run used to call run_capped with no `cap`
+    at all, so every docker exec's capture -- including a file read via
+    `head` -- silently stopped at procs.MAX_CAPTURE_BYTES (1 MiB), well
+    under MAX_READ_BYTES (5 MiB). _read_raw's read exec must request a cap
+    above what `head -c MAX_READ_BYTES+1` can ever emit, so a 1-5 MiB file
+    is never cut short at 1 MiB. (RED-FIRST: pre-fix, no `cap` reaches
+    docker_cli.run for this exec, so the fake records cap=None.)"""
+    from dirtywork.tools import MAX_READ_BYTES
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok(b"hello\n"))
+    sb.read_file("src/app.py")
+    idx = next(i for i, c in enumerate(fake.calls) if "/usr/bin/head" in c[0])
+    assert fake.call_caps[idx] == MAX_READ_BYTES + 1
+
+
+def test_read_raw_refuses_a_truncated_capture_and_no_write_follows(started):
+    """A Captured with truncated=True must refuse outright, even when the
+    reported output is under MAX_READ_BYTES -- truncated is a defensive
+    backstop for a capture cut short somewhere other than `head`'s own
+    MAX_READ_BYTES+1 bound. Pre-fix, `truncated` was never consulted:
+    _transform_file would proceed on the truncated content and a write exec
+    would fire -- the silent data-loss scenario the owner's review found
+    (edit_file writing back a truncated copy of a large file). (RED-FIRST:
+    pre-fix the transform proceeds and a write exec runs.)"""
+    from dirtywork.tools import MAX_READ_BYTES
+    sb, fake, run_dir = started
+    truncated = Captured(returncode=0, output=b"short but truncated",
+                          truncated=True, timed_out=False)
+    fake.script(["exec"], [truncated])
+    out = sb.edit_file("big.txt", "short", "long")
+    assert out.startswith("ERROR:")
+    assert f"exceeds {MAX_READ_BYTES} bytes" in out
+    writes = [c for c in fake.calls if _is_write_exec(c)]
+    assert not writes
+
+
+def test_transform_round_trips_a_file_between_one_and_five_mib_intact(started):
+    """Pins the end-to-end behaviour the old 1 MiB default capture cap would
+    have broken: a file between 1 and 5 MiB must round-trip through
+    edit_file whole -- not silently truncated to the first 1 MiB, which
+    would have made the transform operate on, and write back, a truncated
+    copy of the file (silent data loss)."""
+    sb, fake, run_dir = started
+    body = ("x" * 79 + "\n") * ((2 * 1024 * 1024) // 80)
+    content = (body + "MARKER-old\n").encode("utf-8")
+    assert 1024 * 1024 < len(content) < 5 * 1024 * 1024
+    fake.script(["exec"], [_ok(content), _ok()])
+    out = sb.edit_file("big.txt", "MARKER-old", "MARKER-new")
+    assert "Edited" in out
+    writes = [c for c in fake.calls if _is_write_exec(c)]
+    assert len(writes) == 1
+    _write_argv, _write_timeout, write_stdin = writes[0]
+    assert write_stdin is not None
+    assert len(write_stdin) == len(content)  # same-length replacement
+    assert write_stdin.startswith(b"x" * 79)
+    assert write_stdin.endswith(b"MARKER-new\n")
+    assert b"MARKER-old" not in write_stdin
+
+
 def test_edit_file_non_utf8(started):
     """When file contains non-UTF-8 bytes, edit_file should return error without writing."""
     sb, fake, run_dir = started
@@ -619,6 +682,7 @@ def test_bash_sandboxed_allows_host_only_git_config_but_blocks_push(started):
     assert len(exec_calls) == 1
 
     fake.calls.clear()
+    fake.call_caps.clear()
     blocked = sb.bash("git push origin main")
     assert blocked.startswith("BLOCKED:")
     assert not fake.calls
@@ -1190,6 +1254,7 @@ def test_finalize_sweep_docker_error_is_contained_export_still_runs(started, mon
     # Volume-preserving path intact: export succeeded, so stop() removes the
     # volume exactly as it would with no sweep failure at all.
     fake.calls.clear()
+    fake.call_caps.clear()
     sb.stop()
     assert any(c[0][:2] == ["volume", "rm"] for c in fake.calls)
 
@@ -1234,6 +1299,7 @@ def test_stop_after_finalize_keeps_volume_when_export_failed(started, monkeypatc
 
     sb.finalize()
     fake.calls.clear()
+    fake.call_caps.clear()
     sb.stop()
 
     assert not any(c[0][:2] == ["volume", "rm"] for c in fake.calls)
@@ -1250,6 +1316,7 @@ def test_stop_after_finalize_removes_volume_when_export_succeeded(started, monke
 
     sb.finalize()
     fake.calls.clear()
+    fake.call_caps.clear()
     sb.stop()
 
     assert any(c[0][:2] == ["volume", "rm"] for c in fake.calls)

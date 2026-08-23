@@ -66,7 +66,13 @@ class FakeDocker:
     under the same `["exec", ...]` prefix) without the broad default
     shadowing it. Every call is recorded in `.calls` (list of
     (argv, timeout, stdin)) for order/content assertions; every FakePopen
-    created is recorded in `.popens`.
+    created is recorded in `.popens`. The `cap` kwarg (docker_cli.run's
+    explicit capture cap, PR #56) is recorded in a PARALLEL `.call_caps`
+    list rather than folded into `.calls`'s tuple, since several existing
+    tests unpack `.calls` entries as a 3-tuple (`argv, timeout, stdin =
+    fake.calls[-1]`) and widening that tuple would break them; `.call_caps`
+    is appended to in the same call order as `.calls`, so `.call_caps[i]`
+    is the cap for `.calls[i]`.
 
     `script_popen_stdout(prefix, data)` maps an argv-prefix tuple (matched
     the same longest-prefix-wins way, against the argv passed to `popen()`
@@ -81,6 +87,7 @@ class FakeDocker:
         self.responses = {}
         self.popen_stdout = {}
         self.calls = []
+        self.call_caps = []
         self.popens = []
         self.default = Captured(returncode=0, output=b"", truncated=False, timed_out=False)
 
@@ -90,8 +97,9 @@ class FakeDocker:
     def script_popen_stdout(self, prefix, data: bytes) -> None:
         self.popen_stdout[tuple(prefix)] = data
 
-    def run(self, argv, *, timeout, stdin=None):
+    def run(self, argv, *, timeout, stdin=None, cap=None):
         self.calls.append((list(argv), timeout, stdin))
+        self.call_caps.append(cap)
         best_prefix = None
         best_response = None
         for prefix, response in self.responses.items():
