@@ -4,7 +4,7 @@
 
 **Goal:** Ship dirtywork **0.10.0**, the v1 release candidate — close the last core-job holes. A file larger than one turn's output becomes a recoverable two-step (`append_file` plus a tool-aware truncation recovery and a configurable `--max-tokens`) instead of a silent `model_error` (#36). An interrupted write can no longer leave a truncated file (#43). Ollama becomes a verified first-class provider with a real loaded-context probe (#47). The self-reported defect backlog — snapshot follow-ups, tool wording/perf nits, test-coverage gaps — goes to zero (#40, #41, #42).
 
-**Architecture:** Everything is additive over shipped structure; no new dependency, `schema_version` stays 2. The spine is one new host primitive: `tools._write_atomic(target, data, *, path, verb, create_parents)` stages every host write in a same-directory temp file and promotes it with `os.replace`, keeping today's exact refusal strings and deliberately keeping today's in-place behaviour in the two branches where a rename is wrong (a hardlinked target) or impossible (an unwritable directory). `append_file` is then one more caller of that primitive on the host, and one more three-exec script pair in the container; both backends share the caps (`tools._append_oversized`, `tools._result_too_big`) and the strings (`tools._append_missing`, `tools._not_utf8`) the way `MAX_WRITE_BYTES` is already shared, so the host and the container cannot disagree about what an append refuses. Docker's write path grows the same temp+`mv` shape, with the temp NAME generated host-side (`tools.tmp_name`) and passed in as `$2`, so worker data never reaches the script text. The runner learns two small things: an explicit `max_tokens` on its single `provider.chat` call site (which also makes the prompt budget cap-aware) and a tool-aware recovery for a call the model was cut off mid-emit. Ollama arrives as a three-method subclass of the existing OpenAI-compatible adapter. `workspace.snapshot_worktree` gets a two-pass hash (so a no-op snapshot writes no loose objects) and a breadth-first walk that prunes an ignored directory before descending into it.
+**Architecture:** Everything is additive over shipped structure; no new dependency, `schema_version` stays 2. The spine is one new host primitive: `tools._write_atomic(target, data, *, path, verb, create_parents, must_exist)` stages every host write in a same-directory temp file and promotes it with `os.replace`, keeping today's exact refusal strings and deliberately keeping today's in-place behaviour in the two branches where a rename is wrong (a hardlinked target) or impossible (an unwritable directory). `append_file` is then one more caller of that primitive on the host, and one more three-exec script pair in the container; both backends share the caps (`tools._append_oversized`, `tools._result_too_big`) and the strings (`tools._append_missing`, `tools._not_utf8`) the way `MAX_WRITE_BYTES` is already shared, so the host and the container cannot disagree about what an append refuses. Docker's write path grows the same temp+`mv` shape, with the temp NAME generated host-side (`tools.tmp_name`) and passed in as `$2`, so worker data never reaches the script text. The runner learns two small things: an explicit `max_tokens` on its single `provider.chat` call site (which also makes the prompt budget cap-aware) and a tool-aware recovery for a call the model was cut off mid-emit. Ollama arrives as a three-method subclass of the existing OpenAI-compatible adapter. `workspace.snapshot_worktree` gets a two-pass hash (so a no-op snapshot writes no loose objects) and a breadth-first walk that prunes an ignored directory before descending into it.
 
 **Tech Stack:** Python ≥3.9, stdlib only (`difflib`, `errno`, `json`, `os`, `posixpath`, `re`, `stat`, `sys`, `urllib.parse`). Dev-only dependency: pytest. CI: GitHub Actions. Container scripts: POSIX `sh` plus GNU coreutils/findutils as shipped in the Debian bookworm worker image.
 
@@ -77,6 +77,8 @@ Tests plus three one-line hardenings: `--feedback ""`/whitespace-only normalizes
 ## Precondition
 
 Branch `v1rc-0.10`, dirtywork **0.9.1**, working tree clean.
+
+**Line numbers in this plan are navigational only.** Every `file.py:NN` anchor below was read off this tree while the plan was written and some have since drifted by a line or ten; they tell you where to *look*, never what to *match*. The verbatim **Before/After** blocks are the sole binding edit targets — locate each edit by its quoted text, and if the quoted text is not there, stop and re-read rather than trusting the number.
 
 **Baseline (measured on this branch with `/usr/bin/python3 -m pytest -q` from the repo root): `1026 passed, 1 skipped, 18 deselected in ~41s`.** The 18 deselected are the `docker`/`live` markers excluded by `pyproject.toml`'s `addopts = "-m 'not live and not docker'"`; the 1 skip is the undecodable-filename test in `tests/test_workspace.py`, which needs a filesystem that accepts one. Both are normal. A task may only raise 1026.
 
@@ -166,7 +168,7 @@ Nothing calls `_write_atomic` yet: Task 1 builds and proves the primitive on its
 
 **Files:**
 - Modify: `dirtywork/tools.py` (the import block `:1-12`; a new constants+helpers block immediately after `MAX_LIST_ENTRIES` at `:29`; `_write_all`/`_unlink_quietly`/`_write_atomic` immediately after `_worktree_candidate` which ends at `:95`; `_result_too_big`/`_append_oversized`/`_append_missing`/`_not_utf8` immediately before `_check_write_size` at `:391`; `_check_write_size`'s body `:391-407`; `_transform_file`'s UTF-8 line `:335`)
-- Modify: `tests/test_tools_files.py` (17 new tests, appended at the end of the file)
+- Modify: `tests/test_tools_files.py` (18 new tests, appended at the end of the file)
 
 **Interfaces:**
 - Consumes: `tools.MAX_WRITE_BYTES` (`tools.py:28`), `tools._open_regular` (`tools.py:39`), `tools._worktree_candidate` (`tools.py:82`).
@@ -177,7 +179,7 @@ Nothing calls `_write_atomic` yet: Task 1 builds and proves the primitive on its
   - `tools.is_temp_name(name: str) -> bool`
   - `tools._write_all(fd: int, data: bytes) -> None`
   - `tools._unlink_quietly(p: Path) -> None`
-  - `tools._write_atomic(target: Path, data: bytes, *, path: str, verb: str = "write", create_parents: bool = False) -> str | None`
+  - `tools._write_atomic(target: Path, data: bytes, *, path: str, verb: str = "write", create_parents: bool = False, must_exist: bool = False) -> str | None`
   - `tools._result_too_big(size: int) -> str`
   - `tools._append_oversized(encoded: bytes) -> str | None`
   - `tools._append_missing(path: str) -> str`
@@ -354,6 +356,36 @@ def test_write_atomic_returns_an_error_string_on_an_oserror_during_the_write(wt:
     assert _temp_leftovers(wt) == []           # the temp was unlinked in-call
 
 
+def test_write_atomic_surfaces_a_close_failure_without_raising(wt: Path, monkeypatch):
+    # Spec §2.2: the temp fd is closed BEFORE the promote precisely so a
+    # DEFERRED write error surfaces while the target is still untouched. The
+    # handle is cleared before that close, so the except arm's own cleanup
+    # never closes an already-closed fd -- an EBADF escaping the handler would
+    # be a tool function raising, which the contract forbids.
+    target = wt / "deferred.txt"
+    target.write_text("old\n")
+    staged = {}
+    real_write_all = tools._write_all
+    real_close = os.close
+
+    def _record(fd, data):
+        staged["fd"] = fd            # _write_all only ever gets the temp fd
+        return real_write_all(fd, data)
+
+    def _closing(fd):
+        real_close(fd)
+        if fd == staged.get("fd"):
+            raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(tools, "_write_all", _record)
+    monkeypatch.setattr(os, "close", _closing)
+    out = tools._write_atomic(target, b"new\n", path="deferred.txt")
+    assert out.startswith("ERROR: cannot write 'deferred.txt': ")
+    assert "Input/output error" in out
+    assert target.read_bytes() == b"old\n"     # never promoted
+    assert _temp_leftovers(wt) == []
+
+
 def test_write_atomic_reraises_a_non_oserror_and_unlinks_its_temp(wt: Path, monkeypatch):
     # Spec §2.2 step 4: KeyboardInterrupt / BudgetExceeded / SandboxError are
     # run-level signals the runner owns, NOT tool results.
@@ -403,7 +435,7 @@ def test_append_missing_and_not_utf8_strings(wt: Path):
 - [ ] **Step 2: Run them to verify they fail**
 
 Run: `/usr/bin/python3 -m pytest tests/test_tools_files.py -q -k "tmp_name or is_temp_name or write_atomic or append_oversized or result_too_big or append_missing"`
-Expected: collection succeeds and 17 tests fail, every one with `AttributeError: module 'dirtywork.tools' has no attribute '<name>'` (`tmp_name`, `is_temp_name`, `_write_atomic`, `_append_oversized`, `_result_too_big`, `_append_missing`, `_not_utf8`, `TMP_PREFIX`, `_UMASK`, `_write_all`).
+Expected: collection succeeds and 18 tests fail, every one with `AttributeError: module 'dirtywork.tools' has no attribute '<name>'` (`tmp_name`, `is_temp_name`, `_write_atomic`, `_append_oversized`, `_result_too_big`, `_append_missing`, `_not_utf8`, `TMP_PREFIX`, `_UMASK`, `_write_all`). `test_write_atomic_surfaces_a_close_failure_without_raising` is among them: its `real_write_all = tools._write_all` line raises the same `AttributeError` on `_write_all` before it reaches `_write_atomic`.
 
 - [ ] **Step 3: Add `re` to the imports**
 
@@ -501,7 +533,7 @@ def _unlink_quietly(p: Path) -> None:
 
 
 def _write_atomic(target: Path, data: bytes, *, path: str, verb: str = "write",
-                  create_parents: bool = False):
+                  create_parents: bool = False, must_exist: bool = False):
     """Spec §2.2: write `data` to `target` so a failure or a kill during the
     write leaves the file byte-identical instead of truncated. Returns None on
     success or an `ERROR: …` string -- never an OSError, because a tool
@@ -515,6 +547,14 @@ def _write_atomic(target: Path, data: bytes, *, path: str, verb: str = "write",
     "write" -> `cannot write '<path>'`, "append" -> `cannot append to
     '<path>'`; the ELOOP and non-regular-file strings are shared verbatim
     between the two.
+
+    `must_exist=True` turns off §2.2's new-file branch: an ENOENT probe then
+    returns `_append_missing(path)` instead of staging a temp and creating the
+    target. Spec §1.2 requires it -- "ENOENT on the probe is the does-not-exist
+    error above, never §2.2's new-file branch" -- and it is what makes the host
+    refuse the delete-between-read-and-write race the container already refuses
+    with the append script's `[ -f "$1" ] || exit 2`. `append_file` is the only
+    caller that passes it.
 
     Two branches deliberately keep today's in-place, non-atomic behaviour and
     are named in docs/machine-contract.md and docs/operating.md:
@@ -550,6 +590,11 @@ def _write_atomic(target: Path, data: bytes, *, path: str, verb: str = "write",
             return f"ERROR: '{path}' is not a regular file (refusing FIFO/device/socket)"
         if e.errno != errno.ENOENT:
             return f"ERROR: {lead} '{path}': {e}"
+        if must_exist:
+            # Spec §1.2: for an append, ENOENT is the does-not-exist refusal,
+            # never the new-file branch below -- the target must not be created
+            # by a write that was only ever meant to extend it.
+            return _append_missing(path)
         # ENOENT: there is no file yet. Fall through to the temp with no mode
         # to preserve and no fd to fall back to.
     try:
@@ -587,18 +632,30 @@ def _write_atomic(target: Path, data: bytes, *, path: str, verb: str = "write",
             os.fchmod(tmp_fd, stat.S_IMODE(st.st_mode) if st is not None
                       else 0o644 & ~_UMASK)
             # Closed BEFORE the promote so a deferred write error surfaces
-            # while the target is still untouched.
-            os.close(tmp_fd)
-            tmp_fd = None
+            # while the target is still untouched. The handle is CLEARED
+            # first: os.close consumes the fd whether or not it raises, so if
+            # this close is the one that reports the deferred error, the
+            # handlers below must not try to close it a second time -- an
+            # EBADF out of an except arm would be a tool function raising.
+            fd, tmp_fd = tmp_fd, None
+            os.close(fd)
             os.replace(str(tmp), str(target))
         except OSError as e:
             if tmp_fd is not None:
-                os.close(tmp_fd)
+                # Defensive: cleanup must not replace the real diagnosis with
+                # its own errno.
+                try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
             _unlink_quietly(tmp)
             return f"ERROR: {lead} '{path}': {e}"
         except BaseException:
             if tmp_fd is not None:
-                os.close(tmp_fd)
+                try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
             _unlink_quietly(tmp)
             raise
         return None
@@ -627,10 +684,14 @@ def _append_oversized(encoded: bytes):
     None. Imported by dirtywork.sandbox.docker the way MAX_WRITE_BYTES already
     is, so both backends emit the byte-identical string.
 
-    Deliberately NOT docker._oversized: that helper carries write_file's
-    wording ("content is …; write the file in smaller pieces"), and an
-    append's fix is a different action. Neither _oversized's nor
-    _check_write_size's wording may ever surface from an append."""
+    Deliberately NOT any of the three write-side strings, because an append's
+    fix is a different action from a write's. The three, verbatim, are:
+    docker._oversized's `ERROR: content is <n> bytes, over the <limit>-byte
+    write limit` (no trailing advice); tools.write_file's own inline
+    `ERROR: content is <n> bytes, over the <limit>-byte write limit; write the
+    file in smaller pieces` (the `; write the file in smaller pieces` tail is
+    host-only and exists nowhere in docker.py); and _result_too_big's
+    `…; nothing was written`. None of them may ever surface from an append."""
     if len(encoded) > MAX_WRITE_BYTES:
         return (f"ERROR: text is {len(encoded)} bytes, over the {MAX_WRITE_BYTES}-byte "
                 f"write limit; append in smaller pieces")
@@ -703,7 +764,7 @@ Expected: exit code 0.
 - [ ] **Step 8: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1043 passed, 1 skipped, 18 deselected` (1026 + 17).
+Expected: exit code 0; `1044 passed, 1 skipped, 18 deselected` (1026 + 18).
 
 - [ ] **Step 9: Commit**
 
@@ -721,11 +782,11 @@ The tool is not registered yet (Task 5 does that, once both backends have it), s
 **Files:**
 - Modify: `dirtywork/tools.py` (new `append_file` immediately after `apply_edits`, which ends at `:485`)
 - Modify: `dirtywork/sandbox/host.py` (new `append_file` immediately after `insert_after` at `:67-70`)
-- Modify: `tests/test_tools_files.py` (14 new tests)
+- Modify: `tests/test_tools_files.py` (15 new tests)
 - Modify: `tests/test_sandbox_host.py` (1 new test)
 
 **Interfaces:**
-- Consumes: `tools._append_oversized(encoded: bytes) -> str | None`, `tools._append_missing(path: str) -> str`, `tools._not_utf8(path: str, tool: str) -> str`, `tools._result_too_big(size: int) -> str`, `tools._write_atomic(target, data, *, path, verb, create_parents)` (all Task 1); `tools._open_regular`, `tools._worktree_candidate`, `tools.describe_change`, `guardrails.resolve_in_worktree`.
+- Consumes: `tools._append_oversized(encoded: bytes) -> str | None`, `tools._append_missing(path: str) -> str`, `tools._not_utf8(path: str, tool: str) -> str`, `tools._result_too_big(size: int) -> str`, `tools._write_atomic(target, data, *, path, verb, create_parents, must_exist)` (all Task 1 — `append_file` is the one caller that passes `must_exist=True`); `tools._open_regular`, `tools._worktree_candidate`, `tools.describe_change`, `guardrails.resolve_in_worktree`.
 - Produces:
   - `tools.append_file(worktree: Path, path: str, text: str) -> str`
   - `HostSandbox.append_file(path: str, text: str) -> str`
@@ -864,6 +925,31 @@ def test_append_file_is_atomic_the_target_is_unchanged_when_the_write_fails(wt: 
     assert out.startswith("ERROR: cannot append to 'safe.txt': ")
     assert target.read_text() == "one\n"
     assert _temp_leftovers(wt) == []
+
+
+def test_append_file_refuses_when_the_target_vanishes_before_the_promote(wt: Path, monkeypatch):
+    # Spec §1.2: ENOENT on the write probe is the does-not-exist refusal,
+    # never §2.2's new-file branch -- docker's append write script refuses the
+    # same race with `[ -f "$1" ] || exit 2`. `must_exist=True` is what carries
+    # that rule into the shared primitive, and this pins BOTH halves: that
+    # append_file wires the flag through, and that the primitive honours it.
+    target = wt / "vanishing.md"
+    target.write_text("one\n")
+    real_write_atomic = tools._write_atomic
+    seen = {}
+
+    def _spy(t, data, **kwargs):
+        seen.update(kwargs)
+        os.unlink(str(t))            # the race: gone before the probe runs
+        return real_write_atomic(t, data, **kwargs)
+
+    monkeypatch.setattr(tools, "_write_atomic", _spy)
+    out = tools.append_file(wt, "vanishing.md", "two\n")
+    assert seen["must_exist"] is True
+    assert out == ("ERROR: cannot append to 'vanishing.md': it does not exist; create "
+                   "it with write_file first")
+    assert not target.exists()       # never re-created by the new-file branch
+    assert _temp_leftovers(wt) == []
 ```
 
 Append to `tests/test_sandbox_host.py`:
@@ -882,7 +968,7 @@ def test_host_sandbox_append_file(wt: Path):
 - [ ] **Step 2: Run them to verify they fail**
 
 Run: `/usr/bin/python3 -m pytest tests/test_tools_files.py tests/test_sandbox_host.py -q -k "append_file"`
-Expected: 15 failed — the 14 in `tests/test_tools_files.py` with `AttributeError: module 'dirtywork.tools' has no attribute 'append_file'`, and `test_host_sandbox_append_file` with `AttributeError: 'HostSandbox' object has no attribute 'append_file'`.
+Expected: 16 failed — the 15 in `tests/test_tools_files.py` with `AttributeError: module 'dirtywork.tools' has no attribute 'append_file'` (including `test_append_file_refuses_when_the_target_vanishes_before_the_promote`: `tools._write_atomic` exists from Task 1, so its `monkeypatch.setattr` succeeds and the `AttributeError` comes from the `tools.append_file(...)` call on the next line), and `test_host_sandbox_append_file` with `AttributeError: 'HostSandbox' object has no attribute 'append_file'`.
 
 - [ ] **Step 3: Add `tools.append_file`**
 
@@ -904,7 +990,9 @@ def append_file(worktree: Path, path: str, text: str) -> str:
 
     The §2.2 probe runs UNCHANGED, so the symlink and FIFO refusals are
     byte-identical to write_file's -- except ENOENT, which for an append is
-    the does-not-exist refusal, never §2.2's new-file branch. The content is
+    the does-not-exist refusal, never §2.2's new-file branch. That holds for
+    BOTH probes: this function's own, and _write_atomic's, which is told so
+    with must_exist=True. The content is
     then read through a SECOND open of the same candidate path: O_NONBLOCK
     (which _open_regular always adds) is what keeps a FIFO swapped in between
     the two opens from blocking the read, and the read fd's st_ino/st_dev must
@@ -971,7 +1059,12 @@ def append_file(worktree: Path, path: str, text: str) -> str:
             # Re-checked against what was actually read: the probe's size is a
             # moment old, and the file may have grown in place since.
             return _result_too_big(len(raw) + len(encoded))
-        err = _write_atomic(p, raw + encoded, path=path, verb="append")
+        # must_exist=True: spec §1.2 forbids §2.2's new-file branch here, so a
+        # target deleted between the read and this probe refuses rather than
+        # being re-created -- the same race docker's append write script
+        # refuses with `[ -f "$1" ] || exit 2`.
+        err = _write_atomic(p, raw + encoded, path=path, verb="append",
+                            must_exist=True)
         if err:
             return err
         return describe_change(path, old_text, old_text + text, verb="Appended to")
@@ -998,7 +1091,7 @@ Expected: exit code 0.
 - [ ] **Step 6: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1058 passed, 1 skipped, 18 deselected` (1043 + 15).
+Expected: exit code 0; `1060 passed, 1 skipped, 18 deselected` (1044 + 16).
 
 - [ ] **Step 7: Commit**
 
@@ -1031,13 +1124,23 @@ Two changes that share one file and one test module, done together because §2.6
 
 - [ ] **Step 1: Prove the matcher inventory before touching it**
 
-Run:
+The eleven live in **two different byte shapes**, and one grep cannot see both. Nine of the ten substring matchers plus the tenth are Python source reading `"cat > \"$1\"" in " ".join(c[0])`, so the bytes ON DISK are `cat > \"$1\"` — backslash, quote. Only the exact-argv literal (the `'mkdir -p …'` single-quoted string) carries unescaped quotes. So there are three gates, not one:
 
 ```bash
-grep -n 'cat > "\$1"' tests/test_docker_sandbox.py | wc -l
+grep -c 'cat > \\"\$1' tests/test_docker_sandbox.py
+grep -c 'cat > "\$1"' tests/test_docker_sandbox.py
 grep -rn 'cat > ' tests/test_docker_runs.py
 ```
-Expected: `11`, and exactly one `tests/test_docker_runs.py:153:        lines.append(f"cat > {dest} <<'DIRTYWORK_TEST_EOF'\n{content}DIRTYWORK_TEST_EOF")`. If the first number is not 11, stop and re-count before editing — the plan's ten-substring rewrite below assumes it.
+
+Expected, exactly (all three run on this tree while this plan was written):
+
+```
+10
+1
+tests/test_docker_runs.py:153:        lines.append(f"cat > {dest} <<'DIRTYWORK_TEST_EOF'\n{content}DIRTYWORK_TEST_EOF")
+```
+
+`10` is the escaped substring matchers (`:393`, `:402`, `:412`, `:440`, `:467`, `:1412`, `:1423`, `:1433`, `:1446`, `:1482`), `1` is the exact-argv literal inside `test_write_file_sends_content_on_stdin` (`:380`), and the single `tests/test_docker_runs.py` line is the test's own volume-seeding heredoc, which must NOT be touched. If either number differs, stop and re-count before editing — Step 8's ten-substring rewrite and Step 9's single-literal rewrite both assume them. (Note the first pattern is deliberately unterminated after `$1`: the trailing `\"` would have to be escaped again and adds nothing.)
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -1159,7 +1262,11 @@ def test_read_raw_without_a_tool_keeps_the_legacy_wording(started):
 - [ ] **Step 3: Run them to verify they fail**
 
 Run: `/usr/bin/python3 -m pytest tests/test_docker_sandbox.py -q -k "atomic_script or non_utf8_refusals or without_a_tool"`
-Expected: 3 failed — the first two with `AttributeError: module 'dirtywork.sandbox.docker' has no attribute 'WRITE_SCRIPT'` (raised inside `_is_write_exec`/the assertion), the third with `AssertionError` comparing against the current `ERROR: 'bin.dat' is not valid UTF-8; refusing to edit` — which it already matches, so `test_read_raw_without_a_tool_keeps_the_legacy_wording` PASSES at this point. That is expected and correct: it is a pin on behaviour Step 5 must not change. Confirm the other two fail.
+Expected: **3 selected, 2 failed, 1 passed**, and each for its own reason:
+
+- `test_write_exec_uses_the_atomic_script_and_a_sibling_temp` — `AttributeError: module 'dirtywork.sandbox.docker' has no attribute 'WRITE_SCRIPT'`, from the `argv[:8] == [… docker_mod.WRITE_SCRIPT]` assertion.
+- `test_transform_non_utf8_refusals_name_the_tool_and_match_the_host` — **`AssertionError`, not an `AttributeError`**: the first case's wording comparison fires long before the `_is_write_exec` line at the end, so the failure reads `assert "ERROR: 'bin.dat' is not valid UTF-8; refusing to edit" == "ERROR: bin.dat is not valid UTF-8 text; edit_file only works on text files"`. That legacy string is exactly what Step 5 replaces.
+- `test_read_raw_without_a_tool_keeps_the_legacy_wording` — PASSES. It is a pin on the `tool=None` branch Step 5 must NOT change; a failure here means Step 5 went too far.
 
 - [ ] **Step 4: Import the shared helpers into docker.py and add the scripts**
 
@@ -1469,14 +1576,24 @@ After:
     assert stdin == b"hello"
 ```
 
-- [ ] **Step 10: Prove the old matcher is gone**
+- [ ] **Step 10: Prove the old matcher is gone — in BOTH byte shapes**
 
-Run:
+A `grep 'cat > "\$1"'` alone cannot prove this: the ten substring matchers were never spelled that way on disk (Step 1), so that pattern would come back clean even if Step 8 had been skipped entirely. Run the broad grep, which sees every shape, plus the escaped-form count:
 
 ```bash
-grep -rn 'cat > "\$1"' tests/ dirtywork/
+grep -rn 'cat > ' tests/ dirtywork/
+grep -c 'cat > \\"\$1' tests/test_docker_sandbox.py
 ```
-Expected: **no output**. `tests/test_docker_runs.py:153`'s `cat > {dest}` is a different string and is untouched — confirm with `grep -rn 'cat > ' tests/test_docker_runs.py` (still exactly one line).
+
+Expected — exactly **two** lines from the first command and **`0`** from the second (`grep -c` exits 1 when it counts nothing; that is the pass, not a failure):
+
+```
+tests/test_docker_runs.py:153:        lines.append(f"cat > {dest} <<'DIRTYWORK_TEST_EOF'\n{content}DIRTYWORK_TEST_EOF")
+dirtywork/sandbox/docker.py:<line>:    'cat > "$2" && ' + _PROMOTE
+0
+```
+
+Those are the only two survivors this task may leave: the test's own volume-seeding heredoc in `tests/test_docker_runs.py`, untouched by design, and `WRITE_SCRIPT`'s own `cat > "$2"` from Step 4 (its line number is wherever the block landed after `_oversized`). `tests/test_docker_sandbox.py` must contribute **nothing** — that is what proves all eleven assertions were rewritten. Anything else, especially a `cat > "$1"` in `dirtywork/sandbox/docker.py`, means Step 6 or Steps 8–9 were left half-done. (Task 4's `APPEND_WRITE_SCRIPT` uses `cat >> "$2"` and never matches this pattern, so this gate reads the same after Task 4.)
 
 - [ ] **Step 11: Run the module and see it pass**
 
@@ -1486,7 +1603,7 @@ Expected: exit code 0.
 - [ ] **Step 12: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1061 passed, 1 skipped, 18 deselected` (1058 + 3).
+Expected: exit code 0; `1063 passed, 1 skipped, 18 deselected` (1060 + 3).
 
 - [ ] **Step 13: Commit**
 
@@ -1806,8 +1923,11 @@ In `dirtywork/sandbox/docker.py`, immediately **after** `write_file` (which ends
         """Spec §1.2: three execs, in the same cap order tools.append_file
         uses, so both modes emit identical strings from identical conditions.
         The `text` argument is capped by _append_oversized BEFORE any exec;
-        this path never routes the payload through _oversized, whose
-        write-file wording must not surface from an append."""
+        this path never routes the payload through _oversized, which says
+        `ERROR: content is <n> bytes, over the <limit>-byte write limit` --
+        write_file's noun, and the wrong fix for an append. (The longer
+        host-only form with the `; write the file in smaller pieces` tail
+        lives in tools.write_file and has no counterpart in this module.)"""
         encoded = text.encode("utf-8")
         too_big = _append_oversized(encoded)
         if too_big:
@@ -1840,7 +1960,7 @@ Expected: exit code 0.
 - [ ] **Step 7: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1073 passed, 1 skipped, 18 deselected` (1061 + 12).
+Expected: exit code 0; `1075 passed, 1 skipped, 18 deselected` (1063 + 12).
 
 - [ ] **Step 8: Commit**
 
@@ -2283,7 +2403,7 @@ Expected: exit code 0.
 - [ ] **Step 14: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1076 passed, 1 skipped, 18 deselected` (1073 + 3).
+Expected: exit code 0; `1078 passed, 1 skipped, 18 deselected` (1075 + 3).
 
 - [ ] **Step 15: Commit**
 
@@ -2311,7 +2431,7 @@ git commit -m "feat: register append_file as the eleventh tool"
 - Modify: `docs/machine-contract.md` (`:153-155`), `docs/operating.md` (`:47-56`), `docs/security.md` (`:128-132`)
 
 **Interfaces:**
-- Consumes: `tools._write_atomic(target, data, *, path, verb, create_parents)`, `tools.is_temp_name(name)`, `tools.TMP_FIND_REGEX` (all Task 1).
+- Consumes: `tools._write_atomic(target, data, *, path, verb, create_parents, must_exist)`, `tools.is_temp_name(name)`, `tools.TMP_FIND_REGEX` (all Task 1). Neither of this task's two call sites passes `must_exist`: `write_file` and `_transform_file` both keep §2.2's new-file branch, which is exactly what `must_exist=False` (the default) means.
 - Produces:
   - `budget.BudgetReport.swept: int = 0`
   - `budget.measure_worktree(worktree, *, max_bytes: int, max_files: int, sweep_temps: bool = False) -> BudgetReport`
@@ -2485,7 +2605,7 @@ Run: `/usr/bin/python3 -m pytest tests/test_budget.py tests/test_sandbox_host.py
 Expected: 5 failed — the two `tests/test_budget.py` ones with `TypeError: measure_worktree() got an unexpected keyword argument 'sweep_temps'`, the two `tests/test_sandbox_host.py` ones with `AssertionError` on the missing stderr line, and the export one with `AssertionError: assert 0 == 1` on `len(sweeps)`.
 
 Run: `/usr/bin/python3 -m pytest tests/test_tools_files.py -q -k "promotes_by_rename or is_atomic or preserves_mode_through or umask_default_mode"`
-Expected: 5 failed — `test_write_file_promotes_by_rename_and_leaves_no_temp` on the inode assertion, the two `is_atomic` ones because `_write_all` is not on today's write path (so no exception fires and the file IS clobbered), `test_transform_preserves_mode_through_the_promote` passes today (it is a pin — confirm it passes), and `test_write_file_still_creates_parents_and_uses_the_umask_default_mode` also passes today (another pin). Confirm exactly three fail: `promotes_by_rename`, and the two `is_atomic` tests.
+Expected: **5 selected, 3 failed, 2 passed.** Failing: `test_write_file_promotes_by_rename_and_leaves_no_temp` on the inode assertion, and the two `is_atomic` ones because `_write_all` is not on today's write path (so no exception fires and the file IS clobbered). Passing already, and they are pins on behaviour this task must preserve rather than tests it must turn green: `test_transform_preserves_mode_through_the_promote` and `test_write_file_still_creates_parents_and_uses_the_umask_default_mode`.
 
 - [ ] **Step 3: Move `write_file` onto the primitive**
 
@@ -3045,7 +3165,7 @@ Expected: exit code 0.
 - [ ] **Step 13: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1086 passed, 1 skipped, 18 deselected` (1076 + 10).
+Expected: exit code 0; `1088 passed, 1 skipped, 18 deselected` (1078 + 10).
 
 - [ ] **Step 14: Commit**
 
@@ -3063,11 +3183,13 @@ git commit -m "feat: stage every write through _write_atomic, and sweep stale te
 
 **Stated consequence, carried into the docs:** resuming a 0.9 run silently moves the effective output cap from the adapters' 4096 to 8192. That is deliberate (a 0.9 `run.json` has no `max_tokens` to inherit) and the resume's own transcript records the value actually used.
 
+**Second stated consequence, inside the suite:** an 8192-token default cap and a flat `--max-tokens >= context_window` refusal make every shipped test that ran on a sub-8192 window an exit-2 preflight failure. Seven `tests/test_main.py` tests are in that set and Step 6 breaks all seven simultaneously; **Step 7 repairs them and must be done in the same commit as Step 6**, or this task cannot reach its own gate. The refusal itself is not negotiable — spec §1.4's rule has no small-window exemption.
+
 **Files:**
 - Modify: `dirtywork/runner.py` (`DEFAULT_MAX_TOKENS` beside `DEFAULT_WINDOW` at `:31`; `Runner.__init__` `:392-431`; the `run_start` write `:445-449`; the `provider.chat` call `:589-592`; the `assistant` write `:627-630`)
 - Modify: `dirtywork/__main__.py` (the `.runner` import `:29-37`; `_resolve_context_window` `:196-210`; `_write_run_json_start` `:417-447`; `_load_resume_target` `:659-711`; the `Runner(...)` construction `:793-810`; `_add_run_flags` `:876-921`)
 - Modify: `tests/test_runner.py` (5 new tests; `test_runner_context_window_param_sets_budget_and_run_start` at `:873-883`; the comment at `:451-454`)
-- Modify: `tests/test_main.py` (4 new tests)
+- Modify: `tests/test_main.py` (4 new tests, **plus seven shipped tests whose small windows the new preflight refusal breaks — Step 7**)
 - Modify: `tests/test_transcript_schema.py` (`ASSISTANT_FIELDS` + 1 new test)
 - Modify: `docs/machine-contract.md` (the flag block `:20-37`, a `--max-tokens` bullet in the flag list)
 - Modify: `docs/operating.md` (a cap + decode-cost paragraph in the context-sizing section)
@@ -3566,12 +3688,158 @@ After:
                         "continues)")
 ```
 
-- [ ] **Step 7: Run the affected modules and see them pass**
+- [ ] **Step 7: Repair the seven shipped tests the new refusal breaks**
+
+Step 6's preflight is flat, exactly as spec §1.4 requires: `max_tokens >= window` → exit 2, with no exemption for a test-sized window. `DEFAULT_MAX_TOKENS` is 8192, so **every shipped `tests/test_main.py` test that resolves a window below 8192 now exits 2** where it used to exit 0 or 1. There are seven of them, and Step 6 breaks all seven at once. Measured on this tree by applying Step 6's refusal alone and running `/usr/bin/python3 -m pytest -q`:
+
+```
+FAILED tests/test_main.py::test_run_json_records_task_model_context_window_and_turns
+FAILED tests/test_main.py::test_context_window_env_and_unknown_model_warning
+FAILED tests/test_main.py::test_task_size_warning_fires_for_a_long_brief
+FAILED tests/test_main.py::test_task_size_warning_is_silent_under_the_threshold
+FAILED tests/test_main.py::test_task_size_warning_fires_on_resume
+FAILED tests/test_main.py::test_context_window_source_lands_in_run_json_run_start_and_stdout
+FAILED tests/test_main.py::test_resume_records_its_own_context_window_source
+7 failed, 1019 passed, 1 skipped, 18 deselected
+```
+
+Each stderr reads `error: --max-tokens 8192 must be smaller than the <W>-token context window`. Do **not** soften the refusal to make them pass — give each invocation an explicit `--max-tokens` that is strictly smaller than that site's window. Six of the seven need nothing else; the seventh's window is too small to host any reply worth capping and is scaled up instead.
+
+(`tests/test_runner.py:876`'s `test_runner_context_window_param_sets_budget_and_run_start` is an eighth casualty of this task, via the new `char_budget` formula rather than preflight — Step 1 already rewrites it to `context_window=1000, max_tokens=200`. Nothing more to do there.)
+
+In `tests/test_main.py`, seven edits:
+
+**1. `:1310-1311`, `test_run_json_records_task_model_context_window_and_turns`** (window 5000).
+
+Before:
+
+```python
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--context-window", "5000",
+                 "--stall-turns", "7", "some task"])
+```
+
+After:
+
+```python
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--context-window", "5000",
+                 "--max-tokens", "1000", "--stall-turns", "7", "some task"])
+```
+
+**2. `:1332`, `test_context_window_env_and_unknown_model_warning`** (window 4096, from `DIRTYWORK_CONTEXT_WINDOW`). Only the FIRST of that test's two `m.main` calls needs the flag — the second runs after `monkeypatch.delenv`, on the 32768 default.
+
+Before:
+
+```python
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--model", "other/model", "t"])
+    assert rc == 0
+    assert _read_only_run_json(tmp_path)["context_window"] == 4096
+```
+
+After:
+
+```python
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--model", "other/model",
+                 "--max-tokens", "1000", "t"])
+    assert rc == 0
+    assert _read_only_run_json(tmp_path)["context_window"] == 4096
+```
+
+**3. `:2100-2103`, `test_task_size_warning_fires_for_a_long_brief`** — the one that cannot be fixed with a flag alone. Its assertion pins a 4000-char brief at 50% of a 2000-token window, and the run must still finish `rc == 0`. Under the new shared-window budget that leaves `(2000 - max_tokens) * 0.75 * 4` chars for a prompt whose system block alone grew ~267 chars in Task 5; measured on this tree with Tasks 5 and 7 applied, only `--max-tokens 50` still completes, and `100`, `150`, `200`, `300`, `400` and `500` all end `context_exhausted`. A 2000-token window with an 8192-token default cap is not a configuration 0.10 can serve at all, so scale the whole scenario ×10 and keep the 50% relationship the assertion is actually about.
+
+Before:
+
+```python
+    task = "x" * 4000                     # ~1000 tokens at 4 chars/token
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                   "--context-window", "2000", task]) == 0
+    err = capsys.readouterr().err
+    assert "warning: the task text is ~1000 tokens, 50% of the 2000-token context window" in err
+```
+
+After:
+
+```python
+    task = "x" * 40000                    # ~10000 tokens at 4 chars/token
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                   "--context-window", "20000", "--max-tokens", "1000", task]) == 0
+    err = capsys.readouterr().err
+    assert "warning: the task text is ~10000 tokens, 50% of the 20000-token context window" in err
+```
+
+**4. `:2111-2113`, `test_task_size_warning_is_silent_under_the_threshold`** (window 2000; the brief is 400 chars, so the budget is never in question).
+
+Before:
+
+```python
+    task = "x" * 400                      # ~100 tokens = 5% of 2000
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                   "--context-window", "2000", task]) == 0
+```
+
+After:
+
+```python
+    task = "x" * 400                      # ~100 tokens = 5% of 2000
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                   "--context-window", "2000", "--max-tokens", "500", task]) == 0
+```
+
+**5. `:2127-2128`, `test_task_size_warning_fires_on_resume`** (resume, window 2000). Only the `resume` invocation carries `--context-window`; the `run` that seeds it uses the default window and needs nothing.
+
+Before:
+
+```python
+    assert m.main(["resume", Path(prior["run_dir"]).name, "--context-window", "2000",
+                   "--max-turns", "1"]) == 1
+```
+
+After:
+
+```python
+    assert m.main(["resume", Path(prior["run_dir"]).name, "--context-window", "2000",
+                   "--max-tokens", "500", "--max-turns", "1"]) == 1
+```
+
+**6. `:2139-2140`, `test_context_window_source_lands_in_run_json_run_start_and_stdout`** (window 5000).
+
+Before:
+
+```python
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                   "--context-window", "5000", "t"]) == 0
+```
+
+After:
+
+```python
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                   "--context-window", "5000", "--max-tokens", "1000", "t"]) == 0
+```
+
+**7. `:2166-2167`, `test_resume_records_its_own_context_window_source`** (resume, window 7000). Again only the `resume` invocation.
+
+Before:
+
+```python
+    assert m.main(["resume", Path(prior["run_dir"]).name, "--context-window", "7000",
+                   "--max-turns", "1"]) == 1
+```
+
+After:
+
+```python
+    assert m.main(["resume", Path(prior["run_dir"]).name, "--context-window", "7000",
+                   "--max-tokens", "1000", "--max-turns", "1"]) == 1
+```
+
+None of the seven adds or removes a test, so no pass count moves. Edits 4 and 5 keep those two runs on exactly the outcome they already have on the shipped tree (`test_task_size_warning_fires_on_resume` ends `context_exhausted` today and still does — its `== 1` was never about `max_turns`, whatever the stale comment above it says; leave the comment alone, it is not this task's to fix).
+
+- [ ] **Step 8: Run the affected modules and see them pass**
 
 Run: `/usr/bin/python3 -m pytest tests/test_runner.py tests/test_main.py -q`
 Expected: exit code 0.
 
-- [ ] **Step 8: Document the flag and the two new fields**
+- [ ] **Step 9: Document the flag and the two new fields**
 
 In `docs/machine-contract.md`, add the flag to the `run` block.
 
@@ -3665,12 +3933,12 @@ After:
 | `max_tokens` | start | 0.10: `--max-tokens`, the per-reply output cap. `dirtywork resume` inherits it; a `run.json` written before 0.10 has no such key, and the resume falls back to the 8192 default |
 ```
 
-- [ ] **Step 9: Run the full suite**
+- [ ] **Step 10: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1096 passed, 1 skipped, 18 deselected` (1086 + 10).
+Expected: exit code 0; `1098 passed, 1 skipped, 18 deselected` (1088 + 10).
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add dirtywork/runner.py dirtywork/__main__.py tests/test_runner.py tests/test_main.py \
@@ -3999,7 +4267,7 @@ Expected: exit code 0.
 - [ ] **Step 9: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1102 passed, 1 skipped, 18 deselected` (1096 + 6).
+Expected: exit code 0; `1104 passed, 1 skipped, 18 deselected` (1098 + 6).
 
 - [ ] **Step 10: Commit**
 
@@ -4864,7 +5132,7 @@ actually exercised by the test suites. Reports welcome.
 - [ ] **Step 14: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1124 passed, 1 skipped, 20 deselected` (1102 + 22 passed; 18 + 2 deselected, the two `tests/test_live_ollama.py` tests).
+Expected: exit code 0; `1126 passed, 1 skipped, 20 deselected` (1104 + 22 passed; 18 + 2 deselected, the two `tests/test_live_ollama.py` tests).
 
 - [ ] **Step 15: Commit**
 
@@ -5597,7 +5865,7 @@ Expected: exit code 0.
 - [ ] **Step 14: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1139 passed, 1 skipped, 20 deselected` (1124 + 15: `tests/test_rundir.py` contributes 8 — one direct test plus the seven parametrized slug cases — `tests/test_main.py` 1, and `tests/test_workspace.py` 6).
+Expected: exit code 0; `1141 passed, 1 skipped, 20 deselected` (1126 + 15: `tests/test_rundir.py` contributes 8 — one direct test plus the seven parametrized slug cases — `tests/test_main.py` 1, and `tests/test_workspace.py` 6).
 
 - [ ] **Step 15: Commit**
 
@@ -5863,7 +6131,7 @@ Since 0.8 a successful `edit_file`/`write_file`/`insert_before`/`insert_after` r
 - [ ] **Step 8: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1142 passed, 1 skipped, 20 deselected` (1139 + 3).
+Expected: exit code 0; `1144 passed, 1 skipped, 20 deselected` (1141 + 3).
 
 - [ ] **Step 9: Commit**
 
@@ -6052,8 +6320,16 @@ def test_explicit_null_verify_fields_in_run_json_fall_back_to_defaults(tmp_path,
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `/usr/bin/python3 -m pytest tests/test_export_flow.py tests/test_runs.py tests/test_runner.py tests/test_docker_sandbox.py tests/test_main.py -q -k "truncated_files_changed or truncated_files or append_only_turn or pre_read or feedback or explicit_null_verify"`
-Expected: 3 failed, 6 passed. Failing: `test_empty_feedback_is_treated_as_absent_and_recorded_null` (today `""` is falsy, so the completed-run gate already refuses — confirm which way it goes on your tree and correct the expectation if it passes), `test_whitespace_only_feedback_is_absent_too_and_recorded_null` (`"   \n\t "` is truthy today, so `feedback` is recorded as that string), and `test_explicit_null_verify_fields_in_run_json_fall_back_to_defaults` (`prior.get("verify_rounds", DEFAULT)` returns the explicit `None`, and the run then dies or records `null`). The other six are pins on behaviour that already works and must keep working.
+Run: `/usr/bin/python3 -m pytest tests/test_export_flow.py tests/test_runs.py tests/test_runner.py tests/test_docker_sandbox.py tests/test_main.py -q -k "truncates_files_changed or truncated_files_changed or append_only_turn or pre_read or empty_feedback or whitespace_only_feedback or non_utf8_feedback or explicit_null_verify"`
+
+The `-k` expression names all nine of this step's tests and nothing else — verified with `--collect-only` on this tree, which reports `9/394 tests collected (385 deselected)` and lists exactly the nine written in Step 1. (A looser `… or feedback` also drags in five shipped `feedback` tests from `test_runner.py`/`test_main.py`, and `truncated_files_changed` alone never matches `test_export_**truncates**_files_changed_and_flags_it`.)
+
+Expected: **9 selected, 2 failed, 7 passed.** Failing:
+
+- `test_whitespace_only_feedback_is_absent_too_and_recorded_null` — `"   \n\t "` is truthy today, so `feedback` is recorded as that string. Step 3 fixes it.
+- `test_explicit_null_verify_fields_in_run_json_fall_back_to_defaults` — `prior.get("verify_rounds", DEFAULT)` returns the explicit `None`, and the run dies with `TypeError: int() argument must be a string, a bytes-like object or a number, not 'NoneType'`. Step 4 fixes it.
+
+The other seven are pins on behaviour that already works and must keep working — including **`test_empty_feedback_is_treated_as_absent_and_recorded_null`, which passes as written**: `""` is already falsy, so the completed-run gate already refuses it. Do not expect that one to be red.
 
 - [ ] **Step 3: Normalize empty feedback at parse**
 
@@ -6135,7 +6411,7 @@ Expected: exit code 0.
 - [ ] **Step 7: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1151 passed, 1 skipped, 20 deselected` (1142 + 9).
+Expected: exit code 0; `1153 passed, 1 skipped, 20 deselected` (1144 + 9).
 
 - [ ] **Step 8: Commit**
 
@@ -6334,7 +6610,7 @@ Expected: **no output**. (Without the `grep -v`, the only remaining hits are thi
 - [ ] **Step 8: Run the full suite and confirm the two version sources agree**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1151 passed, 1 skipped, 20 deselected` — unchanged from Task 12 (this task adds no test).
+Expected: exit code 0; `1153 passed, 1 skipped, 20 deselected` — unchanged from Task 12 (this task adds no test).
 
 Then:
 
@@ -6396,6 +6672,7 @@ Every numbered item of `docs/superpowers/specs/2026-08-20-v1rc-large-writes-atom
 | §1.2 host: strict UTF-8, `<path> is not valid UTF-8 text; append_file only works on text files` | `tools._not_utf8`, Task 1 Step 6; Task 2 Step 3; test `test_append_file_refuses_non_utf8_with_the_tool_named` |
 | §1.2 host: read fd's `st_ino`/`st_dev` must match the probe's | Task 2, Step 3 |
 | §1.2 host: `_write_atomic(target, old+text, verb="append")` | Task 2, Step 3; Task 1 Steps 5 (the `verb` parameter) and 1 (`test_write_atomic_append_verb_changes_only_the_generic_tail`) |
+| §1.2 host: `ENOENT` on the probe is the does-not-exist error, **never §2.2's new-file branch** — in `_write_atomic` too, not only in `append_file`'s own probe | Task 1, Step 5 (`must_exist`); Task 2, Step 3 (`must_exist=True`); test `test_append_file_refuses_when_the_target_vanishes_before_the_promote` |
 | §1.2 host: never creates parent directories | Task 2, Step 3 (`create_parents` not passed); test `test_append_file_never_creates_parent_directories` |
 | §1.2 docker: `_rel(writing=True)` and three execs | Task 4, Step 5; test `test_append_file_takes_three_execs_guard_read_write` |
 | §1.2 docker: guard script `[ -e ] || exit 2; [ -f ] || exit 3; stat -c %s`, FIFO refused before any read | Task 4, Steps 4 and 5; tests `…guard_rc2…`, `…guard_rc3_refuses_before_any_read` |
@@ -6428,12 +6705,12 @@ Every numbered item of `docs/superpowers/specs/2026-08-20-v1rc-large-writes-atom
 | §1.4 threaded `__main__` → `Runner.__init__` → the single `provider.chat` call as an explicit kwarg | Task 7, Steps 3 and 6; test `test_max_tokens_defaults_to_8192_and_reaches_the_provider` |
 | §1.4 adapters keep their own 4096 defaults for direct callers | Task 7 — no step changes either adapter; `tests/test_llm.py:102` (`payload["max_tokens"] == 4096`) is untouched and stays green |
 | §1.4 `char_budget = int(max(0, window - max_tokens) * BUDGET_FRACTION * CHARS_PER_TOKEN)` | Task 7, Step 3; test `test_char_budget_subtracts_max_tokens_from_the_window` |
-| §1.4 preflight refuses `>=` the window with the exact message, exit 2 | Task 7, Step 6; test `test_max_tokens_at_or_over_the_context_window_exits_2` |
+| §1.4 preflight refuses `>=` the window with the exact message, exit 2 | Task 7, Step 6; test `test_max_tokens_at_or_over_the_context_window_exits_2`. The rule is flat, so Task 7 Step 7 repairs the seven shipped `tests/test_main.py` tests that ran on sub-8192 windows rather than exempting them |
 | §1.4 recorded on `run_start` and `run.json`; NOT on the stdout payload | Task 7, Steps 3 and 6; tests `test_run_start_records_max_tokens`, `test_max_tokens_flag_is_recorded_in_run_json`. No step touches `_emit_result`/`_contract_fields` |
-| §1.4 Anthropic note: "pass `--max-tokens 4096` for models that cap output there" | Task 7, Step 8 (the machine-contract bullet) |
-| §1.4 docs: machine-contract flag list, `docs/operating.md`, `docs/transcript-schema.md` `run_start` + `run.json` | Task 7, Step 8 |
+| §1.4 Anthropic note: "pass `--max-tokens 4096` for models that cap output there" | Task 7, Step 9 (the machine-contract bullet) |
+| §1.4 docs: machine-contract flag list, `docs/operating.md`, `docs/transcript-schema.md` `run_start` + `run.json` | Task 7, Step 9 |
 | §1.5 `assistant` gains `finish_reason`, written as `… if isinstance(…, str) else None` | Task 7, Step 3; tests `test_assistant_event_records_finish_reason`, `…_is_null_for_a_non_string` |
-| §1.5 documented as `string \| null`, open enum | Task 7, Step 8 |
+| §1.5 documented as `string \| null`, open enum | Task 7, Step 9 |
 | §1.5 `ASSISTANT_FIELDS` + a doc-token assertion mirroring `RUN_END_FIELDS` | Task 7, Step 4 |
 | §2.1 scope: every host in-place write and docker's `_write_raw`/`_append_raw` | Task 6 Steps 3–4 (host `write_file`/`_transform_file`), Task 2 Step 3 (host `append_file`), Task 3 Step 6 (docker `_write_raw`), Task 4 Steps 4–5 (docker append) |
 | §2.1 honest threat model: robustness, not security; `O_NOFOLLOW` refusals as deterministic as today | Task 1's `_write_atomic` docstring (Step 5); Task 6, Step 11 (`docs/security.md`) |
@@ -6442,7 +6719,7 @@ Every numbered item of `docs/superpowers/specs/2026-08-20-v1rc-large-writes-atom
 | §2.2 step 1: side-effect-free probe, ELOOP/ENXIO/other/ENOENT, `fstat` + `S_ISREG`, the doubled-path refusal preserved verbatim, capture `st_mode`/`st_nlink`/`st_ino`/`st_dev` | Task 1, Step 5; tests `…refuses_a_symlink…`, `…refuses_a_fifo…` |
 | §2.2 step 2: hardlink fallback, probe fd open until replace or fallback, closed in `finally` | Task 1, Step 5; test `test_write_atomic_writes_through_a_hardlinked_target` |
 | §2.2 step 3: same-directory temp, generated name, `O_EXCL` `0o600`, `fchmod` to the target's mode or `0o644 & ~_UMASK`, `os.close` BEFORE `os.replace` | Task 1, Steps 4 and 5; tests `…creates_a_new_file_with_umask_default_mode`, `…preserves_an_existing_files_mode`, `…promotes_by_rename_so_the_inode_changes` |
-| §2.2 step 4: one catch boundary; `OSError` → unlink + return; other `BaseException` → unlink + re-raise | Task 1, Step 5; tests `…returns_an_error_string_on_an_oserror_during_the_write`, `…reraises_a_non_oserror_and_unlinks_its_temp` |
+| §2.2 step 4: one catch boundary; `OSError` → unlink + return; other `BaseException` → unlink + re-raise; the pre-promote `os.close` may itself raise and must still return a string | Task 1, Step 5; tests `…returns_an_error_string_on_an_oserror_during_the_write`, `…reraises_a_non_oserror_and_unlinks_its_temp`, `…surfaces_a_close_failure_without_raising` |
 | §2.2 step 5: `EACCES`/`EROFS` with a live probe fd → fd fallback; `ENOENT` probe → generic tail with the temp errno; any other temp error → generic tail | Task 1, Step 5; tests `…falls_back_to_the_fd_in_an_unwritable_directory`, `…refuses_a_new_file_in_an_unwritable_directory` |
 | §2.3 what "nothing was written" means, plus the two named exceptions and the inode change | Task 6, Step 10 (`docs/machine-contract.md` and `docs/operating.md`, both anchors replaced) |
 | §2.4 the accepted race delta, stated in `docs/security.md`'s host-mode notes | Task 6, Step 11 |
@@ -6574,7 +6851,7 @@ take once this branch is merged and 0.10.0 is cut.
 - `tools.is_temp_name(name: str) -> bool` — takes a bare NAME, never a path. `budget._measure_posix` calls it with `os.fwalk`'s entry name, which is exactly that.
 - `tools._write_all(fd: int, data: bytes) -> None` — raises `OSError`; loops until the buffer is gone. It is the single monkeypatch point the atomicity tests use, so every write inside `_write_atomic` goes through it and none uses bare `os.write`.
 - `tools._unlink_quietly(p: Path) -> None` — never raises.
-- `tools._write_atomic(target: Path, data: bytes, *, path: str, verb: str = "write", create_parents: bool = False) -> str | None` — `None` means success; a non-empty `ERROR: …` string means refuse. `verb` is exactly `"write"` or `"append"`; anything else is treated as `"append"` by the `lead` ternary, and no caller passes anything else. The ONLY exception it lets escape is a non-`OSError` `BaseException` re-raised after the temp is unlinked.
+- `tools._write_atomic(target: Path, data: bytes, *, path: str, verb: str = "write", create_parents: bool = False, must_exist: bool = False) -> str | None` — `None` means success; a non-empty `ERROR: …` string means refuse. `verb` is exactly `"write"` or `"append"`; anything else is treated as `"append"` by the `lead` ternary, and no caller passes anything else. `must_exist` is `True` at exactly one call site (`tools.append_file`) and turns an ENOENT probe into `_append_missing(path)` instead of the new-file branch; `create_parents` and `must_exist` are never both `True`. The ONLY exception it lets escape is a non-`OSError` `BaseException` re-raised after the temp is unlinked — and never an `EBADF` from its own cleanup, because the temp fd handle is cleared before the pre-promote `os.close` and both handlers' cleanup closes are wrapped in `try/except OSError: pass`.
 - `tools._result_too_big(size: int) -> str` — always a string, never `None`; `_check_write_size(new_text: str) -> str | None` is the falsy-means-ok wrapper both `_transform_file`s already test with `if too_big:`.
 - `tools._append_oversized(encoded: bytes) -> str | None` — takes BYTES (the caller has already encoded), same falsy-means-ok convention as `docker._oversized`.
 - `tools._append_missing(path: str) -> str` and `tools._not_utf8(path: str, tool: str) -> str` — always strings. `path` is the model-facing path in every call site, host and docker alike; `tool` is a registered tool name (`"write_file"`, `"edit_file"`, `"apply_edits"`, `"insert_before"`, `"insert_after"`, `"append_file"`), never `None` — `docker._read_raw` checks for `None` before calling.
