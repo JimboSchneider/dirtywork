@@ -46,10 +46,12 @@ os.umask(_UMASK)
 # `.dw-tmp.notes` is left alone.
 TMP_PREFIX = ".dw-tmp."
 TMP_NAME_RE = re.compile(r"\.dw-tmp\..+\.[0-9a-f]{8}")
-# The same shape as TMP_NAME_RE written as the POSIX extended regex GNU
-# `find -regex` wants (it matches the WHOLE path, hence the leading `.*/`).
-# Kept here, beside TMP_NAME_RE, so the host sweep and the container sweep can
-# never drift apart.
+# The same shape as TMP_NAME_RE written as a POSIX extended regex (it matches
+# the WHOLE path, hence the leading `.*/`). GNU find's DEFAULT regextype is
+# Emacs, which treats `{8}` literally and matches nothing -- the consumer MUST
+# pass `-regextype posix-extended` alongside `-regex` (as the Task 6 sweep
+# exec does). Kept here, beside TMP_NAME_RE, so the host sweep and the
+# container sweep can never drift apart.
 TMP_FIND_REGEX = r".*/\.dw-tmp\..+\.[0-9a-f]{8}"
 
 
@@ -232,6 +234,12 @@ def _write_atomic(target: Path, data: bytes, *, path: str, verb: str = "write",
                 try:
                     os.ftruncate(probe_fd, 0)
                     _write_all(probe_fd, data)
+                    # The close IS the write's completion here: a deferred
+                    # write error (ENOSPC/EIO) must surface as a returned
+                    # string, not escape from the `finally` below. The handle
+                    # is cleared first so the `finally` never double-closes.
+                    fd, probe_fd = probe_fd, None
+                    os.close(fd)
                 except OSError as e:
                     return f"ERROR: {lead} '{path}': {e}"
                 return None
@@ -246,6 +254,12 @@ def _write_atomic(target: Path, data: bytes, *, path: str, verb: str = "write",
                 try:
                     os.ftruncate(probe_fd, 0)
                     _write_all(probe_fd, data)
+                    # Same close-is-completion rule as the hardlink branch
+                    # above: clear the handle before closing so a deferred
+                    # write error returns as a string and the `finally`
+                    # never double-closes.
+                    fd, probe_fd = probe_fd, None
+                    os.close(fd)
                 except OSError as e2:
                     return f"ERROR: {lead} '{path}': {e2}"
                 return None
@@ -284,8 +298,15 @@ def _write_atomic(target: Path, data: bytes, *, path: str, verb: str = "write",
             raise
         return None
     finally:
+        # Defensive only: on every remaining path the probe fd was merely
+        # probed/read (never written through), so a close error here is
+        # meaningless -- it must never escape and override the real outcome
+        # already being returned.
         if probe_fd is not None:
-            os.close(probe_fd)
+            try:
+                os.close(probe_fd)
+            except OSError:
+                pass
 
 
 def _number_lines(text: str, offset: int, limit: int) -> str:

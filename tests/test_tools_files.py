@@ -708,6 +708,36 @@ def test_write_atomic_surfaces_a_close_failure_without_raising(wt: Path, monkeyp
     assert _temp_leftovers(wt) == []
 
 
+def test_write_atomic_surfaces_a_close_failure_on_the_hardlink_path_too(wt: Path, monkeypatch):
+    # Fix round 1: the hardlink branch writes through probe_fd and then
+    # closes it AS the write's completion, so a deferred close failure there
+    # must surface as a returned string too -- never escape from the
+    # defensive `finally` below it.
+    a = wt / "a.txt"
+    a.write_text("old\n")
+    b = wt / "b.txt"
+    os.link(a, b)
+    staged = {}
+    real_write_all = tools._write_all
+    real_close = os.close
+
+    def _record(fd, data):
+        staged["fd"] = fd            # the hardlink branch writes through probe_fd
+        return real_write_all(fd, data)
+
+    def _closing(fd):
+        real_close(fd)
+        if fd == staged.get("fd"):
+            raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(tools, "_write_all", _record)
+    monkeypatch.setattr(os, "close", _closing)
+    out = tools._write_atomic(a, b"new\n", path="a.txt")
+    assert out.startswith("ERROR: cannot write '")
+    assert "Input/output error" in out
+    assert _temp_leftovers(wt) == []
+
+
 def test_write_atomic_reraises_a_non_oserror_and_unlinks_its_temp(wt: Path, monkeypatch):
     # Spec §2.2 step 4: KeyboardInterrupt / BudgetExceeded / SandboxError are
     # run-level signals the runner owns, NOT tool results.
