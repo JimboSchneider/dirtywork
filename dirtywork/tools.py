@@ -741,6 +741,103 @@ def apply_edits(worktree: Path, path: str, edits: list) -> str:
                            tool="apply_edits")
 
 
+def append_file(worktree: Path, path: str, text: str) -> str:
+    """Spec §1.2: append `text` VERBATIM to the end of an existing regular
+    file. Nothing is inserted between the old bytes and the new ones -- the
+    model owns line discipline, and APPEND_FILE_SPEC's description says so.
+
+    Three caps fire in a fixed order, mirrored exactly by
+    DockerSandbox.append_file, so neither backend can surface the other's
+    wording: (1) the `text` ARGUMENT (_append_oversized), before the file is
+    touched at all; (2) the current file's size against MAX_READ_BYTES; (3)
+    the RESULT size. Caps 2 and 3 share ONE sentence (_result_too_big), so a
+    file too large to read reads as un-appendable rather than surfacing
+    read_file's "read limit" wording.
+
+    The §2.2 probe runs UNCHANGED, so the symlink and FIFO refusals are
+    byte-identical to write_file's -- except ENOENT, which for an append is
+    the does-not-exist refusal, never §2.2's new-file branch. That holds for
+    BOTH probes: this function's own, and _write_atomic's, which is told so
+    with must_exist=True. The content is
+    then read through a SECOND open of the same candidate path: O_NONBLOCK
+    (which _open_regular always adds) is what keeps a FIFO swapped in between
+    the two opens from blocking the read, and the read fd's st_ino/st_dev must
+    match the probe's or the append refuses rather than pasting one file's
+    bytes onto another inode. append_file NEVER creates parent directories."""
+    encoded = text.encode("utf-8")
+    too_big = _append_oversized(encoded)
+    if too_big:
+        return too_big
+    try:
+        resolve_in_worktree(path, worktree, writing=True)  # containment check only
+    except GuardrailError as e:
+        return f"ERROR: {e}"
+    p = _worktree_candidate(path, worktree)
+    try:
+        probe_fd = os.open(str(p), os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as e:
+        if e.errno == errno.ENOENT:
+            return _append_missing(path)
+        if e.errno == errno.ELOOP:
+            return (f"ERROR: '{path}' is a symlink; writing through a symlink is not "
+                    f"allowed even when its target is inside the worktree")
+        if e.errno == errno.ENXIO:
+            return f"ERROR: '{path}' is not a regular file (refusing FIFO/device/socket)"
+        return f"ERROR: cannot append to '{path}': {e}"
+    try:
+        probe_st = os.fstat(probe_fd)
+        if not stat.S_ISREG(probe_st.st_mode):
+            return (f"ERROR: cannot append to '{path}': '{p}' is not a regular file "
+                    f"(refusing FIFO/device/socket)")
+        if probe_st.st_size > MAX_READ_BYTES or probe_st.st_size + len(encoded) > MAX_WRITE_BYTES:
+            # Caps 2 and 3, decided before the read so a 6 MB file is never
+            # loaded just to be refused. MAX_READ_BYTES == MAX_WRITE_BYTES
+            # today, so the first test already implies the second; both are
+            # written out so the rule survives the two constants diverging.
+            return _result_too_big(probe_st.st_size + len(encoded))
+        try:
+            fh = _open_regular(p, os.O_RDONLY, max_size=MAX_READ_BYTES)
+        except OSError as e:
+            if e.errno is None:
+                # _open_regular's two errno-less refusals -- the read cap and
+                # the non-regular-file check -- which the probe fd disproved a
+                # moment ago. Reaching here means the target was replaced
+                # between the two opens; refuse with the append's own wording,
+                # never read_file's (spec §1.2).
+                return (f"ERROR: cannot append to '{path}': the file changed between "
+                        f"opening it and reading it")
+            return f"ERROR: cannot append to '{path}': {e}"
+        try:
+            read_st = os.fstat(fh.fileno())
+            if (read_st.st_ino, read_st.st_dev) != (probe_st.st_ino, probe_st.st_dev):
+                return (f"ERROR: cannot append to '{path}': the file changed between "
+                        f"opening it and reading it")
+            raw = fh.read()
+        except OSError as e:
+            return f"ERROR: cannot append to '{path}': {e}"
+        finally:
+            fh.close()
+        try:
+            old_text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return _not_utf8(path, "append_file")
+        if len(raw) + len(encoded) > MAX_WRITE_BYTES:
+            # Re-checked against what was actually read: the probe's size is a
+            # moment old, and the file may have grown in place since.
+            return _result_too_big(len(raw) + len(encoded))
+        # must_exist=True: spec §1.2 forbids §2.2's new-file branch here, so a
+        # target deleted between the read and this probe refuses rather than
+        # being re-created -- the same race docker's append write script
+        # refuses with `[ -f "$1" ] || exit 2`.
+        err = _write_atomic(p, raw + encoded, path=path, verb="append",
+                            must_exist=True)
+        if err:
+            return err
+        return describe_change(path, old_text, old_text + text, verb="Appended to")
+    finally:
+        os.close(probe_fd)
+
+
 def list_dir(worktree: Path, path: str = ".") -> str:
     try:
         p = resolve_in_worktree(path, worktree)

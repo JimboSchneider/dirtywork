@@ -69,6 +69,11 @@ class HostSandbox:
         self._check_budget()
         return result
 
+    def append_file(self, path: str, text: str) -> str:
+        result = tools.append_file(self.worktree, path, text)
+        self._check_budget()
+        return result
+
     def list_dir(self, path: str = ".") -> str:
         return tools.list_dir(self.worktree, path)
 

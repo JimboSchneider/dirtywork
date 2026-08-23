@@ -782,3 +782,159 @@ def test_append_missing_and_not_utf8_strings(wt: Path):
         "write_file first")
     assert tools._not_utf8("bin.dat", "append_file") == (
         "ERROR: bin.dat is not valid UTF-8 text; append_file only works on text files")
+
+
+# --- spec §1.2: host append_file.
+
+
+def test_append_file_appends_verbatim_with_no_separator(wt: Path):
+    target = wt / "notes.md"
+    target.write_text("one\n")
+    out = tools.append_file(wt, "notes.md", "two\n")
+    assert target.read_text() == "one\ntwo\n"
+    assert out.startswith("Appended to notes.md: +1 -0")
+    assert "+two" in out
+
+
+def test_append_file_header_when_the_file_did_not_end_in_a_newline(wt: Path):
+    # Spec §1.2: not including a leading newline REPLACES the final line, and
+    # the header says so. No new counting rule -- this is describe_change.
+    target = wt / "tail.txt"
+    target.write_text("one")
+    out = tools.append_file(wt, "tail.txt", "two\n")
+    assert target.read_text() == "onetwo\n"
+    assert out.startswith("Appended to tail.txt: +1 -1 (removed 1 non-blank line)")
+
+
+def test_append_file_refuses_a_missing_target(wt: Path):
+    out = tools.append_file(wt, "nope.md", "x")
+    assert out == ("ERROR: cannot append to 'nope.md': it does not exist; create it "
+                   "with write_file first")
+    assert not (wt / "nope.md").exists()
+
+
+def test_append_file_refuses_a_symlink(wt: Path):
+    real = wt / "real3.txt"
+    real.write_text("original\n")
+    link = wt / "link3.txt"
+    os.symlink(real, link)
+    out = tools.append_file(wt, "link3.txt", "more\n")
+    assert out == ("ERROR: 'link3.txt' is a symlink; writing through a symlink is not "
+                   "allowed even when its target is inside the worktree")
+    assert real.read_text() == "original\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs require a POSIX OS")
+def test_append_file_refuses_a_fifo(wt: Path):
+    fifo = wt / "pipe2"
+    os.mkfifo(fifo)
+    with _hang_guard():
+        out = tools.append_file(wt, "pipe2", "x")
+    assert out == "ERROR: 'pipe2' is not a regular file (refusing FIFO/device/socket)"
+
+
+def test_append_file_refuses_an_oversized_text_argument_before_touching_the_file(wt: Path):
+    # Cap 1, and it fires before the containment check, so a missing file with
+    # an oversized text still reports the text problem.
+    huge = "x" * (tools.MAX_WRITE_BYTES + 1)
+    out = tools.append_file(wt, "nothing-here.md", huge)
+    assert out == (f"ERROR: text is {tools.MAX_WRITE_BYTES + 1} bytes, over the "
+                   f"{tools.MAX_WRITE_BYTES}-byte write limit; append in smaller pieces")
+
+
+def test_append_file_refuses_when_the_result_would_be_over_the_write_limit(wt: Path):
+    target = wt / "atlimit.txt"
+    target.write_bytes(b"x" * tools.MAX_READ_BYTES)      # readable, but full
+    out = tools.append_file(wt, "atlimit.txt", "y" * 100)
+    assert out == (f"ERROR: result is {tools.MAX_READ_BYTES + 100} bytes, over the "
+                   f"{tools.MAX_WRITE_BYTES}-byte write limit; nothing was written")
+    assert target.stat().st_size == tools.MAX_READ_BYTES
+
+
+def test_append_file_refuses_a_file_too_large_to_read_with_the_result_cap_wording(wt: Path):
+    # Cap 2 (spec §1.2): an un-appendable file must NEVER surface read_file's
+    # "refusing to read"/"read limit" wording.
+    target = wt / "huge.txt"
+    target.write_bytes(b"x" * (tools.MAX_READ_BYTES + 1))
+    out = tools.append_file(wt, "huge.txt", "y")
+    assert out == (f"ERROR: result is {tools.MAX_READ_BYTES + 2} bytes, over the "
+                   f"{tools.MAX_WRITE_BYTES}-byte write limit; nothing was written")
+    assert "read limit" not in out and "refusing to read" not in out
+
+
+def test_append_file_refuses_non_utf8_with_the_tool_named(wt: Path):
+    target = wt / "bin.dat"
+    target.write_bytes(b"\xff\xfe binary")
+    out = tools.append_file(wt, "bin.dat", "text")
+    assert out == ("ERROR: bin.dat is not valid UTF-8 text; append_file only works "
+                   "on text files")
+    assert target.read_bytes() == b"\xff\xfe binary"
+
+
+def test_append_file_refuses_a_path_outside_the_worktree(wt: Path):
+    out = tools.append_file(wt, "../../etc/hosts", "x")
+    assert out.startswith("ERROR:") and "outside the worktree" in out
+
+
+def test_append_file_refuses_writing_inside_dot_git(wt: Path):
+    (wt / ".git").mkdir()
+    (wt / ".git" / "config").write_text("[core]\n")
+    out = tools.append_file(wt, ".git/config", "\tfoo = bar\n")
+    assert out.startswith("ERROR:") and ".git/" in out
+    assert (wt / ".git" / "config").read_text() == "[core]\n"
+
+
+def test_append_file_never_creates_parent_directories(wt: Path):
+    out = tools.append_file(wt, "brand/new/f.txt", "x")
+    assert out == ("ERROR: cannot append to 'brand/new/f.txt': it does not exist; "
+                   "create it with write_file first")
+    assert not (wt / "brand").exists()
+
+
+def test_append_file_preserves_mode_and_leaves_no_temp(wt: Path):
+    target = wt / "run.sh"
+    target.write_text("#!/bin/sh\n")
+    target.chmod(0o755)
+    assert tools.append_file(wt, "run.sh", "echo hi\n").startswith("Appended to run.sh:")
+    assert target.read_text() == "#!/bin/sh\necho hi\n"
+    assert _stat.S_IMODE(target.stat().st_mode) == 0o755
+    assert _temp_leftovers(wt) == []
+
+
+def test_append_file_is_atomic_the_target_is_unchanged_when_the_write_fails(wt: Path, monkeypatch):
+    target = wt / "safe.txt"
+    target.write_text("one\n")
+
+    def _boom(fd, data):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(tools, "_write_all", _boom)
+    out = tools.append_file(wt, "safe.txt", "two\n")
+    assert out.startswith("ERROR: cannot append to 'safe.txt': ")
+    assert target.read_text() == "one\n"
+    assert _temp_leftovers(wt) == []
+
+
+def test_append_file_refuses_when_the_target_vanishes_before_the_promote(wt: Path, monkeypatch):
+    # Spec §1.2: ENOENT on the write probe is the does-not-exist refusal,
+    # never §2.2's new-file branch -- docker's append write script refuses the
+    # same race with `[ -f "$1" ] || exit 2`. `must_exist=True` is what carries
+    # that rule into the shared primitive, and this pins BOTH halves: that
+    # append_file wires the flag through, and that the primitive honours it.
+    target = wt / "vanishing.md"
+    target.write_text("one\n")
+    real_write_atomic = tools._write_atomic
+    seen = {}
+
+    def _spy(t, data, **kwargs):
+        seen.update(kwargs)
+        os.unlink(str(t))            # the race: gone before the probe runs
+        return real_write_atomic(t, data, **kwargs)
+
+    monkeypatch.setattr(tools, "_write_atomic", _spy)
+    out = tools.append_file(wt, "vanishing.md", "two\n")
+    assert seen["must_exist"] is True
+    assert out == ("ERROR: cannot append to 'vanishing.md': it does not exist; create "
+                   "it with write_file first")
+    assert not target.exists()       # never re-created by the new-file branch
+    assert _temp_leftovers(wt) == []

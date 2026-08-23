@@ -107,3 +107,13 @@ def test_host_sandbox_apply_edits(wt: Path):
                                        {"old": "two", "new": "2"}])
     assert out.startswith("Applied 2 edits to batch.txt: ")
     assert (wt / "batch.txt").read_text() == "1\n2\n"
+
+
+def test_host_sandbox_append_file(wt: Path):
+    sb = HostSandbox(wt)
+    sb.start(wt, wt, "slug", "deadbeef")
+    assert sb.append_file("hello.txt", "there\n").startswith("Appended to hello.txt:")
+    assert (wt / "hello.txt").read_text() == "hi\nthere\n"
+    assert sb.append_file("gone.txt", "x") == (
+        "ERROR: cannot append to 'gone.txt': it does not exist; create it with "
+        "write_file first")
