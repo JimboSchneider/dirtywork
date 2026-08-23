@@ -26,7 +26,7 @@ dirtywork run --repo <path> "<task>"
     [--max-worktree-mb 2048]
     [--max-worktree-files 200000]
     [--sandbox docker|none]           # default: docker
-    [--image ghcr.io/jimboschneider/dirtywork-worker:0.9]  # docker mode only
+    [--image ghcr.io/jimboschneider/dirtywork-worker:0.10]  # docker mode only
     [--allow-network]                 # docker mode only; default --network none
     [--memory 4g]                     # docker mode only
     [--cpus 2]                        # docker mode only
@@ -60,19 +60,19 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   the same worktree.
 
 - `--image REF` (docker mode) — the worker image, default
-  `ghcr.io/jimboschneider/dirtywork-worker:0.9`. The image is the worker's
+  `ghcr.io/jimboschneider/dirtywork-worker:0.10`. The image is the worker's
   whole toolchain: with `--network none` and no host mounts, nothing can be
   installed during a run. To add a tool, derive an image once:
 
   ```Dockerfile
-  FROM ghcr.io/jimboschneider/dirtywork-worker:0.9
+  FROM ghcr.io/jimboschneider/dirtywork-worker:0.10
   USER root
   RUN apt-get update && apt-get install -y --no-install-recommends <packages> \
       && rm -rf /var/lib/apt/lists/*
   USER worker
   ```
 
-  then `docker build -t my-worker:0.9 .` and `--image my-worker:0.9`. A custom
+  then `docker build -t my-worker:0.10 .` and `--image my-worker:0.10`. A custom
   `--image` is never digest-pinned — `PINNED_DIGEST` protects the maintained
   default image only.
 
@@ -257,7 +257,11 @@ printed to stdout (nothing else goes to stdout):
 Six of those keys are 0.8 additions (`stuck_on`, `files_changed`,
 `files_changed_truncated`, `last_tool_result`, `last_assistant_text`,
 `verify`) and the last three are 0.9's (`trimmed_turns`, `timeouts`,
-`context_window_source`). Every one of them is present on every payload —
+`context_window_source`). **0.10 adds no stdout key at all**: its additions are
+the eleventh tool (`append_file`), the `--max-tokens` flag, `max_tokens` on
+`run_start` and `run.json`, `finish_reason` on `assistant` events, and
+`--provider ollama` — all additive, `schema_version` still `2`. Every one of
+the nine keys above is present on every payload —
 `null` when it does not apply, `[]`/`false` for the list and its flag, `0` for
 the two counters — including the two paths where `runner.run()` never returns
 (see below), where they carry those same defaults rather than being omitted.
