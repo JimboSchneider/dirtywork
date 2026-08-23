@@ -2271,3 +2271,38 @@ def test_resume_inherits_max_tokens_and_a_pre_0_10_run_falls_back_to_the_default
     assert m.main(["resume", run_dir.name]) == 0
     fifth = json.loads(capsys.readouterr().out)
     assert json.loads((Path(fifth["run_dir"]) / "run.json").read_text())["max_tokens"] == 8192
+
+
+def test_ollama_missing_model_says_not_available_and_names_ollama_run(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--provider", "ollama",
+                 "--model", "gemma4:latest", "t"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "model 'gemma4:latest' not available" in err
+    assert "Pull or run it first: ollama run gemma4:latest" in err
+    assert "'gemma4:latest'" in err            # the tag reminder
+    assert "lms load" not in err
+
+
+def test_openai_missing_model_still_says_lms_load(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                 "--model", "no/such-model", "t"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "model 'no/such-model' not loaded" in err
+    assert "Load it with: lms load no/such-model" in err
+
+
+def test_resume_refuses_switching_between_openai_and_ollama(tmp_path, monkeypatch, capsys):
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    run_dir = Path(first["run_dir"])
+    prior = json.loads((run_dir / "run.json").read_text())
+    prior["status"] = "max_turns"
+    (run_dir / "run.json").write_text(json.dumps(prior))
+    assert m.main(["resume", run_dir.name, "--provider", "ollama"]) == 2
+    assert "resume it with that provider" in capsys.readouterr().err

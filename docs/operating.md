@@ -268,9 +268,26 @@ dirtywork asks the server what it actually loaded (LM Studio's
 not have to repeat the number as `--context-window`. The run records where the
 value came from in `context_window_source` — `provider:openai:server` when the
 server answered, `provider:openai` when the built-in table did, `flag`/`env`
-when you said so, `default` when nothing knew. Ollama is not probed in 0.9: its
-`/api/show` reports the model's architectural maximum rather than the loaded
-`num_ctx`, so pass `--context-window` there.
+when you said so, `default` when nothing knew. `--provider ollama` is probed
+too, with `GET /api/ps` — the `context_length` it reports is the loaded
+`num_ctx` and moves when a chat sets `options.num_ctx` — and shows up as
+`provider:ollama:server`. There is no static table for Ollama, so a model that
+is not resident goes straight to `default` (32768): Ollama's `/v1/models` lists
+models you have *pulled*, not models it has *loaded*, so preflight cannot tell.
+Run `ollama run <model>` before the run (or pass `--context-window`) or Ollama
+will load its own, usually smaller, `num_ctx` and truncate server-side without
+telling anyone.
+
+**Ollama quickstart:**
+
+    ollama run gemma4:latest            # make it resident first
+    dirtywork run --provider ollama --model gemma4:latest \
+      --repo ~/repos/someproject "Add a unit test for X"
+
+The full tag is required — `gemma4` and `gemma4:latest` are different ids to
+Ollama, and `--model` must match what `/v1/models` lists. Parallel tool calls
+are not verified on Ollama; if a model emits them, dirtywork parses them the
+same way it parses LM Studio's.
 
 The window is shared between the prompt and the reply, so `--max-tokens`
 (default 8192) is subtracted from it before the prompt budget is computed:

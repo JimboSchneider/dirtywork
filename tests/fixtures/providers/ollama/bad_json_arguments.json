@@ -1,0 +1,17 @@
+{
+  "id": "chatcmpl-518",
+  "object": "chat.completion",
+  "created": 1755900007,
+  "model": "gemma4:latest",
+  "choices": [{
+    "index": 0,
+    "message": {
+      "role": "assistant", "content": "",
+      "tool_calls": [
+        {"id": "call_badargs", "index": 0, "type": "function", "function": {"name": "write_file", "arguments": "{\"path\": \"x\", \"content\": \"abc"}}
+      ]
+    },
+    "finish_reason": "length"
+  }],
+  "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
+}

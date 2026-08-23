@@ -62,10 +62,12 @@ Full model, known exposures and the host-mode caveats:
 | CI-tested | Linux x86_64 (Ubuntu, Python 3.9 + 3.13) and macOS | unit suite on every push; the Docker sandbox live tests run on Linux in CI |
 | Unsupported | Windows | the unit suite also runs on `windows-latest` in CI as an advisory (allowed-to-fail) job that publishes a per-file pass/fail/error/skip table; Windows remains unsupported until an integration suite passes (see the note in [Security & trust](https://github.com/JimboSchneider/dirtywork/blob/main/docs/security.md#security--trust)) |
 
-Other OpenAI-compatible servers (Ollama, vLLM, llama.cpp) should work via
-`--base-url`/`--provider`; only LM Studio and the Anthropic API adapter
-(`--provider anthropic`, recorded-fixture tests, no live tests) are
-exercised by the test suites.
+Other OpenAI-compatible servers (vLLM, llama.cpp) should work via
+`--base-url`/`--provider`. LM Studio (`--provider openai`) and Ollama
+(`--provider ollama`) are both exercised — recorded-fixture contract tests for
+each, plus an opt-in live smoke per server; the Anthropic API adapter
+(`--provider anthropic`) has recorded-fixture tests and no live tests. Parallel
+tool calls are unverified on Ollama.
 
 ## Requirements
 
@@ -83,13 +85,19 @@ exercised by the test suites.
   for the measured numbers
 - `--provider anthropic` needs the `ANTHROPIC_API_KEY` environment variable
   set; the default (`--provider openai`, LM Studio or any OpenAI-compatible
-  server) needs no key.
+  server) and `--provider ollama` need no key.
+- `--provider ollama` talks to `http://localhost:11434/v1` and asks
+  `GET /api/ps` what context length the model is actually loaded with. Run
+  `ollama run <model>` first — Ollama lists *pulled* models, not resident ones,
+  so an unloaded model passes preflight and then gets whatever `num_ctx`
+  Ollama picks. Model ids include the tag (`gemma4:latest`).
 - The target repo must be a git repo with at least one commit
 
 **Other servers:** anything speaking the OpenAI chat-completions API with tool
-calling should work via `--base-url` (e.g. Ollama at
-`http://localhost:11434/v1`) — see [Platform support](#platform-support) for
-what's actually exercised by the test suites. Reports welcome.
+calling should work via `--base-url`. Ollama has its own `--provider ollama`
+as of 0.10 (default base URL `http://localhost:11434/v1`, with a real
+loaded-context probe) — see [Platform support](#platform-support) for what's
+actually exercised by the test suites. Reports welcome.
 
 ## Install
 

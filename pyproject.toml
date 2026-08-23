@@ -37,5 +37,6 @@ packages = ["dirtywork", "dirtywork.providers", "dirtywork.sandbox"]
 markers = [
     "live: requires a running LM Studio server",
     "docker: requires a running Docker daemon",
+    "ollama: requires a running Ollama server",
 ]
-addopts = "-m 'not live and not docker'"
+addopts = "-m 'not live and not docker and not ollama'"

@@ -20,7 +20,7 @@ dirtywork run --repo <path> "<task>"
     [--timeout 1800]                  # whole-run wall clock, seconds
     [--temperature <f>]               # omitted by default → server preset
     [--max-tokens 8192]               # per-reply output cap; must be < the context window
-    [--provider openai|anthropic]     # default: openai; anthropic needs ANTHROPIC_API_KEY
+    [--provider openai|anthropic|ollama]  # default: openai; anthropic needs ANTHROPIC_API_KEY
     [--base-url <url>]                # default depends on --provider (LM Studio for openai,
                                       # https://api.anthropic.com for anthropic)
     [--max-worktree-mb 2048]
@@ -104,9 +104,14 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   this last step warns). Which step answered is recorded as
   `context_window_source` on `run_start`, `run.json`, every payload and
   `run_end`: `flag`, `env`, `provider:<name>:server`, `provider:<name>`, or
-  `default`. Ollama is not probed in 0.9 — its `/api/show` reports the model's
-  architectural maximum rather than the loaded `num_ctx` — so pass
-  `--context-window` there. See
+  `default`. `--provider ollama` is probed with `GET /api/ps`, whose
+  `context_length` is the loaded `num_ctx` (recorded as
+  `provider:ollama:server`); Ollama has no static table in dirtywork, so a
+  model that is not resident falls straight through to `default` — its
+  `/v1/models` lists PULLED models, so preflight passes for a model Ollama has
+  not loaded yet. Run `ollama run <model>` before the run, or pass
+  `--context-window`, or Ollama will quietly serve its own smaller `num_ctx`.
+  See
   [Sizing the context window](operating.md#sizing-the-context-window).
 
 - `--max-tokens` (default 8192) — the per-reply output cap sent to the provider

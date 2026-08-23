@@ -173,7 +173,22 @@ def _non_negative_int(text: str) -> int:
 _ENDPOINT_HINTS = {
     "openai": "Is the OpenAI-compatible server running? Try: lms ps",
     "anthropic": "Check ANTHROPIC_API_KEY and that api.anthropic.com is reachable.",
+    "ollama": "Is Ollama running? Try: ollama ps",
 }
+
+# Spec §3.1: what to tell the operator when the model is not there. A dict
+# keyed by provider, replacing the two-branch ternary, so adding a provider is
+# an entry rather than another branch. `{model}` is substituted with str.replace
+# (never str.format): a model id is operator input and may contain braces.
+_MODEL_HINTS = {
+    "openai": "Load it with: lms load {model}",
+    "ollama": ("Pull or run it first: ollama run {model} — Ollama model ids include "
+               "the tag, e.g. 'gemma4:latest'"),
+}
+_DEFAULT_MODEL_HINT = "Pick one of the models listed above with --model."
+# Ollama's /v1/models lists PULLED models, not resident ones, so "not loaded"
+# would be the wrong word there.
+_MODEL_ABSENT_WORD = {"ollama": "not available"}
 
 
 def _preflight_llm(args):
@@ -188,10 +203,11 @@ def _preflight_llm(args):
     except LLMError as e:
         raise PreflightFailure(f"{e}\n{_ENDPOINT_HINTS.get(args.provider, '')}")
     if args.model not in models:
-        hint = (f"Load it with: lms load {args.model}" if args.provider == "openai"
-                else "Pick one of the models listed above with --model.")
+        hint = _MODEL_HINTS.get(args.provider, _DEFAULT_MODEL_HINT).replace(
+            "{model}", args.model)
+        absent = _MODEL_ABSENT_WORD.get(args.provider, "not loaded")
         raise PreflightFailure(
-            f"model '{args.model}' not loaded (loaded: {', '.join(models) or 'none'}). {hint}")
+            f"model '{args.model}' {absent} (loaded: {', '.join(models) or 'none'}). {hint}")
     return provider
 
 
@@ -691,6 +707,12 @@ def _load_resume_target(args) -> dict:
     elif args.provider != prior_provider:
         # Same rule as --sandbox (which resume does not expose at all): the
         # prior run's history was shaped by that provider's wire format.
+        # Deliberately NO openai<->ollama carve-out (spec §3.1), even though
+        # the wire format is identical: the inherited --model would carry the
+        # wrong id (Ollama's carry a tag) and base_url is not recorded on the
+        # run, so the run is not portable between the two. Anyone who reached
+        # Ollama before 0.10 with `--provider openai --base-url …:11434/v1`
+        # keeps resuming exactly that way.
         raise PreflightFailure(
             f"run {prior['slug']} used provider '{prior_provider}'; resume it with that "
             f"provider (drop --provider {args.provider}) or start a new run")
