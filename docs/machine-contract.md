@@ -150,7 +150,18 @@ not configurable; a run's tool surface is the same in host and docker mode.
   limit; append in smaller pieces`), the current file's size, and the result
   size (both of the latter render `ERROR: result is <n> bytes, over the
   <limit>-byte write limit; nothing was written`). This is the second half of
-  the large-file recipe: `write_file` the first part, `append_file` the rest.
+  the large-file recipe: `write_file` the first part, `append_file` the rest —
+  and it is what a truncated call is told to do by name. When a tool call is cut
+  off at the token limit (`finish_reason: "length"`), the harness answers it with
+  `ERROR: your write_file for '<path>' was cut off at the token limit — nothing
+  was written. Write the file in chunks: write_file with the first part, then
+  append_file for each following part.` when the path can be recovered from the
+  model's own argument fragment, and otherwise with `ERROR: your <tool> call was
+  cut off at the token limit before it completed. Emit smaller tool calls — for a
+  large file, write_file the first part and append_file the rest.` Either way the
+  turn counts as a `malformed_args` failure, including the Anthropic shape where
+  the truncated arguments parse as `{}` and a required parameter is simply
+  missing.
 - `edit_file(path, old_string, new_string)` — one exact replacement;
   `old_string` must occur exactly once.
 - `apply_edits(path, edits)` — several exact replacements to ONE file in one

@@ -79,7 +79,8 @@ _TEXT_TOOL_MARKERS = tuple("<" + m for m in ("tool_call>", "function=", "functio
 
 NUDGES = {
     "truncated": ("Your reply was cut off at the token limit. Continue with smaller steps — "
-                  "emit one tool call at a time and write large files in pieces."),
+                  "emit one tool call at a time; for a large file, write_file the first "
+                  "part and append_file the rest."),
     "empty": ("Your reply contained no tool call and no answer. Continue the task with a "
               "tool call, or call finish(summary=...) if the task is complete."),
     "text_tool_call": ("Your reply contained a tool call written as text; the harness only "
@@ -91,6 +92,56 @@ NUDGES = {
 def _join_nudges(*parts) -> str:
     """One user message per turn: merge whichever nudge texts apply."""
     return "\n\n".join(p for p in parts if p)
+
+
+# Spec §1.3. The fragment is the MODEL's own bytes and may be arbitrarily
+# malformed, so it is scanned, never parsed: one bounded regex over the first
+# TRUNCATED_ARGS_SCAN_CHARS characters, and the capture is unescaped through
+# json.loads inside a try. Any failure degrades to the generic sentence.
+_TRUNCATED_PATH_RE = re.compile(r'"path"\s*:\s*"((?:[^"\\]|\\.)*)"')
+TRUNCATED_ARGS_SCAN_CHARS = 8192
+TRUNCATED_PATH_CHARS = 200
+
+
+def _recovered_path(raw_arguments):
+    """The `path` a length-truncated tool call was building, or None.
+
+    Returns at most TRUNCATED_PATH_CHARS characters: the value is
+    model-controlled and goes straight into a tool result the model reads back,
+    so a 40 KB "path" must not become a 40 KB error message. On Anthropic
+    `raw_arguments` is "" (its error branches never set it) and this returns
+    None, which is exactly the degradation spec §1.3 asks for."""
+    if not isinstance(raw_arguments, str) or not raw_arguments:
+        return None
+    m = _TRUNCATED_PATH_RE.search(raw_arguments[:TRUNCATED_ARGS_SCAN_CHARS])
+    if m is None:
+        return None
+    try:
+        value = json.loads('"' + m.group(1) + '"')
+    except ValueError:
+        return None            # json.JSONDecodeError subclasses ValueError
+    if not isinstance(value, str):
+        return None
+    return value[:TRUNCATED_PATH_CHARS]
+
+
+def truncated_call_result(tool: str, raw_arguments) -> str:
+    """Spec §1.3: the tool result a call cut off at the token limit gets.
+
+    A write_file whose path can be recovered is told exactly which write to
+    redo and how; anything else gets the generic form. Both name append_file,
+    because before 0.10 "write it in pieces" was not honest advice for a NEW
+    large file -- no tool could add to one."""
+    if tool == "write_file":
+        path = _recovered_path(raw_arguments)
+        if path is not None:
+            return (f"ERROR: your write_file for {path!r} was cut off at the token "
+                    f"limit — nothing was written. Write the file in chunks: "
+                    f"write_file with the first part, then append_file for each "
+                    f"following part.")
+    return (f"ERROR: your {tool} call was cut off at the token limit before it "
+            f"completed. Emit smaller tool calls — for a large file, write_file "
+            f"the first part and append_file the rest.")
 
 
 def strip_think(text) -> str:
@@ -452,6 +503,16 @@ class Runner:
         self.char_budget = int(max(0, self.context_window - self.max_tokens)
                                * BUDGET_FRACTION * CHARS_PER_TOKEN)
 
+    def _missing_required(self, name: str, args) -> bool:
+        """Spec §1.3 case (b): True when `args` parsed but is missing a
+        required parameter of tool `name`. An unknown tool and a non-dict
+        `args` are False -- those have their own accounting (`unknown_tool`,
+        `bad_args`) and are not truncations."""
+        spec = self.registry.spec(name)
+        if spec is None or not isinstance(args, dict):
+            return False
+        return any(p not in args for p in spec.required)
+
     def run(self, system_prompt: str, task: str) -> RunResult:
         messages = [
             {"role": "system", "content": system_prompt},
@@ -699,14 +760,19 @@ class Runner:
                     if tc.error is not None:
                         abort_reason = failures.record("malformed_args")
                         if finish_reason == "length":
-                            result = (
-                                "ERROR: your reply was cut off at the token limit before "
-                                "the tool call completed. Emit smaller tool calls — e.g. "
-                                "write the file in pieces using multiple write_file/"
-                                "edit_file calls."
-                            )
+                            result = truncated_call_result(name, tc.raw_arguments)
                         else:
                             result = f"ERROR: {tc.error}"
+                    elif finish_reason == "length" and self._missing_required(name, args):
+                        # Spec §1.3 case (b): the Anthropic shape. A truncated
+                        # tool_use whose `input` came back {} parses
+                        # "successfully", so tc.error is None -- but a required
+                        # parameter is simply absent. Checked BEFORE dispatch so
+                        # the registry's bad_args path never swallows it: this
+                        # is a truncation, not an argument mistake, and it is
+                        # accounted as malformed_args exactly like case (a).
+                        abort_reason = failures.record("malformed_args")
+                        result = truncated_call_result(name, tc.raw_arguments)
                     else:
                         try:
                             spec = self.registry.spec(name)

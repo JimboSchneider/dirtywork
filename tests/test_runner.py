@@ -320,6 +320,8 @@ def test_context_exhausted_status(parts):
 
 
 def test_length_finish_reason_gives_helpful_hint(parts):
+    # Spec §1.3: the fixture already carries a recoverable `path`, so this is
+    # now the PATH-RECOVERED case and pins the whole sentence.
     wt, registry, sandbox, transcript, tmp = parts
     truncated = _resp(tool_calls=[_bad_args("c", "write_file", '{"path": "x", "content": "abc')],
                       finish_reason="length",
@@ -330,7 +332,95 @@ def test_length_finish_reason_gives_helpful_hint(parts):
     transcript.close()
     assert result.status == "completed"
     tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
-    assert "cut off at the token limit" in tool_msgs[0]["content"]
+    assert tool_msgs[0]["content"] == (
+        "ERROR: your write_file for 'x' was cut off at the token limit — nothing was "
+        "written. Write the file in chunks: write_file with the first part, then "
+        "append_file for each following part.")
+
+
+_GENERIC_TRUNCATION = ("ERROR: your {tool} call was cut off at the token limit before it "
+                       "completed. Emit smaller tool calls — for a large file, write_file "
+                       "the first part and append_file the rest.")
+
+
+def test_length_truncation_of_a_non_write_file_tool_gives_the_generic_form(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    truncated = _resp(tool_calls=[_bad_args("c", "edit_file", '{"path": "x", "old_string": "a')],
+                      finish_reason="length",
+                      usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider = FakeProvider([truncated, _resp(content="done")])
+    Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
+    transcript.close()
+    tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
+    assert tool_msgs[0]["content"] == _GENERIC_TRUNCATION.format(tool="edit_file")
+
+
+def test_length_truncation_with_no_raw_arguments_gives_the_generic_form(parts):
+    # The Anthropic shape: its error branches never set raw_arguments, so path
+    # recovery has nothing to scan and degrades to the generic sentence.
+    wt, registry, sandbox, transcript, tmp = parts
+    truncated = _resp(tool_calls=[_bad_args("c", "write_file", "")],
+                      finish_reason="length",
+                      usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider = FakeProvider([truncated, _resp(content="done")])
+    Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
+    transcript.close()
+    tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
+    assert tool_msgs[0]["content"] == _GENERIC_TRUNCATION.format(tool="write_file")
+
+
+def test_length_truncation_with_an_invalid_escape_degrades_to_generic(parts):
+    # A raw fragment whose escape sequence is not valid JSON must not raise
+    # inside the turn loop.
+    wt, registry, sandbox, transcript, tmp = parts
+    truncated = _resp(tool_calls=[_bad_args("c", "write_file", '{"path": "a\\qb", "content": "z')],
+                      finish_reason="length",
+                      usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider = FakeProvider([truncated, _resp(content="done")])
+    Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
+    transcript.close()
+    tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
+    assert tool_msgs[0]["content"] == _GENERIC_TRUNCATION.format(tool="write_file")
+
+
+def test_recovered_path_is_truncated_and_rendered_with_repr(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    long_path = "z" * 300
+    raw = '{"path": "' + long_path + '", "content": "abc'
+    truncated = _resp(tool_calls=[_bad_args("c", "write_file", raw)],
+                      finish_reason="length",
+                      usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider = FakeProvider([truncated, _resp(content="done")])
+    Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
+    transcript.close()
+    tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
+    assert f"for {'z' * 200!r} was cut off" in tool_msgs[0]["content"]
+    assert "z" * 201 not in tool_msgs[0]["content"]
+
+
+def test_length_truncation_with_empty_args_counts_as_malformed_args_not_bad_args(parts):
+    # Spec §1.3 case (b): a truncated Anthropic tool_use whose `input` came
+    # back {} PARSES, so tc.error is None -- but a required parameter is
+    # missing. It must be caught before dispatch and accounted as
+    # malformed_args, so three of them abort on THAT kind rather than bad_args.
+    wt, registry, sandbox, transcript, tmp = parts
+    empty = _resp(tool_calls=[_call("c", "write_file", {})], finish_reason="length",
+                  usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider = FakeProvider([empty, empty, empty])
+    result = Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+    assert result.final_message == "aborted after 3 consecutive malformed_args failures"
+    results = [e["result"] for e in _events(tmp) if e["event"] == "tool_result"]
+    assert results[0] == _GENERIC_TRUNCATION.format(tool="write_file")
+    assert "bad arguments" not in results[0]
+
+
+def test_truncated_nudge_names_write_file_and_append_file(parts):
+    assert NUDGES["truncated"] == (
+        "Your reply was cut off at the token limit. Continue with smaller steps — "
+        "emit one tool call at a time; for a large file, write_file the first part "
+        "and append_file the rest.")
 
 
 def test_run_start_includes_run_info(parts):
