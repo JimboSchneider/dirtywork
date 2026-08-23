@@ -448,10 +448,12 @@ def test_finalize_exception_recorded_status_preserved(parts):
 
 def test_assistant_text_capped_in_transcript_full_text_resent(parts):
     wt, registry, sandbox, transcript, tmp = parts
-    # Over MAX_ASSISTANT_TEXT_CHARS (64_000) but comfortably under the
-    # default model's char_budget (~98_304 for the fallback DEFAULT_WINDOW),
-    # so trim_messages doesn't ALSO trigger context_exhausted — this test is
-    # about the transcript-only cap, not the trim path.
+    # Over MAX_ASSISTANT_TEXT_CHARS (64_000) but under the default model's
+    # char_budget, which since 0.10 is (32768 - 8192) * 0.75 * 4 = 73_728 for
+    # the fallback DEFAULT_WINDOW and the default --max-tokens. The whole
+    # history here is ~70_050 chars, so trim_messages doesn't ALSO trigger
+    # context_exhausted — this test is about the transcript-only cap, not the
+    # trim path.
     huge_text = "y" * 70_000
     provider = FakeProvider([
         _resp(tool_calls=[_call("c1", "list_dir", {"path": "."})], content=huge_text),
@@ -873,9 +875,11 @@ def test_resolve_context_window_rejects_bad_env(env):
 def test_runner_context_window_param_sets_budget_and_run_start(parts):
     wt, registry, sandbox, transcript, tmp = parts
     provider = FakeProvider([_resp(content="done")])
-    r = Runner(provider, registry, sandbox, transcript, model="unknown/model", context_window=1000)
+    r = Runner(provider, registry, sandbox, transcript, model="unknown/model",
+               context_window=1000, max_tokens=200)
     assert r.context_window == 1000
-    assert r.char_budget == int(1000 * 0.75 * 4)
+    # Spec §1.4: the prompt budget is what is left AFTER the output cap.
+    assert r.char_budget == int((1000 - 200) * 0.75 * 4)
     r.run("s", "t")
     transcript.close()
     start = next(e for e in _events(tmp) if e["event"] == "run_start")
@@ -1507,3 +1511,77 @@ def test_mutating_tools_includes_every_tool_that_changes_a_file():
     from dirtywork.runner import _MUTATING_TOOLS
     assert set(_MUTATING_TOOLS) == {"write_file", "append_file", "edit_file",
                                     "apply_edits", "insert_before", "insert_after"}
+
+
+# --- spec §1.4/§1.5: the output cap and the recorded finish reason.
+
+
+def test_max_tokens_defaults_to_8192_and_reaches_the_provider(parts):
+    from dirtywork.runner import DEFAULT_MAX_TOKENS
+    wt, registry, sandbox, transcript, tmp = parts
+
+    seen = {}
+
+    class _RecordingProvider(FakeProvider):
+        def chat(self, model, history, tools, *, temperature=None, max_tokens=4096,
+                 timeout=None):
+            seen["max_tokens"] = max_tokens
+            return super().chat(model, history, tools, temperature=temperature,
+                                max_tokens=max_tokens, timeout=timeout)
+
+    r = Runner(_RecordingProvider([_resp(content="done")]), registry, sandbox, transcript,
+               model="m")
+    r.run("s", "t")
+    transcript.close()
+    assert DEFAULT_MAX_TOKENS == 8192
+    assert seen["max_tokens"] == 8192
+
+
+def test_char_budget_subtracts_max_tokens_from_the_window(parts):
+    # Spec §1.4: the window is SHARED. Budgeting the prompt as if the whole
+    # window were available is what made a long reply run off the end.
+    wt, registry, sandbox, transcript, tmp = parts
+    from dirtywork.runner import BUDGET_FRACTION, CHARS_PER_TOKEN
+    r = Runner(FakeProvider([_resp(content="done")]), registry, sandbox, transcript,
+               model="m", context_window=32768, max_tokens=8192)
+    assert r.char_budget == int((32768 - 8192) * BUDGET_FRACTION * CHARS_PER_TOKEN)
+    # A cap larger than the window cannot go negative here (preflight refuses
+    # that combination; a directly-built Runner must still not explode).
+    r2 = Runner(FakeProvider([_resp(content="done")]), registry, sandbox, transcript,
+                model="m", context_window=1000, max_tokens=8192)
+    assert r2.char_budget == 0
+
+
+def test_run_start_records_max_tokens(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    r = Runner(FakeProvider([_resp(content="done")]), registry, sandbox, transcript,
+               model="m", max_tokens=1234)
+    r.run("s", "t")
+    transcript.close()
+    start = next(e for e in _events(tmp) if e["event"] == "run_start")
+    assert start["max_tokens"] == 1234
+
+
+def test_assistant_event_records_finish_reason(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("c1", "list_dir", {"path": "."})],
+              finish_reason="tool_calls"),
+        _resp(content="done", finish_reason="stop"),
+    ])
+    Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
+    transcript.close()
+    reasons = [e["finish_reason"] for e in _events(tmp) if e["event"] == "assistant"]
+    assert reasons == ["tool_calls", "stop"]
+
+
+def test_assistant_event_finish_reason_is_null_for_a_non_string(parts):
+    # Adapters do not guarantee a string -- the Anthropic adapter passes an
+    # unknown stop reason through raw -- so anything non-str is recorded as
+    # null rather than emitted as some other JSON type (spec §1.5).
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(content="done", finish_reason=17)])
+    Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
+    transcript.close()
+    assistant = next(e for e in _events(tmp) if e["event"] == "assistant")
+    assert assistant["finish_reason"] is None

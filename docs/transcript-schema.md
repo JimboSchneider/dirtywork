@@ -36,6 +36,7 @@ One per run, always the first line.
 | `model` | ✓ | ✓ | string | |
 | `max_turns` | ✓ | ✓ | integer | |
 | `timeout` | ✓ | ✓ | integer | seconds, whole-run wall clock |
+| `max_tokens` | | ✓ | integer | 0.10: `--max-tokens`, the per-reply output cap sent to the provider. Subtracted from `context_window` before the prompt budget is computed. Refused at preflight when it is not smaller than the window |
 | `repo` | ✓ | ✓ | string | absolute path |
 | `worktree` | ✓ | ✓ | string | absolute path |
 | `schema_version` | | ✓ | `2` | present from v2 onward; its absence marks v1 |
@@ -60,6 +61,7 @@ One per model turn that produced a reply, with or without tool calls.
 |---|---|---|---|---|
 | `text` | ✓ | ✓ | string | the reply text; capped at `MAX_ASSISTANT_TEXT_CHARS` (64 000) **in the transcript only** — the full text is still sent to the model, and the cap is marked inline |
 | `tool_calls` | ✓ | ✓ | list | `[{name, arguments}, …]` — `arguments` is the model's own raw JSON argument string, capped at 2000 chars. Structurally invalid entries the provider could not address are **not** listed here; they appear as `tool_result` records with an empty `tool` |
+| `finish_reason` | | ✓ | string \| null | 0.10: the provider's own stop reason for this turn, passed through. Common values are `stop`, `length` and `tool_calls`, but this is **not a closed enum** — a provider may report anything, and a non-string value (the Anthropic adapter passes unknown stop reasons through raw) is recorded as `null` |
 
 ### `tool_result`
 
@@ -207,6 +209,7 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `model` | start | |
 | `provider` | start | `"openai"` \| `"anthropic"` |
 | `context_window` | start | resolved tokens |
+| `max_tokens` | start | 0.10: `--max-tokens`, the per-reply output cap. `dirtywork resume` inherits it; a `run.json` written before 0.10 has no such key, and the resume falls back to the 8192 default |
 | `context_window_source` | start, end | 0.9: `flag` \| `env` \| `provider:<name>:server` \| `provider:<name>` \| `default` — which precedence step produced `context_window`. Written at start and repeated at end (including on the two failure paths) so the plain `dirtywork runs show`, which reads only `run.json`, never shows `-` |
 | `resumed_from` | start | slug of the run this one continues, or null |
 | `resumed_by` | — | written onto the **prior** run's `run.json` when a resume starts |

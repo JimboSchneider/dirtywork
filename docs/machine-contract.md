@@ -19,6 +19,7 @@ dirtywork run --repo <path> "<task>"
                                       # built-in table, else 32768 (+ stderr warning)
     [--timeout 1800]                  # whole-run wall clock, seconds
     [--temperature <f>]               # omitted by default → server preset
+    [--max-tokens 8192]               # per-reply output cap; must be < the context window
     [--provider openai|anthropic]     # default: openai; anthropic needs ANTHROPIC_API_KEY
     [--base-url <url>]                # default depends on --provider (LM Studio for openai,
                                       # https://api.anthropic.com for anthropic)
@@ -107,6 +108,19 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   architectural maximum rather than the loaded `num_ctx` — so pass
   `--context-window` there. See
   [Sizing the context window](operating.md#sizing-the-context-window).
+
+- `--max-tokens` (default 8192) — the per-reply output cap sent to the provider
+  on every request, and subtracted from the context window before the prompt
+  budget is computed (`(window - max_tokens) * 0.75 * 4` chars), so a long reply
+  can no longer run off the end of a window the prompt already filled. Preflight
+  refuses `--max-tokens` at or above the window with
+  `--max-tokens <N> must be smaller than the <W>-token context window` (exit 2).
+  Recorded on `run_start` and in `run.json`; **not** echoed on the stdout payload
+  (it is configuration, not evidence). `dirtywork resume` inherits it; a run
+  recorded before 0.10 has no value to inherit and gets the 8192 default, which
+  raises its effective cap from the adapters' old 4096. Pass `--max-tokens 4096`
+  for models that cap output there — some older Claude models reject a larger
+  value outright.
 
 - `--allow-commit` (host mode only) — replaces the prompt's "leave all changes
   uncommitted for review" rule with "commit your work in small conventional

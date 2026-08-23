@@ -21,6 +21,7 @@ NUDGE_KINDS = ["truncated", "empty", "text_tool_call", "stall", "timeout"]
 STATUSES = ["completed", "max_turns", "timeout", "context_exhausted", "model_error",
             "interrupted", "stalled", "stuck", "verify_failed", "budget_exceeded",
             "sandbox_error", "export_failed"]
+ASSISTANT_FIELDS = ["text", "tool_calls", "finish_reason"]
 RUN_END_FIELDS = ["diff_stat", "untracked", "patch_path", "escaping_symlinks",
                   "dropped_git_entries", "worktree_bytes", "worktree_files",
                   "export_status", "watchdog_violation", "watchdog_violation_kind",
@@ -178,3 +179,9 @@ def test_version_is_in_step_with_pyproject():
     # so a release only bumps pyproject.toml and dirtywork/__init__.py.
     assert dirtywork.__version__.count(".") == 2
     assert f'version = "{dirtywork.__version__}"' in pyproject
+
+
+def test_doc_documents_every_assistant_field():
+    tokens = _doc_tokens()
+    for field in ASSISTANT_FIELDS:
+        assert field in tokens, f"assistant field '{field}' is not documented in {DOC.name}"

@@ -28,6 +28,7 @@ from .providers import DEFAULT_BASE_URLS, PROVIDER_NAMES, get_provider
 from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json, write_run_json
 from .runner import (
     CHARS_PER_TOKEN,
+    DEFAULT_MAX_TOKENS,
     DEFAULT_STALL_TURNS,
     DEFAULT_STUCK_REPEATS,
     DEFAULT_VERIFY_ROUNDS,
@@ -207,6 +208,17 @@ def _resolve_context_window(args, provider=None) -> tuple:
     if source == "default":
         print(f"warning: no known context window for '{args.model}'; assuming {window} tokens "
               f"(set --context-window or DIRTYWORK_CONTEXT_WINDOW)", file=sys.stderr)
+    # Spec §1.4: prompt and reply share the window, so a cap at or above it
+    # leaves no room for a prompt at all. Refused here, after the warning, so
+    # an operator with an unknown model still sees which window was assumed.
+    # Read with getattr: `runs`/`bench` build Namespaces without this attribute.
+    max_tokens = getattr(args, "max_tokens", None)
+    if max_tokens is None:
+        max_tokens = DEFAULT_MAX_TOKENS
+    if max_tokens >= window:
+        raise PreflightFailure(
+            f"--max-tokens {max_tokens} must be smaller than the {window}-token "
+            f"context window")
     return window, source
 
 
@@ -430,6 +442,7 @@ def _write_run_json_start(run_dir: Path, ctx: RunContext, args) -> None:
         "provider": args.provider,
         "context_window": ctx.context_window,
         "context_window_source": ctx.context_window_source,
+        "max_tokens": getattr(args, "max_tokens", DEFAULT_MAX_TOKENS),
         "branch_from_run": ctx.branch_from_run,
         "feedback": ctx.feedback,
         "resumed_from": ctx.resumed_from,
@@ -701,6 +714,12 @@ def _load_resume_target(args) -> dict:
         args.verify_rounds = prior.get("verify_rounds", DEFAULT_VERIFY_ROUNDS)
     if getattr(args, "verify_timeout", None) is None:
         args.verify_timeout = prior.get("verify_timeout", DEFAULT_VERIFY_TIMEOUT)
+    if getattr(args, "max_tokens", None) is None:
+        # Spec §1.4/§6: `.get(k) if … is not None else default` rather than
+        # `.get(k, default)`, so a pre-0.10 run.json (no key) AND a
+        # hand-edited one carrying an explicit null both land on the default.
+        args.max_tokens = (prior.get("max_tokens") if prior.get("max_tokens") is not None
+                           else DEFAULT_MAX_TOKENS)
     # Last, so the earlier refusals (still running, missing worktree, provider
     # switch) keep their own messages when they apply too.
     args.feedback_text = _load_feedback(args)
@@ -793,7 +812,9 @@ def _execute(ctx: RunContext, args, client) -> int:
 
         runner = Runner(
             client, registry, sandbox, transcript, model=args.model,
-            max_turns=args.max_turns, timeout=args.timeout, temperature=args.temperature,
+            max_turns=args.max_turns, timeout=args.timeout,
+            max_tokens=getattr(args, "max_tokens", DEFAULT_MAX_TOKENS),
+            temperature=args.temperature,
             run_info={
                 "repo": str(ctx.repo), "worktree": str(ctx.worktree), "branch": ctx.branch,
                 "branch_from": ctx.branch_from, "base_commit": ctx.base_commit,
@@ -905,6 +926,12 @@ def _add_run_flags(p, *, resume: bool) -> None:
     p.add_argument("--context-window", type=_positive_int, default=None,
                    help="model context window in tokens (default: the server's loaded window, "
                         "else the built-in table, else 32768)")
+    p.add_argument("--max-tokens", type=_positive_int,
+                   default=None if resume else DEFAULT_MAX_TOKENS,
+                   help="max tokens the model may generate per reply (default 8192; must be "
+                        "smaller than the context window, and subtracted from it when the "
+                        "prompt budget is computed; resume inherits this from the run it "
+                        "continues)")
     p.add_argument("--max-worktree-mb", type=int, default=DEFAULT_MAX_WORKTREE_MB)
     p.add_argument("--max-worktree-files", type=int, default=DEFAULT_MAX_WORKTREE_FILES)
     p.add_argument("--image", default=None if resume else DEFAULT_IMAGE)

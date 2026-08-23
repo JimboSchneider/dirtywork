@@ -272,6 +272,17 @@ when you said so, `default` when nothing knew. Ollama is not probed in 0.9: its
 `/api/show` reports the model's architectural maximum rather than the loaded
 `num_ctx`, so pass `--context-window` there.
 
+The window is shared between the prompt and the reply, so `--max-tokens`
+(default 8192) is subtracted from it before the prompt budget is computed:
+`(window - max_tokens) * 0.75 * 4` characters. At the 32768 default that is
+about 18.4k tokens' worth of prompt, versus the cap-blind 24.5k before 0.10 —
+real slack instead of a reply that runs off the end. Raising `--max-tokens`
+buys longer single replies at the cost of prompt room, and decode is the slow
+half on a local model: a cap you never reach costs nothing, but a cap you do
+reach costs seconds per turn. Lower it when a model rejects it (some older
+Claude models cap output at 4096) or when you would rather spend the window on
+context than on one long reply.
+
 **Rules of thumb**
 
 - Keep a dispatched brief under ~450 lines. Past roughly 20% of the window

@@ -29,6 +29,10 @@ FINISH_TOOL = "finish"
 # The per-model context-window table moved to the provider that serves those
 # models (providers/openai_compat.py): resolve_context_window asks the provider.
 DEFAULT_WINDOW = 32768
+# Spec §1.4: the per-reply output cap. Both adapters default to 4096 for direct
+# callers; the runner now always passes this explicitly, so a large write_file
+# has room to finish instead of being cut off mid-JSON.
+DEFAULT_MAX_TOKENS = 8192
 TRIM_MARKER = "[result trimmed — re-run the tool if needed]"
 CHARS_PER_TOKEN = 4
 BUDGET_FRACTION = 0.75
@@ -401,6 +405,7 @@ class RunResult:
 class Runner:
     def __init__(self, provider, registry, sandbox, transcript, model,
                  max_turns: int = 40, timeout: int = 1800,
+                 max_tokens: int = DEFAULT_MAX_TOKENS,
                  temperature: float | None = None,
                  run_info: dict | None = None,
                  finalize: Callable[[], dict] | None = None,
@@ -418,6 +423,9 @@ class Runner:
         self.model = model
         self.max_turns = max_turns
         self.timeout = timeout
+        # Spec §1.4: passed explicitly on every chat call. The adapters keep
+        # their own 4096 defaults for direct callers.
+        self.max_tokens = max_tokens
         self.temperature = temperature
         self.run_info = run_info
         self.finalize = finalize
@@ -437,7 +445,12 @@ class Runner:
         # only None means "ask the provider".
         self.context_window = (context_window if context_window is not None
                                else (provider.context_window(model) or DEFAULT_WINDOW))
-        self.char_budget = int(self.context_window * BUDGET_FRACTION * CHARS_PER_TOKEN)
+        # Spec §1.4: prompt and reply share ONE window, so the prompt budget is
+        # what is left after the output cap. max(0, …) keeps a directly-built
+        # Runner with a cap larger than its window from going negative;
+        # preflight refuses that combination for a real run.
+        self.char_budget = int(max(0, self.context_window - self.max_tokens)
+                               * BUDGET_FRACTION * CHARS_PER_TOKEN)
 
     def run(self, system_prompt: str, task: str) -> RunResult:
         messages = [
@@ -446,6 +459,7 @@ class Runner:
         ]
         self.transcript.write("run_start", task=task, model=self.model,
                               max_turns=self.max_turns, timeout=self.timeout,
+                              max_tokens=self.max_tokens,
                               context_window=self.context_window,
                               context_window_source=self.context_window_source,
                               schema_version=2, **(self.run_info or {}))
@@ -590,6 +604,7 @@ class Runner:
                 try:
                     resp = self.provider.chat(self.model, messages, self.registry.schemas(),
                                               temperature=self.temperature,
+                                              max_tokens=self.max_tokens,
                                               timeout=max(1.0, remaining))
                 except LLMTimeout:
                     if time.monotonic() >= deadline - 0.5:
@@ -628,7 +643,12 @@ class Runner:
                 self.transcript.write(
                     "assistant", text=transcript_text,
                     tool_calls=[{"name": tc.name, "arguments": (tc.raw_arguments or "")[:2000]}
-                                for tc in tool_calls])
+                                for tc in tool_calls],
+                    # Spec §1.5: an OPEN enum. Adapters do not guarantee a
+                    # string (Anthropic passes an unknown stop reason through
+                    # raw), so anything else is recorded as null rather than
+                    # emitted as some other JSON type.
+                    finish_reason=finish_reason if isinstance(finish_reason, str) else None)
                 if isinstance(transcript_text, str) and transcript_text.strip():
                     last_assistant_text = transcript_text[:LAST_TEXT_CHARS]
                 if resp.tool_calls:

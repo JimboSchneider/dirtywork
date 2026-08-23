@@ -1308,7 +1308,7 @@ def test_run_json_records_task_model_context_window_and_turns(tmp_path, monkeypa
     m = _install_host_harness(monkeypatch, tmp_path)
     repo = _host_repo(tmp_path)
     rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--context-window", "5000",
-                 "--stall-turns", "7", "some task"])
+                 "--max-tokens", "1000", "--stall-turns", "7", "some task"])
     assert rc == 0
     data = _read_only_run_json(tmp_path)
     assert data["task"] == "some task"
@@ -1328,7 +1328,8 @@ def test_context_window_env_and_unknown_model_warning(tmp_path, monkeypatch, cap
     m = _install_host_harness(monkeypatch, tmp_path)
     repo = _host_repo(tmp_path)
     monkeypatch.setenv("DIRTYWORK_CONTEXT_WINDOW", "4096")
-    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--model", "other/model", "t"])
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--model", "other/model",
+                 "--max-tokens", "1000", "t"])
     assert rc == 0
     assert _read_only_run_json(tmp_path)["context_window"] == 4096
     assert "warning: no known context window" not in capsys.readouterr().err
@@ -2096,11 +2097,11 @@ def test_timeouts_land_on_the_payload_run_end_and_run_json(tmp_path, monkeypatch
 def test_task_size_warning_fires_for_a_long_brief(tmp_path, monkeypatch, capsys):
     m = _install_host_harness(monkeypatch, tmp_path)
     repo = _host_repo(tmp_path)
-    task = "x" * 4000                     # ~1000 tokens at 4 chars/token
+    task = "x" * 40000                    # ~10000 tokens at 4 chars/token
     assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
-                   "--context-window", "2000", task]) == 0
+                   "--context-window", "20000", "--max-tokens", "1000", task]) == 0
     err = capsys.readouterr().err
-    assert "warning: the task text is ~1000 tokens, 50% of the 2000-token context window" in err
+    assert "warning: the task text is ~10000 tokens, 50% of the 20000-token context window" in err
     assert "docs/operating.md#sizing-the-context-window" in err
 
 
@@ -2109,7 +2110,7 @@ def test_task_size_warning_is_silent_under_the_threshold(tmp_path, monkeypatch, 
     repo = _host_repo(tmp_path)
     task = "x" * 400                      # ~100 tokens = 5% of 2000
     assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
-                   "--context-window", "2000", task]) == 0
+                   "--context-window", "2000", "--max-tokens", "500", task]) == 0
     assert "the task text is" not in capsys.readouterr().err
 
 
@@ -2125,7 +2126,7 @@ def test_task_size_warning_fires_on_resume(tmp_path, monkeypatch, capsys):
                    "x" * 4000]) == 1
     prior = json.loads(capsys.readouterr().out)
     assert m.main(["resume", Path(prior["run_dir"]).name, "--context-window", "2000",
-                   "--max-turns", "1"]) == 1
+                   "--max-tokens", "500", "--max-turns", "1"]) == 1
     err = capsys.readouterr().err
     assert "warning: the task text is ~" in err
     assert "% of the 2000-token context window" in err
@@ -2136,7 +2137,7 @@ def test_context_window_source_lands_in_run_json_run_start_and_stdout(
     m = _install_host_harness(monkeypatch, tmp_path)
     repo = _host_repo(tmp_path)
     assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
-                   "--context-window", "5000", "t"]) == 0
+                   "--context-window", "5000", "--max-tokens", "1000", "t"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["context_window_source"] == "flag"
     run_dir = Path(payload["run_dir"])
@@ -2164,7 +2165,7 @@ def test_resume_records_its_own_context_window_source(tmp_path, monkeypatch, cap
     assert json.loads((Path(prior["run_dir"]) / "run.json").read_text())[
         "context_window_source"] == "default"
     assert m.main(["resume", Path(prior["run_dir"]).name, "--context-window", "7000",
-                   "--max-turns", "1"]) == 1
+                   "--max-tokens", "1000", "--max-turns", "1"]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["context_window_source"] == "flag"
     assert json.loads((Path(payload["run_dir"]) / "run.json").read_text())[
@@ -2184,3 +2185,62 @@ def test_emit_result_seeds_context_window_source():
         usage={}, final_message="boom", provider="openai",
         context_window_source="provider:openai:server")
     assert payload["context_window_source"] == "provider:openai:server"
+
+
+def test_max_tokens_flag_is_recorded_in_run_json(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                   "--context-window", "20000", "--max-tokens", "3000", "t"]) == 0
+    assert _read_only_run_json(tmp_path)["max_tokens"] == 3000
+    payload = json.loads(capsys.readouterr().out)
+    events = [json.loads(line) for line
+              in Path(payload["transcript"]).read_text().splitlines()]
+    start = next(e for e in events if e["event"] == "run_start")
+    assert start["max_tokens"] == 3000
+
+
+def test_max_tokens_defaults_to_8192_on_a_fresh_run(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "t"]) == 0
+    capsys.readouterr()
+    assert _read_only_run_json(tmp_path)["max_tokens"] == 8192
+
+
+def test_max_tokens_at_or_over_the_context_window_exits_2(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none",
+                 "--context-window", "4096", "--max-tokens", "4096", "t"])
+    assert rc == 2
+    assert ("--max-tokens 4096 must be smaller than the 4096-token context window"
+            in capsys.readouterr().err)
+    assert not (tmp_path / "runs").exists()
+
+
+def test_resume_inherits_max_tokens_and_a_pre_0_10_run_falls_back_to_the_default(
+        tmp_path, monkeypatch, capsys):
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    run_dir = Path(first["run_dir"])
+    prior = json.loads((run_dir / "run.json").read_text())
+    assert prior["max_tokens"] == 8192
+
+    # A run recorded with an explicit cap is inherited verbatim.
+    prior["max_tokens"] = 2000
+    prior["status"] = "max_turns"
+    (run_dir / "run.json").write_text(json.dumps(prior))
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url))
+    assert m.main(["resume", run_dir.name]) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert json.loads((Path(second["run_dir"]) / "run.json").read_text())["max_tokens"] == 2000
+
+    # A pre-0.10 run.json has no max_tokens at all: the new default applies.
+    prior.pop("max_tokens")
+    prior["status"] = "max_turns"
+    (run_dir / "run.json").write_text(json.dumps(prior))
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url))
+    assert m.main(["resume", run_dir.name]) == 0
+    third = json.loads(capsys.readouterr().out)
+    assert json.loads((Path(third["run_dir"]) / "run.json").read_text())["max_tokens"] == 8192
