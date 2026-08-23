@@ -499,27 +499,15 @@ def write_file(worktree: Path, path: str, content: str) -> str:
         return f"ERROR: {e}"
     p = _worktree_candidate(path, worktree)
     # Best-effort 'before' picture, taken after the containment check and
-    # before the truncating open. None means "nothing to diff against".
+    # before the write. None means "nothing to diff against".
     old_text = _read_text_for_diff(p)
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        return f"ERROR: cannot write '{path}': {e}"
-    try:
-        fh = _open_regular(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-    except OSError as e:
-        if e.errno == errno.ELOOP:
-            return (
-                f"ERROR: '{path}' is a symlink; writing through a symlink is not "
-                f"allowed even when its target is inside the worktree"
-            )
-        if e.errno == errno.ENXIO:
-            return f"ERROR: '{path}' is not a regular file (refusing FIFO/device/socket)"
-        return f"ERROR: cannot write '{path}': {e}"
-    try:
-        fh.write(encoded)
-    finally:
-        fh.close()
+    # Spec §2.1: staged through a sibling temp and promoted with os.replace, so
+    # a kill or an I/O error mid-write leaves the old file byte-identical
+    # instead of truncated. Every refusal string is unchanged --
+    # _write_atomic's probe is the same open, minus O_CREAT|O_TRUNC.
+    err = _write_atomic(p, encoded, path=path, create_parents=True)
+    if err:
+        return err
     return describe_write(path, old_text, content, len(encoded))
 
 
@@ -530,7 +518,8 @@ def _transform_file(worktree: Path, path: str, transform, *, tool: str) -> str:
     writing anything. Every check edit_file used to perform itself lives here,
     unchanged: worktree containment, the regular-file/symlink refusals, the
     5 MB read limit, UTF-8 validation, and the O_NOFOLLOW write -- plus, since
-    0.9, the shared output cap (_check_write_size, spec §1.5)."""
+    0.9, the shared output cap (_check_write_size, spec §1.5) and, since 0.10,
+    the staged write (_write_atomic, spec §2.1)."""
     try:
         p = resolve_in_worktree(path, worktree, writing=True)
     except GuardrailError as e:
@@ -554,21 +543,11 @@ def _transform_file(worktree: Path, path: str, transform, *, tool: str) -> str:
     if too_big:
         return too_big
     write_target = _worktree_candidate(path, worktree)
-    try:
-        wfh = _open_regular(write_target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-    except OSError as e:
-        if e.errno == errno.ELOOP:
-            return (
-                f"ERROR: '{path}' is a symlink; writing through a symlink is not "
-                f"allowed even when its target is inside the worktree"
-            )
-        if e.errno == errno.ENXIO:
-            return f"ERROR: '{path}' is not a regular file (refusing FIFO/device/socket)"
-        return f"ERROR: cannot write '{path}': {e}"
-    try:
-        wfh.write(new_text.encode("utf-8"))
-    finally:
-        wfh.close()
+    # Spec §2.1: the same staged write write_file uses. _transform_file never
+    # creates parents -- it only ever writes a file it just read.
+    err = _write_atomic(write_target, new_text.encode("utf-8"), path=path)
+    if err:
+        return err
     return result
 
 

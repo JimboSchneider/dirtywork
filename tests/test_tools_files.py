@@ -938,3 +938,59 @@ def test_append_file_refuses_when_the_target_vanishes_before_the_promote(wt: Pat
                    "it with write_file first")
     assert not target.exists()       # never re-created by the new-file branch
     assert _temp_leftovers(wt) == []
+
+
+# --- spec §2.1/§2.3: every host write now goes through _write_atomic.
+
+
+def test_write_file_promotes_by_rename_and_leaves_no_temp(wt: Path):
+    target = wt / "README.md"
+    before = target.stat().st_ino
+    assert tools.write_file(wt, "README.md", "# Demo v2\n").startswith("Wrote README.md:")
+    assert target.read_text() == "# Demo v2\n"
+    assert target.stat().st_ino != before
+    assert _temp_leftovers(wt) == []
+
+
+def test_write_file_is_atomic_the_target_is_unchanged_when_the_write_fails(wt: Path, monkeypatch):
+    target = wt / "README.md"
+
+    def _boom(fd, data):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(tools, "_write_all", _boom)
+    out = tools.write_file(wt, "README.md", "clobbered")
+    assert out.startswith("ERROR: cannot write 'README.md': ")
+    assert target.read_text() == "# Demo\n"      # spec §2.3: byte-identical
+    assert _temp_leftovers(wt) == []
+
+
+def test_edit_file_is_atomic_the_target_is_unchanged_when_the_write_fails(wt: Path, monkeypatch):
+    target = wt / "src" / "app.py"
+    original = target.read_text()
+
+    def _boom(fd, data):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(tools, "_write_all", _boom)
+    out = tools.edit_file(wt, "src/app.py", "return 42", "return 43")
+    assert out.startswith("ERROR: cannot write 'src/app.py': ")
+    assert target.read_text() == original
+    assert _temp_leftovers(wt / "src") == []
+
+
+def test_transform_preserves_mode_through_the_promote(wt: Path):
+    target = wt / "hook.sh"
+    target.write_text("old\n")
+    target.chmod(0o750)
+    assert tools.edit_file(wt, "hook.sh", "old", "new").startswith("Edited hook.sh:")
+    assert target.read_text() == "new\n"
+    assert _stat.S_IMODE(target.stat().st_mode) == 0o750
+
+
+def test_write_file_still_creates_parents_and_uses_the_umask_default_mode(wt: Path):
+    out = tools.write_file(wt, "a/b/c.txt", "deep\n")
+    assert out.startswith("Wrote 5 bytes to a/b/c.txt (new file, 1 line)")
+    made = wt / "a" / "b" / "c.txt"
+    assert made.read_text() == "deep\n"
+    assert _stat.S_IMODE(made.stat().st_mode) == 0o644 & ~tools._UMASK

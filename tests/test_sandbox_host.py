@@ -117,3 +117,27 @@ def test_host_sandbox_append_file(wt: Path):
     assert sb.append_file("gone.txt", "x") == (
         "ERROR: cannot append to 'gone.txt': it does not exist; create it with "
         "write_file first")
+
+
+def test_host_sandbox_start_sweeps_a_leftover_temp_and_says_so(wt: Path, capsys):
+    # Spec §2.5: only a KILL can leave one behind, and a resume is where it
+    # shows up. Never silent.
+    from dirtywork import tools
+    leftover = wt / tools.tmp_name("hello.txt")
+    leftover.write_text("half-written")
+    sb = HostSandbox(wt)
+    sb.start(wt, wt, "slug", "deadbeef")
+    assert not leftover.exists()
+    assert "swept 1 stale temp file" in capsys.readouterr().err
+
+
+def test_host_sandbox_finalize_sweeps_and_reports(wt: Path, capsys):
+    from dirtywork import tools
+    sb = HostSandbox(wt)
+    sb.start(wt, wt, "slug", "deadbeef")
+    capsys.readouterr()
+    (wt / tools.tmp_name("a.txt")).write_text("x")
+    (wt / tools.tmp_name("b.txt")).write_text("y")
+    sb.finalize()
+    assert "swept 2 stale temp files" in capsys.readouterr().err
+    assert [p.name for p in wt.iterdir() if p.name.startswith(tools.TMP_PREFIX)] == []

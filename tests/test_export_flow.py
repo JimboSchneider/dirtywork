@@ -351,3 +351,42 @@ def test_export_run_reports_files_changed(tmp_path, empty_worktree):
     names_index = next(i for i, c in enumerate(fake.calls) if "--cached" in c[0])
     add_index = next(i for i, c in enumerate(fake.calls) if c[0][-2:] == ["add", "-A"])
     assert add_index < names_index
+
+
+def test_export_sweeps_stale_temps_before_git_add(tmp_path, empty_worktree):
+    from dirtywork.tools import TMP_FIND_REGEX
+    fake = FakeDocker()
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/usr/bin/find", "/work",
+                 "-type", "f", "-regextype", "posix-extended", "-regex", TMP_FIND_REGEX],
+                _ok(b"/work/src/.dw-tmp.app.py.deadbeef\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "write-tree"],
+                _ok(b"treehash1234\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "diff", "--stat",
+                 "deadbeef" * 5, "treehash1234"], _ok(b" 1 file changed\n"))
+    fake.script_popen_stdout(
+        ["docker", "exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "diff",
+         "deadbeef" * 5, "treehash1234"], b"diff --git a/x b/x\n+hi\n")
+    fake.script_popen_stdout(
+        ["docker", "exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "archive",
+         "--format=tar", "treehash1234"],
+        _make_tar([{"name": "hello.txt", "content": b"hi there"}]))
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+
+    export_run(
+        DockerConfig(), slug="abc123", base_commit="deadbeef" * 5, worktree=empty_worktree,
+        run_dir=run_dir, objects_dir=Path("/repo/.git/objects"),
+        image_ref="dirtywork/worker@sha256:" + "a" * 64, uid=501, gid=20,
+        repo_label="deadbeef", run=fake.run, popen=fake.popen,
+    )
+
+    argvs = [c[0] for c in fake.calls]
+    sweeps = [a for a in argvs if "-regextype" in a]
+    adds = [a for a in argvs if a[-3:] == ["/usr/bin/git", "add", "-A"]]
+    assert len(sweeps) == 1 and len(adds) == 1
+    assert sweeps[0][4:] == ["/usr/bin/find", "/work", "-type", "f", "-regextype",
+                             "posix-extended", "-regex", TMP_FIND_REGEX,
+                             "-print", "-delete"]
+    assert argvs.index(sweeps[0]) < argvs.index(adds[0])

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from .. import tools
@@ -7,6 +8,7 @@ from ..budget import (
     DEFAULT_MAX_WORKTREE_FILES,
     DEFAULT_MAX_WORKTREE_MB,
     BudgetExceeded,
+    BudgetReport,
     measure_worktree,
 )
 from ..workspace import host_diff_stat, host_files_changed, host_untracked
@@ -31,10 +33,23 @@ class HostSandbox:
         self.base_commit = base_commit
         self.repo = repo
         self.slug = slug
+        # Spec §2.5: every completed write unlinks its own staging temp, so the
+        # only way one survives is a kill -- which means a RESUMED run's
+        # worktree is where it turns up. One sweep, here, folded into a
+        # measurement walk that costs what any budget check costs.
+        self._sweep_note(self._measure(sweep_temps=True))
 
-    def _measure(self) -> dict:
+    def _measure(self, *, sweep_temps: bool = False) -> BudgetReport:
         return measure_worktree(self.worktree, max_bytes=self.max_worktree_mb * 1024 * 1024,
-                                   max_files=self.max_worktree_files)
+                                   max_files=self.max_worktree_files,
+                                   sweep_temps=sweep_temps)
+
+    def _sweep_note(self, report: BudgetReport) -> None:
+        """Spec §2.5: a swept temp is evidence a previous run was killed
+        mid-write. Worth one stderr line; never silent."""
+        if report.swept:
+            plural = "" if report.swept == 1 else "s"
+            print(f"swept {report.swept} stale temp file{plural}", file=sys.stderr)
 
     def _check_budget(self) -> None:
         report = self._measure()
@@ -89,7 +104,10 @@ class HostSandbox:
     def finalize(self) -> RunArtifacts:
         if self.base_commit is None:
             raise SandboxError("finalize() called before start()")
-        report = self._measure()
+        # Spec §2.5: swept BEFORE host_files_changed, so a temp left by a kill
+        # during this very run can never appear in the run's evidence.
+        report = self._measure(sweep_temps=True)
+        self._sweep_note(report)
         files_changed, files_changed_truncated = host_files_changed(
             self.worktree, self.base_commit)
         return RunArtifacts(

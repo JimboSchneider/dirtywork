@@ -49,15 +49,23 @@ all-or-nothing before the write — the first failure writes nothing and the
 result names it. That is one turn instead of five, and one prompt-cache hit
 instead of five, which is most of the difference on a small local model.
 
-> **In-place edits are atomic *before* the write, not *through* it.** Every
-> refusal — validation, a non-matching `old`, an unreadable or non-UTF-8 file,
-> a result over the 5 MB write limit — happens before the file is opened, so
-> the file is untouched. Once the write starts, an I/O error or a kill can
-> still leave the file truncated; that is true of `edit_file`, `insert_*` and
-> `write_file` too and is unchanged in 0.9. The worktree is a scratch branch,
-> so the recovery is `git -C <worktree> checkout -- <path>`. A temp-file/rename
-> primitive was considered and deferred: done naively it re-opens the
-> final-component symlink race that the current `O_NOFOLLOW` write closes.
+> **File writes are atomic as of 0.10.** Every refusal — validation, a
+> non-matching `old`, an unreadable or non-UTF-8 file, a result over the 5 MB
+> write limit — still happens before the file is opened. And now the write
+> itself is staged: `write_file`, `append_file`, `edit_file`, `apply_edits` and
+> `insert_*` write into a sibling `.dw-tmp.<name>.<8 hex>` file and promote it
+> with an atomic rename, so an I/O error or a kill mid-write leaves the target
+> byte-identical instead of truncated. The file's mode is carried across the
+> promote (an executable stays executable). Two exceptions keep the old
+> behaviour on purpose: a target with more than one hard link is written
+> through the shared inode, because that is what a hardlink is *for*; and a
+> target in a directory dirtywork cannot write is written in place, because a
+> rename is impossible there. In docker mode there is no fd fallback: a
+> writable file inside an unwritable directory refuses (Permission denied)
+> where host mode writes in place. The promote changes the inode, so a
+> background process the worker left holding the file open keeps seeing the
+> old content. Recovery for a genuinely bad write is still `git -C <worktree>
+> checkout -- <path>` — the worktree is a scratch branch.
 
 #### Verifying a run
 

@@ -126,7 +126,19 @@ the container has no host filesystem or shared parent repo to escape into.
   `guardrail_block` event, so attempted escapes are visible at review time.
 - File tools refuse to operate on anything that isn't a regular file (FIFOs,
   devices, sockets) and refuse to write through a symlink at the final path
-  component, even when its target is inside the worktree. `write_file`
+  component, even when its target is inside the worktree. As of 0.10 a write is
+  staged in a sibling temp and promoted with `rename(2)`; a symlink present at
+  call time refuses exactly as before, and one that appears in the gap between
+  the check and the promote gets **replaced as a link** — `rename(2)` does not
+  follow its destination, so nothing is ever written through it. That is a
+  robustness change, not a security change: host tool calls are serial, every
+  `bash` call SIGKILLs its process group when it returns, and the realistic
+  adversary here is a confused or prompt-injected model, not a racing process.
+  The same delta holds in docker mode, where the promote (`mv -fT --`) replaces
+  the path itself: a symlink target is replaced by a regular file rather than
+  written through, and a hardlinked target is un-linked (the sibling link
+  keeps the old content). A promoted file's inode changes, so ownership and
+  extended attributes are the new file's, not the old file's. `write_file`
   content is capped at 5 MB, `list_dir` output at 2000 entries, and the
   assistant's own text is capped at 64 000 chars in the transcript (the
   full text is still sent to the model).

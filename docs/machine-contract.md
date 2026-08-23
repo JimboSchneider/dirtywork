@@ -161,9 +161,17 @@ The four in-place tools (`edit_file`, `apply_edits`, `insert_before`,
 an oversized result with the same string
 (`ERROR: result is <n> bytes, over the <limit>-byte write limit; nothing was
 written`) and produce byte-identical success text on the host and in the
-container. "Nothing was written" covers every failure **before** the write
-begins; a failure *during* the write (I/O error, kill) can still leave a
-truncated file — see `docs/operating.md`.
+container. Since 0.10 "nothing was written" also covers a failure **during**
+the write: every host write and every container write is staged in a sibling
+temp file and promoted with an atomic rename, so an I/O error or a kill leaves
+the target byte-identical. Two branches keep the old in-place behaviour and are
+named here rather than hidden: a target with more than one hard link (a
+hardlink is *meant* to see the write through the shared inode) and a target in
+a directory the process cannot write (a rename is impossible there). The
+promote changes the file's inode, so a worker process holding the old file open
+keeps reading the old content until it re-opens. In docker mode there is no fd
+fallback: a writable file inside an unwritable directory refuses (Permission
+denied) where host mode writes in place.
 
 **stdout:** on any run that gets past preflight, exactly one JSON object is
 printed to stdout (nothing else goes to stdout):
