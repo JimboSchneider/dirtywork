@@ -100,7 +100,7 @@ def _oversized(encoded: bytes):
 # directory; `rm -f` on any failure is harmless when the temp never existed.
 # GNU coreutils (`--reference`, `-T`) ship in the bookworm worker image.
 _PROMOTE = ('{ chmod --reference="$1" "$2" 2>/dev/null || chmod 644 "$2"; } && '
-            'mv -fT "$2" "$1" || { rm -f -- "$2"; exit 1; }')
+            'mv -fT -- "$2" "$1" || { rm -f -- "$2"; exit 1; }')
 
 # `$1` is the target relpath, `$2` the host-generated temp relpath; worker DATA
 # arrives on stdin and is never inside the script text. `&&`-chained so a

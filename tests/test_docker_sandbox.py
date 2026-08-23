@@ -1523,7 +1523,7 @@ def test_write_exec_uses_the_atomic_script_and_a_sibling_temp(started):
     assert stdin == b"hello"
     # Spec §2.6: `&&`-chained, never move INTO a directory, guards echo their
     # own diagnostic, the temp is removed on any failure.
-    assert 'mv -fT "$2" "$1"' in docker_mod.WRITE_SCRIPT
+    assert 'mv -fT -- "$2" "$1"' in docker_mod.WRITE_SCRIPT
     assert 'chmod --reference="$1" "$2" 2>/dev/null || chmod 644 "$2"' in docker_mod.WRITE_SCRIPT
     assert '{ rm -f -- "$2"; exit 1; }' in docker_mod.WRITE_SCRIPT
 

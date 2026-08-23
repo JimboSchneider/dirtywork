@@ -277,8 +277,10 @@ second traversal), at `finalize` before `_measure()`/`host_files_changed`; docke
 guard echoes its own diagnostic so `_write_raw`'s stderr wrap never renders empty):
 
 ```sh
-mkdir -p "$(dirname -- "$1")" && { [ ! -d "$1" ] || { echo "cannot write $1: Is a directory" >&2; exit 1; }; } && { [ -w "$1" ] || [ ! -e "$1" ] || { echo "cannot write $1: Permission denied" >&2; exit 1; }; } && cat > "$2" && { chmod --reference="$1" "$2" 2>/dev/null || chmod 644 "$2"; } && mv -fT "$2" "$1" || { rm -f -- "$2"; exit 1; }
+mkdir -p "$(dirname -- "$1")" && { [ ! -d "$1" ] || { echo "cannot write $1: Is a directory" >&2; exit 1; }; } && { [ -w "$1" ] || [ ! -e "$1" ] || { echo "cannot write $1: Permission denied" >&2; exit 1; }; } && cat > "$2" && { chmod --reference="$1" "$2" 2>/dev/null || chmod 644 "$2"; } && mv -fT -- "$2" "$1" || { rm -f -- "$2"; exit 1; }
 ```
+
+(`mv -fT -- ` — the `--` was added during execution: Task 3's review proved in-container that a top-level target named like `-f` is otherwise taken as an option. Execution amendment, 2026-08-23.)
 
 - `&&`-chained (a failed `cat` never promotes); `mv -fT` (never move *into* a directory); the
   writability guard keeps host parity (today an unwritable file refuses `EACCES`; without it the
