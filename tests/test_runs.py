@@ -1364,3 +1364,13 @@ def test_timed_out_is_its_own_outcome_class_in_both_views(tmp_path, monkeypatch,
     md = capsys.readouterr().out
     assert "[timed out]" in md
     assert "- **timeouts:** 2" in md
+
+
+def test_render_markdown_notes_a_truncated_files_changed_list():
+    doc = runs.render_markdown("slug1", {"files_changed": ["a.py", "b.py"],
+                                         "files_changed_truncated": True}, [])
+    assert "**files changed (2) — list truncated**" in doc
+    plain = runs.render_markdown("slug1", {"files_changed": ["a.py", "b.py"],
+                                           "files_changed_truncated": False}, [])
+    assert "**files changed (2)**" in plain
+    assert "list truncated" not in plain

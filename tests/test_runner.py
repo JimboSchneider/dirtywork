@@ -416,6 +416,42 @@ def test_length_truncation_with_empty_args_counts_as_malformed_args_not_bad_args
     assert "bad arguments" not in results[0]
 
 
+def test_length_truncated_but_parseable_call_still_dispatches(parts):
+    # Controller addition (Task 8 review): a fully parseable tool call with
+    # ALL required params present must still dispatch normally under
+    # finish_reason == "length" -- truncation recovery is for calls that
+    # failed to parse (case a) or are missing a required param (case b), not
+    # every "length" turn. Task 8's reviewer verified this manually; this
+    # pins it.
+    wt, registry, sandbox, transcript, tmp = parts
+    call = _resp(tool_calls=[_call("c", "write_file", {"path": "x.txt", "content": "hello\n"})],
+                 finish_reason="length",
+                 usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider = FakeProvider([call, _resp(content="done")])
+    result = Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert (wt / "x.txt").read_text() == "hello\n"
+    results = [e["result"] for e in _events(tmp) if e["event"] == "tool_result"]
+    assert "cut off at the token limit" not in results[0]
+
+
+def test_an_append_only_turn_counts_as_progress_and_does_not_stall(parts):
+    # Spec §6: _MUTATING_TOOLS is what ProgressTracker reads, and append_file
+    # is in it -- a run whose only work is appending must not be called stalled.
+    wt, registry, sandbox, transcript, tmp = parts
+    (wt / "notes.md").write_text("one\n")
+    calls = [_resp(tool_calls=[_call(f"c{i}", "append_file",
+                                     {"path": "notes.md", "text": f"line {i}\n"})])
+             for i in range(3)]
+    provider = FakeProvider(calls + [_resp(content="done")])
+    r = Runner(provider, registry, sandbox, transcript, model="m", stall_turns=2)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert (wt / "notes.md").read_text() == "one\nline 0\nline 1\nline 2\n"
+
+
 def test_truncated_nudge_names_write_file_and_append_file(parts):
     assert NUDGES["truncated"] == (
         "Your reply was cut off at the token limit. Continue with smaller steps — "

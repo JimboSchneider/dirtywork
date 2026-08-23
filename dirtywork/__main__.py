@@ -691,6 +691,13 @@ def _load_feedback(args):
             raise PreflightFailure(f"cannot read feedback file '{path}': {e}")
     if text is None:
         return None
+    if not text.strip():
+        # Spec §6: an empty or whitespace-only --feedback is ABSENT, not
+        # feedback. Normalized HERE, at parse, so the completed-run gate, the
+        # resume prompt and run.json's `feedback` field can never disagree --
+        # which is what makes docs/transcript-schema.md's "null means a resume
+        # without feedback" a true statement rather than an aspiration.
+        return None
     if len(text) > MAX_FEEDBACK_CHARS:
         raise PreflightFailure(
             f"feedback is {len(text)} chars, over the {MAX_FEEDBACK_CHARS}-char limit")
@@ -744,9 +751,16 @@ def _load_resume_target(args) -> dict:
         if verify_command:
             args.verify = verify_command
     if getattr(args, "verify_rounds", None) is None:
-        args.verify_rounds = prior.get("verify_rounds", DEFAULT_VERIFY_ROUNDS)
+        # Spec §6: `.get(k) if … is not None else default`, never
+        # `.get(k, default)` -- a hand-edited run.json carrying an explicit
+        # `null` would otherwise leave args.verify_rounds None.
+        args.verify_rounds = (prior.get("verify_rounds")
+                              if prior.get("verify_rounds") is not None
+                              else DEFAULT_VERIFY_ROUNDS)
     if getattr(args, "verify_timeout", None) is None:
-        args.verify_timeout = prior.get("verify_timeout", DEFAULT_VERIFY_TIMEOUT)
+        args.verify_timeout = (prior.get("verify_timeout")
+                               if prior.get("verify_timeout") is not None
+                               else DEFAULT_VERIFY_TIMEOUT)
     if getattr(args, "max_tokens", None) is None:
         # Spec §1.4/§6, hardened in fix round 1: a hand-edited run.json can
         # carry anything JSON allows for this key -- a string, a float, a

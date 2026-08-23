@@ -393,3 +393,37 @@ def test_export_run_never_execs_a_sweep_the_export_volume_is_readonly(tmp_path, 
     adds = [a for a in argvs if a[-3:] == ["/usr/bin/git", "add", "-A"]]
     assert sweeps == []
     assert len(adds) == 1
+
+
+def test_export_truncates_files_changed_and_flags_it(tmp_path, empty_worktree):
+    from dirtywork.workspace import MAX_FILES_CHANGED
+    names = b"".join(f"f{i:06d}.txt\n".encode() for i in range(MAX_FILES_CHANGED + 5))
+    fake = FakeDocker()
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "diff",
+                 "--cached", "--name-only", "deadbeef" * 5], _ok(names))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "write-tree"],
+                _ok(b"treehash1234\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "diff", "--stat",
+                 "deadbeef" * 5, "treehash1234"], _ok(b" many files changed\n"))
+    fake.script_popen_stdout(
+        ["docker", "exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "diff",
+         "deadbeef" * 5, "treehash1234"], b"diff --git a/x b/x\n+hi\n")
+    fake.script_popen_stdout(
+        ["docker", "exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "archive",
+         "--format=tar", "treehash1234"],
+        _make_tar([{"name": "hello.txt", "content": b"hi"}]))
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+
+    artifacts = export_run(
+        DockerConfig(), slug="abc123", base_commit="deadbeef" * 5, worktree=empty_worktree,
+        run_dir=run_dir, objects_dir=Path("/repo/.git/objects"),
+        image_ref="dirtywork/worker@sha256:" + "a" * 64, uid=501, gid=20,
+        repo_label="deadbeef", run=fake.run, popen=fake.popen,
+    )
+
+    assert len(artifacts.files_changed) == MAX_FILES_CHANGED
+    assert artifacts.files_changed_truncated is True
+    assert artifacts.files_changed == sorted(artifacts.files_changed)

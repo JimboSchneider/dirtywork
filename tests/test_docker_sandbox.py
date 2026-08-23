@@ -1806,3 +1806,25 @@ def test_append_file_post_read_size_over_the_write_cap_traps_to_result_cap(start
     assert out == (f"ERROR: result is {MAX_READ_BYTES + 100} bytes, over the "
                    f"{MAX_WRITE_BYTES}-byte write limit; nothing was written")
     assert not [c for c in fake.calls if _is_append_write_exec(c)]
+
+
+def test_docker_write_file_still_writes_when_the_pre_read_is_oversized(started):
+    # Spec §6: the pre-read is DECORATION on the write. An unreadable "before"
+    # picture must not stop the write; the result just reads as a new file.
+    from dirtywork.tools import MAX_READ_BYTES
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok())
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"],
+                _ok(b"x" * (MAX_READ_BYTES + 1)))
+    out = sb.write_file("big.txt", "replacement")
+    assert out == "Wrote 11 bytes to big.txt (new file, 1 line)"
+    assert len([c for c in fake.calls if _is_write_exec(c)]) == 1
+
+
+def test_docker_write_file_still_writes_when_the_pre_read_is_not_utf8(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok())
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"], _ok(b"\xff\xfe"))
+    out = sb.write_file("bin.dat", "now text\n")
+    assert out == "Wrote 9 bytes to bin.dat (new file, 1 line)"
+    assert len([c for c in fake.calls if _is_write_exec(c)]) == 1

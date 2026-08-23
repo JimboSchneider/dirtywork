@@ -2320,3 +2320,62 @@ def test_branch_from_an_invalid_slug_exits_2_and_creates_nothing(tmp_path, monke
     assert "invalid run slug '../escape'" in capsys.readouterr().err
     assert not (tmp_path / "runs").exists()
     assert not (repo / ".worktrees").exists()
+
+
+def test_empty_feedback_is_treated_as_absent_and_recorded_null(tmp_path, monkeypatch, capsys):
+    # Spec §6: normalized at PARSE, so the completed-run gate, the resume
+    # prompt and run.json all agree -- which is what makes
+    # docs/transcript-schema.md's "null means a resume without feedback" true.
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    run_dir = Path(first["run_dir"])
+    prior = json.loads((run_dir / "run.json").read_text())
+    prior["status"] = "completed"
+    (run_dir / "run.json").write_text(json.dumps(prior))
+    assert m.main(["resume", run_dir.name, "--feedback", ""]) == 2
+    assert "pass --feedback to continue it" in capsys.readouterr().err
+
+
+def test_whitespace_only_feedback_is_absent_too_and_recorded_null(tmp_path, monkeypatch, capsys):
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    run_dir = Path(first["run_dir"])
+    prior = json.loads((run_dir / "run.json").read_text())
+    prior["status"] = "max_turns"
+    (run_dir / "run.json").write_text(json.dumps(prior))
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url))
+    assert m.main(["resume", run_dir.name, "--feedback", "   \n\t "]) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert json.loads((Path(second["run_dir"]) / "run.json").read_text())["feedback"] is None
+
+
+def test_non_utf8_feedback_file_exits_2(tmp_path, monkeypatch, capsys):
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    run_dir = Path(first["run_dir"])
+    prior = json.loads((run_dir / "run.json").read_text())
+    prior["status"] = "max_turns"
+    (run_dir / "run.json").write_text(json.dumps(prior))
+    bad = tmp_path / "feedback.bin"
+    bad.write_bytes(b"\xff\xfe not text")
+    assert m.main(["resume", run_dir.name, "--feedback-file", str(bad)]) == 2
+    assert f"cannot read feedback file '{bad}'" in capsys.readouterr().err
+
+
+def test_explicit_null_verify_fields_in_run_json_fall_back_to_defaults(tmp_path, monkeypatch, capsys):
+    # Spec §6: a hand-edited run.json carrying `"verify_rounds": null` must not
+    # make args.verify_rounds None -- `.get(k, default)` would.
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    run_dir = Path(first["run_dir"])
+    prior = json.loads((run_dir / "run.json").read_text())
+    prior["status"] = "max_turns"
+    prior["verify_rounds"] = None
+    prior["verify_timeout"] = None
+    (run_dir / "run.json").write_text(json.dumps(prior))
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url))
+    assert m.main(["resume", run_dir.name]) == 0
+    second = json.loads(capsys.readouterr().out)
+    resumed = json.loads((Path(second["run_dir"]) / "run.json").read_text())
+    assert resumed["verify_rounds"] == m.DEFAULT_VERIFY_ROUNDS
+    assert resumed["verify_timeout"] == m.DEFAULT_VERIFY_TIMEOUT

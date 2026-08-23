@@ -50,7 +50,7 @@ One per run, always the first line.
 | `temperature` | | ✓ | number \| null | omitted from the request when null |
 | `provider` | | ✓ | `"openai"` \| `"anthropic"` | |
 | `resumed_from` | | ✓ | string \| null | slug of the run this one continues |
-| `feedback` | | ✓ | string \| null | 0.8: `resume --feedback`/`--feedback-file` text, verbatim (max 64 000 chars); null on a fresh run or a resume without feedback |
+| `feedback` | | ✓ | string \| null | 0.8: `resume --feedback`/`--feedback-file` text, verbatim (max 64 000 chars); null on a fresh run or a resume without feedback. Since 0.10 an EMPTY or whitespace-only `--feedback`/`--feedback-file` is normalized to null at parse, so it is treated as absent everywhere — including by the gate that refuses to resume a `completed` run without feedback |
 | `sandbox` | | ✓ | `"none"` \| object | `"none"` in host mode; in Docker mode `{backend, image, image_digest, image_pinned, network, memory, cpus, pids_limit, tmp_size, gitdir_size, max_worktree_mb, max_worktree_files, user}` |
 
 ### `assistant`
