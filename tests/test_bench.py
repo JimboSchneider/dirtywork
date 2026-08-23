@@ -19,7 +19,9 @@ from dirtywork.sandbox import docker_args
 from .fake_docker import FakeCaptured
 
 BENCH_REPOS = Path(__file__).resolve().parent.parent / "bench" / "repos"
-TASK_NAMES = ["py-fix-off-by-one", "node-add-cli-flag", "sh-fix-script"]
+TASK_NAMES = ["py-fix-off-by-one", "node-add-cli-flag", "sh-fix-script",
+              "py-rename-symbol", "py-impossible-test", "sh-hanging-script",
+              "py-big-fixture"]
 
 
 def _bench_json(task_name: str) -> dict:
@@ -80,7 +82,9 @@ def test_task_source_files_are_unsolved():
     # Fixtures ship the BUGGY state -- if the acceptance check already passes
     # against the fixture as committed, the task gives the model nothing to do.
     runtimes = {"py-fix-off-by-one": "python3", "sh-fix-script": "bash",
-                "node-add-cli-flag": "node"}
+                "node-add-cli-flag": "node", "py-rename-symbol": "bash",
+                "py-impossible-test": "bash", "sh-hanging-script": "bash",
+                "py-big-fixture": "bash"}
     for name in TASK_NAMES:
         if shutil.which(runtimes[name]) is None:
             continue  # optional runtime not installed in this environment
