@@ -18,14 +18,20 @@ from ..tools import (
     MAX_READ_BYTES,
     MAX_WRITE_BYTES,
     _apply_edits_once,
+    _append_missing,
+    _append_oversized,
     _cap,
     _check_write_size,
     _insert_once,
+    _not_utf8,
     _number_lines,
     _replace_once,
+    _result_too_big,
+    describe_change,
     describe_write,
     grep_timeout_result,
     timeout_result,
+    tmp_name,
 )
 from . import SandboxError
 from . import docker_args
@@ -84,6 +90,38 @@ def _oversized(encoded: bytes):
             f"{MAX_WRITE_BYTES}-byte write limit"
         )
     return None
+
+
+# Spec §2.6. The promote tail is shared by both write scripts so a change to
+# how a staged file becomes the real file happens in ONE place:
+# `chmod --reference` copies the target's mode (today's `cat >` wrote through
+# the inode and preserved it for free -- the temp+`mv` shape is what creates
+# the need); `chmod 644` is the new-file fallback; `mv -fT` never moves INTO a
+# directory; `rm -f` on any failure is harmless when the temp never existed.
+# GNU coreutils (`--reference`, `-T`) ship in the bookworm worker image.
+_PROMOTE = ('{ chmod --reference="$1" "$2" 2>/dev/null || chmod 644 "$2"; } && '
+            'mv -fT "$2" "$1" || { rm -f -- "$2"; exit 1; }')
+
+# `$1` is the target relpath, `$2` the host-generated temp relpath; worker DATA
+# arrives on stdin and is never inside the script text. `&&`-chained so a
+# failed `cat` can never promote. The writability guard keeps host parity:
+# today an unwritable file refuses EACCES, and without it temp+`mv` would
+# silently overwrite a 0444 file, since rename needs only directory write.
+# Each guard echoes its own diagnostic so _write_raw's stderr wrap never
+# renders empty.
+WRITE_SCRIPT = (
+    'mkdir -p "$(dirname -- "$1")" && '
+    '{ [ ! -d "$1" ] || { echo "cannot write $1: Is a directory" >&2; exit 1; }; } && '
+    '{ [ -w "$1" ] || [ ! -e "$1" ] || { echo "cannot write $1: Permission denied" >&2; exit 1; }; } && '
+    'cat > "$2" && ' + _PROMOTE
+)
+
+
+def _sibling_tmp(rel: str) -> str:
+    """The staging path for an in-container write to `rel`: the same directory
+    (so `mv` is an atomic same-filesystem rename) with tools.tmp_name()'s
+    generated basename."""
+    return posixpath.join(posixpath.dirname(rel), tmp_name(posixpath.basename(rel)))
 
 
 class DockerSandbox:
@@ -389,7 +427,12 @@ class DockerSandbox:
                    else f"tar rc={tar_out.returncode}, docker exec tar rc={tar_in.returncode}")
             raise SandboxError(f"resume seed failed: {why}")
 
-    def _read_raw(self, path: str, *, strict: bool = False):
+    def _read_raw(self, path: str, *, strict: bool = False, tool: str | None = None):
+        """Spec §5.1: `tool` names the tool whose call this read serves, so a
+        non-UTF-8 file refuses with the HOST's wording (`<path> is not valid
+        UTF-8 text; <tool> only works on text files`) instead of the legacy
+        `refusing to edit`, which was wrong for every insert/apply/append. It
+        is only consulted on a `strict` read."""
         rel, err = _rel(path)
         if err:
             return None, err
@@ -410,6 +453,11 @@ class DockerSandbox:
             try:
                 text = captured.output.decode("utf-8", errors="strict")
             except UnicodeDecodeError:
+                if tool is not None:
+                    return None, _not_utf8(path, tool)
+                # No shipped caller reaches this since 0.10 -- every strict
+                # read names its tool. Kept so a direct caller of this private
+                # method gets a coherent refusal rather than a formatted None.
                 return None, (
                     f"ERROR: '{path}' is not valid UTF-8; refusing to edit"
                 )
@@ -435,7 +483,7 @@ class DockerSandbox:
             return err
         argv = docker_args.exec_argv(
             self.container,
-            ["/bin/sh", "-c", 'mkdir -p "$(dirname -- "$1")" && cat > "$1"', "_", rel],
+            ["/bin/sh", "-c", WRITE_SCRIPT, "_", rel, _sibling_tmp(rel)],
             stdin=True,
         )
         captured = self._run(argv, timeout=WRITE_EXEC_TIMEOUT, stdin=encoded)
@@ -452,20 +500,21 @@ class DockerSandbox:
         # unreadable/missing file yields None and reads as a new file.
         # _oversized/_rel checks are owned by _write_raw (DRY) — one extra
         # `head` exec on an oversized/invalid-path write is acceptable.
-        old_text, _unused = self._read_raw(path, strict=True)
+        old_text, _unused = self._read_raw(path, strict=True, tool="write_file")
         err = self._write_raw(path, encoded)
         if err:
             return err
         return describe_write(path, old_text, content, len(encoded))
 
-    def _transform_file(self, path: str, transform) -> str:
+    def _transform_file(self, path: str, transform, *, tool: str) -> str:
         """Read → transform → write inside the container: the same shape as
         tools._transform_file, over the same transforms, so edit_file,
         insert_before and insert_after are three transforms over ONE path per
         backend (spec §3.2) and the two backends can never disagree about an
-        anchor rule or an error string. The UTF-8 refusal comes from
-        _read_raw(strict=True), which is why no `tool` name is needed here."""
-        text, err = self._read_raw(path, strict=True)
+        anchor rule or an error string. `tool` is forwarded to _read_raw so a
+        non-UTF-8 file refuses with the host's wording, naming the tool the
+        model called (spec §5.1)."""
+        text, err = self._read_raw(path, strict=True, tool=tool)
         if err:
             return err
         new_text, result = transform(text)
@@ -484,16 +533,20 @@ class DockerSandbox:
         return result
 
     def edit_file(self, path: str, old_string: str, new_string: str) -> str:
-        return self._transform_file(path, _replace_once(path, old_string, new_string))
+        return self._transform_file(path, _replace_once(path, old_string, new_string),
+                                    tool="edit_file")
 
     def apply_edits(self, path: str, edits: list) -> str:
-        return self._transform_file(path, _apply_edits_once(path, edits))
+        return self._transform_file(path, _apply_edits_once(path, edits),
+                                    tool="apply_edits")
 
     def insert_before(self, path: str, anchor: str, text: str) -> str:
-        return self._transform_file(path, _insert_once(path, anchor, text, "before"))
+        return self._transform_file(path, _insert_once(path, anchor, text, "before"),
+                                    tool="insert_before")
 
     def insert_after(self, path: str, anchor: str, text: str) -> str:
-        return self._transform_file(path, _insert_once(path, anchor, text, "after"))
+        return self._transform_file(path, _insert_once(path, anchor, text, "after"),
+                                    tool="insert_after")
 
     def _probe(self, attr: str, argv: list) -> bool:
         """Probe once per sandbox instance for an optional in-image tool; cached on self."""

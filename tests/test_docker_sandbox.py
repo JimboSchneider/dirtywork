@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import pytest
 from dirtywork.procs import Captured
 from dirtywork.resume import stash_dir_for
 from dirtywork.sandbox import SandboxError
+from dirtywork.sandbox import docker as docker_mod
 from dirtywork.sandbox.docker import DockerSandbox, docker_cli
 from dirtywork.sandbox.docker_args import DockerConfig
 from tests.docker_fakes import FakeDocker, FakePopen, _fail, _ok
@@ -18,6 +20,16 @@ _TOP_HEADER = b"UID  PID  PPID  C  STIME  TTY  TIME  CMD\n"
 
 _SAMPLE_ARGV = ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
                 "du -sk /work; find /work | wc -l"]
+
+
+def _is_write_exec(call) -> bool:
+    """True for a recorded docker call that ran DockerSandbox's write script.
+    ONE place, so the next change to that script text touches one line instead
+    of ten (spec §2.6's counted churn). `call` is FakeDocker's
+    (argv, timeout, stdin) triple; the script is a single argv ELEMENT, so
+    membership -- not a substring search over a joined string -- is the exact
+    test."""
+    return docker_mod.WRITE_SCRIPT in call[0]
 
 
 @pytest.fixture()
@@ -375,11 +387,17 @@ def test_write_file_sends_content_on_stdin(started):
     assert "Wrote 5 bytes" in out
     assert "(new file, 1 line)" in out
     argv, timeout, stdin = fake.calls[-1]
-    assert argv == [
+    # The temp basename is random per call (spec §2.2: the worker controls
+    # sibling names), so the fixed prefix is asserted exactly and the temp by
+    # shape -- test_write_exec_uses_the_atomic_script_and_a_sibling_temp pins
+    # the rest.
+    assert argv[:10] == [
         "exec", "-w", "/work", "-i", "dw-abc123",
-        "/bin/sh", "-c", 'mkdir -p "$(dirname -- "$1")" && cat > "$1"',
+        "/bin/sh", "-c", docker_mod.WRITE_SCRIPT,
         "_", "deep/new/file.txt",
     ]
+    assert re.fullmatch(r"deep/new/\.dw-tmp\.file\.txt\.[0-9a-f]{8}", argv[10])
+    assert len(argv) == 11
     assert stdin == b"hello"
 
 
@@ -390,7 +408,7 @@ def test_write_file_refuses_dot_git(started):
     # write_file's best-effort pre-read runs before _write_raw's checks (DRY:
     # _write_raw owns the checks), so one harmless `head` exec is expected —
     # but never the actual write.
-    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    writes = [c for c in fake.calls if _is_write_exec(c)]
     assert not writes
 
 
@@ -399,7 +417,7 @@ def test_write_file_refuses_oversized_content(started):
     sb, fake, run_dir = started
     out = sb.write_file("big.txt", "x" * (MAX_WRITE_BYTES + 1))
     assert out.startswith("ERROR:")
-    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    writes = [c for c in fake.calls if _is_write_exec(c)]
     assert not writes
 
 
@@ -409,7 +427,7 @@ def test_edit_file_reads_then_writes(started):
     out = sb.edit_file("src/app.py", "return 42", "return 43")
     assert "Edited" in out
     heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
-    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    writes = [c for c in fake.calls if _is_write_exec(c)]
     assert len(heads) == 1
     assert len(writes) == 1
 
@@ -437,7 +455,7 @@ def test_edit_file_write_failure(started):
     assert out.startswith("ERROR:")
     # Verify write was attempted (1 read + 1 write = 2 exec calls)
     heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
-    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    writes = [c for c in fake.calls if _is_write_exec(c)]
     assert len(heads) == 1
     assert len(writes) == 1
 
@@ -464,7 +482,7 @@ def test_edit_file_non_utf8(started):
     assert "not valid UTF-8" in out
     # Verify no write was attempted (1 read, 0 writes)
     heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
-    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    writes = [c for c in fake.calls if _is_write_exec(c)]
     assert len(heads) == 1
     assert len(writes) == 0
 
@@ -1409,7 +1427,7 @@ def test_insert_after_reads_then_writes(started):
     out = sb.insert_after("cfg.txt", "beta", "beta-plus")
     assert out.startswith("Inserted into cfg.txt: +1 -0")
     heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
-    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    writes = [c for c in fake.calls if _is_write_exec(c)]
     assert len(heads) == 1
     assert len(writes) == 1
     assert writes[0][2] == b"alpha\nbeta\nbeta-plus\ngamma\n"
@@ -1420,7 +1438,7 @@ def test_insert_before_refuses_a_repeated_anchor(started):
     fake.script(["exec"], _ok(b"aa\naa\n"))
     out = sb.insert_before("dup.txt", "aa", "x")
     assert out.startswith("ERROR: anchor occurs 2 times in dup.txt")
-    assert not [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    assert not [c for c in fake.calls if _is_write_exec(c)]
 
 
 def test_apply_edits_reads_then_writes(started):
@@ -1430,7 +1448,7 @@ def test_apply_edits_reads_then_writes(started):
                                        {"old": "two", "new": "2"}])
     assert out.startswith("Applied 2 edits to batch.txt: ")
     heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
-    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    writes = [c for c in fake.calls if _is_write_exec(c)]
     assert len(heads) == 1 and len(writes) == 1        # one read, one write, per batch
     assert writes[0][2] == b"1\n2\n"                    # the batch's final text
 
@@ -1443,7 +1461,7 @@ def test_apply_edits_rollback_never_writes(started):
     # Byte-identical to the host's text (spec §1.8 parity), and no write exec.
     assert out == ("ERROR: edit 2 of 2: old text occurs 0 times in batch.txt; it must "
                    "occur exactly once (after edits 1..1 are applied); no edits applied")
-    assert not [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    assert not [c for c in fake.calls if _is_write_exec(c)]
 
 
 def test_apply_edits_matches_the_host_text_for_success_and_every_refusal(started, tmp_path):
@@ -1479,4 +1497,71 @@ def test_transform_result_over_the_write_cap_is_refused(started):
     assert sb.edit_file("grow.txt", "seed", huge) == expected
     fake.script(["exec"], _ok(b"seed\n"))
     assert sb.apply_edits("grow.txt", [{"old": "seed", "new": huge}]) == expected
-    assert not [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    assert not [c for c in fake.calls if _is_write_exec(c)]
+
+
+# --- spec §2.6/§5.1: the atomic container write script and the tool-aware
+# --- UTF-8 refusal.
+
+
+def test_write_exec_uses_the_atomic_script_and_a_sibling_temp(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok())
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"],
+                _fail(b"head: cannot open 'deep/new/file.txt'"))
+    sb.write_file("deep/new/file.txt", "hello")
+    argv, timeout, stdin = fake.calls[-1]
+    assert argv[:8] == ["exec", "-w", "/work", "-i", "dw-abc123",
+                        "/bin/sh", "-c", docker_mod.WRITE_SCRIPT]
+    assert argv[8] == "_"
+    assert argv[9] == "deep/new/file.txt"
+    # The temp is a SIBLING of the target (same directory => same filesystem =>
+    # `mv` is an atomic rename) and its name is generated HOST-side, so worker
+    # bytes never reach the script text.
+    assert re.fullmatch(r"deep/new/\.dw-tmp\.file\.txt\.[0-9a-f]{8}", argv[10])
+    assert len(argv) == 11
+    assert stdin == b"hello"
+    # Spec §2.6: `&&`-chained, never move INTO a directory, guards echo their
+    # own diagnostic, the temp is removed on any failure.
+    assert 'mv -fT "$2" "$1"' in docker_mod.WRITE_SCRIPT
+    assert 'chmod --reference="$1" "$2" 2>/dev/null || chmod 644 "$2"' in docker_mod.WRITE_SCRIPT
+    assert '{ rm -f -- "$2"; exit 1; }' in docker_mod.WRITE_SCRIPT
+
+
+def test_transform_non_utf8_refusals_name_the_tool_and_match_the_host(started, tmp_path):
+    """Spec §5.1: docker's wording becomes the host's, and names the tool the
+    model actually called -- never the legacy `refusing to edit`."""
+    from dirtywork import tools
+    sb, fake, run_dir = started
+    wt = tmp_path / "utf8parity"
+    wt.mkdir()
+    (wt / "bin.dat").write_bytes(b"\xff\xfe old")
+    cases = [
+        ("edit_file", lambda: sb.edit_file("bin.dat", "old", "new"),
+         lambda: tools.edit_file(wt, "bin.dat", "old", "new")),
+        ("insert_before", lambda: sb.insert_before("bin.dat", "old", "x"),
+         lambda: tools.insert_before(wt, "bin.dat", "old", "x")),
+        ("insert_after", lambda: sb.insert_after("bin.dat", "old", "x"),
+         lambda: tools.insert_after(wt, "bin.dat", "old", "x")),
+        ("apply_edits", lambda: sb.apply_edits("bin.dat", [{"old": "old", "new": "new"}]),
+         lambda: tools.apply_edits(wt, "bin.dat", [{"old": "old", "new": "new"}])),
+    ]
+    for tool, docker_call, host_call in cases:
+        fake.script(["exec"], _ok(b"\xff\xfe old"))
+        docker_out = docker_call()
+        assert docker_out == (f"ERROR: bin.dat is not valid UTF-8 text; {tool} only "
+                              f"works on text files")
+        assert docker_out == host_call()
+        assert "refusing to edit" not in docker_out
+    assert not [c for c in fake.calls if _is_write_exec(c)]
+
+
+def test_read_raw_without_a_tool_keeps_the_legacy_wording(started):
+    # No shipped caller reaches this branch since 0.10 (every strict read names
+    # its tool). It stays so a direct caller of this private method gets a
+    # coherent refusal instead of "None only works on text files".
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok(b"\xff\xfe"))
+    text, err = sb._read_raw("bin.dat", strict=True)
+    assert text is None
+    assert err == "ERROR: 'bin.dat' is not valid UTF-8; refusing to edit"
