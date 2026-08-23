@@ -1,9 +1,0 @@
-{
-  "task": "Running `bash build.sh` should create `out.txt` with a build confirmation, but `bash acceptance/check.sh` currently fails. Make it pass.",
-  "acceptance": {
-    "command": "bash /acceptance/check.sh",
-    "hashes": {
-      "acceptance/check.sh": "60090b3721793cff6ef355069ff9a51a35b3f45c2a619fa5a97eb15f0da403f0"
-    }
-  }
-}

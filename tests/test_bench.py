@@ -20,7 +20,7 @@ from .fake_docker import FakeCaptured
 
 BENCH_REPOS = Path(__file__).resolve().parent.parent / "bench" / "repos"
 TASK_NAMES = ["py-fix-off-by-one", "node-add-cli-flag", "sh-fix-script",
-              "py-rename-symbol", "py-impossible-test", "sh-hanging-script",
+              "py-rename-symbol",
               "py-big-fixture", "py-canonical-config", "sh-wait-for-service"]
 
 
@@ -83,7 +83,6 @@ def test_task_source_files_are_unsolved():
     # against the fixture as committed, the task gives the model nothing to do.
     runtimes = {"py-fix-off-by-one": "python3", "sh-fix-script": "bash",
                 "node-add-cli-flag": "node", "py-rename-symbol": "bash",
-                "py-impossible-test": "bash", "sh-hanging-script": "bash",
                 "py-big-fixture": "bash", "py-canonical-config": "bash",
                 "sh-wait-for-service": "bash"}
     for name in TASK_NAMES:
