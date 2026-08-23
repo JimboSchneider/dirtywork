@@ -435,6 +435,16 @@ verified against a live Ollama v0.32.x:
    changed between passes must not leave the tree pointing at an unwritten blob), then
    update-index/write-tree/commit-tree as today. (Verified: `write-tree` fails on absent blobs, so
    the no-op decision cannot come after a `-w`-less update-index.)
+
+   (Execution amendment, 2026-08-23: the "no loose objects on a no-op" framing above was imprecise
+   — git's object store is content-addressed, so `-w` on unchanged content was ALREADY a no-op at
+   the object-count level on the old single-pass code; that half of the claim held before this
+   change too. Task 10's fix round 1 rewrote the pinning test
+   (`test_snapshot_worktree_makes_a_no_op_decision_without_writing`) to check the command
+   transcript instead of the object count, since the count alone doesn't discriminate old code from
+   new. The two-pass change's real, measured effect is elsewhere: a genuine no-op now returns
+   before the temp index + `write-tree` ever run and stops freshening blob mtimes (~21% faster at
+   20k files), at the cost of a second full read+hash pass on the changed path (+9-19%).)
 4. **Walk cost:** replace the walk with an explicit BFS: collect each level's candidate directory
    relpaths, run **one** batched index-aware `_ignored_relpaths` call per tree *depth* (never
    `--no-index` — index-awareness is what keeps a tracked `build/keep.txt` in the snapshot when

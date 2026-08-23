@@ -483,13 +483,20 @@ def _hash_entries(worktree: Path, files: list, links: list, env: dict, *,
 
     `write` selects `-w` (write each blob into the object store) or not. Spec
     §4.3 calls this TWICE: once WITHOUT -w, only to decide whether anything
-    changed at all (a no-op snapshot must not litter the object store with
-    loose objects), and then -- only when something did -- once WITH -w,
-    rebuilding the entries from the SECOND pass's shas. Rebuilding is
-    load-bearing: a file that changed between the two passes must not leave the
-    tree pointing at a blob that was never written. (Verified: `write-tree`
-    fails on absent blobs, so the no-op decision cannot instead be made after a
-    -w-less update-index.)
+    changed at all -- a genuine no-op then returns before the temp index and
+    `write-tree` ever run and without freshening any blob's mtime. (NOT to
+    avoid loose objects: git's content-addressed store already makes a `-w`
+    hash of unchanged content a no-op at the object-count level regardless of
+    pass count -- see snapshot_worktree's 2026-08-23 execution-amendment
+    note.) Only when something DID change does a second pass run, WITH -w,
+    rebuilding the entries from that pass's shas. Rebuilding is load-bearing:
+    a file that changed between the two passes must not leave the tree
+    pointing at a blob that was never written. (Verified: `write-tree` fails
+    on absent blobs, so the no-op decision cannot instead be made after a
+    -w-less update-index.) The second pass is a deliberate COST, not free: on
+    a genuinely changed worktree this reads and hashes every file twice
+    (measured +9-19%), traded for skipping that work entirely on a no-op
+    (measured ~21% faster at 20k files).
 
     `--no-filters` is load-bearing too: the filter that would otherwise run is
     configured REPO-locally, which GIT_CONFIG_GLOBAL=/dev/null does not
@@ -552,27 +559,41 @@ def snapshot_worktree(worktree: Path, branch: str, message: str,
     which is what keeps this in agreement with `host_worktree_dirty`'s `git
     status`. Raises WorkspaceError.
 
-    `hash-object -w --no-filters` is load-bearing: the filter that would
-    otherwise run is configured REPO-locally, which GIT_CONFIG_GLOBAL=/dev/null
-    does not disable (verified, git 2.48.1). `worktree` is resolved to an
-    absolute path up front, so every line handed to `hash-object
-    --stdin-paths` starts with `/` — a worker-chosen filename can never be the
-    FIRST character of that line, which is what neutralises `--stdin-paths`'
-    own C-quoting of a leading `"` (verified: a relative path starting with
-    `"` is silently misread as a different, C-unescaped path; an absolute one
-    is not). `update-index --index-info` cannot be neutralised the same way —
-    the field it quotes is the tree-relative path itself, which a worker fully
-    controls — so it runs as `-z`/NUL-delimited instead, a protocol with no
-    quoting step at all (verified against git 2.48.1: an on-disk file literally
-    named `"src\\057main.py"` round-trips as that literal name under `-z`, but
-    is silently re-recorded as `src/main.py` without it). A relative path
-    containing any control character (at minimum `\\n`, which
-    `--stdin-paths`' line protocol treats as the path terminator, and `\\r`,
-    which `--stdin-paths` strips from the end of a line before opening it) is
-    refused outright rather than mis-hashed or mis-addressed. `worktree` must
-    already have `branch` checked out (`symbolic-ref HEAD`, checked before
-    anything is hashed) — a worktree on a different branch never gets its
-    content committed onto `branch` out from under it."""
+    `--no-filters` is load-bearing on hashing (see `_hash_entries`): the
+    filter that would otherwise run is configured REPO-locally, which
+    GIT_CONFIG_GLOBAL=/dev/null does not disable (verified, git 2.48.1).
+    `worktree` is resolved to an absolute path up front, so every line handed
+    to `hash-object --stdin-paths` starts with `/` — a worker-chosen filename
+    can never be the FIRST character of that line, which is what neutralises
+    `--stdin-paths`' own C-quoting of a leading `"` (verified: a relative path
+    starting with `"` is silently misread as a different, C-unescaped path;
+    an absolute one is not). `update-index --index-info` cannot be
+    neutralised the same way — the field it quotes is the tree-relative path
+    itself, which a worker fully controls — so it runs as `-z`/NUL-delimited
+    instead, a protocol with no quoting step at all (verified against git
+    2.48.1: an on-disk file literally named `"src\\057main.py"` round-trips as
+    that literal name under `-z`, but is silently re-recorded as
+    `src/main.py` without it). A relative path containing any control
+    character (at minimum `\\n`, which `--stdin-paths`' line protocol treats
+    as the path terminator, and `\\r`, which `--stdin-paths` strips from the
+    end of a line before opening it) is refused outright rather than
+    mis-hashed or mis-addressed. `worktree` must already have `branch`
+    checked out (`symbolic-ref HEAD`, checked before anything is hashed) — a
+    worktree on a different branch never gets its content committed onto
+    `branch` out from under it.
+
+    (Execution amendment, 2026-08-23, spec §4.3: hashing runs in TWO passes
+    (`_hash_entries`, `write=False` then `write=True`), not the single `-w`
+    pass this docstring originally described. The original "avoids loose
+    objects on a no-op" framing was imprecise — git's content-addressed store
+    already made a `-w` hash of unchanged content a no-op at the object-count
+    level, so the old single-pass code did not litter the object store on a
+    no-op either; Task 10's fix round 1 rewrote the pinning test to check the
+    command transcript (no `-w`, no `update-index`, no `write-tree` on a
+    no-op) instead of the object count. The two-pass change's real, measured
+    effect: a genuine no-op now returns before the temp index + `write-tree`
+    ever run and stops freshening blob mtimes (~21% faster at 20k files), at
+    the cost of a second full read+hash pass on the changed path (+9-19%).)"""
     worktree = Path(worktree).resolve()
     env = git_env()
 
@@ -583,16 +604,6 @@ def snapshot_worktree(worktree: Path, branch: str, message: str,
             f"worktree {worktree} has {current} checked out, not refs/heads/{branch}; "
             f"refusing to commit its content onto a branch it is not on"
         )
-
-    # Spec §4.2: the empty tree's id is content-addressed, so it depends on the
-    # repo's OBJECT FORMAT -- the well-known 4b825dc… is the SHA-1 answer only.
-    # Computed here, once per call, from the repo itself. `--stdin` with empty
-    # stdin (never a /dev/null path) and no `-w`: this asks for an id, it does
-    # not write an object.
-    empty_tree_res = _git(worktree, *GIT_NEUTRAL_FLAGS, "hash-object", "-t", "tree",
-                          "--stdin", env=env, stdin_text="")
-    _check(empty_tree_res, "hash-object -t tree", worktree)
-    empty_tree = empty_tree_res.stdout.strip()
 
     files, links, skipped, unreadable_dirs = _walk_worktree(worktree)
     if report is not None:
@@ -630,15 +641,27 @@ def snapshot_worktree(worktree: Path, branch: str, message: str,
     _check(head_tree_res, f"rev-parse {head}^{{tree}}", worktree)
     head_tree = head_tree_res.stdout.strip()
 
-    if not files and not links and head_tree != empty_tree:
-        # An index built from zero entries writes the empty tree. Comparing
-        # that against a NON-empty head_tree below would look like a real
-        # change and commit "delete everything" — refuse before hashing (there
-        # is nothing to hash) or writing anything at all.
-        raise WorkspaceError(
-            f"refusing to snapshot an empty tree over a non-empty branch head "
-            f"({worktree} holds nothing snapshot_worktree can see)"
-        )
+    if not files and not links:
+        # Spec §4.2: the empty tree's id is content-addressed, so it depends
+        # on the repo's OBJECT FORMAT — the well-known 4b825dc… is the SHA-1
+        # answer only. Computed here, LAZILY — read nowhere else, so a
+        # non-empty snapshot (the common case) never pays this extra
+        # subprocess. `--stdin` with empty stdin (never a /dev/null path) and
+        # no `-w`: this asks for an id, it does not write an object.
+        empty_tree_res = _git(worktree, *GIT_NEUTRAL_FLAGS, "hash-object", "-t", "tree",
+                              "--stdin", env=env, stdin_text="")
+        _check(empty_tree_res, "hash-object -t tree", worktree)
+        empty_tree = empty_tree_res.stdout.strip()
+        if head_tree != empty_tree:
+            # An index built from zero entries writes the empty tree.
+            # Comparing that against a NON-empty head_tree below would look
+            # like a real change and commit "delete everything" — refuse
+            # before hashing (there is nothing to hash) or writing anything
+            # at all.
+            raise WorkspaceError(
+                f"refusing to snapshot an empty tree over a non-empty branch head "
+                f"({worktree} holds nothing snapshot_worktree can see)"
+            )
 
     # Spec §4.3, pass 1: hash WITHOUT -w and compare against the head tree. If
     # they agree there is nothing to snapshot, and returning here means a no-op

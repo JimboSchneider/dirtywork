@@ -873,15 +873,36 @@ def _loose_objects(repo: Path) -> int:
     raise AssertionError("git count-objects printed no count")
 
 
-def test_snapshot_worktree_writes_no_loose_objects_on_a_no_op(tmp_path: Path):
-    # Spec §4.3: a snapshot that changes nothing must not litter the object
-    # store. Pass 1 hashes WITHOUT -w purely to decide.
+def test_snapshot_worktree_makes_a_no_op_decision_without_writing(tmp_path: Path, monkeypatch):
+    # Spec §4.3: git's content-addressed object store ALREADY guarantees the
+    # loose-object count is unchanged on a no-op -- `-w` on unchanged content
+    # is a no-op at the object-store level even on the old single-pass code,
+    # so that count alone doesn't discriminate the fix. What this pins is the
+    # MECHANISM: pass 1 hashes WITHOUT -w purely to decide, and a genuine
+    # no-op returns before `update-index`/`write-tree` ever run -- checked via
+    # the actual command transcript, not just an object count.
+    import dirtywork.workspace as workspace_mod
     from dirtywork.workspace import snapshot_worktree
     repo, wt = _snapshot_repo(tmp_path)
     assert snapshot_worktree(wt, "dirtywork/snap", "wip: one") is not None
     before = _loose_objects(repo)
+
+    calls = []
+    real_run = workspace_mod.subprocess.run
+
+    def _recording(argv, *args, **kwargs):
+        calls.append(list(argv))
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_mod.subprocess, "run", _recording)
     assert snapshot_worktree(wt, "dirtywork/snap", "wip: two") is None
-    assert _loose_objects(repo) == before
+
+    hash_object_calls = [c for c in calls if "hash-object" in c]
+    assert hash_object_calls
+    assert not any("-w" in c for c in hash_object_calls)
+    assert not any("update-index" in c for c in calls)
+    assert not any("write-tree" in c for c in calls)
+    assert _loose_objects(repo) == before      # secondary invariant
 
 
 def test_snapshot_worktree_tree_only_references_written_blobs(tmp_path: Path):
@@ -899,13 +920,21 @@ def test_snapshot_worktree_tree_only_references_written_blobs(tmp_path: Path):
 
 def test_snapshot_worktree_computes_the_empty_tree_id_per_invocation(tmp_path: Path):
     # Spec §4.2: the hard-coded SHA-1 empty tree is gone, so a SHA-256 repo
-    # gets the right id.
+    # gets the right id. init with --object-format=sha256 so this actually
+    # EXERCISES that (the hasattr line alone doesn't): on the old hard-coded
+    # SHA-1 constant this repo's empty tree never matches, so a genuine no-op
+    # over an empty head is misread as "delete everything" and refused.
+    import re
     import dirtywork.workspace as workspace_mod
     from dirtywork.workspace import snapshot_worktree
     assert not hasattr(workspace_mod, "EMPTY_TREE_SHA")
+    version = subprocess.run(["git", "--version"], capture_output=True, text=True, check=True).stdout
+    m = re.search(r"(\d+)\.(\d+)", version)
+    if m and (int(m.group(1)), int(m.group(2))) < (2, 29):
+        pytest.skip("git < 2.29 lacks --object-format=sha256")
     repo = tmp_path / "repo_empty"
     repo.mkdir()
-    _git(repo, "init", "-b", "main")
+    _git(repo, "init", "-b", "main", "--object-format=sha256")
     _git(repo, "config", "user.email", "t@t")
     _git(repo, "config", "user.name", "t")
     _git(repo, "commit", "--allow-empty", "-m", "init")
