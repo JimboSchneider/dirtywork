@@ -25,9 +25,11 @@ from . import __version__
 from .budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB
 from .llm import LLMError
 from .providers import DEFAULT_BASE_URLS, PROVIDER_NAMES, get_provider
-from .rundir import RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json, write_run_json
+from .rundir import (RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json,
+                     run_dir_for, write_run_json)
 from .runner import (
     CHARS_PER_TOKEN,
+    DEFAULT_MAX_TOKENS,
     DEFAULT_STALL_TURNS,
     DEFAULT_STUCK_REPEATS,
     DEFAULT_VERIFY_ROUNDS,
@@ -88,7 +90,8 @@ def build_system_prompt(display_root, repo_context: str | None, *, allow_commit:
 Complete the task, then reply with a plain-text summary of what you changed and what commands you ran.
 
 Rules:
-- Use edit_file, apply_edits (several exact replacements in one file at once), insert_before, insert_after or write_file for ALL file changes. Never modify files via bash (no sed -i, no echo redirects, no heredocs).
+- Use edit_file, apply_edits (several exact replacements in one file at once), insert_before, insert_after, write_file or append_file for ALL file changes. Never modify files via bash (no sed -i, no echo redirects, no heredocs).
+- A file too large for one reply: write_file the first part, then append_file each following part. append_file adds your text to the END of an existing file with nothing inserted between, so include a leading newline when the file does not end with one.
 - Paths are relative to {display_root}.
 - Explore before editing: use list_dir, grep, and read_file to understand the code first.
 - Verify your work: run the repo's tests or build via bash before declaring the task complete.
@@ -171,7 +174,22 @@ def _non_negative_int(text: str) -> int:
 _ENDPOINT_HINTS = {
     "openai": "Is the OpenAI-compatible server running? Try: lms ps",
     "anthropic": "Check ANTHROPIC_API_KEY and that api.anthropic.com is reachable.",
+    "ollama": "Is Ollama running? Try: ollama ps",
 }
+
+# Spec §3.1: what to tell the operator when the model is not there. A dict
+# keyed by provider, replacing the two-branch ternary, so adding a provider is
+# an entry rather than another branch. `{model}` is substituted with str.replace
+# (never str.format): a model id is operator input and may contain braces.
+_MODEL_HINTS = {
+    "openai": "Load it with: lms load {model}",
+    "ollama": ("Pull or run it first: ollama run {model} — Ollama model ids include "
+               "the tag, e.g. 'gemma4:latest'"),
+}
+_DEFAULT_MODEL_HINT = "Pick one of the models listed above with --model."
+# Ollama's /v1/models lists PULLED models, not resident ones, so "not loaded"
+# would be the wrong word there.
+_MODEL_ABSENT_WORD = {"ollama": "not available"}
 
 
 def _preflight_llm(args):
@@ -186,10 +204,11 @@ def _preflight_llm(args):
     except LLMError as e:
         raise PreflightFailure(f"{e}\n{_ENDPOINT_HINTS.get(args.provider, '')}")
     if args.model not in models:
-        hint = (f"Load it with: lms load {args.model}" if args.provider == "openai"
-                else "Pick one of the models listed above with --model.")
+        hint = _MODEL_HINTS.get(args.provider, _DEFAULT_MODEL_HINT).replace(
+            "{model}", args.model)
+        absent = _MODEL_ABSENT_WORD.get(args.provider, "not loaded")
         raise PreflightFailure(
-            f"model '{args.model}' not loaded (loaded: {', '.join(models) or 'none'}). {hint}")
+            f"model '{args.model}' {absent} (loaded: {', '.join(models) or 'none'}). {hint}")
     return provider
 
 
@@ -206,6 +225,21 @@ def _resolve_context_window(args, provider=None) -> tuple:
     if source == "default":
         print(f"warning: no known context window for '{args.model}'; assuming {window} tokens "
               f"(set --context-window or DIRTYWORK_CONTEXT_WINDOW)", file=sys.stderr)
+    # Spec §1.4: prompt and reply share the window, so a cap at or above it
+    # leaves no room for a prompt at all. Refused here, after the warning, so
+    # an operator with an unknown model still sees which window was assumed.
+    # Read with getattr: this defends a directly-built Namespace (e.g. in a
+    # test that skips argparse), which may lack the attribute entirely. A
+    # real CLI invocation always has it -- `_add_run_flags` sets a default for
+    # both `run` and `resume` -- and `runs`/`bench` never reach this function
+    # at all: `main()` dispatches and returns for both before this call.
+    max_tokens = getattr(args, "max_tokens", None)
+    if max_tokens is None:
+        max_tokens = DEFAULT_MAX_TOKENS
+    if max_tokens >= window:
+        raise PreflightFailure(
+            f"--max-tokens {max_tokens} must be smaller than the {window}-token "
+            f"context window")
     return window, source
 
 
@@ -241,7 +275,13 @@ def _resolve_branch_from(args) -> tuple:
     if not isinstance(value, str) or not value.startswith("@"):
         return value, None
     slug = value[1:]
-    run_dir = resolve_run_dir(slug, RUNS_DIR)
+    # Spec §4.1: the SAME rule `runs snapshot` uses. resolve_run_dir treats
+    # anything with a separator as a path, which is right for
+    # `dirtywork resume <run-dir>` and wrong for an `@<slug>` reference.
+    try:
+        run_dir = run_dir_for(slug, RUNS_DIR)
+    except RunDirError as e:
+        raise PreflightFailure(str(e))
     if not run_dir.is_dir():
         raise PreflightFailure(f"unknown run '{slug}' (no run dir under {RUNS_DIR})")
     try:
@@ -429,6 +469,7 @@ def _write_run_json_start(run_dir: Path, ctx: RunContext, args) -> None:
         "provider": args.provider,
         "context_window": ctx.context_window,
         "context_window_source": ctx.context_window_source,
+        "max_tokens": getattr(args, "max_tokens", DEFAULT_MAX_TOKENS),
         "branch_from_run": ctx.branch_from_run,
         "feedback": ctx.feedback,
         "resumed_from": ctx.resumed_from,
@@ -650,6 +691,13 @@ def _load_feedback(args):
             raise PreflightFailure(f"cannot read feedback file '{path}': {e}")
     if text is None:
         return None
+    if not text.strip():
+        # Spec §6: an empty or whitespace-only --feedback is ABSENT, not
+        # feedback. Normalized HERE, at parse, so the completed-run gate, the
+        # resume prompt and run.json's `feedback` field can never disagree --
+        # which is what makes docs/transcript-schema.md's "null means a resume
+        # without feedback" a true statement rather than an aspiration.
+        return None
     if len(text) > MAX_FEEDBACK_CHARS:
         raise PreflightFailure(
             f"feedback is {len(text)} chars, over the {MAX_FEEDBACK_CHARS}-char limit")
@@ -673,6 +721,12 @@ def _load_resume_target(args) -> dict:
     elif args.provider != prior_provider:
         # Same rule as --sandbox (which resume does not expose at all): the
         # prior run's history was shaped by that provider's wire format.
+        # Deliberately NO openai<->ollama carve-out (spec §3.1), even though
+        # the wire format is identical: the inherited --model would carry the
+        # wrong id (Ollama's carry a tag) and base_url is not recorded on the
+        # run, so the run is not portable between the two. Anyone who reached
+        # Ollama before 0.10 with `--provider openai --base-url …:11434/v1`
+        # keeps resuming exactly that way.
         raise PreflightFailure(
             f"run {prior['slug']} used provider '{prior_provider}'; resume it with that "
             f"provider (drop --provider {args.provider}) or start a new run")
@@ -697,9 +751,31 @@ def _load_resume_target(args) -> dict:
         if verify_command:
             args.verify = verify_command
     if getattr(args, "verify_rounds", None) is None:
-        args.verify_rounds = prior.get("verify_rounds", DEFAULT_VERIFY_ROUNDS)
+        # Spec §6: `.get(k) if … is not None else default`, never
+        # `.get(k, default)` -- a hand-edited run.json carrying an explicit
+        # `null` would otherwise leave args.verify_rounds None.
+        args.verify_rounds = (prior.get("verify_rounds")
+                              if prior.get("verify_rounds") is not None
+                              else DEFAULT_VERIFY_ROUNDS)
     if getattr(args, "verify_timeout", None) is None:
-        args.verify_timeout = prior.get("verify_timeout", DEFAULT_VERIFY_TIMEOUT)
+        args.verify_timeout = (prior.get("verify_timeout")
+                               if prior.get("verify_timeout") is not None
+                               else DEFAULT_VERIFY_TIMEOUT)
+    if getattr(args, "max_tokens", None) is None:
+        # Spec §1.4/§6, hardened in fix round 1: a hand-edited run.json can
+        # carry anything JSON allows for this key -- a string, a float, a
+        # bool, zero, a negative number -- not just a missing key or an
+        # explicit null. Only a real positive int (bool excluded, since
+        # `isinstance(True, int)` is True) is inherited; everything else
+        # falls back to the default rather than tracebacking in preflight's
+        # `>=` comparison or bypassing `_positive_int` into a cap-blind or
+        # inflated budget.
+        inherited = prior.get("max_tokens")
+        if (isinstance(inherited, int) and not isinstance(inherited, bool)
+                and inherited > 0):
+            args.max_tokens = inherited
+        else:
+            args.max_tokens = DEFAULT_MAX_TOKENS
     # Last, so the earlier refusals (still running, missing worktree, provider
     # switch) keep their own messages when they apply too.
     args.feedback_text = _load_feedback(args)
@@ -792,7 +868,9 @@ def _execute(ctx: RunContext, args, client) -> int:
 
         runner = Runner(
             client, registry, sandbox, transcript, model=args.model,
-            max_turns=args.max_turns, timeout=args.timeout, temperature=args.temperature,
+            max_turns=args.max_turns, timeout=args.timeout,
+            max_tokens=getattr(args, "max_tokens", DEFAULT_MAX_TOKENS),
+            temperature=args.temperature,
             run_info={
                 "repo": str(ctx.repo), "worktree": str(ctx.worktree), "branch": ctx.branch,
                 "branch_from": ctx.branch_from, "base_commit": ctx.base_commit,
@@ -904,6 +982,12 @@ def _add_run_flags(p, *, resume: bool) -> None:
     p.add_argument("--context-window", type=_positive_int, default=None,
                    help="model context window in tokens (default: the server's loaded window, "
                         "else the built-in table, else 32768)")
+    p.add_argument("--max-tokens", type=_positive_int,
+                   default=None if resume else DEFAULT_MAX_TOKENS,
+                   help="max tokens the model may generate per reply (default 8192; must be "
+                        "smaller than the context window, and subtracted from it when the "
+                        "prompt budget is computed; resume inherits this from the run it "
+                        "continues)")
     p.add_argument("--max-worktree-mb", type=int, default=DEFAULT_MAX_WORKTREE_MB)
     p.add_argument("--max-worktree-files", type=int, default=DEFAULT_MAX_WORKTREE_FILES)
     p.add_argument("--image", default=None if resume else DEFAULT_IMAGE)

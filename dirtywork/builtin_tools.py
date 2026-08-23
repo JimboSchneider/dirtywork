@@ -1,4 +1,4 @@
-"""The ten tools dirtywork ships, declared as ToolSpecs.
+"""The eleven tools dirtywork ships, declared as ToolSpecs.
 
 Each `fn` receives the Sandbox as its first argument and forwards to the
 matching Sandbox method, so a tool never knows whether it is running on the
@@ -34,6 +34,10 @@ def _read_file(sandbox, path, offset=0, limit=400):
 
 def _write_file(sandbox, path, content):
     return sandbox.write_file(path, content)
+
+
+def _append_file(sandbox, path, text):
+    return sandbox.append_file(path, text)
 
 
 def _edit_file(sandbox, path, old_string, new_string):
@@ -95,6 +99,22 @@ WRITE_FILE_SPEC = ToolSpec(
     },
     required=("path", "content"),
     fn=_write_file,
+    caps=Caps(fs="write", max_output_chars=TOOL_OUTPUT_CAP, transcript="preview"),
+)
+
+APPEND_FILE_SPEC = ToolSpec(
+    name="append_file",
+    description="Append text verbatim to the END of an existing file (create "
+                "the file with write_file first). Nothing is inserted between "
+                "the old content and your text — include a leading newline if "
+                "the file does not end with one. Use write_file + append_file "
+                "to produce a file too large for one reply.",
+    params={
+        "path": ParamSpec(type="string"),
+        "text": ParamSpec(type="string"),
+    },
+    required=("path", "text"),
+    fn=_append_file,
     caps=Caps(fs="write", max_output_chars=TOOL_OUTPUT_CAP, transcript="preview"),
 )
 
@@ -239,9 +259,9 @@ FINISH_SPEC = ToolSpec(
 
 # Registration order is the order the tools are advertised to the model and the
 # order the unknown-tool error lists them in. Do not reorder.
-BUILTIN_SPECS = (READ_FILE_SPEC, WRITE_FILE_SPEC, EDIT_FILE_SPEC, APPLY_EDITS_SPEC,
-                 INSERT_BEFORE_SPEC, INSERT_AFTER_SPEC, LIST_DIR_SPEC, GREP_SPEC,
-                 BASH_SPEC, FINISH_SPEC)
+BUILTIN_SPECS = (READ_FILE_SPEC, WRITE_FILE_SPEC, APPEND_FILE_SPEC, EDIT_FILE_SPEC,
+                 APPLY_EDITS_SPEC, INSERT_BEFORE_SPEC, INSERT_AFTER_SPEC, LIST_DIR_SPEC,
+                 GREP_SPEC, BASH_SPEC, FINISH_SPEC)
 
 
 def default_registry(transcript=None) -> ToolRegistry:

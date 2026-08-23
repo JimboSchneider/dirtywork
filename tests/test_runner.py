@@ -320,6 +320,8 @@ def test_context_exhausted_status(parts):
 
 
 def test_length_finish_reason_gives_helpful_hint(parts):
+    # Spec §1.3: the fixture already carries a recoverable `path`, so this is
+    # now the PATH-RECOVERED case and pins the whole sentence.
     wt, registry, sandbox, transcript, tmp = parts
     truncated = _resp(tool_calls=[_bad_args("c", "write_file", '{"path": "x", "content": "abc')],
                       finish_reason="length",
@@ -330,7 +332,131 @@ def test_length_finish_reason_gives_helpful_hint(parts):
     transcript.close()
     assert result.status == "completed"
     tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
-    assert "cut off at the token limit" in tool_msgs[0]["content"]
+    assert tool_msgs[0]["content"] == (
+        "ERROR: your write_file for 'x' was cut off at the token limit — nothing was "
+        "written. Write the file in chunks: write_file with the first part, then "
+        "append_file for each following part.")
+
+
+_GENERIC_TRUNCATION = ("ERROR: your {tool} call was cut off at the token limit before it "
+                       "completed. Emit smaller tool calls — for a large file, write_file "
+                       "the first part and append_file the rest.")
+
+
+def test_length_truncation_of_a_non_write_file_tool_gives_the_generic_form(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    truncated = _resp(tool_calls=[_bad_args("c", "edit_file", '{"path": "x", "old_string": "a')],
+                      finish_reason="length",
+                      usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider = FakeProvider([truncated, _resp(content="done")])
+    Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
+    transcript.close()
+    tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
+    assert tool_msgs[0]["content"] == _GENERIC_TRUNCATION.format(tool="edit_file")
+
+
+def test_length_truncation_with_no_raw_arguments_gives_the_generic_form(parts):
+    # The Anthropic shape: its error branches never set raw_arguments, so path
+    # recovery has nothing to scan and degrades to the generic sentence.
+    wt, registry, sandbox, transcript, tmp = parts
+    truncated = _resp(tool_calls=[_bad_args("c", "write_file", "")],
+                      finish_reason="length",
+                      usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider = FakeProvider([truncated, _resp(content="done")])
+    Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
+    transcript.close()
+    tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
+    assert tool_msgs[0]["content"] == _GENERIC_TRUNCATION.format(tool="write_file")
+
+
+def test_length_truncation_with_an_invalid_escape_degrades_to_generic(parts):
+    # A raw fragment whose escape sequence is not valid JSON must not raise
+    # inside the turn loop.
+    wt, registry, sandbox, transcript, tmp = parts
+    truncated = _resp(tool_calls=[_bad_args("c", "write_file", '{"path": "a\\qb", "content": "z')],
+                      finish_reason="length",
+                      usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider = FakeProvider([truncated, _resp(content="done")])
+    Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
+    transcript.close()
+    tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
+    assert tool_msgs[0]["content"] == _GENERIC_TRUNCATION.format(tool="write_file")
+
+
+def test_recovered_path_is_truncated_and_rendered_with_repr(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    long_path = "z" * 300
+    raw = '{"path": "' + long_path + '", "content": "abc'
+    truncated = _resp(tool_calls=[_bad_args("c", "write_file", raw)],
+                      finish_reason="length",
+                      usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider = FakeProvider([truncated, _resp(content="done")])
+    Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
+    transcript.close()
+    tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
+    assert f"for {'z' * 200!r} was cut off" in tool_msgs[0]["content"]
+    assert "z" * 201 not in tool_msgs[0]["content"]
+
+
+def test_length_truncation_with_empty_args_counts_as_malformed_args_not_bad_args(parts):
+    # Spec §1.3 case (b): a truncated Anthropic tool_use whose `input` came
+    # back {} PARSES, so tc.error is None -- but a required parameter is
+    # missing. It must be caught before dispatch and accounted as
+    # malformed_args, so three of them abort on THAT kind rather than bad_args.
+    wt, registry, sandbox, transcript, tmp = parts
+    empty = _resp(tool_calls=[_call("c", "write_file", {})], finish_reason="length",
+                  usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider = FakeProvider([empty, empty, empty])
+    result = Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+    assert result.final_message == "aborted after 3 consecutive malformed_args failures"
+    results = [e["result"] for e in _events(tmp) if e["event"] == "tool_result"]
+    assert results[0] == _GENERIC_TRUNCATION.format(tool="write_file")
+    assert "bad arguments" not in results[0]
+
+
+def test_length_truncated_but_parseable_call_still_dispatches(parts):
+    # Controller addition (Task 8 review): a fully parseable tool call with
+    # ALL required params present must still dispatch normally under
+    # finish_reason == "length" -- truncation recovery is for calls that
+    # failed to parse (case a) or are missing a required param (case b), not
+    # every "length" turn. Task 8's reviewer verified this manually; this
+    # pins it.
+    wt, registry, sandbox, transcript, tmp = parts
+    call = _resp(tool_calls=[_call("c", "write_file", {"path": "x.txt", "content": "hello\n"})],
+                 finish_reason="length",
+                 usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider = FakeProvider([call, _resp(content="done")])
+    result = Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert (wt / "x.txt").read_text() == "hello\n"
+    results = [e["result"] for e in _events(tmp) if e["event"] == "tool_result"]
+    assert "cut off at the token limit" not in results[0]
+
+
+def test_an_append_only_turn_counts_as_progress_and_does_not_stall(parts):
+    # Spec §6: _MUTATING_TOOLS is what ProgressTracker reads, and append_file
+    # is in it -- a run whose only work is appending must not be called stalled.
+    wt, registry, sandbox, transcript, tmp = parts
+    (wt / "notes.md").write_text("one\n")
+    calls = [_resp(tool_calls=[_call(f"c{i}", "append_file",
+                                     {"path": "notes.md", "text": f"line {i}\n"})])
+             for i in range(3)]
+    provider = FakeProvider(calls + [_resp(content="done")])
+    r = Runner(provider, registry, sandbox, transcript, model="m", stall_turns=2)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    assert (wt / "notes.md").read_text() == "one\nline 0\nline 1\nline 2\n"
+
+
+def test_truncated_nudge_names_write_file_and_append_file(parts):
+    assert NUDGES["truncated"] == (
+        "Your reply was cut off at the token limit. Continue with smaller steps — "
+        "emit one tool call at a time; for a large file, write_file the first part "
+        "and append_file the rest.")
 
 
 def test_run_start_includes_run_info(parts):
@@ -448,10 +574,12 @@ def test_finalize_exception_recorded_status_preserved(parts):
 
 def test_assistant_text_capped_in_transcript_full_text_resent(parts):
     wt, registry, sandbox, transcript, tmp = parts
-    # Over MAX_ASSISTANT_TEXT_CHARS (64_000) but comfortably under the
-    # default model's char_budget (~98_304 for the fallback DEFAULT_WINDOW),
-    # so trim_messages doesn't ALSO trigger context_exhausted — this test is
-    # about the transcript-only cap, not the trim path.
+    # Over MAX_ASSISTANT_TEXT_CHARS (64_000) but under the default model's
+    # char_budget, which since 0.10 is (32768 - 8192) * 0.75 * 4 = 73_728 for
+    # the fallback DEFAULT_WINDOW and the default --max-tokens. The whole
+    # history here is ~70_050 chars, so trim_messages doesn't ALSO trigger
+    # context_exhausted — this test is about the transcript-only cap, not the
+    # trim path.
     huge_text = "y" * 70_000
     provider = FakeProvider([
         _resp(tool_calls=[_call("c1", "list_dir", {"path": "."})], content=huge_text),
@@ -873,9 +1001,11 @@ def test_resolve_context_window_rejects_bad_env(env):
 def test_runner_context_window_param_sets_budget_and_run_start(parts):
     wt, registry, sandbox, transcript, tmp = parts
     provider = FakeProvider([_resp(content="done")])
-    r = Runner(provider, registry, sandbox, transcript, model="unknown/model", context_window=1000)
+    r = Runner(provider, registry, sandbox, transcript, model="unknown/model",
+               context_window=1000, max_tokens=200)
     assert r.context_window == 1000
-    assert r.char_budget == int(1000 * 0.75 * 4)
+    # Spec §1.4: the prompt budget is what is left AFTER the output cap.
+    assert r.char_budget == int((1000 - 200) * 0.75 * 4)
     r.run("s", "t")
     transcript.close()
     start = next(e for e in _events(tmp) if e["event"] == "run_start")
@@ -1499,3 +1629,85 @@ def test_a_verify_timeout_is_not_counted(parts):
     assert box.commands == ["npm test"]        # it DID run, and it DID time out
     assert result.extra["timeouts"] == 0       # spec §4.3: worker tool calls only
     assert [e for e in _events(tmp) if e["event"] == "nudge"] == []
+
+
+def test_mutating_tools_includes_every_tool_that_changes_a_file():
+    # Spec §6: a run whose only progress is inserts/batches/appends must not be
+    # called stalled. _MUTATING_TOOLS is what ProgressTracker reads.
+    from dirtywork.runner import _MUTATING_TOOLS
+    assert set(_MUTATING_TOOLS) == {"write_file", "append_file", "edit_file",
+                                    "apply_edits", "insert_before", "insert_after"}
+
+
+# --- spec §1.4/§1.5: the output cap and the recorded finish reason.
+
+
+def test_max_tokens_defaults_to_8192_and_reaches_the_provider(parts):
+    from dirtywork.runner import DEFAULT_MAX_TOKENS
+    wt, registry, sandbox, transcript, tmp = parts
+
+    seen = {}
+
+    class _RecordingProvider(FakeProvider):
+        def chat(self, model, history, tools, *, temperature=None, max_tokens=4096,
+                 timeout=None):
+            seen["max_tokens"] = max_tokens
+            return super().chat(model, history, tools, temperature=temperature,
+                                max_tokens=max_tokens, timeout=timeout)
+
+    r = Runner(_RecordingProvider([_resp(content="done")]), registry, sandbox, transcript,
+               model="m")
+    r.run("s", "t")
+    transcript.close()
+    assert DEFAULT_MAX_TOKENS == 8192
+    assert seen["max_tokens"] == 8192
+
+
+def test_char_budget_subtracts_max_tokens_from_the_window(parts):
+    # Spec §1.4: the window is SHARED. Budgeting the prompt as if the whole
+    # window were available is what made a long reply run off the end.
+    wt, registry, sandbox, transcript, tmp = parts
+    from dirtywork.runner import BUDGET_FRACTION, CHARS_PER_TOKEN
+    r = Runner(FakeProvider([_resp(content="done")]), registry, sandbox, transcript,
+               model="m", context_window=32768, max_tokens=8192)
+    assert r.char_budget == int((32768 - 8192) * BUDGET_FRACTION * CHARS_PER_TOKEN)
+    # A cap larger than the window cannot go negative here (preflight refuses
+    # that combination; a directly-built Runner must still not explode).
+    r2 = Runner(FakeProvider([_resp(content="done")]), registry, sandbox, transcript,
+                model="m", context_window=1000, max_tokens=8192)
+    assert r2.char_budget == 0
+
+
+def test_run_start_records_max_tokens(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    r = Runner(FakeProvider([_resp(content="done")]), registry, sandbox, transcript,
+               model="m", max_tokens=1234)
+    r.run("s", "t")
+    transcript.close()
+    start = next(e for e in _events(tmp) if e["event"] == "run_start")
+    assert start["max_tokens"] == 1234
+
+
+def test_assistant_event_records_finish_reason(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("c1", "list_dir", {"path": "."})],
+              finish_reason="tool_calls"),
+        _resp(content="done", finish_reason="stop"),
+    ])
+    Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
+    transcript.close()
+    reasons = [e["finish_reason"] for e in _events(tmp) if e["event"] == "assistant"]
+    assert reasons == ["tool_calls", "stop"]
+
+
+def test_assistant_event_finish_reason_is_null_for_a_non_string(parts):
+    # Adapters do not guarantee a string -- the Anthropic adapter passes an
+    # unknown stop reason through raw -- so anything non-str is recorded as
+    # null rather than emitted as some other JSON type (spec §1.5).
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(content="done", finish_reason=17)])
+    Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
+    transcript.close()
+    assistant = next(e for e in _events(tmp) if e["event"] == "assistant")
+    assert assistant["finish_reason"] is None

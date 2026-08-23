@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -8,9 +9,10 @@ import pytest
 from dirtywork.procs import Captured
 from dirtywork.resume import stash_dir_for
 from dirtywork.sandbox import SandboxError
+from dirtywork.sandbox import docker as docker_mod
 from dirtywork.sandbox.docker import DockerSandbox, docker_cli
 from dirtywork.sandbox.docker_args import DockerConfig
-from tests.docker_fakes import FakeDocker, FakePopen, _fail, _ok
+from tests.docker_fakes import FakeDocker, FakePopen, _fail, _ok, _rc
 
 DockerError = docker_cli.DockerError
 
@@ -18,6 +20,27 @@ _TOP_HEADER = b"UID  PID  PPID  C  STIME  TTY  TIME  CMD\n"
 
 _SAMPLE_ARGV = ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
                 "du -sk /work; find /work | wc -l"]
+
+
+def _is_write_exec(call) -> bool:
+    """True for a recorded docker call that ran DockerSandbox's write script.
+    ONE place, so the next change to that script text touches one line instead
+    of ten (spec §2.6's counted churn). `call` is FakeDocker's
+    (argv, timeout, stdin) triple; the script is a single argv ELEMENT, so
+    membership -- not a substring search over a joined string -- is the exact
+    test."""
+    return docker_mod.WRITE_SCRIPT in call[0]
+
+
+def _is_append_write_exec(call) -> bool:
+    """True for a recorded docker call that ran the append write script."""
+    return docker_mod.APPEND_WRITE_SCRIPT in call[0]
+
+
+def _script_append_guard(fake, response) -> None:
+    """Script the append guard exec (the FIRST of append_file's three)."""
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
+                 docker_mod.APPEND_GUARD_SCRIPT], response)
 
 
 @pytest.fixture()
@@ -60,6 +83,7 @@ def started(docker, tmp_path: Path):
     worktree.mkdir()
     sb.start(worktree, repo, "abc123", "deadbeef" * 5)
     fake.calls.clear()
+    fake.call_caps.clear()
     return sb, fake, run_dir
 
 
@@ -86,6 +110,7 @@ def started_with_transcript(tmp_path: Path):
     worktree.mkdir()
     sb.start(worktree, repo, "abc123", "deadbeef" * 5)
     fake.calls.clear()
+    fake.call_caps.clear()
     return sb, fake, run_dir, transcript
 
 
@@ -274,6 +299,7 @@ def test_stop_is_idempotent_and_removes_container_and_volume(docker, tmp_path):
     worktree.mkdir()
     sb.start(worktree, repo, "abc123", "deadbeef" * 5)
     fake.calls.clear()
+    fake.call_caps.clear()
 
     sb.stop()
     sb.stop()  # second call must no-op, not re-issue docker commands
@@ -375,11 +401,17 @@ def test_write_file_sends_content_on_stdin(started):
     assert "Wrote 5 bytes" in out
     assert "(new file, 1 line)" in out
     argv, timeout, stdin = fake.calls[-1]
-    assert argv == [
+    # The temp basename is random per call (spec §2.2: the worker controls
+    # sibling names), so the fixed prefix is asserted exactly and the temp by
+    # shape -- test_write_exec_uses_the_atomic_script_and_a_sibling_temp pins
+    # the rest.
+    assert argv[:10] == [
         "exec", "-w", "/work", "-i", "dw-abc123",
-        "/bin/sh", "-c", 'mkdir -p "$(dirname -- "$1")" && cat > "$1"',
+        "/bin/sh", "-c", docker_mod.WRITE_SCRIPT,
         "_", "deep/new/file.txt",
     ]
+    assert re.fullmatch(r"deep/new/\.dw-tmp\.file\.txt\.[0-9a-f]{8}", argv[10])
+    assert len(argv) == 11
     assert stdin == b"hello"
 
 
@@ -390,7 +422,7 @@ def test_write_file_refuses_dot_git(started):
     # write_file's best-effort pre-read runs before _write_raw's checks (DRY:
     # _write_raw owns the checks), so one harmless `head` exec is expected —
     # but never the actual write.
-    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    writes = [c for c in fake.calls if _is_write_exec(c)]
     assert not writes
 
 
@@ -399,7 +431,7 @@ def test_write_file_refuses_oversized_content(started):
     sb, fake, run_dir = started
     out = sb.write_file("big.txt", "x" * (MAX_WRITE_BYTES + 1))
     assert out.startswith("ERROR:")
-    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    writes = [c for c in fake.calls if _is_write_exec(c)]
     assert not writes
 
 
@@ -409,7 +441,7 @@ def test_edit_file_reads_then_writes(started):
     out = sb.edit_file("src/app.py", "return 42", "return 43")
     assert "Edited" in out
     heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
-    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    writes = [c for c in fake.calls if _is_write_exec(c)]
     assert len(heads) == 1
     assert len(writes) == 1
 
@@ -437,7 +469,7 @@ def test_edit_file_write_failure(started):
     assert out.startswith("ERROR:")
     # Verify write was attempted (1 read + 1 write = 2 exec calls)
     heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
-    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    writes = [c for c in fake.calls if _is_write_exec(c)]
     assert len(heads) == 1
     assert len(writes) == 1
 
@@ -454,6 +486,66 @@ def test_read_file_oversize(started):
     assert f"exceeds {MAX_READ_BYTES} bytes" in out
 
 
+def test_read_exec_requests_a_capture_cap_above_max_read_bytes(started):
+    """PR #56 review: docker_cli.run used to call run_capped with no `cap`
+    at all, so every docker exec's capture -- including a file read via
+    `head` -- silently stopped at procs.MAX_CAPTURE_BYTES (1 MiB), well
+    under MAX_READ_BYTES (5 MiB). _read_raw's read exec must request a cap
+    above what `head -c MAX_READ_BYTES+1` can ever emit, so a 1-5 MiB file
+    is never cut short at 1 MiB. (RED-FIRST: pre-fix, no `cap` reaches
+    docker_cli.run for this exec, so the fake records cap=None.)"""
+    from dirtywork.tools import MAX_READ_BYTES
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok(b"hello\n"))
+    sb.read_file("src/app.py")
+    idx = next(i for i, c in enumerate(fake.calls) if "/usr/bin/head" in c[0])
+    assert fake.call_caps[idx] == MAX_READ_BYTES + 1
+
+
+def test_read_raw_refuses_a_truncated_capture_and_no_write_follows(started):
+    """A Captured with truncated=True must refuse outright, even when the
+    reported output is under MAX_READ_BYTES -- truncated is a defensive
+    backstop for a capture cut short somewhere other than `head`'s own
+    MAX_READ_BYTES+1 bound. Pre-fix, `truncated` was never consulted:
+    _transform_file would proceed on the truncated content and a write exec
+    would fire -- the silent data-loss scenario the owner's review found
+    (edit_file writing back a truncated copy of a large file). (RED-FIRST:
+    pre-fix the transform proceeds and a write exec runs.)"""
+    from dirtywork.tools import MAX_READ_BYTES
+    sb, fake, run_dir = started
+    truncated = Captured(returncode=0, output=b"short but truncated",
+                          truncated=True, timed_out=False)
+    fake.script(["exec"], [truncated])
+    out = sb.edit_file("big.txt", "short", "long")
+    assert out.startswith("ERROR:")
+    assert f"exceeds {MAX_READ_BYTES} bytes" in out
+    writes = [c for c in fake.calls if _is_write_exec(c)]
+    assert not writes
+
+
+def test_transform_round_trips_a_file_between_one_and_five_mib_intact(started):
+    """Pins the end-to-end behaviour the old 1 MiB default capture cap would
+    have broken: a file between 1 and 5 MiB must round-trip through
+    edit_file whole -- not silently truncated to the first 1 MiB, which
+    would have made the transform operate on, and write back, a truncated
+    copy of the file (silent data loss)."""
+    sb, fake, run_dir = started
+    body = ("x" * 79 + "\n") * ((2 * 1024 * 1024) // 80)
+    content = (body + "MARKER-old\n").encode("utf-8")
+    assert 1024 * 1024 < len(content) < 5 * 1024 * 1024
+    fake.script(["exec"], [_ok(content), _ok()])
+    out = sb.edit_file("big.txt", "MARKER-old", "MARKER-new")
+    assert "Edited" in out
+    writes = [c for c in fake.calls if _is_write_exec(c)]
+    assert len(writes) == 1
+    _write_argv, _write_timeout, write_stdin = writes[0]
+    assert write_stdin is not None
+    assert len(write_stdin) == len(content)  # same-length replacement
+    assert write_stdin.startswith(b"x" * 79)
+    assert write_stdin.endswith(b"MARKER-new\n")
+    assert b"MARKER-old" not in write_stdin
+
+
 def test_edit_file_non_utf8(started):
     """When file contains non-UTF-8 bytes, edit_file should return error without writing."""
     sb, fake, run_dir = started
@@ -464,7 +556,7 @@ def test_edit_file_non_utf8(started):
     assert "not valid UTF-8" in out
     # Verify no write was attempted (1 read, 0 writes)
     heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
-    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    writes = [c for c in fake.calls if _is_write_exec(c)]
     assert len(heads) == 1
     assert len(writes) == 0
 
@@ -590,6 +682,7 @@ def test_bash_sandboxed_allows_host_only_git_config_but_blocks_push(started):
     assert len(exec_calls) == 1
 
     fake.calls.clear()
+    fake.call_caps.clear()
     blocked = sb.bash("git push origin main")
     assert blocked.startswith("BLOCKED:")
     assert not fake.calls
@@ -1086,6 +1179,7 @@ def test_sample_worktree_still_retries_once_with_reset_when_no_reset_yet_this_ca
 
 def test_finalize_stops_container_calls_export_run_and_host_read_tree(started, monkeypatch):
     from dirtywork.sandbox import RunArtifacts
+    from dirtywork.tools import TMP_FIND_REGEX
     sb, fake, run_dir = started
     seen = {}
 
@@ -1107,6 +1201,92 @@ def test_finalize_stops_container_calls_export_run_and_host_read_tree(started, m
     assert seen["host_read_tree_worktree"] == sb._worktree
     assert any(c[0][:2] == ["rm", "-f"] for c in fake.calls)  # worker container removed
 
+    # Fix round 1 (spec §2.5 execution amendment): the stale-temp sweep runs
+    # against the still-alive WORKER container -- the export container's
+    # /work is readonly by design, so a sweep exec there would silently
+    # no-op. One exec, same argv shape as the host sweep's regex, and it
+    # must land BEFORE the `rm -f` that stops the worker container.
+    argvs = [c[0] for c in fake.calls]
+    sweeps = [a for a in argvs if "-regextype" in a]
+    removes = [a for a in argvs if a[:2] == ["rm", "-f"]]
+    assert len(sweeps) == 1
+    assert sweeps[0] == ["exec", "-w", "/work", "dw-abc123", "/usr/bin/find", "/work",
+                         "-type", "f", "-regextype", "posix-extended", "-regex",
+                         TMP_FIND_REGEX, "-print", "-delete"]
+    assert argvs.index(sweeps[0]) < argvs.index(removes[0])
+
+
+def test_finalize_sweep_docker_error_is_contained_export_still_runs(started, monkeypatch, capsys):
+    # Fix wave: a DockerError out of the best-effort sweep exec (timeout,
+    # daemon hiccup) must never escape finalize() and skip export -- doing
+    # so would leave _export_failed False while nothing was ever exported,
+    # and stop() would then delete the volume out from under a transient
+    # docker hiccup, destroying the run's real output. The sweep is
+    # best-effort; the salvage path (export -> host_read_tree) is sacred.
+    from dirtywork.sandbox import RunArtifacts
+    sb, fake, run_dir = started
+    real_run = sb._run
+
+    def sweep_raises(argv, *, timeout, stdin=None):
+        if "-regextype" in argv:
+            fake.calls.append((list(argv), timeout, stdin))
+            raise DockerError("docker exec ... timed out after 40s", timed_out=True)
+        return real_run(argv, timeout=timeout, stdin=stdin)
+
+    sb._run = sweep_raises
+
+    export_called = []
+
+    def fake_export_run(cfg, **kwargs):
+        export_called.append(True)
+        return RunArtifacts(export_status="ok", diff_stat="stat", worktree_bytes=10, worktree_files=1)
+
+    monkeypatch.setattr(docker_mod.export, "export_run", fake_export_run)
+    monkeypatch.setattr(docker_mod, "host_read_tree", lambda worktree: None)
+
+    artifacts = sb.finalize()
+
+    assert export_called == [True]
+    assert artifacts.export_status == "ok"
+    assert sb._export_failed is False
+    assert "sweep failed: docker exec ... timed out after 40s" in capsys.readouterr().err
+
+    # Volume-preserving path intact: export succeeded, so stop() removes the
+    # volume exactly as it would with no sweep failure at all.
+    fake.calls.clear()
+    fake.call_caps.clear()
+    sb.stop()
+    assert any(c[0][:2] == ["volume", "rm"] for c in fake.calls)
+
+
+def test_finalize_sweep_counts_only_real_temp_paths(started, monkeypatch, capsys):
+    # Fix wave: Captured.output merges stderr (procs.py runs the exec with
+    # stderr=subprocess.STDOUT), so a `find: permission denied` line or other
+    # daemon chatter sits in the same stream as the real -print'ed paths. The
+    # swept count must be lines that actually match TMP_FIND_REGEX, not just
+    # non-blank lines -- one real temp path plus one permission-denied line
+    # must count as 1 swept, not 2.
+    from dirtywork.sandbox import RunArtifacts
+    from dirtywork.tools import TMP_FIND_REGEX
+    sb, fake, run_dir = started
+
+    sweep_argv = ["exec", "-w", "/work", "dw-abc123", "/usr/bin/find", "/work",
+                  "-type", "f", "-regextype", "posix-extended", "-regex",
+                  TMP_FIND_REGEX, "-print", "-delete"]
+    fake.script(sweep_argv, _rc(1, b"/work/.dw-tmp.foo.a1b2c3d4\n"
+                                   b"find: '/work/x': Permission denied\n"))
+
+    monkeypatch.setattr(docker_mod.export, "export_run",
+                         lambda cfg, **kw: RunArtifacts(export_status="ok"))
+    monkeypatch.setattr(docker_mod, "host_read_tree", lambda worktree: None)
+
+    sb.finalize()
+
+    err = capsys.readouterr().err
+    assert "swept 1 stale temp file" in err
+    assert "stale temp files" not in err  # would only appear if the count were != 1
+    assert "sweep incomplete (rc 1)" in err
+
 
 def test_stop_after_finalize_keeps_volume_when_export_failed(started, monkeypatch):
     from dirtywork.sandbox import RunArtifacts
@@ -1119,6 +1299,7 @@ def test_stop_after_finalize_keeps_volume_when_export_failed(started, monkeypatc
 
     sb.finalize()
     fake.calls.clear()
+    fake.call_caps.clear()
     sb.stop()
 
     assert not any(c[0][:2] == ["volume", "rm"] for c in fake.calls)
@@ -1135,6 +1316,7 @@ def test_stop_after_finalize_removes_volume_when_export_succeeded(started, monke
 
     sb.finalize()
     fake.calls.clear()
+    fake.call_caps.clear()
     sb.stop()
 
     assert any(c[0][:2] == ["volume", "rm"] for c in fake.calls)
@@ -1409,7 +1591,7 @@ def test_insert_after_reads_then_writes(started):
     out = sb.insert_after("cfg.txt", "beta", "beta-plus")
     assert out.startswith("Inserted into cfg.txt: +1 -0")
     heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
-    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    writes = [c for c in fake.calls if _is_write_exec(c)]
     assert len(heads) == 1
     assert len(writes) == 1
     assert writes[0][2] == b"alpha\nbeta\nbeta-plus\ngamma\n"
@@ -1420,7 +1602,7 @@ def test_insert_before_refuses_a_repeated_anchor(started):
     fake.script(["exec"], _ok(b"aa\naa\n"))
     out = sb.insert_before("dup.txt", "aa", "x")
     assert out.startswith("ERROR: anchor occurs 2 times in dup.txt")
-    assert not [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    assert not [c for c in fake.calls if _is_write_exec(c)]
 
 
 def test_apply_edits_reads_then_writes(started):
@@ -1430,7 +1612,7 @@ def test_apply_edits_reads_then_writes(started):
                                        {"old": "two", "new": "2"}])
     assert out.startswith("Applied 2 edits to batch.txt: ")
     heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
-    writes = [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    writes = [c for c in fake.calls if _is_write_exec(c)]
     assert len(heads) == 1 and len(writes) == 1        # one read, one write, per batch
     assert writes[0][2] == b"1\n2\n"                    # the batch's final text
 
@@ -1443,7 +1625,7 @@ def test_apply_edits_rollback_never_writes(started):
     # Byte-identical to the host's text (spec §1.8 parity), and no write exec.
     assert out == ("ERROR: edit 2 of 2: old text occurs 0 times in batch.txt; it must "
                    "occur exactly once (after edits 1..1 are applied); no edits applied")
-    assert not [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    assert not [c for c in fake.calls if _is_write_exec(c)]
 
 
 def test_apply_edits_matches_the_host_text_for_success_and_every_refusal(started, tmp_path):
@@ -1479,4 +1661,308 @@ def test_transform_result_over_the_write_cap_is_refused(started):
     assert sb.edit_file("grow.txt", "seed", huge) == expected
     fake.script(["exec"], _ok(b"seed\n"))
     assert sb.apply_edits("grow.txt", [{"old": "seed", "new": huge}]) == expected
-    assert not [c for c in fake.calls if "cat > \"$1\"" in " ".join(c[0])]
+    assert not [c for c in fake.calls if _is_write_exec(c)]
+
+
+# --- spec §2.6/§5.1: the atomic container write script and the tool-aware
+# --- UTF-8 refusal.
+
+
+def test_write_exec_uses_the_atomic_script_and_a_sibling_temp(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok())
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"],
+                _fail(b"head: cannot open 'deep/new/file.txt'"))
+    sb.write_file("deep/new/file.txt", "hello")
+    argv, timeout, stdin = fake.calls[-1]
+    assert argv[:8] == ["exec", "-w", "/work", "-i", "dw-abc123",
+                        "/bin/sh", "-c", docker_mod.WRITE_SCRIPT]
+    assert argv[8] == "_"
+    assert argv[9] == "deep/new/file.txt"
+    # The temp is a SIBLING of the target (same directory => same filesystem =>
+    # `mv` is an atomic rename) and its name is generated HOST-side, so worker
+    # bytes never reach the script text.
+    assert re.fullmatch(r"deep/new/\.dw-tmp\.file\.txt\.[0-9a-f]{8}", argv[10])
+    assert len(argv) == 11
+    assert stdin == b"hello"
+    # Spec §2.6: `&&`-chained, never move INTO a directory, guards echo their
+    # own diagnostic, the temp is removed on any failure.
+    assert 'mv -fT -- "$2" "$1"' in docker_mod.WRITE_SCRIPT
+    assert 'chmod --reference="$1" "$2" 2>/dev/null || chmod 644 "$2"' in docker_mod.WRITE_SCRIPT
+    assert '{ rm -f -- "$2"; exit 1; }' in docker_mod.WRITE_SCRIPT
+
+
+def test_transform_non_utf8_refusals_name_the_tool_and_match_the_host(started, tmp_path):
+    """Spec §5.1: docker's wording becomes the host's, and names the tool the
+    model actually called -- never the legacy `refusing to edit`."""
+    from dirtywork import tools
+    sb, fake, run_dir = started
+    wt = tmp_path / "utf8parity"
+    wt.mkdir()
+    (wt / "bin.dat").write_bytes(b"\xff\xfe old")
+    cases = [
+        ("edit_file", lambda: sb.edit_file("bin.dat", "old", "new"),
+         lambda: tools.edit_file(wt, "bin.dat", "old", "new")),
+        ("insert_before", lambda: sb.insert_before("bin.dat", "old", "x"),
+         lambda: tools.insert_before(wt, "bin.dat", "old", "x")),
+        ("insert_after", lambda: sb.insert_after("bin.dat", "old", "x"),
+         lambda: tools.insert_after(wt, "bin.dat", "old", "x")),
+        ("apply_edits", lambda: sb.apply_edits("bin.dat", [{"old": "old", "new": "new"}]),
+         lambda: tools.apply_edits(wt, "bin.dat", [{"old": "old", "new": "new"}])),
+    ]
+    for tool, docker_call, host_call in cases:
+        fake.script(["exec"], _ok(b"\xff\xfe old"))
+        docker_out = docker_call()
+        assert docker_out == (f"ERROR: bin.dat is not valid UTF-8 text; {tool} only "
+                              f"works on text files")
+        assert docker_out == host_call()
+        assert "refusing to edit" not in docker_out
+    assert not [c for c in fake.calls if _is_write_exec(c)]
+
+
+def test_read_raw_without_a_tool_keeps_the_legacy_wording(started):
+    # No shipped caller reaches this branch since 0.10 (every strict read names
+    # its tool). It stays so a direct caller of this private method gets a
+    # coherent refusal instead of "None only works on text files".
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok(b"\xff\xfe"))
+    text, err = sb._read_raw("bin.dat", strict=True)
+    assert text is None
+    assert err == "ERROR: 'bin.dat' is not valid UTF-8; refusing to edit"
+
+
+# --- spec §1.2 (docker half) / §2.6: append_file in the container.
+
+
+def test_append_file_takes_three_execs_guard_read_write(started):
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(b"4\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"], _ok(b"one\n"))
+    fake.script(["exec", "-w", "/work", "-i", "dw-abc123", "/bin/sh", "-c",
+                 docker_mod.APPEND_WRITE_SCRIPT], _ok())
+    out = sb.append_file("notes.md", "two\n")
+    assert out.startswith("Appended to notes.md: +1 -0")
+    guards = [c for c in fake.calls if docker_mod.APPEND_GUARD_SCRIPT in c[0]]
+    heads = [c for c in fake.calls if "/usr/bin/head" in c[0]]
+    writes = [c for c in fake.calls if _is_append_write_exec(c)]
+    assert len(guards) == 1 and len(heads) == 1 and len(writes) == 1
+    assert fake.calls.index(guards[0]) < fake.calls.index(heads[0]) < fake.calls.index(writes[0])
+    assert writes[0][2] == b"two\n"          # only the NEW bytes go on stdin
+    assert not [c for c in fake.calls if _is_write_exec(c)]   # never write_file's script
+
+
+def test_append_file_write_script_shape(started):
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(b"4\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"], _ok(b"one\n"))
+    fake.script(["exec", "-w", "/work", "-i", "dw-abc123", "/bin/sh", "-c",
+                 docker_mod.APPEND_WRITE_SCRIPT], _ok())
+    sb.append_file("deep/notes.md", "two\n")
+    argv = [c for c in fake.calls if _is_append_write_exec(c)][0][0]
+    assert argv[:8] == ["exec", "-w", "/work", "-i", "dw-abc123",
+                        "/bin/sh", "-c", docker_mod.APPEND_WRITE_SCRIPT]
+    assert argv[8] == "_" and argv[9] == "deep/notes.md"
+    assert re.fullmatch(r"deep/\.dw-tmp\.notes\.md\.[0-9a-f]{8}", argv[10])
+    assert len(argv) == 11
+    # Spec §2.6: the missing-target guard is re-checked at write time, the copy
+    # is made before the append, and the promote tail is shared with WRITE_SCRIPT.
+    assert docker_mod.APPEND_WRITE_SCRIPT.startswith('[ -f "$1" ] || exit 2; ')
+    assert 'cp -- "$1" "$2" && cat >> "$2"' in docker_mod.APPEND_WRITE_SCRIPT
+    assert docker_mod.APPEND_WRITE_SCRIPT.endswith(docker_mod._PROMOTE)
+    assert docker_mod.WRITE_SCRIPT.endswith(docker_mod._PROMOTE)
+    # Fix round 1: the write script's own writability guard (WRITE_SCRIPT's
+    # counterpart) sits between the missing-target check and the copy.
+    assert ('[ -w "$1" ] || { echo "cannot append to $1: Permission denied" '
+            '>&2; exit 1; }') in docker_mod.APPEND_WRITE_SCRIPT
+    # Fix round 1: the guard script refuses a symlink (dangling included)
+    # BEFORE the existence/regular-file checks, and stats through -L.
+    assert docker_mod.APPEND_GUARD_SCRIPT.startswith('[ ! -h "$1" ] || exit 3; ')
+    assert docker_mod.APPEND_GUARD_SCRIPT.endswith('stat -Lc %s -- "$1"')
+
+
+def test_append_file_guard_rc2_is_the_does_not_exist_string(started):
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _rc(2))
+    out = sb.append_file("nope.md", "x")
+    assert out == ("ERROR: cannot append to 'nope.md': it does not exist; create it "
+                   "with write_file first")
+    assert not [c for c in fake.calls if "/usr/bin/head" in c[0]]      # no read
+    assert not [c for c in fake.calls if _is_append_write_exec(c)]     # no write
+
+
+def test_append_file_guard_rc3_refuses_before_any_read(started):
+    # Spec §1.2: a FIFO/device/directory is refused by the GUARD, before any
+    # reader exec exists that a FIFO could block.
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _rc(3))
+    out = sb.append_file("pipe", "x")
+    assert out == "ERROR: cannot append to 'pipe': not a regular file"
+    assert not [c for c in fake.calls if "/usr/bin/head" in c[0]]
+    assert not [c for c in fake.calls if _is_append_write_exec(c)]
+
+
+def test_append_file_guard_size_over_the_read_cap_uses_the_result_wording(started):
+    from dirtywork.tools import MAX_READ_BYTES, MAX_WRITE_BYTES
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(f"{MAX_READ_BYTES + 1}\n".encode()))
+    out = sb.append_file("huge.txt", "y")
+    # `_read_raw` alone discards the size (`head -c N+1` only proves "exceeds"),
+    # which is exactly why the guard exec reports it: docker can name the
+    # EXACT number even for a file it will never read.
+    assert out == (f"ERROR: result is {MAX_READ_BYTES + 2} bytes, over the "
+                   f"{MAX_WRITE_BYTES}-byte write limit; nothing was written")
+    assert not [c for c in fake.calls if "/usr/bin/head" in c[0]]
+
+
+def test_append_file_guard_size_plus_text_over_the_write_cap(started):
+    from dirtywork.tools import MAX_READ_BYTES, MAX_WRITE_BYTES
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(f"{MAX_READ_BYTES}\n".encode()))
+    out = sb.append_file("atlimit.txt", "y" * 100)
+    assert out == (f"ERROR: result is {MAX_READ_BYTES + 100} bytes, over the "
+                   f"{MAX_WRITE_BYTES}-byte write limit; nothing was written")
+    assert not [c for c in fake.calls if "/usr/bin/head" in c[0]]
+
+
+def test_append_file_oversized_text_argument_costs_no_exec(started):
+    from dirtywork.tools import MAX_WRITE_BYTES
+    sb, fake, run_dir = started
+    out = sb.append_file("notes.md", "x" * (MAX_WRITE_BYTES + 1))
+    assert out == (f"ERROR: text is {MAX_WRITE_BYTES + 1} bytes, over the "
+                   f"{MAX_WRITE_BYTES}-byte write limit; append in smaller pieces")
+    assert not fake.calls                       # capped BEFORE any exec
+    assert "write the file in smaller pieces" not in out   # never _oversized's wording
+
+
+def test_append_file_non_utf8_names_append_file(started):
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(b"8\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"], _ok(b"\xff\xfe old"))
+    out = sb.append_file("bin.dat", "text")
+    assert out == ("ERROR: bin.dat is not valid UTF-8 text; append_file only works "
+                   "on text files")
+    assert "refusing to edit" not in out
+    assert not [c for c in fake.calls if _is_append_write_exec(c)]
+
+
+def test_append_file_write_exec_rc2_still_refuses_as_missing(started):
+    # Spec §2.6: a delete BETWEEN the guard exec and the write exec still
+    # refuses correctly, because the write script re-checks `[ -f "$1" ]`.
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(b"4\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"], _ok(b"one\n"))
+    fake.script(["exec", "-w", "/work", "-i", "dw-abc123", "/bin/sh", "-c",
+                 docker_mod.APPEND_WRITE_SCRIPT], _rc(2))
+    out = sb.append_file("notes.md", "two\n")
+    assert out == ("ERROR: cannot append to 'notes.md': it does not exist; create it "
+                   "with write_file first")
+
+
+def test_append_file_write_exec_failure_wraps_stderr(started):
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(b"4\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"], _ok(b"one\n"))
+    fake.script(["exec", "-w", "/work", "-i", "dw-abc123", "/bin/sh", "-c",
+                 docker_mod.APPEND_WRITE_SCRIPT], _fail(b"cp: cannot stat: I/O error"))
+    out = sb.append_file("notes.md", "two\n")
+    assert out == "ERROR: cannot append to 'notes.md': cp: cannot stat: I/O error"
+
+
+def test_append_file_refuses_dot_git(started):
+    sb, fake, run_dir = started
+    out = sb.append_file(".git/config", "\tfoo = bar\n")
+    assert out == "ERROR: writing inside .git/ is not allowed (got '.git/config')"
+    assert not fake.calls
+
+
+def test_append_file_matches_the_host_text_for_every_shared_refusal(started, tmp_path):
+    """Spec §1.2: the three caps, the does-not-exist string and the non-UTF-8
+    string are byte-identical in both modes. (The non-regular-file refusal is
+    deliberately NOT shared -- see this task's header.)"""
+    from dirtywork import tools
+    sb, fake, run_dir = started
+    wt = tmp_path / "appendparity"
+    wt.mkdir()
+
+    # Cap 1: the text argument.
+    huge_text = "x" * (tools.MAX_WRITE_BYTES + 1)
+    assert sb.append_file("f.txt", huge_text) == tools.append_file(wt, "f.txt", huge_text)
+
+    # The does-not-exist refusal.
+    _script_append_guard(fake, _rc(2))
+    assert sb.append_file("f.txt", "x") == tools.append_file(wt, "f.txt", "x")
+
+    # Cap 2: a file too large to read.
+    (wt / "f.txt").write_bytes(b"x" * (tools.MAX_READ_BYTES + 1))
+    _script_append_guard(fake, _ok(f"{tools.MAX_READ_BYTES + 1}\n".encode()))
+    assert sb.append_file("f.txt", "y") == tools.append_file(wt, "f.txt", "y")
+
+    # Cap 3: the result over the write limit.
+    (wt / "f.txt").write_bytes(b"x" * tools.MAX_READ_BYTES)
+    _script_append_guard(fake, _ok(f"{tools.MAX_READ_BYTES}\n".encode()))
+    assert sb.append_file("f.txt", "y" * 100) == tools.append_file(wt, "f.txt", "y" * 100)
+
+    # The non-UTF-8 refusal.
+    (wt / "f.txt").write_bytes(b"\xff\xfe old")
+    _script_append_guard(fake, _ok(b"8\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"], _ok(b"\xff\xfe old"))
+    assert sb.append_file("f.txt", "text") == tools.append_file(wt, "f.txt", "text")
+
+
+# --- Fix round 1 (spec/plan amended 2026-08-23): post-read result re-check
+# restores cap-3 parity when the guard's snapshot goes stale between the
+# guard exec and the read exec.
+
+
+def test_append_file_read_exceeds_traps_to_result_cap(started):
+    # The guard approved a small size, but the read exec's own cap fires
+    # (a race: the file grew between the two execs). This must surface the
+    # result-cap string -- never _read_raw's "exceeds ... refusing to read",
+    # which is read_file's noun, not append's -- and must cost no write exec.
+    from dirtywork.tools import MAX_READ_BYTES, MAX_WRITE_BYTES
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(b"4\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"],
+                _ok(b"x" * (MAX_READ_BYTES + 1)))
+    out = sb.append_file("racy.txt", "y")
+    assert out == (f"ERROR: result is 5 bytes, over the "
+                   f"{MAX_WRITE_BYTES}-byte write limit; nothing was written")
+    assert not [c for c in fake.calls if _is_append_write_exec(c)]
+
+
+def test_append_file_post_read_size_over_the_write_cap_traps_to_result_cap(started):
+    # The guard approved a small size, the read exec itself stays under
+    # MAX_READ_BYTES (so _read_raw succeeds), but the ACTUAL content read
+    # plus the new text exceeds MAX_WRITE_BYTES -- the guard's snapshot was a
+    # moment old. Must refuse with the recomputed sum and cost no write exec.
+    from dirtywork.tools import MAX_READ_BYTES, MAX_WRITE_BYTES
+    sb, fake, run_dir = started
+    _script_append_guard(fake, _ok(b"4\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"],
+                _ok(b"x" * MAX_READ_BYTES))
+    out = sb.append_file("racy2.txt", "y" * 100)
+    assert out == (f"ERROR: result is {MAX_READ_BYTES + 100} bytes, over the "
+                   f"{MAX_WRITE_BYTES}-byte write limit; nothing was written")
+    assert not [c for c in fake.calls if _is_append_write_exec(c)]
+
+
+def test_docker_write_file_still_writes_when_the_pre_read_is_oversized(started):
+    # Spec §6: the pre-read is DECORATION on the write. An unreadable "before"
+    # picture must not stop the write; the result just reads as a new file.
+    from dirtywork.tools import MAX_READ_BYTES
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok())
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"],
+                _ok(b"x" * (MAX_READ_BYTES + 1)))
+    out = sb.write_file("big.txt", "replacement")
+    assert out == "Wrote 11 bytes to big.txt (new file, 1 line)"
+    assert len([c for c in fake.calls if _is_write_exec(c)]) == 1
+
+
+def test_docker_write_file_still_writes_when_the_pre_read_is_not_utf8(started):
+    sb, fake, run_dir = started
+    fake.script(["exec"], _ok())
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"], _ok(b"\xff\xfe"))
+    out = sb.write_file("bin.dat", "now text\n")
+    assert out == "Wrote 9 bytes to bin.dat (new file, 1 line)"
+    assert len([c for c in fake.calls if _is_write_exec(c)]) == 1

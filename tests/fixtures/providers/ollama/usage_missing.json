@@ -1,0 +1,1 @@
+{"id": "chatcmpl-516", "object": "chat.completion", "created": 1755900005, "model": "gemma4:latest", "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]}

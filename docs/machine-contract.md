@@ -19,13 +19,14 @@ dirtywork run --repo <path> "<task>"
                                       # built-in table, else 32768 (+ stderr warning)
     [--timeout 1800]                  # whole-run wall clock, seconds
     [--temperature <f>]               # omitted by default → server preset
-    [--provider openai|anthropic]     # default: openai; anthropic needs ANTHROPIC_API_KEY
+    [--max-tokens 8192]               # per-reply output cap; must be < the context window
+    [--provider openai|anthropic|ollama]  # default: openai; anthropic needs ANTHROPIC_API_KEY
     [--base-url <url>]                # default depends on --provider (LM Studio for openai,
                                       # https://api.anthropic.com for anthropic)
     [--max-worktree-mb 2048]
     [--max-worktree-files 200000]
     [--sandbox docker|none]           # default: docker
-    [--image ghcr.io/jimboschneider/dirtywork-worker:0.9]  # docker mode only
+    [--image ghcr.io/jimboschneider/dirtywork-worker:0.10]  # docker mode only
     [--allow-network]                 # docker mode only; default --network none
     [--memory 4g]                     # docker mode only
     [--cpus 2]                        # docker mode only
@@ -59,19 +60,19 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   the same worktree.
 
 - `--image REF` (docker mode) — the worker image, default
-  `ghcr.io/jimboschneider/dirtywork-worker:0.9`. The image is the worker's
+  `ghcr.io/jimboschneider/dirtywork-worker:0.10`. The image is the worker's
   whole toolchain: with `--network none` and no host mounts, nothing can be
   installed during a run. To add a tool, derive an image once:
 
   ```Dockerfile
-  FROM ghcr.io/jimboschneider/dirtywork-worker:0.9
+  FROM ghcr.io/jimboschneider/dirtywork-worker:0.10
   USER root
   RUN apt-get update && apt-get install -y --no-install-recommends <packages> \
       && rm -rf /var/lib/apt/lists/*
   USER worker
   ```
 
-  then `docker build -t my-worker:0.9 .` and `--image my-worker:0.9`. A custom
+  then `docker build -t my-worker:0.10 .` and `--image my-worker:0.10`. A custom
   `--image` is never digest-pinned — `PINNED_DIGEST` protects the maintained
   default image only.
 
@@ -103,10 +104,30 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   this last step warns). Which step answered is recorded as
   `context_window_source` on `run_start`, `run.json`, every payload and
   `run_end`: `flag`, `env`, `provider:<name>:server`, `provider:<name>`, or
-  `default`. Ollama is not probed in 0.9 — its `/api/show` reports the model's
-  architectural maximum rather than the loaded `num_ctx` — so pass
-  `--context-window` there. See
+  `default`. `--provider ollama` is probed with `GET /api/ps`, whose
+  `context_length` is the loaded `num_ctx` (recorded as
+  `provider:ollama:server`); Ollama has no static table in dirtywork, so a
+  model that is not resident falls straight through to `default` — its
+  `/v1/models` lists PULLED models, so preflight passes for a model Ollama has
+  not loaded yet. Run `ollama run <model>` before the run, or pass
+  `--context-window`, or Ollama will quietly serve its own smaller `num_ctx`.
+  See
   [Sizing the context window](operating.md#sizing-the-context-window).
+
+- `--max-tokens` (default 8192) — the per-reply output cap sent to the provider
+  on every request, and subtracted from the context window before the prompt
+  budget is computed (`(window - max_tokens) * 0.75 * 4` chars), so a long reply
+  can no longer run off the end of a window the prompt already filled. Preflight
+  refuses `--max-tokens` at or above the window with
+  `--max-tokens <N> must be smaller than the <W>-token context window` (exit 2).
+  The rule is flat, with no small-window exemption: a server-reported context
+  window at or below 8192 refuses every run until `--max-tokens` is passed and
+  lowered below it. Recorded on `run_start` and in `run.json`; **not** echoed on the stdout payload
+  (it is configuration, not evidence). `dirtywork resume` inherits it; a run
+  recorded before 0.10 has no value to inherit and gets the 8192 default, which
+  raises its effective cap from the adapters' old 4096. Pass `--max-tokens 4096`
+  for models that cap output there — some older Claude models reject a larger
+  value outright.
 
 - `--allow-commit` (host mode only) — replaces the prompt's "leave all changes
   uncommitted for review" rule with "commit your work in small conventional
@@ -116,7 +137,7 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   a container's commits could not reach the host anyway. `dirtywork resume`
   inherits the setting from the run it continues.
 
-**Tools:** the worker is advertised exactly ten tools, in this order. They are
+**Tools:** the worker is advertised exactly eleven tools, in this order. They are
 not configurable; a run's tool surface is the same in host and docker mode.
 
 - `read_file(path, offset=0, limit=400)` — numbered lines; files over ~5 MB and
@@ -124,6 +145,28 @@ not configurable; a run's tool surface is the same in host and docker mode.
 - `write_file(path, content)` — create or overwrite; parent directories are
   created. The result echoes a capped unified diff (a new file reports its byte
   and line count instead).
+- `append_file(path, text)` — append `text` **verbatim** to the end of an
+  EXISTING file; nothing is inserted between the old content and the new, so a
+  file that does not end in a newline needs one at the start of `text`. A
+  missing target refuses with `ERROR: cannot append to '<path>': it does not
+  exist; create it with write_file first` — `append_file` never creates a file
+  or a parent directory. Three caps, in order and identical in both modes: the
+  `text` argument (`ERROR: text is <n> bytes, over the <limit>-byte write
+  limit; append in smaller pieces`), the current file's size, and the result
+  size (both of the latter render `ERROR: result is <n> bytes, over the
+  <limit>-byte write limit; nothing was written`). This is the second half of
+  the large-file recipe: `write_file` the first part, `append_file` the rest —
+  and it is what a truncated call is told to do by name. When a tool call is cut
+  off at the token limit (`finish_reason: "length"`), the harness answers it with
+  `ERROR: your write_file for '<path>' was cut off at the token limit — nothing
+  was written. Write the file in chunks: write_file with the first part, then
+  append_file for each following part.` when the path can be recovered from the
+  model's own argument fragment, and otherwise with `ERROR: your <tool> call was
+  cut off at the token limit before it completed. Emit smaller tool calls — for a
+  large file, write_file the first part and append_file the rest.` Either way the
+  turn counts as a `malformed_args` failure, including the Anthropic shape where
+  the truncated arguments parse as `{}` and a required parameter is simply
+  missing.
 - `edit_file(path, old_string, new_string)` — one exact replacement;
   `old_string` must occur exactly once.
 - `apply_edits(path, edits)` — several exact replacements to ONE file in one
@@ -150,9 +193,24 @@ The four in-place tools (`edit_file`, `apply_edits`, `insert_before`,
 an oversized result with the same string
 (`ERROR: result is <n> bytes, over the <limit>-byte write limit; nothing was
 written`) and produce byte-identical success text on the host and in the
-container. "Nothing was written" covers every failure **before** the write
-begins; a failure *during* the write (I/O error, kill) can still leave a
-truncated file — see `docs/operating.md`.
+container. Diff bodies use `\n` as the only line separator, so **CRLF content
+keeps its carriage return**: a line ending `\r\n` renders as `-foo\r` /
+`+foo\r`, exactly as `git diff` shows it, and a line that merely *contains* a
+form feed or other vertical whitespace is never split. A final line with no
+trailing newline is followed by git's own `\ No newline at end of file` marker
+on its own output line.
+
+Since 0.10 "nothing was written" also covers a failure **during**
+the write: every host write and every container write is staged in a sibling
+temp file and promoted with an atomic rename, so an I/O error or a kill leaves
+the target byte-identical. Two branches (host mode only) keep the old in-place
+behaviour and are named here rather than hidden: a target with more than one
+hard link (a hardlink is *meant* to see the write through the shared inode)
+and a target in a directory the process cannot write (a rename is impossible
+there). The promote changes the file's inode, so a worker process holding the
+old file open keeps reading the old content until it re-opens. In docker mode
+there is no fd fallback: a writable file inside an unwritable directory
+refuses (Permission denied) where host mode writes in place.
 
 **stdout:** on any run that gets past preflight, exactly one JSON object is
 printed to stdout (nothing else goes to stdout):
@@ -199,7 +257,11 @@ printed to stdout (nothing else goes to stdout):
 Six of those keys are 0.8 additions (`stuck_on`, `files_changed`,
 `files_changed_truncated`, `last_tool_result`, `last_assistant_text`,
 `verify`) and the last three are 0.9's (`trimmed_turns`, `timeouts`,
-`context_window_source`). Every one of them is present on every payload —
+`context_window_source`). **0.10 adds no stdout key at all**: its additions are
+the eleventh tool (`append_file`), the `--max-tokens` flag, `max_tokens` on
+`run_start` and `run.json`, `finish_reason` on `assistant` events, and
+`--provider ollama` — all additive, `schema_version` still `2`. Every one of
+the nine keys above is present on every payload —
 `null` when it does not apply, `[]`/`false` for the list and its flag, `0` for
 the two counters — including the two paths where `runner.run()` never returns
 (see below), where they carry those same defaults rather than being omitted.
@@ -218,7 +280,7 @@ transcript can't be created), or any other exception escapes the run
 still populated so the worktree and run directory can be located for
 salvage.
 
-`base_commit` and `provider` (`"openai"` or `"anthropic"`) are present on
+`base_commit` and `provider` (`"openai"`, `"anthropic"`, or `"ollama"`) are present on
 every post-preflight payload. `resumed_from` is
 the slug of the run this one continued, or `null` if this was a fresh run.
 `finalize_error`, `watchdog_violation` and `watchdog_violation_kind` are

@@ -14,10 +14,11 @@ from dirtywork.providers import (
 
 
 def test_provider_names_and_default_base_urls_agree():
-    assert PROVIDER_NAMES == ("openai", "anthropic")
+    assert PROVIDER_NAMES == ("openai", "anthropic", "ollama")
     assert DEFAULT_BASE_URLS == {
         "openai": "http://localhost:1234/v1",
         "anthropic": "https://api.anthropic.com",
+        "ollama": "http://localhost:11434/v1",
     }
     assert set(DEFAULT_BASE_URLS) == set(PROVIDER_NAMES)
 
@@ -96,6 +97,7 @@ def test_get_provider_explicit_empty_base_url_is_not_replaced_by_default(monkeyp
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     assert get_provider("anthropic", "").base_url == ""
     assert get_provider("openai", "").base_url == ""
+    assert get_provider("ollama", "").base_url == ""
 
 
 def test_every_provider_name_is_constructible(monkeypatch):
@@ -108,3 +110,10 @@ def test_provider_double_default_model_matches_the_cli():
     import dirtywork.__main__ as m
     from tests.provider_doubles import DEFAULT_MODEL
     assert DEFAULT_MODEL == m.DEFAULT_MODEL
+
+
+def test_ollama_default_base_url_agrees_with_the_adapter():
+    # The string is written in two places on purpose (providers/__init__.py
+    # imports its adapters lazily); this is what keeps them in step.
+    from dirtywork.providers.ollama import OLLAMA_DEFAULT_BASE_URL
+    assert DEFAULT_BASE_URLS["ollama"] == OLLAMA_DEFAULT_BASE_URL

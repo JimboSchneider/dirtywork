@@ -146,3 +146,20 @@ def test_read_run_json_missing_raises_oserror(tmp_path: Path):
     run_dir.mkdir(mode=0o700)
     with pytest.raises(OSError):
         read_run_json(run_dir)
+
+
+def test_run_dir_for_returns_the_managed_directory(tmp_path: Path):
+    from dirtywork.rundir import run_dir_for
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    assert run_dir_for("2026-08-23-abc123", runs) == runs / "2026-08-23-abc123"
+
+
+@pytest.mark.parametrize("slug", ["../escape", "/etc", ".", "..", "", "a/b", "-leading"])
+def test_run_dir_for_refuses_a_slug_that_could_name_a_path(tmp_path: Path, slug):
+    from dirtywork.rundir import run_dir_for
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    with pytest.raises(RunDirError) as excinfo:
+        run_dir_for(slug, runs)
+    assert f"invalid run slug '{slug}'" in str(excinfo.value)

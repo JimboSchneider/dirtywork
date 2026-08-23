@@ -5,6 +5,8 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from .tools import is_temp_name
+
 DEFAULT_MAX_WORKTREE_MB = 2048
 DEFAULT_MAX_WORKTREE_FILES = 200_000
 
@@ -23,6 +25,10 @@ class BudgetReport:
     files: int
     escaping_symlinks: list
     violation: str | None
+    # Spec §2.5: staging temps this walk removed. Defaulted and LAST, so every
+    # existing four-positional construction stays valid; 0 unless the caller
+    # asked for the sweep.
+    swept: int = 0
 
 
 class _UnreadableDir(Exception):
@@ -42,10 +48,17 @@ def _is_escaping(dirpath: str, target: str, root: str) -> bool:
     return not (candidate == root_norm or candidate.startswith(root_norm + os.sep))
 
 
-def _measure_posix(worktree: Path, max_bytes: int, max_files: int) -> BudgetReport:
+def _measure_posix(worktree: Path, max_bytes: int, max_files: int,
+                   sweep_temps: bool = False) -> BudgetReport:
+    """`sweep_temps` (spec §2.5) removes a leftover `.dw-tmp.<name>.<8 hex>`
+    staging file as this walk passes it, rather than counting it. Folded in
+    here so the sweep costs NO second traversal: HostSandbox already walks the
+    worktree at start and again at finalize. A swept entry is not counted
+    toward `files`/`bytes` -- it is about to stop existing."""
     root = str(worktree)
     total_bytes = 0
     total_files = 0
+    swept = 0
     escaping: list = []
 
     def _onerror(err: OSError) -> None:
@@ -60,6 +73,14 @@ def _measure_posix(worktree: Path, max_bytes: int, max_files: int) -> BudgetRepo
                     st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
                 except OSError as e:
                     raise _UnreadableDir(e.filename or str(e))
+                if sweep_temps and stat.S_ISREG(st.st_mode) and is_temp_name(name):
+                    try:
+                        os.unlink(name, dir_fd=dirfd)
+                    except OSError:
+                        pass          # still there next walk; never fail a run for it
+                    else:
+                        swept += 1
+                        continue
                 total_files += 1
                 total_bytes += (
                     st.st_blocks * 512 if hasattr(st, "st_blocks") else st.st_size
@@ -72,21 +93,26 @@ def _measure_posix(worktree: Path, max_bytes: int, max_files: int) -> BudgetRepo
                 if total_bytes > max_bytes:
                     return BudgetReport(
                         total_bytes, total_files, escaping,
-                        f"worktree exceeds {max_bytes // (1024 * 1024)} MB",
+                        f"worktree exceeds {max_bytes // (1024 * 1024)} MB", swept,
                     )
                 if total_files > max_files:
                     return BudgetReport(
                         total_bytes, total_files, escaping,
-                        f"worktree exceeds {max_files} entries",
+                        f"worktree exceeds {max_files} entries", swept,
                     )
     except _UnreadableDir as e:
         return BudgetReport(total_bytes, total_files, escaping,
-                             f"unreadable directory: {e.path}")
+                             f"unreadable directory: {e.path}", swept)
 
-    return BudgetReport(total_bytes, total_files, escaping, None)
+    return BudgetReport(total_bytes, total_files, escaping, None, swept)
 
 
-def _measure_windows(worktree: Path, max_bytes: int, max_files: int) -> BudgetReport:
+def _measure_windows(worktree: Path, max_bytes: int, max_files: int,
+                     sweep_temps: bool = False) -> BudgetReport:
+    # `sweep_temps` is accepted and IGNORED here: Windows is unsupported (see
+    # README's platform table), the sweep is a POSIX dir_fd unlink, and a
+    # silently skipped sweep only means a leftover temp is reported as an
+    # ordinary file rather than removed. Stated, not hidden.
     # Best-effort; not exercised by this (POSIX-developed) test suite. `\\?\`
     # -prefixed paths avoid MAX_PATH limits; FILE_ATTRIBUTE_REPARSE_POINT
     # entries (symlinks and junctions) are counted but not descended into,
@@ -136,7 +162,8 @@ def _measure_windows(worktree: Path, max_bytes: int, max_files: int) -> BudgetRe
     return BudgetReport(total_bytes, total_files, escaping, None)
 
 
-def measure_worktree(worktree: Path, *, max_bytes: int, max_files: int) -> BudgetReport:
+def measure_worktree(worktree: Path, *, max_bytes: int, max_files: int,
+                     sweep_temps: bool = False) -> BudgetReport:
     if os.name == "nt":
-        return _measure_windows(worktree, max_bytes, max_files)
-    return _measure_posix(worktree, max_bytes, max_files)
+        return _measure_windows(worktree, max_bytes, max_files, sweep_temps)
+    return _measure_posix(worktree, max_bytes, max_files, sweep_temps)

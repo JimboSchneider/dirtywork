@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import os
 import posixpath
+import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -17,15 +19,22 @@ from ..tools import (
     MAX_LIST_ENTRIES,
     MAX_READ_BYTES,
     MAX_WRITE_BYTES,
+    TMP_FIND_REGEX,
     _apply_edits_once,
+    _append_missing,
+    _append_oversized,
     _cap,
     _check_write_size,
     _insert_once,
+    _not_utf8,
     _number_lines,
     _replace_once,
+    _result_too_big,
+    describe_change,
     describe_write,
     grep_timeout_result,
     timeout_result,
+    tmp_name,
 )
 from . import SandboxError
 from . import docker_args
@@ -47,6 +56,13 @@ from ..resume import stash_dir_for
 READ_EXEC_TIMEOUT = 30
 WRITE_EXEC_TIMEOUT = 30
 LIST_EXEC_TIMEOUT = 30
+
+# Matches a full swept temp-file path, and only that -- `Captured.output`
+# merges stderr into the same stream (procs.py runs with
+# stderr=subprocess.STDOUT), so a `find: '/work/x': Permission denied` line
+# or other daemon chatter sits in the same output as the real `-print`ed
+# paths. Anchored with fullmatch() below rather than trusted as a substring.
+_SWEEP_PATTERN = re.compile(TMP_FIND_REGEX + r"\Z")
 
 
 def _rel(path: str, *, writing: bool = False):
@@ -84,6 +100,67 @@ def _oversized(encoded: bytes):
             f"{MAX_WRITE_BYTES}-byte write limit"
         )
     return None
+
+
+# Spec §2.6. The promote tail is shared by both write scripts so a change to
+# how a staged file becomes the real file happens in ONE place:
+# `chmod --reference` copies the target's mode (today's `cat >` wrote through
+# the inode and preserved it for free -- the temp+`mv` shape is what creates
+# the need); `chmod 644` is the new-file fallback; `mv -fT` never moves INTO a
+# directory; `rm -f` on any failure is harmless when the temp never existed.
+# GNU coreutils (`--reference`, `-T`) ship in the bookworm worker image.
+_PROMOTE = ('{ chmod --reference="$1" "$2" 2>/dev/null || chmod 644 "$2"; } && '
+            'mv -fT -- "$2" "$1" || { rm -f -- "$2"; exit 1; }')
+
+# `$1` is the target relpath, `$2` the host-generated temp relpath; worker DATA
+# arrives on stdin and is never inside the script text. `&&`-chained so a
+# failed `cat` can never promote. The writability guard keeps host parity:
+# today an unwritable file refuses EACCES, and without it temp+`mv` would
+# silently overwrite a 0444 file, since rename needs only directory write.
+# Each guard echoes its own diagnostic so _write_raw's stderr wrap never
+# renders empty.
+WRITE_SCRIPT = (
+    'mkdir -p "$(dirname -- "$1")" && '
+    '{ [ ! -d "$1" ] || { echo "cannot write $1: Is a directory" >&2; exit 1; }; } && '
+    '{ [ -w "$1" ] || [ ! -e "$1" ] || { echo "cannot write $1: Permission denied" >&2; exit 1; }; } && '
+    'cat > "$2" && ' + _PROMOTE
+)
+
+
+def _sibling_tmp(rel: str) -> str:
+    """The staging path for an in-container write to `rel`: the same directory
+    (so `mv` is an atomic same-filesystem rename) with tools.tmp_name()'s
+    generated basename."""
+    return posixpath.join(posixpath.dirname(rel), tmp_name(posixpath.basename(rel)))
+
+
+# Spec §1.2: exec 1 of three. `[ ! -h ]` FIRST refuses any symlink (dangling
+# included) as exit 3, restoring parity with the host's O_NOFOLLOW probe
+# (which refuses symlinks too) and closing a cap bypass: plain `stat -c %s`
+# is an lstat, so a symlink to an oversized file dodged caps 2 and 3. Then
+# `[ -e ]` then `[ -f ]` -- so a FIFO, device or directory is refused with
+# exit 3 BEFORE any reader exec exists that a FIFO could block -- then the
+# EXACT byte size on stdout via `stat -Lc`, which follows the link as
+# belt-and-suspenders for a race after the `-h` check. The size matters
+# because `_read_raw` alone discards it (`head -c N+1` only proves
+# "exceeds"), and docker must be able to name the exact result size for a
+# file it will never read.
+APPEND_GUARD_SCRIPT = ('[ ! -h "$1" ] || exit 3; [ -e "$1" ] || exit 2; '
+                       '[ -f "$1" ] || exit 3; stat -Lc %s -- "$1"')
+
+# Spec §2.6: exec 3 of three. `[ -f "$1" ]` is re-checked here so a delete
+# between the guard exec and this one still refuses as "does not exist"
+# (exit 2) rather than silently creating the file; `-f` also re-excludes
+# directories and FIFOs. The writability guard is WRITE_SCRIPT's
+# counterpart: without it a 0444 target either leaks a temp-path in a
+# cp/cat stderr wrap or, run as root, silently succeeds -- neither is the
+# EACCES parity spec §2.6 asks for. `cp` without `-p` is fine -- the shared
+# promote's `chmod --reference` runs afterward.
+APPEND_WRITE_SCRIPT = (
+    '[ -f "$1" ] || exit 2; '
+    '[ -w "$1" ] || { echo "cannot append to $1: Permission denied" >&2; exit 1; }; '
+    'cp -- "$1" "$2" && cat >> "$2" && ' + _PROMOTE
+)
 
 
 class DockerSandbox:
@@ -279,7 +356,43 @@ class DockerSandbox:
         Read and clear it here, right after the thread is guaranteed dead,
         so a violation that landed while idle still surfaces instead of
         being silently reported `completed`. The export still runs — the
-        volume is intact and the work is worth salvaging regardless."""
+        volume is intact and the work is worth salvaging regardless.
+
+        Spec §2.5 (execution amendment, fix round 1): the stale-temp sweep
+        runs HERE, one exec against the still-alive WORKER container, right
+        before `_stop_container()` below -- not in export_run. The EXPORT
+        container's `/work` volume mount is readonly by design
+        (docker_args.export_create_argv), so a `find … -delete` there would
+        get EROFS on every match and silently do nothing. Reporting is never
+        silent on a partial failure: the swept-N note fires whenever at least
+        one real temp-file line was seen, regardless of exit code, and a
+        non-zero rc gets its own note so an EROFS or other mid-sweep error is
+        never mistaken for "nothing to sweep". The count itself is filtered
+        through `_SWEEP_PATTERN` -- `Captured.output` merges stderr, so a
+        `find: permission denied` or daemon error line must never inflate
+        the swept count.
+
+        The sweep is best-effort, not part of the run's success/failure
+        boundary: a `DockerError` here (timeout, daemon hiccup) is caught
+        and reported, never allowed to escape and skip export -- the salvage
+        path (export -> host_read_tree) is what actually protects the run's
+        output, and it must still run."""
+        sweep_argv = docker_args.exec_argv(
+            self.container, ["/usr/bin/find", "/work", "-type", "f", "-regextype",
+                             "posix-extended", "-regex", TMP_FIND_REGEX, "-print", "-delete"])
+        try:
+            sweep_captured = self._run(sweep_argv, timeout=docker_cli.T_EXPORT_STEP)
+        except docker_cli.DockerError as e:
+            print(f"sweep failed: {e}", file=sys.stderr)
+        else:
+            swept = [line for line
+                    in sweep_captured.output.decode("utf-8", errors="replace").splitlines()
+                    if line.strip() and _SWEEP_PATTERN.fullmatch(line.strip())]
+            if swept:
+                plural = "" if len(swept) == 1 else "s"
+                print(f"swept {len(swept)} stale temp file{plural}", file=sys.stderr)
+            if sweep_captured.returncode != 0:
+                print(f"sweep incomplete (rc {sweep_captured.returncode})", file=sys.stderr)
         self._stop_container()
         watchdog_violation = self.watchdog.violation if self.watchdog is not None else None
         # D1: only meaningful when watchdog_violation itself is set -- see
@@ -389,20 +502,33 @@ class DockerSandbox:
                    else f"tar rc={tar_out.returncode}, docker exec tar rc={tar_in.returncode}")
             raise SandboxError(f"resume seed failed: {why}")
 
-    def _read_raw(self, path: str, *, strict: bool = False):
+    def _read_raw(self, path: str, *, strict: bool = False, tool: str | None = None):
+        """Spec §5.1: `tool` names the tool whose call this read serves, so a
+        non-UTF-8 file refuses with the HOST's wording (`<path> is not valid
+        UTF-8 text; <tool> only works on text files`) instead of the legacy
+        `refusing to edit`, which was wrong for every insert/apply/append. It
+        is only consulted on a `strict` read."""
         rel, err = _rel(path)
         if err:
             return None, err
         argv = docker_args.exec_argv(
             self.container, ["/usr/bin/head", "-c", str(MAX_READ_BYTES + 1), "--", rel]
         )
-        captured = self._run(argv, timeout=READ_EXEC_TIMEOUT)
+        # docker_cli.run's default capture cap (procs.MAX_CAPTURE_BYTES, 1 MiB)
+        # is meant for ordinary exec output, not a file body -- request a cap
+        # above what `head` can ever emit (MAX_READ_BYTES + 1) so a 1-5 MiB
+        # file is never silently cut short at 1 MiB. With that explicit cap
+        # the exceeds check below is live again (it was dead code under the
+        # 1 MiB default, since captured.output could never exceed it); a
+        # `truncated` Captured is refused defensively even though the exec
+        # itself should never produce one now.
+        captured = self._run(argv, timeout=READ_EXEC_TIMEOUT, cap=MAX_READ_BYTES + 1)
         if captured.returncode != 0:
             return None, (
                 f"ERROR: cannot read '{path}': "
                 f"{captured.output.decode('utf-8', 'replace')[:500]}"
             )
-        if len(captured.output) > MAX_READ_BYTES:
+        if captured.truncated or len(captured.output) > MAX_READ_BYTES:
             return None, (
                 f"ERROR: '{path}' exceeds {MAX_READ_BYTES} bytes; refusing to read"
             )
@@ -410,6 +536,11 @@ class DockerSandbox:
             try:
                 text = captured.output.decode("utf-8", errors="strict")
             except UnicodeDecodeError:
+                if tool is not None:
+                    return None, _not_utf8(path, tool)
+                # No shipped caller reaches this since 0.10 -- every strict
+                # read names its tool. Kept so a direct caller of this private
+                # method gets a coherent refusal rather than a formatted None.
                 return None, (
                     f"ERROR: '{path}' is not valid UTF-8; refusing to edit"
                 )
@@ -435,7 +566,7 @@ class DockerSandbox:
             return err
         argv = docker_args.exec_argv(
             self.container,
-            ["/bin/sh", "-c", 'mkdir -p "$(dirname -- "$1")" && cat > "$1"', "_", rel],
+            ["/bin/sh", "-c", WRITE_SCRIPT, "_", rel, _sibling_tmp(rel)],
             stdin=True,
         )
         captured = self._run(argv, timeout=WRITE_EXEC_TIMEOUT, stdin=encoded)
@@ -452,20 +583,108 @@ class DockerSandbox:
         # unreadable/missing file yields None and reads as a new file.
         # _oversized/_rel checks are owned by _write_raw (DRY) — one extra
         # `head` exec on an oversized/invalid-path write is acceptable.
-        old_text, _unused = self._read_raw(path, strict=True)
+        old_text, _unused = self._read_raw(path, strict=True, tool="write_file")
         err = self._write_raw(path, encoded)
         if err:
             return err
         return describe_write(path, old_text, content, len(encoded))
 
-    def _transform_file(self, path: str, transform) -> str:
+    def _append_guard(self, path: str, rel: str, text_len: int):
+        """Spec §1.2 exec 1: (size, None) or (None, error). Decides existence,
+        regular-file-ness and both size caps before anything is read."""
+        argv = docker_args.exec_argv(
+            self.container, ["/bin/sh", "-c", APPEND_GUARD_SCRIPT, "_", rel])
+        captured = self._run(argv, timeout=READ_EXEC_TIMEOUT)
+        if captured.returncode == 2:
+            return None, _append_missing(path)
+        if captured.returncode == 3:
+            return None, f"ERROR: cannot append to '{path}': not a regular file"
+        text = captured.output.decode("utf-8", "replace")
+        if captured.returncode != 0:
+            return None, f"ERROR: cannot append to '{path}': {text[:500]}"
+        try:
+            size = int(text.strip())
+        except ValueError:
+            return None, f"ERROR: cannot append to '{path}': {text[:500]}"
+        if size > MAX_READ_BYTES or size + text_len > MAX_WRITE_BYTES:
+            # Caps 2 and 3 share one sentence, exactly as on the host, so a
+            # file too large to read reads as un-appendable rather than
+            # surfacing _read_raw's "refusing to read" wording.
+            return None, _result_too_big(size + text_len)
+        return size, None
+
+    def _append_write(self, path: str, rel: str, encoded: bytes) -> str:
+        """Spec §2.6 exec 3: '' on success, an 'ERROR: …' string otherwise."""
+        argv = docker_args.exec_argv(
+            self.container,
+            ["/bin/sh", "-c", APPEND_WRITE_SCRIPT, "_", rel, _sibling_tmp(rel)],
+            stdin=True,
+        )
+        captured = self._run(argv, timeout=WRITE_EXEC_TIMEOUT, stdin=encoded)
+        if captured.returncode == 2:
+            return _append_missing(path)
+        if captured.returncode != 0:
+            return (f"ERROR: cannot append to '{path}': "
+                    f"{captured.output.decode('utf-8', 'replace')[:500]}")
+        return ""
+
+    def append_file(self, path: str, text: str) -> str:
+        """Spec §1.2: three execs, in the same cap order tools.append_file
+        uses, so both modes emit identical strings from identical conditions.
+        The `text` argument is capped by _append_oversized BEFORE any exec;
+        this path never routes the payload through _oversized, which says
+        `ERROR: content is <n> bytes, over the <limit>-byte write limit` --
+        write_file's noun, and the wrong fix for an append. (The longer
+        host-only form with the `; write the file in smaller pieces` tail
+        lives in tools.write_file and has no counterpart in this module.)"""
+        encoded = text.encode("utf-8")
+        too_big = _append_oversized(encoded)
+        if too_big:
+            return too_big
+        rel, err = _rel(path, writing=True)
+        if err:
+            return err
+        size, err = self._append_guard(path, rel, len(encoded))
+        if err:
+            return err
+        # The guard already refused a file over MAX_READ_BYTES with the
+        # result-cap string; the exceeds-trap just below covers the race
+        # where the file grows between that exec and this one.
+        # `tool="append_file"` is what makes a non-UTF-8 file refuse with
+        # the host's append wording rather than the legacy `refusing to
+        # edit` (spec §5.1).
+        old_text, err = self._read_raw(path, strict=True, tool="append_file")
+        if err:
+            if err.startswith(f"ERROR: '{path}' exceeds "):
+                # TOCTOU: the guard's snapshot approved a size that
+                # _read_raw's own cap disproved a moment later. Trapped
+                # here so read_file's "refusing to read" wording -- the
+                # wrong noun for an append -- can never surface; reported
+                # against the guard's last-known size, the best number
+                # available (mirrors tools.append_file's probe-then-read
+                # race handling, spec §2.6).
+                return _result_too_big(size + len(encoded))
+            return err
+        # Re-checked against what was actually read, mirroring
+        # tools.append_file: the guard's size is a moment old, and the file
+        # may have grown in place since ("the probe's size is a moment
+        # old", spec §2.6).
+        if len(old_text.encode("utf-8")) + len(encoded) > MAX_WRITE_BYTES:
+            return _result_too_big(len(old_text.encode("utf-8")) + len(encoded))
+        err = self._append_write(path, rel, encoded)
+        if err:
+            return err
+        return describe_change(path, old_text, old_text + text, verb="Appended to")
+
+    def _transform_file(self, path: str, transform, *, tool: str) -> str:
         """Read → transform → write inside the container: the same shape as
         tools._transform_file, over the same transforms, so edit_file,
         insert_before and insert_after are three transforms over ONE path per
         backend (spec §3.2) and the two backends can never disagree about an
-        anchor rule or an error string. The UTF-8 refusal comes from
-        _read_raw(strict=True), which is why no `tool` name is needed here."""
-        text, err = self._read_raw(path, strict=True)
+        anchor rule or an error string. `tool` is forwarded to _read_raw so a
+        non-UTF-8 file refuses with the host's wording, naming the tool the
+        model called (spec §5.1)."""
+        text, err = self._read_raw(path, strict=True, tool=tool)
         if err:
             return err
         new_text, result = transform(text)
@@ -484,16 +703,20 @@ class DockerSandbox:
         return result
 
     def edit_file(self, path: str, old_string: str, new_string: str) -> str:
-        return self._transform_file(path, _replace_once(path, old_string, new_string))
+        return self._transform_file(path, _replace_once(path, old_string, new_string),
+                                    tool="edit_file")
 
     def apply_edits(self, path: str, edits: list) -> str:
-        return self._transform_file(path, _apply_edits_once(path, edits))
+        return self._transform_file(path, _apply_edits_once(path, edits),
+                                    tool="apply_edits")
 
     def insert_before(self, path: str, anchor: str, text: str) -> str:
-        return self._transform_file(path, _insert_once(path, anchor, text, "before"))
+        return self._transform_file(path, _insert_once(path, anchor, text, "before"),
+                                    tool="insert_before")
 
     def insert_after(self, path: str, anchor: str, text: str) -> str:
-        return self._transform_file(path, _insert_once(path, anchor, text, "after"))
+        return self._transform_file(path, _insert_once(path, anchor, text, "after"),
+                                    tool="insert_after")
 
     def _probe(self, attr: str, argv: list) -> bool:
         """Probe once per sandbox instance for an optional in-image tool; cached on self."""

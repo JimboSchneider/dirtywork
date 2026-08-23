@@ -106,3 +106,31 @@ def test_measure_does_not_descend_into_symlinked_dir(wt: Path):
 def test_default_constants():
     assert DEFAULT_MAX_WORKTREE_MB == 2048
     assert DEFAULT_MAX_WORKTREE_FILES == 200_000
+
+
+def test_measure_worktree_sweeps_only_generated_temps(wt: Path):
+    # Spec §2.5: the sweep matches the FULL generated shape, so a worker file
+    # that merely starts like one survives.
+    from dirtywork import tools
+    ours = wt / tools.tmp_name("app.py")
+    ours.write_text("staged")
+    theirs = wt / ".dw-tmp.notes"
+    theirs.write_text("mine")
+    (wt / "keep.txt").write_text("keep")
+    report = measure_worktree(wt, max_bytes=10 * 1024 * 1024, max_files=1000,
+                              sweep_temps=True)
+    assert report.swept == 1
+    assert not ours.exists()
+    assert theirs.read_text() == "mine"
+    assert (wt / "keep.txt").read_text() == "keep"
+    assert report.files == 2          # a swept temp is not counted
+
+
+def test_measure_worktree_does_not_sweep_unless_asked(wt: Path):
+    from dirtywork import tools
+    ours = wt / tools.tmp_name("app.py")
+    ours.write_text("staged")
+    report = measure_worktree(wt, max_bytes=10 * 1024 * 1024, max_files=1000)
+    assert report.swept == 0
+    assert ours.exists()
+    assert report.files == 1

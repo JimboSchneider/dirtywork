@@ -34,8 +34,13 @@ Day-to-day usage once dirtywork is installed: running a task, reviewing and resu
 
 #### Editing files
 
-The worker changes files only through tools — `write_file`, `edit_file`,
-`apply_edits`, `insert_before`, `insert_after` — never through `bash`. When a
+The worker changes files only through tools — `write_file`, `append_file`,
+`edit_file`, `apply_edits`, `insert_before`, `insert_after` — never through
+`bash`. A file larger than one reply is `write_file` for the first part and
+`append_file` for each part after it; `append_file` adds text verbatim to the
+end of an EXISTING file, inserting nothing between the old content and the
+new, so `text` needs a leading newline when the file does not end with one.
+When a
 brief lists several exact replacements in one file, say so and expect one
 `apply_edits` call rather than a run of `edit_file` calls: the edits are applied
 **in order on the running text** (edit 3 may depend on what edit 1 produced),
@@ -44,15 +49,23 @@ all-or-nothing before the write — the first failure writes nothing and the
 result names it. That is one turn instead of five, and one prompt-cache hit
 instead of five, which is most of the difference on a small local model.
 
-> **In-place edits are atomic *before* the write, not *through* it.** Every
-> refusal — validation, a non-matching `old`, an unreadable or non-UTF-8 file,
-> a result over the 5 MB write limit — happens before the file is opened, so
-> the file is untouched. Once the write starts, an I/O error or a kill can
-> still leave the file truncated; that is true of `edit_file`, `insert_*` and
-> `write_file` too and is unchanged in 0.9. The worktree is a scratch branch,
-> so the recovery is `git -C <worktree> checkout -- <path>`. A temp-file/rename
-> primitive was considered and deferred: done naively it re-opens the
-> final-component symlink race that the current `O_NOFOLLOW` write closes.
+> **File writes are atomic as of 0.10.** Every refusal — validation, a
+> non-matching `old`, an unreadable or non-UTF-8 file, a result over the 5 MB
+> write limit — still happens before the file is opened. And now the write
+> itself is staged: `write_file`, `append_file`, `edit_file`, `apply_edits` and
+> `insert_*` write into a sibling `.dw-tmp.<name>.<8 hex>` file and promote it
+> with an atomic rename, so an I/O error or a kill mid-write leaves the target
+> byte-identical instead of truncated. The file's mode is carried across the
+> promote (an executable stays executable). Two exceptions keep the old
+> behaviour on purpose: a target with more than one hard link is written
+> through the shared inode, because that is what a hardlink is *for*; and a
+> target in a directory dirtywork cannot write is written in place, because a
+> rename is impossible there. In docker mode there is no fd fallback: a
+> writable file inside an unwritable directory refuses (Permission denied)
+> where host mode writes in place. The promote changes the inode, so a
+> background process the worker left holding the file open keeps seeing the
+> old content. Recovery for a genuinely bad write is still `git -C <worktree>
+> checkout -- <path>` — the worktree is a scratch branch.
 
 #### Verifying a run
 
@@ -255,9 +268,45 @@ dirtywork asks the server what it actually loaded (LM Studio's
 not have to repeat the number as `--context-window`. The run records where the
 value came from in `context_window_source` — `provider:openai:server` when the
 server answered, `provider:openai` when the built-in table did, `flag`/`env`
-when you said so, `default` when nothing knew. Ollama is not probed in 0.9: its
-`/api/show` reports the model's architectural maximum rather than the loaded
-`num_ctx`, so pass `--context-window` there.
+when you said so, `default` when nothing knew. `--provider ollama` is probed
+too, with `GET /api/ps` — the `context_length` it reports is the loaded
+`num_ctx` and moves when a chat sets `options.num_ctx` — and shows up as
+`provider:ollama:server`. There is no static table for Ollama, so a model that
+is not resident goes straight to `default` (32768): Ollama's `/v1/models` lists
+models you have *pulled*, not models it has *loaded*, so preflight cannot tell.
+Run `ollama run <model>` before the run (or pass `--context-window`) or Ollama
+will load its own, usually smaller, `num_ctx` and truncate server-side without
+telling anyone.
+
+**Ollama quickstart:**
+
+    ollama run gemma4:latest            # make it resident first
+    dirtywork run --provider ollama --model gemma4:latest \
+      --repo ~/repos/someproject "Add a unit test for X"
+
+Some Ollama builds load a model with a small default `num_ctx` (4096 or
+lower); if the probed window comes back at or below 8192 the flat
+`--max-tokens` refusal exits 2 (it defaults to 8192, and the check is
+`max_tokens >= window`), so on such setups pass `--max-tokens` below the
+loaded window — or raise `num_ctx` before loading.
+
+The full tag is required — `gemma4` and `gemma4:latest` are different ids to
+Ollama, and `--model` must match what `/v1/models` lists. Parallel tool calls
+are not verified on Ollama; if a model emits them, dirtywork parses them the
+same way it parses LM Studio's.
+
+The window is shared between the prompt and the reply, so `--max-tokens`
+(default 8192) is subtracted from it before the prompt budget is computed:
+`(window - max_tokens) * 0.75 * 4` characters. At the 32768 default that is
+about 18.4k tokens' worth of prompt, versus the cap-blind 24.5k before 0.10 —
+real slack instead of a reply that runs off the end. Raising `--max-tokens`
+buys longer single replies at the cost of prompt room, and decode is the slow
+half on a local model: a cap you never reach costs nothing, but a cap you do
+reach costs seconds per turn. Lower it when a model rejects it (some older
+Claude models cap output at 4096) or when you would rather spend the window on
+context than on one long reply. The refusal is flat, with no small-window
+exemption: a server-reported context window at or below 8192 refuses every run
+until you pass `--max-tokens` and lower it below that window.
 
 **Rules of thumb**
 

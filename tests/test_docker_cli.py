@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dirtywork.procs import Captured
+from dirtywork.procs import Captured, MAX_CAPTURE_BYTES
 from dirtywork.sandbox.docker_cli import (
     DockerError,
     T_QUERY,
@@ -44,6 +44,28 @@ def test_run_raises_dockererror_on_timeout(monkeypatch):
         run(["exec", "dw-x", "/bin/true"], timeout=5)
     assert "exec" in str(exc_info.value)
     assert "5" in str(exc_info.value)
+
+
+def test_run_forwards_the_capture_cap(monkeypatch):
+    # The 1 MiB default in run_capped is meant for ordinary exec output, not
+    # a file body read back whole -- run() must forward whatever cap its
+    # caller asks for, and default to MAX_CAPTURE_BYTES when none is given,
+    # rather than silently dropping the kwarg on the floor (PR #56 review:
+    # docker_cli.run used to call run_capped with no cap at all, so every
+    # docker exec's capture -- including file reads -- was cut at 1 MiB).
+    seen = {}
+
+    def fake_run_capped(argv, *, timeout, stdin=None, cap=None, cwd=None, env=None, kill_group=True):
+        seen["cap"] = cap
+        return Captured(returncode=0, output=b"ok", truncated=False, timed_out=False)
+
+    monkeypatch.setattr("dirtywork.sandbox.docker_cli.run_capped", fake_run_capped)
+
+    run(["version"], timeout=T_QUERY, cap=123)
+    assert seen["cap"] == 123
+
+    run(["version"], timeout=T_QUERY)
+    assert seen["cap"] == MAX_CAPTURE_BYTES
 
 
 def test_docker_version_returns_string_on_success():
@@ -342,7 +364,7 @@ def test_docker_error_timed_out_defaults_false_and_run_sets_it(monkeypatch):
 
     import dirtywork.sandbox.docker_cli as mod
 
-    def fake_run_capped(argv, *, timeout=None, stdin=None):
+    def fake_run_capped(argv, *, timeout=None, stdin=None, cap=None):
         return Captured(returncode=None, output=b"", truncated=False, timed_out=True)
 
     monkeypatch.setattr(mod, "run_capped", fake_run_capped)

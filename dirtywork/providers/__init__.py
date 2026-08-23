@@ -11,11 +11,14 @@ import math
 from dataclasses import dataclass, field
 from typing import Protocol
 
-PROVIDER_NAMES = ("openai", "anthropic")
+PROVIDER_NAMES = ("openai", "anthropic", "ollama")
 
 DEFAULT_BASE_URLS = {
     "openai": "http://localhost:1234/v1",
     "anthropic": "https://api.anthropic.com",
+    # Kept in step with providers.ollama.OLLAMA_DEFAULT_BASE_URL by a test, not
+    # by an import: the adapters below are imported LAZILY on purpose.
+    "ollama": "http://localhost:11434/v1",
 }
 
 
@@ -96,6 +99,9 @@ def get_provider(name: str, base_url: str | None = None, timeout: int = 600) -> 
     if name == "anthropic":
         from .anthropic import AnthropicClient
         return AnthropicClient(base_url=url, timeout=timeout)
+    if name == "ollama":
+        from .ollama import OllamaClient
+        return OllamaClient(base_url=url, timeout=timeout)
     raise ValueError(f"unknown provider '{name}'. Available: {', '.join(PROVIDER_NAMES)}.")
 
 

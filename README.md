@@ -44,7 +44,7 @@ macOS (Windows unsupported — see below).
 ## Security & trust
 
 **Docker is the default sandbox as of 0.4 — a breaking change from 0.2.**
-Every tool call (`read_file`/`write_file`/`edit_file`/`apply_edits`/
+Every tool call (`read_file`/`write_file`/`append_file`/`edit_file`/`apply_edits`/
 `insert_before`/`insert_after`/`list_dir`/`grep`/`bash`) runs inside a
 locked-down container: `--network none` by default,
 `--read-only` root filesystem, `--cap-drop ALL`, kernel-enforced memory/CPU/
@@ -62,10 +62,12 @@ Full model, known exposures and the host-mode caveats:
 | CI-tested | Linux x86_64 (Ubuntu, Python 3.9 + 3.13) and macOS | unit suite on every push; the Docker sandbox live tests run on Linux in CI |
 | Unsupported | Windows | the unit suite also runs on `windows-latest` in CI as an advisory (allowed-to-fail) job that publishes a per-file pass/fail/error/skip table; Windows remains unsupported until an integration suite passes (see the note in [Security & trust](https://github.com/JimboSchneider/dirtywork/blob/main/docs/security.md#security--trust)) |
 
-Other OpenAI-compatible servers (Ollama, vLLM, llama.cpp) should work via
-`--base-url`/`--provider`; only LM Studio and the Anthropic API adapter
-(`--provider anthropic`, recorded-fixture tests, no live tests) are
-exercised by the test suites.
+Other OpenAI-compatible servers (vLLM, llama.cpp) should work via
+`--base-url`/`--provider`. LM Studio (`--provider openai`) and Ollama
+(`--provider ollama`) are both exercised — recorded-fixture contract tests for
+each, plus an opt-in live smoke per server; the Anthropic API adapter
+(`--provider anthropic`) has recorded-fixture tests and no live tests. Parallel
+tool calls are unverified on Ollama.
 
 ## Requirements
 
@@ -83,13 +85,19 @@ exercised by the test suites.
   for the measured numbers
 - `--provider anthropic` needs the `ANTHROPIC_API_KEY` environment variable
   set; the default (`--provider openai`, LM Studio or any OpenAI-compatible
-  server) needs no key.
+  server) and `--provider ollama` need no key.
+- `--provider ollama` talks to `http://localhost:11434/v1` and asks
+  `GET /api/ps` what context length the model is actually loaded with. Run
+  `ollama run <model>` first — Ollama lists *pulled* models, not resident ones,
+  so an unloaded model passes preflight and then gets whatever `num_ctx`
+  Ollama picks. Model ids include the tag (`gemma4:latest`).
 - The target repo must be a git repo with at least one commit
 
 **Other servers:** anything speaking the OpenAI chat-completions API with tool
-calling should work via `--base-url` (e.g. Ollama at
-`http://localhost:11434/v1`) — see [Platform support](#platform-support) for
-what's actually exercised by the test suites. Reports welcome.
+calling should work via `--base-url`. Ollama has its own `--provider ollama`
+as of 0.10 (default base URL `http://localhost:11434/v1`, with a real
+loaded-context probe) — see [Platform support](#platform-support) for what's
+actually exercised by the test suites. Reports welcome.
 
 ## Install
 
@@ -156,19 +164,27 @@ stdout JSON and exit codes: [docs/machine-contract.md](https://github.com/JimboS
    `.git/info/exclude` automatically. If the repo has a `CLAUDE.md` or
    `AGENTS.md` at its base commit, its content is injected into the
    worker's system prompt so it inherits your conventions.
-3. **The loop** — the model gets ten tools (`read_file`, `write_file`,
-   `edit_file`, `apply_edits`, `insert_before`, `insert_after`, `list_dir`,
-   `grep`, `bash`, `finish`) via OpenAI function-calling.
+3. **The loop** — the model gets eleven tools (`read_file`, `write_file`,
+   `append_file`, `edit_file`, `apply_edits`, `insert_before`, `insert_after`,
+   `list_dir`, `grep`, `bash`, `finish`) via OpenAI function-calling.
+   `append_file` adds text verbatim to the end of an existing file, so a file
+   larger than one reply is `write_file` for the first part and `append_file`
+   for each part after it — the recovery a truncated `write_file` is now told
+   to use by name.
    `insert_before`/`insert_after` add
    whole lines around a unique anchor without touching the anchor's own line
    — the primitive for "add a line here", which `edit_file` could only express
    as a replace. `apply_edits` takes a brief's whole numbered list of exact
    replacements to one file in a single call, applied in order, all-or-nothing:
    if any `old` does not match exactly once at its turn, nothing is written and
-   the result names the first failure. Every successful
-   `edit_file`/`apply_edits`/`write_file`/`insert_*` result
+   the result names the first failure. Since 0.10 every file write is staged
+   in a temp file and promoted atomically, so a run killed mid-write leaves
+   the file byte-identical instead of truncated. Every successful
+   `edit_file`/`apply_edits`/`write_file`/`append_file`/`insert_*` result
    echoes a capped unified diff of what actually changed, so a replace that
-   silently deleted a line is visible to the worker in the same turn.
+   silently deleted a line is visible to the worker in the same turn — except
+   `write_file` on a NEW file, which has nothing to diff against and reports
+   its byte and line count instead.
    Context is budgeted per model — dirtywork asks the server what window it
    actually loaded and reports both the value and its source, and the payload's
    `trimmed_turns` says on how many turns the oldest tool results had to be
@@ -189,6 +205,8 @@ stdout JSON and exit codes: [docs/machine-contract.md](https://github.com/JimboS
                                           # includes a real end-to-end agent run)
     python3 -m pytest -m docker -v       # docker suite (requires a running Docker
                                           # daemon; host-sentinel and lifecycle tests)
+    python3 -m pytest -m ollama -v       # ollama suite (requires a running Ollama
+                                          # server; opt-in, same shape as -m live)
 
 Design docs: `docs/superpowers/specs/2026-08-13-localagent-design.md`
 (architecture and contracts) and
