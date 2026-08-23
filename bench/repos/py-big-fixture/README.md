@@ -14,9 +14,10 @@ one per customer, columns in this exact order:
 - `created_at` -- an ISO-8601 date `YYYY-MM-DD`, starting at `2024-01-01`
   for id 1 and advancing by one day per id (id 2 -> `2024-01-02`, ...,
   id 400 -> `2025-02-03`).
-- `balance` -- a decimal amount with exactly two digits after the point:
-  `id * 3.33`, rounded to two decimal places (id 1 -> `3.33`,
-  id 2 -> `6.66`).
+- `balance` -- `id * 3.33`, rounded to two decimal places with standard
+  rounding (Python's `round(id * 3.33, 2)`) and printed with exactly two
+  digits after the point (id 1 -> `3.33`, id 2 -> `6.66`).
 
-No blank lines, no quoting, no trailing blank line beyond the file's final
-newline -- plain comma-separated values, UTF-8, LF line endings.
+No blank lines, no quoting, no header/data mismatch in field count -- plain
+comma-separated values, UTF-8, LF line endings only (no CR), and the file
+must end with exactly one trailing newline (not zero, not two).

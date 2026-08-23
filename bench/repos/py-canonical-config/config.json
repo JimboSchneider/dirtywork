@@ -1,0 +1,21 @@
+{
+  "app_name": "orderflow",
+  "version": "3.4.1",
+  "environment": "production",
+  "debug": false,
+  "log_level": "info",
+  "max_connections": 200,
+  "request_timeout_seconds": 30,
+  "retry_limit": 3,
+  "cache_ttl_seconds": 900,
+  "default_locale": "en-US",
+  "features": {
+    "new_checkout": true,
+    "beta_dashboard": false,
+    "email_notifications": true
+  },
+  "rate_limit": {
+    "requests_per_minute": 120,
+    "burst": 20
+  }
+}

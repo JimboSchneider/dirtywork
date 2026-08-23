@@ -1,0 +1,9 @@
+{
+  "task": "`bash build.sh` should write `out.txt`, but `bash acceptance/check.sh` fails. Make it pass without removing the health check entirely (a bounded wait with a clear timeout message is fine).",
+  "acceptance": {
+    "command": "bash /acceptance/check.sh",
+    "hashes": {
+      "acceptance/check.sh": "34ab1c1c845e90d85e93a21bb65e0959e6810fe8bb9341525466316f94ace8e2"
+    }
+  }
+}

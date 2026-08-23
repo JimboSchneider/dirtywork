@@ -3,7 +3,7 @@
   "acceptance": {
     "command": "bash /acceptance/check.sh",
     "hashes": {
-      "acceptance/check.sh": "630351f7ee1435269fe8bd222f1b90e394c2d65d10d96ffce4de2471be94f62d"
+      "acceptance/check.sh": "aa1c9a940dd8e69cfdbd054e307fc1b3d80e3a6512577cf14f3a8033f5d0cd1b"
     }
   }
 }
