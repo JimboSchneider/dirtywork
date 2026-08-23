@@ -780,7 +780,7 @@ git commit -m "feat(tools): _write_atomic and the shared write/append strings bo
 
 ---
 
-**Task 1 amendment (executed 2026-08-23):** the post-review fix round (commit `4b3070d`) restructured `_write_atomic`'s probe-fd close — in the two in-place branches the close is the write's completion (`OSError` → the generic tail, never a raise) and the function-level `finally` close is defensive — and added a 19th test (`test_write_atomic_surfaces_a_close_failure_on_the_hardlink_path_too`). Task 1 therefore ends at `1045 passed`, and every full-suite gate below reads +1 relative to the original chain (final: 1157 — the Task 4 and Task 6 fix rounds added three more). The `TMP_FIND_REGEX` comment now names the `-regextype posix-extended` requirement.
+**Task 1 amendment (executed 2026-08-23):** the post-review fix round (commit `4b3070d`) restructured `_write_atomic`'s probe-fd close — in the two in-place branches the close is the write's completion (`OSError` → the generic tail, never a raise) and the function-level `finally` close is defensive — and added a 19th test (`test_write_atomic_surfaces_a_close_failure_on_the_hardlink_path_too`). Task 1 therefore ends at `1045 passed`, and every full-suite gate below reads +1 relative to the original chain (final: 1158 — the Task 4/6 fix rounds and a Task 12 banked pin added four more). The `TMP_FIND_REGEX` comment now names the `-regextype posix-extended` requirement.
 
 ### Task 2: host `append_file` (spec §1.2, host half)
 
@@ -6549,7 +6549,7 @@ Expected: exit code 0.
 - [ ] **Step 7: Run the full suite**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1157 passed, 1 skipped, 20 deselected` (1148 + 9).
+Expected: exit code 0; `1158 passed, 1 skipped, 20 deselected` (1148 + 10: the brief's 9 plus the controller-banked case-(a) dispatch pin from Task 8's review).
 
 - [ ] **Step 8: Commit**
 
@@ -6748,7 +6748,7 @@ Expected: **no output**. (Without the `grep -v`, the only remaining hits are thi
 - [ ] **Step 8: Run the full suite and confirm the two version sources agree**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: exit code 0; `1157 passed, 1 skipped, 20 deselected` — unchanged from Task 12 (this task adds no test).
+Expected: exit code 0; `1158 passed, 1 skipped, 20 deselected` — unchanged from Task 12 (this task adds no test).
 
 Then:
 
