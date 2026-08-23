@@ -816,7 +816,13 @@ def append_file(worktree: Path, path: str, text: str) -> str:
         except OSError as e:
             return f"ERROR: cannot append to '{path}': {e}"
         finally:
-            fh.close()
+            # Defensive only: this is a read-only fd, so a close error here
+            # is meaningless -- it must never escape and override the real
+            # outcome already being returned.
+            try:
+                fh.close()
+            except OSError:
+                pass
         try:
             old_text = raw.decode("utf-8")
         except UnicodeDecodeError:
@@ -835,7 +841,15 @@ def append_file(worktree: Path, path: str, text: str) -> str:
             return err
         return describe_change(path, old_text, old_text + text, verb="Appended to")
     finally:
-        os.close(probe_fd)
+        # Defensive only: on the in-place branches _write_atomic already
+        # wrote through this same inode and reported any deferred error via
+        # its own close-as-completion, so this second fd's close error is a
+        # duplicate signal -- it must never escape and override the real
+        # outcome already being returned.
+        try:
+            os.close(probe_fd)
+        except OSError:
+            pass
 
 
 def list_dir(worktree: Path, path: str = ".") -> str:
