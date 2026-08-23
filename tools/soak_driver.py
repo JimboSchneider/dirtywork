@@ -31,9 +31,13 @@ invocation shape (`--repo ... --sandbox docker --keep-volume
 --max-turns/--timeout`, then the row's own `--provider`/`--base-url`/extra
 flags) mirrors `dirtywork.bench.run_one_bench_case`.
 
-Resumable: a row whose `label` already appears in `--out` is skipped, so a
-killed sweep restarts where it left off. `--dry-run` prints the command each
-row would run without executing anything.
+Resumable: a row whose `label` already has a terminal-status result in
+`--out` is skipped, so a killed sweep restarts where it left off -- a row
+whose spawn itself failed before any `dirtywork run` happened is NOT counted
+as done and will retry. Every label in a plan file must be unique (checked
+upfront; a duplicate is a plan error, not two rows sharing one result).
+`--dry-run` prints the command each row would run without executing
+anything.
 
 Stdlib only, run from a source checkout (same constraint as dirtywork.bench).
 """
@@ -244,17 +248,35 @@ def _run_acceptance(acceptance_dir: Path, bench_data: dict, volume: str) -> str:
 
 def _run_one(row: dict) -> dict:
     """Run (and, for the bench-task row shape, stage first and score) one
-    plan row. Never raises -- a bad row becomes a result row carrying
-    `error`, same tolerance as `dirtywork.bench.run_one_bench_case`. A
-    `repo`-shaped row is run in place (no staging, no acceptance -- see the
-    module docstring) so `repo_dir` is only ever cleaned up when it was this
-    function's own staged copy."""
+    plan row. Never raises `Exception` -- a bad row becomes a result row
+    carrying `error`, same tolerance as `dirtywork.bench.run_one_bench_case`.
+    A `repo`-shaped row is run in place (no staging, no acceptance -- see
+    the module docstring) so `repo_dir` is only ever cleaned up when it was
+    this function's own staged copy.
+
+    Cleanup (review item 6): everything from the moment `repo_dir` might
+    exist onward runs inside ONE outer try/finally, so a staged temp dir is
+    removed even when the row is interrupted (Ctrl-C/KeyboardInterrupt)
+    while `_invoke_dirtywork`'s subprocess is running -- the longest step,
+    and the one most likely to catch a Ctrl-C. A per-step `except Exception`
+    does NOT catch `KeyboardInterrupt` (it is a BaseException), so relying on
+    those alone to clean up (the previous shape of this function) could leak
+    a staged copy on every interrupted row; `finally` runs regardless of
+    exception type. The `--keep-volume` docker volume is handled
+    differently, and deliberately NOT covered by that same guarantee: it is
+    removed only in the ordinary (no exception) path below, once a row's
+    acceptance check (or the decision to skip one) is settled. If a row
+    raises or is interrupted before reaching that point, its volume is left
+    behind on purpose -- it is the one piece of forensic evidence for what
+    the sandbox actually did, and an operator can `docker run -v
+    <volume>:/work ... /bin/sh` into it. Only a row that reaches the end
+    without incident has its volume cleaned up automatically."""
     result = {
         "label": row.get("label"), "task": row.get("task") or row.get("repo"),
         "model": row.get("model"), "provider": row.get("provider"),
         "base_url": row.get("base_url"), "flags": row.get("flags") or [],
         "run_dir": None, "exit_code": None, "wall_s": None, "status": None,
-        "acceptance_passed": None,
+        "final_message": None, "acceptance_passed": None,
     }
     try:
         resolved = _resolve_row(row)
@@ -263,36 +285,40 @@ def _run_one(row: dict) -> dict:
         return result
 
     cleanup_repo_dir = resolved["stage"]
+    repo_dir = None
     try:
-        repo_dir = (_stage_repo(resolved["source_dir"], row.get("label") or row.get("task", "task"))
-                   if resolved["stage"] else resolved["repo_path"])
-    except Exception as e:
-        result["error"] = f"staging failed: {e}"
-        return result
+        try:
+            repo_dir = (_stage_repo(resolved["source_dir"],
+                                    row.get("label") or row.get("task", "task"))
+                       if resolved["stage"] else resolved["repo_path"])
+        except Exception as e:
+            result["error"] = f"staging failed: {e}"
+            return result
 
-    argv = _build_argv(row.get("model"), row.get("provider"), row.get("base_url"),
-                       resolved["task_text"], repo_dir, row.get("flags") or [])
-    try:
-        payload, exit_code, wall_s, stderr_text = _invoke_dirtywork(argv)
-    except Exception as e:
-        if cleanup_repo_dir:
-            shutil.rmtree(repo_dir, ignore_errors=True)
-        result["error"] = f"subprocess failed: {e}"
-        return result
-    result["exit_code"], result["wall_s"] = exit_code, wall_s
+        argv = _build_argv(row.get("model"), row.get("provider"), row.get("base_url"),
+                           resolved["task_text"], repo_dir, row.get("flags") or [])
+        try:
+            payload, exit_code, wall_s, stderr_text = _invoke_dirtywork(argv)
+        except Exception as e:
+            result["error"] = f"subprocess failed: {e}"
+            return result
+        result["exit_code"], result["wall_s"] = exit_code, wall_s
+        # Only available at run time, off this row's OWN subprocess's stdout
+        # -- see tools/soak_harvest.py's comment on `_harness_failures` for
+        # why it can never be recovered later from run_dir alone (review item 1).
+        result["final_message"] = (payload or {}).get("final_message")
 
-    run_dir = Path(payload["run_dir"]) if payload and payload.get("run_dir") else None
-    run_json = soak_common.read_run_json(run_dir) if run_dir else {}
-    # "terminal status from run.json" -- fall back to the stdout payload
-    # only if run.json itself could not be read (e.g. finalize crashed hard).
-    status = run_json.get("status") or (payload or {}).get("status")
-    result["run_dir"] = str(run_dir) if run_dir else None
-    result["status"] = status
-    if payload is None:
-        result["error"] = f"no stdout JSON (exit {exit_code}): {stderr_text.strip()[:500]}"
+        run_dir = Path(payload["run_dir"]) if payload and payload.get("run_dir") else None
+        run_json = soak_common.read_run_json(run_dir) if run_dir else {}
+        # "terminal status from run.json" -- fall back to the stdout payload
+        # only if run.json itself could not be read (e.g. finalize crashed hard).
+        status = run_json.get("status") or (payload or {}).get("status")
+        result["run_dir"] = str(run_dir) if run_dir else None
+        result["status"] = status
+        if payload is None:
+            result["error"] = f"no stdout JSON (exit {exit_code}): {stderr_text.strip()[:500]}"
 
-    volume = run_json.get("volume")
-    try:
+        volume = run_json.get("volume")
         # bench_data is None for a `repo` row -- never scored, acceptance_passed stays null.
         if resolved["bench_data"] is not None and volume and status == "completed":
             acceptance = _run_acceptance(resolved["acceptance_dir"], resolved["bench_data"], volume)
@@ -303,11 +329,10 @@ def _run_one(row: dict) -> dict:
                 docker_cli.run(["volume", "rm", volume], timeout=docker_cli.T_LIFECYCLE)
             except Exception:
                 pass
+        return result
     finally:
-        if cleanup_repo_dir:
+        if cleanup_repo_dir and repo_dir is not None:
             shutil.rmtree(repo_dir, ignore_errors=True)
-
-    return result
 
 
 def _dry_run_line(row: dict) -> str:
@@ -325,7 +350,36 @@ def _dry_run_line(row: dict) -> str:
 
 
 def _existing_labels(out_path: Path) -> set:
-    return {row.get("label") for row in soak_common.load_jsonl(out_path) if row.get("label")}
+    """Labels a prior sweep already resolved -- ONLY rows that reached a real
+    `dirtywork run` and got a terminal `status` back (whatever it was:
+    `completed`, `max_turns`, `stuck`, ...). `_run_one` writes `status: None`
+    for a row whose spawn itself failed (`_resolve_row`/staging/the
+    subprocess call raised, or produced no stdout JSON to read a status
+    from) -- such a row never got as far as `dirtywork run` doing anything,
+    so it must NOT count as done: a fixed plan (a typo, a missing
+    bench.json) should be able to resume and retry exactly that row, not
+    skip it forever (review item 7)."""
+    return {row.get("label") for row in soak_common.load_jsonl(out_path)
+            if row.get("label") and row.get("status") is not None}
+
+
+def _duplicate_labels(rows: list) -> list:
+    """Labels that appear more than once among a plan's rows (a row with no
+    label is ignored here -- `main`'s loop already skips and reports those
+    separately). Sorted for a deterministic error message. Checked upfront
+    so two rows can never share a label within one sweep -- the resumability
+    check above only looks at the OUT file, computed once before the loop
+    starts, so without this a plan containing the same label twice would run
+    both copies (review item 7)."""
+    seen, dupes = set(), set()
+    for row in rows:
+        label = row.get("label")
+        if not label:
+            continue
+        if label in seen:
+            dupes.add(label)
+        seen.add(label)
+    return sorted(dupes)
 
 
 def _append_result(out_path: Path, row: dict) -> None:
@@ -363,6 +417,10 @@ def main(argv=None) -> int:
     rows = soak_common.load_jsonl(plan_path)
     if not rows:
         print(f"error: '{plan_path}' has no rows", file=sys.stderr)
+        return 2
+    dupes = _duplicate_labels(rows)
+    if dupes:
+        print(f"error: '{plan_path}' has duplicate labels: {', '.join(dupes)}", file=sys.stderr)
         return 2
 
     out_path = Path(args.out) if args.out else _default_out_path(plan_path)

@@ -1,27 +1,26 @@
-"""Shared run-dir discovery/parsing for tools/soak_driver.py and
-tools/soak_harvest.py (issue #48, docs/superpowers/bench/2026-08-23-v1-soak-matrix.md).
+"""Shared helpers for tools/soak_driver.py and tools/soak_harvest.py (issue
+#48, docs/superpowers/bench/2026-08-23-v1-soak-matrix.md).
 
-Both scripts read `~/.dirtywork/runs/<slug>/run.json` and
-`~/.dirtywork/runs/<slug>/transcript.jsonl` (docs/transcript-schema.md) and a
-driver's own results JSONL -- this module is the one place that knows how to
-find and tolerantly parse those three file shapes, so a schema quirk gets
-fixed once instead of twice.
+DRY (repo standing rule): everything here is either genuinely new to these
+two scripts, or a thin existence-check wrapper around parsing the package
+already does -- `dirtywork.bench._load_results` already parses a JSONL file
+tolerantly, and `dirtywork.runs.read_transcript_events` already parses a
+transcript tolerantly (missing/unreadable file included), so this module
+calls those instead of re-implementing their loops (review of a09dd65, item
+3 -- the two functions here used to be near-verbatim copies of those, plus
+unused `RUNS_DIR`/`BENCH_HOME` re-exports of `dirtywork.rundir` that no
+caller in tools/ ever read; both are gone now).
 
-Stdlib only. Mirrors the tolerant-parse style of `dirtywork.bench._load_results`
-and `dirtywork.rundir.read_run_json`.
+Stdlib only.
 """
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from dirtywork import rundir  # noqa: E402  (path insert above must run first)
-
-RUNS_DIR = rundir.RUNS_DIR
-BENCH_HOME = rundir.BENCH_HOME
+from dirtywork import bench, rundir, runs  # noqa: E402  (path insert above must run first)
 
 
 def read_run_json(run_dir) -> dict:
@@ -36,29 +35,22 @@ def read_run_json(run_dir) -> dict:
 
 def load_jsonl(path) -> list:
     """Every JSON object in a JSONL file (a soak plan, a driver --out file,
-    or a bench results file). Blank and malformed lines are skipped: a file
-    written by a killed sweep, or a hand-edited plan with a stray blank
-    line, must still load the rows that parse."""
+    or a bench results file), via `dirtywork.bench._load_results`. That
+    function itself assumes the file exists -- its one in-package caller,
+    `bench.cmd_summarize`, checks first -- so this wrapper adds the same
+    check: a driver's --out file legitimately does not exist yet before a
+    sweep's first row, and a plan path might simply be a typo."""
     path = Path(path)
     if not path.is_file():
         return []
-    rows = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(parsed, dict):
-            rows.append(parsed)
-    return rows
+    return bench._load_results(path)
 
 
 def read_transcript(run_dir) -> list:
-    """Every JSON object in `<run_dir>/transcript.jsonl`, in file order (the
-    events are line-flushed as written, so file order is chronological
-    order). `[]` if the run dir has no transcript yet."""
-    path = Path(run_dir) / "transcript.jsonl"
-    return load_jsonl(path)
+    """Every JSON object in `<run_dir>/transcript.jsonl`, via
+    `dirtywork.runs.read_transcript_events` (already tolerant of a missing
+    or unreadable file -- the error string it can also return is discarded
+    here, same as every other caller in the package that only wants the
+    events, e.g. `runs.cmd_show`)."""
+    events, _error = runs.read_transcript_events(Path(run_dir) / "transcript.jsonl")
+    return events

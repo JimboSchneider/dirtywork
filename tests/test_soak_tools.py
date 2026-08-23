@@ -227,13 +227,116 @@ def test_model_tool_time_splits_gaps_by_which_event_ends_them(harvest):
         {"ts": _ts(5), "event": "assistant"},       # 5s of model time
         {"ts": _ts(8), "event": "tool_result", "tool": "bash", "args": '{"command":"ls"}'},
         {"ts": _ts(10), "event": "assistant"},       # 2s of model time
-        {"ts": _ts(11), "event": "run_end"},
+        {"ts": _ts(11), "event": "run_end"},         # trailing 1s gap excluded (item 8, below)
     ]
     mt = harvest.model_tool_time(events)
     assert mt["model_s"] == pytest.approx(7.0)
-    assert mt["tool_s"] == pytest.approx(4.0)
+    assert mt["tool_s"] == pytest.approx(3.0)
     assert mt["slowest"][0] == pytest.approx(3.0)
     assert mt["slowest"][1] == "bash"
+
+
+def test_model_tool_time_excludes_the_trailing_run_end_gap(harvest):
+    # The gap between the last real event and run_end is the runner's own
+    # finalize/export wait (git diff/patch, Docker export), not tool-call or
+    # model latency -- it must be charged to NEITHER bucket, and must not
+    # win "slowest tool call" (review item 8).
+    events = [
+        {"ts": _ts(0), "event": "assistant"},
+        {"ts": _ts(2), "event": "tool_result", "tool": "bash", "args": "{}"},
+        {"ts": _ts(300), "event": "run_end"},   # 298s finalize/export wait
+    ]
+    mt = harvest.model_tool_time(events)
+    assert mt["tool_s"] == pytest.approx(2.0)    # only the real tool_result gap
+    assert mt["model_s"] == pytest.approx(0.0)
+    assert mt["slowest"][0] == pytest.approx(2.0)
+
+
+# --------------------------------------------------------------------------
+# review item 4: _last_event is dirtywork.runs's, not a local copy
+# --------------------------------------------------------------------------
+
+def test_last_event_is_reused_from_dirtywork_runs(harvest):
+    from dirtywork import runs
+    assert harvest._last_event is runs._last_event
+
+
+# --------------------------------------------------------------------------
+# review item 5: transcript parsed once; _event_counts takes events, not a
+# run_dir re-read
+# --------------------------------------------------------------------------
+
+def test_event_counts_over_an_already_parsed_event_list(harvest):
+    events = [
+        {"event": "nudge", "kind": "stall"},
+        {"event": "nudge", "kind": "timeout"},
+        {"event": "guardrail_block"},
+        {"event": "sandbox_reset"},
+        {"event": "nudge", "kind": "some_unmapped_kind"},
+        {"event": "assistant"},   # ignored -- not a counted event
+    ]
+    counts = harvest._event_counts(events)
+    assert counts["nudge_stall"] == 1
+    assert counts["nudge_timeout"] == 1
+    assert counts["guardrail_block"] == 1
+    assert counts["sandbox_reset"] == 1
+    assert counts["nudge_other"] == 1
+
+
+# --------------------------------------------------------------------------
+# review item 1: final_message (abort kind) comes from the driver row, not
+# run_json['last_assistant_text']
+# --------------------------------------------------------------------------
+
+def test_harvest_run_reads_abort_kind_from_driver_rows_final_message(tmp_path, harvest):
+    run_json = {**BASE_RUN_JSON, "status": "model_error", "last_assistant_text": "I give up."}
+    run_dir = _write_run(tmp_path, "run-abort", run_json, [])
+    driver_row = {"final_message": "aborted after 3 consecutive empty_reply failures"}
+    h = harvest.harvest_run("run-abort", run_dir, driver_row)
+    assert "abort=empty_reply" in harvest.bench._failure_cell(h["harness"])
+
+
+def test_harvest_run_without_a_driver_row_does_not_fabricate_abort_kind(tmp_path, harvest):
+    # Before the fix, last_assistant_text stood in for final_message -- wrong,
+    # since it is the MODEL's text, not the runner's. Even when it happens to
+    # look like an abort message, it must NOT be read as one.
+    run_json = {**BASE_RUN_JSON, "status": "model_error",
+                "last_assistant_text": "aborted after 3 consecutive empty_reply failures"}
+    run_dir = _write_run(tmp_path, "run-abort2", run_json, [])
+    h = harvest.harvest_run("run-abort2", run_dir, None)
+    assert "abort=" not in harvest.bench._failure_cell(h["harness"])
+
+
+# --------------------------------------------------------------------------
+# review item 2: _markdown_table escapes '|' and collapses embedded newlines
+# --------------------------------------------------------------------------
+
+def test_markdown_table_escapes_pipe_and_collapses_newlines(harvest):
+    rows = [{"a": "pytest -q | tail", "b": "line1\nline2\r\nline3"}]
+    text = harvest._markdown_table(("a", "b"), rows)
+    lines = text.splitlines()
+    assert len(lines) == 3   # header + separator + exactly one data row
+    assert lines[2] == "| pytest -q \\| tail | line1 line2 line3 |"
+
+
+def test_harvest_main_markdown_survives_a_piped_command_in_slowest_call(tmp_path, harvest, capsys):
+    events = [
+        {"ts": _ts(0), "event": "assistant"},
+        {"ts": _ts(5), "event": "tool_result", "tool": "bash",
+         "args": '{"command":"pytest -q | tail -20"}'},
+        {"ts": _ts(6), "event": "run_end", "status": "completed",
+         "usage": {"prompt_tokens": 10, "completion_tokens": 5}, "turns": 2},
+    ]
+    run_dir = _write_run(tmp_path, "run-pipe", BASE_RUN_JSON, events)
+    assert harvest.main([str(run_dir)]) == 0
+    out = capsys.readouterr().out
+    # every physical line of the "Model vs tool time" table must be a
+    # complete, unbroken markdown row -- the embedded '|' in the bash
+    # command must not have split it into two
+    mt_lines = [l for l in out.split("## Model vs tool time\n", 1)[1].strip().splitlines()]
+    assert mt_lines   # sanity: the table actually printed something
+    for line in mt_lines:
+        assert line.startswith("|") and line.endswith("|")
 
 
 # --------------------------------------------------------------------------
@@ -461,6 +564,104 @@ def test_dry_run_reports_mutual_exclusion_error_inline(tmp_path, driver, bench_t
 
 
 # --------------------------------------------------------------------------
+# review item 6: _run_one cleans up a staged repo dir even when interrupted
+# --------------------------------------------------------------------------
+
+def test_run_one_cleans_up_staged_repo_dir_on_keyboard_interrupt(driver, bench_task_dir, monkeypatch):
+    # KeyboardInterrupt is a BaseException, not an Exception -- a bare
+    # `except Exception` around the subprocess call (the previous shape of
+    # this function) does not catch it, and would leak the staged temp dir.
+    # `_run_one` must still remove it via an outer try/finally.
+    staged = {}
+    real_stage_repo = driver._stage_repo
+
+    def spy_stage_repo(source_dir, tag):
+        d = real_stage_repo(source_dir, tag)
+        staged["dir"] = d
+        return d
+
+    def boom(argv):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(driver, "_stage_repo", spy_stage_repo)
+    monkeypatch.setattr(driver, "_invoke_dirtywork", boom)
+
+    row = _plan_row("row-a", bench_task_dir)
+    with pytest.raises(KeyboardInterrupt):
+        driver._run_one(row)
+    assert "dir" in staged                 # staging did happen...
+    assert not staged["dir"].exists()      # ...but was cleaned up despite the interrupt
+
+
+def test_run_one_cleans_up_staged_repo_dir_on_ordinary_exception(driver, bench_task_dir, monkeypatch):
+    staged = {}
+    real_stage_repo = driver._stage_repo
+
+    def spy_stage_repo(source_dir, tag):
+        d = real_stage_repo(source_dir, tag)
+        staged["dir"] = d
+        return d
+
+    def boom(argv):
+        raise RuntimeError("simulated subprocess crash")
+
+    monkeypatch.setattr(driver, "_stage_repo", spy_stage_repo)
+    monkeypatch.setattr(driver, "_invoke_dirtywork", boom)
+
+    row = _plan_row("row-a", bench_task_dir)
+    result = driver._run_one(row)
+    assert result["error"] == "subprocess failed: simulated subprocess crash"
+    assert result["status"] is None        # never ran -- must stay resumable (item 7 below)
+    assert not staged["dir"].exists()
+
+
+# --------------------------------------------------------------------------
+# review item 7: resume-by-label only counts rows with a real status;
+# duplicate labels within one plan are refused
+# --------------------------------------------------------------------------
+
+def test_existing_labels_ignores_rows_whose_spawn_never_produced_a_status(tmp_path, driver):
+    out_path = tmp_path / "out.jsonl"
+    out_path.write_text(
+        json.dumps({"label": "spawn-failed", "status": None, "error": "no bench.json"}) + "\n"
+        + json.dumps({"label": "ran-ok", "status": "completed"}) + "\n"
+        + json.dumps({"label": "also-ran", "status": "max_turns"}) + "\n",
+        encoding="utf-8")
+    assert driver._existing_labels(out_path) == {"ran-ok", "also-ran"}
+
+
+def test_dry_run_retries_a_label_whose_prior_row_never_got_a_status(
+        tmp_path, driver, bench_task_dir, capsys):
+    plan = tmp_path / "plan.jsonl"
+    plan.write_text(json.dumps(_plan_row("row-a", bench_task_dir)) + "\n", encoding="utf-8")
+    out_path = tmp_path / "out.jsonl"
+    out_path.write_text(
+        json.dumps({"label": "row-a", "status": None, "error": "boom"}) + "\n", encoding="utf-8")
+
+    rc = driver.main([str(plan), "--out", str(out_path), "--dry-run"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "row-a" in captured.out          # re-attempted, not treated as done
+    assert "skip row-a" not in captured.err
+
+
+def test_duplicate_labels_detects_repeats_and_ignores_unlabeled_rows(driver):
+    rows = [{"label": "a"}, {"label": "b"}, {"label": "a"}, {"label": None}, {}]
+    assert driver._duplicate_labels(rows) == ["a"]
+
+
+def test_main_refuses_a_plan_with_duplicate_labels(tmp_path, driver, bench_task_dir, capsys):
+    plan = tmp_path / "plan.jsonl"
+    plan.write_text(
+        json.dumps(_plan_row("dup", bench_task_dir)) + "\n"
+        + json.dumps(_plan_row("dup", bench_task_dir)) + "\n",
+        encoding="utf-8")
+    rc = driver.main([str(plan), "--dry-run"])
+    assert rc == 2
+    assert "duplicate labels: dup" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
 # soak_common
 # --------------------------------------------------------------------------
 
@@ -477,3 +678,33 @@ def test_load_jsonl_missing_file_returns_empty_list(tmp_path, common):
 
 def test_read_run_json_missing_returns_empty_dict(tmp_path, common):
     assert common.read_run_json(tmp_path / "no-such-run") == {}
+
+
+def test_read_transcript_delegates_to_dirtywork_runs(tmp_path, common):
+    run_dir = tmp_path / "run-x"
+    run_dir.mkdir()
+    (run_dir / "transcript.jsonl").write_text(
+        '{"event": "run_start"}\nnot json\n{"event": "run_end"}\n', encoding="utf-8")
+    assert common.read_transcript(run_dir) == [{"event": "run_start"}, {"event": "run_end"}]
+
+
+def test_read_transcript_missing_returns_empty_list(tmp_path, common):
+    assert common.read_transcript(tmp_path / "no-such-run") == []
+
+
+def test_soak_common_no_longer_re_exports_unused_constants(common):
+    # review item 3: RUNS_DIR/BENCH_HOME were dead re-exports of
+    # dirtywork.rundir that nothing in tools/ ever read.
+    assert not hasattr(common, "RUNS_DIR")
+    assert not hasattr(common, "BENCH_HOME")
+
+
+def test_load_jsonl_and_read_transcript_delegate_to_the_package(common):
+    # review item 3 (DRY): these must be thin wrappers that CALL
+    # dirtywork.bench._load_results / dirtywork.runs.read_transcript_events,
+    # not re-implementations of their parsing loops -- checked at the source
+    # level since the behavioral tests above can't tell "reused" from
+    # "copied and happens to match".
+    import inspect
+    assert "bench._load_results" in inspect.getsource(common.load_jsonl)
+    assert "runs.read_transcript_events" in inspect.getsource(common.read_transcript)

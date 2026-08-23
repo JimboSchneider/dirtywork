@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import soak_common  # noqa: E402
 from dirtywork import bench  # noqa: E402
+from dirtywork.runs import _last_event  # noqa: E402  (DRY: reuse, don't re-copy -- review item 4)
 
 MAIN_COLUMNS = ("Run", "Model", "Status", "Turns", "Wall", "Prompt tok", "Compl tok",
                 "Harness failures", "Review verdict", "Notes", "Feature fired")
@@ -149,10 +150,19 @@ def model_tool_time(events: list) -> dict:
     timestamp order; the gap between two consecutive events' `ts` is charged
     to MODEL time when the SECOND event is `assistant` (the model was
     generating that reply in between), and to TOOL time otherwise (a
-    `tool_result`, `nudge`, `guardrail_block`, `sandbox_reset` or `run_end`
-    following an `assistant` event -- the harness or the sandboxed command
-    was running in between). The slowest single tool call is the largest
-    such gap ending on a `tool_result`."""
+    `tool_result`, `nudge`, `guardrail_block` or `sandbox_reset` following an
+    `assistant` event -- the harness or the sandboxed command was running in
+    between). The slowest single tool call is the largest such gap ending on
+    a `tool_result`.
+
+    EXCLUDED: the final gap, between the last in-loop event and `run_end`,
+    is charged to NEITHER bucket (review item 8). That gap is the runner's
+    own finalize/export step after the agent loop is done -- computing
+    `git diff --stat`, writing `diff.patch`, the Docker-mode export commit --
+    not tool-call latency or model latency, and counting it as tool time
+    inflated every run's tool-time share (and could make an otherwise-fast
+    run's "slowest tool call" cell report the export step instead of an
+    actual tool call)."""
     model_s = 0.0
     tool_s = 0.0
     slowest = None  # (seconds, tool, args)
@@ -163,7 +173,7 @@ def model_tool_time(events: list) -> dict:
             continue
         if prev_ts is not None:
             gap = (ts - prev_ts).total_seconds()
-            if gap > 0:
+            if gap > 0 and e.get("event") != "run_end":
                 if e.get("event") == "assistant":
                     model_s += gap
                 else:
@@ -177,13 +187,6 @@ def model_tool_time(events: list) -> dict:
 # --------------------------------------------------------------------------
 # Per-run aggregates shared by all three tables
 # --------------------------------------------------------------------------
-
-def _last_event(events: list, name: str) -> dict:
-    for e in reversed(events):
-        if e.get("event") == name:
-            return e
-    return {}
-
 
 def _wall_seconds(run_json: dict, run_end: dict):
     if isinstance(run_end.get("duration_s"), (int, float)):
@@ -204,23 +207,61 @@ def _tool_mix(events: list) -> str:
     return " ".join(f"{t}:{n}" for t, n in sorted(counts.items()))
 
 
+def _event_counts(events: list) -> dict:
+    """Same shape and same result as `dirtywork.bench._event_counts`, but
+    over an already-parsed event list instead of re-reading transcript.jsonl
+    from disk. `bench._event_counts` only accepts a `run_dir` path (it does
+    its own file read), and `harvest_run` below already parses the
+    transcript once via `soak_common.read_transcript` -- calling
+    `bench._event_counts(run_dir)` on top of that would be a second parse of
+    the same file for every run harvested (review item 5). Kept as a local
+    copy of that loop rather than a call into the package: item 10 of the
+    same review adds a `bench._run_acceptance(acceptance_dir=...)` parameter
+    but does not touch `_event_counts`, and this function must work whether
+    or not that item lands (its sequencing is conditional on no soak sweep
+    being in flight)."""
+    counts = {"guardrail_block": 0, "sandbox_reset": 0, "nudge_other": 0}
+    counts.update({f"nudge_{kind}": 0 for kind in bench.NUDGE_KINDS})
+    for e in events:
+        name = e.get("event")
+        if name in ("guardrail_block", "sandbox_reset"):
+            counts[name] += 1
+        elif name == "nudge":
+            key = f"nudge_{e.get('kind')}"
+            counts[key if key in counts else "nudge_other"] += 1
+    return counts
+
+
 def harvest_run(label: str, run_dir: Path, driver_row: dict = None) -> dict:
     """One run dir's raw numbers, gathered once and shared by all three
-    table-row builders below."""
+    table-row builders below. `driver_row` (a row from a `soak_driver.py
+    --out` file, when harvesting via `--driver-out`) supplies `final_message`
+    -- see the comment on the `_harness_failures` call below for why that
+    can't come from `run_dir` alone."""
     run_json = soak_common.read_run_json(run_dir)
-    events = soak_common.read_transcript(run_dir)
+    events = soak_common.read_transcript(run_dir)   # parsed once, shared below (item 5)
     run_end = _last_event(events, "run_end")
     usage = run_end.get("usage") or {}
     status = run_json.get("status") or run_end.get("status")
     turns = run_json.get("turns", run_end.get("turns"))
     wall_s = _wall_seconds(run_json, run_end)
 
-    counts = bench._event_counts(run_dir)
-    # `last_assistant_text` stands in for the runner's own `final_message`
-    # (only available at run time, never persisted -- docs/transcript-schema.md's
-    # `## run.json` note on `dirtywork runs show`) -- it carries the same
-    # "aborted after N consecutive X failures" text on a model_error run.
-    harness = bench._harness_failures(counts, status, run_json.get("last_assistant_text"),
+    counts = _event_counts(events)
+    # The runner's own `final_message` (what `_abort_kind` regex-matches for
+    # a model_error run's "aborted after N consecutive X failures" text) is
+    # NEVER persisted to run.json or the transcript -- it exists only in the
+    # `dirtywork run` process's stdout JSON at run time (runner.py's
+    # RunResult.final -> __main__._emit_result; docs/transcript-schema.md's
+    # "## run.json" section says so explicitly: "the final message from the
+    # finish call's summary, because run.json records neither"). `run_json`'s
+    # `last_assistant_text` is the MODEL's own last reply, a different
+    # string, and using it here was wrong (review item 1) -- harvesting a
+    # bare run dir (no `--driver-out`) genuinely cannot recover this value,
+    # so `abort=` in the Harness-failures cell is only ever populated when
+    # `soak_driver.py`'s result row (which captures `final_message` off its
+    # own subprocess's stdout) is available.
+    final_message = driver_row.get("final_message") if driver_row else None
+    harness = bench._harness_failures(counts, status, final_message,
                                       run_json.get("timeouts", 0))
 
     notes = "-"
@@ -317,11 +358,24 @@ def _model_tool_row(h: dict) -> dict:
 # Rendering
 # --------------------------------------------------------------------------
 
+def _md_cell(value) -> str:
+    """One cell's text, made safe to sit inside a `| ... |` Markdown row.
+    Real data breaks a naive `str(value)` two ways: a `|` (e.g. the slowest
+    tool call's raw `args` for `{"command": "pytest -q | tail"}`) would be
+    read as a column separator and shift every cell after it, and an
+    embedded `\\n`/`\\r` (a multi-line error string) would split the row
+    across physical lines and corrupt the table. CSV mode is unaffected --
+    it renders through `csv.writer`, which already quotes/escapes correctly
+    for that format (review item 2)."""
+    text = str(value).replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    return text.replace("|", "\\|")
+
+
 def _markdown_table(columns, rows) -> str:
     lines = ["| " + " | ".join(columns) + " |",
              "|" + "|".join(["---"] * len(columns)) + "|"]
     for r in rows:
-        lines.append("| " + " | ".join(str(r.get(c, "-")) for c in columns) + " |")
+        lines.append("| " + " | ".join(_md_cell(r.get(c, "-")) for c in columns) + " |")
     return "\n".join(lines)
 
 
