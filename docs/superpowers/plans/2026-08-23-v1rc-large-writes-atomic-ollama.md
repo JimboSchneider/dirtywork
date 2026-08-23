@@ -780,7 +780,7 @@ git commit -m "feat(tools): _write_atomic and the shared write/append strings bo
 
 ---
 
-**Task 1 amendment (executed 2026-08-23):** the post-review fix round (commit `4b3070d`) restructured `_write_atomic`'s probe-fd close — in the two in-place branches the close is the write's completion (`OSError` → the generic tail, never a raise) and the function-level `finally` close is defensive — and added a 19th test (`test_write_atomic_surfaces_a_close_failure_on_the_hardlink_path_too`). Task 1 therefore ends at `1045 passed`, and every full-suite gate below reads +1 relative to the original chain (final: 1158 — the Task 4/6 fix rounds and a Task 12 banked pin added four more). The `TMP_FIND_REGEX` comment now names the `-regextype posix-extended` requirement.
+**Task 1 amendment (executed 2026-08-23):** the post-review fix round (commit `4b3070d`) restructured `_write_atomic`'s probe-fd close — in the two in-place branches the close is the write's completion (`OSError` → the generic tail, never a raise) and the function-level `finally` close is defensive — and added a 19th test (`test_write_atomic_surfaces_a_close_failure_on_the_hardlink_path_too`). Task 1 therefore ends at `1045 passed`, and every full-suite gate below reads +1 relative to the original chain (final: 1158 — the Task 4/6 fix rounds and a Task 12 banked pin added four more; the post-Task-13 whole-branch review's fix wave, commit 108d881, added two sweep tests, landing the released suite at **1160 passed, 1 skipped, 20 deselected**). The `TMP_FIND_REGEX` comment now names the `-regextype posix-extended` requirement.
 
 ### Task 2: host `append_file` (spec §1.2, host half)
 
