@@ -14,17 +14,18 @@ Day-to-day usage once dirtywork is installed: running a task, reviewing and resu
   repo's tests — then commit the branch or discard it. (The worktree is
   only populated after the run ends, once the export step completes.)
 
-  > **The worker cannot install dependencies in docker mode** (`--network
-  > none`, no host directories mounted); it can only run what the image
-  > ships — git, bash, coreutils, findutils, python3, node/npm, the .NET SDK,
-  > ripgrep, jq, uuid-runtime, shellcheck and curl. Always run the repo's own
-  > gate yourself on the exported worktree, or pass it as
-  > [`--verify`](#verifying-a-run). For a Node repo whose gate needs
-  > `node_modules`, symlink your own into the exported worktree for the gate
-  > and remove it afterwards — a `node_modules/` gitignore pattern does **not**
-  > match a symlink, so a forgotten one shows up as an untracked path. If the
-  > gate needs a tool the image lacks, build a derived image (see the recipe
-  > next to `--image` in [Machine contract](machine-contract.md#machine-contract)).
+  > **The worker cannot install dependencies in docker mode** (`--network none`,
+  > no host directories mounted); it can only run what the image ships — git,
+  > bash, coreutils, findutils, python3, node/npm, the .NET SDKs (8.0 and 10.0
+  > from the 1.0 image; the published `:0.10` image has 8.0 only), ripgrep, jq,
+  > uuid-runtime, shellcheck and curl. Always run the repo's own gate yourself
+  > on the exported worktree, or pass it as [`--verify`](#verifying-a-run). For
+  > a Node repo whose gate needs `node_modules`, symlink your own into the
+  > exported worktree for the gate and remove it afterwards — a `node_modules/`
+  > gitignore pattern does **not** match a symlink, so a forgotten one shows up
+  > as an untracked path. If the gate needs a tool the image lacks, build a
+  > derived image (see the recipe next to `--image` in [Machine
+  > contract](machine-contract.md#machine-contract)).
 - **Clean up a run:** `dirtywork runs clean <slug>` — see
   [Inspecting, cleaning up and re-exporting runs](#inspecting-cleaning-up-and-re-exporting-runs)
   for the safety rules and the rest of the `runs` subcommands.
@@ -407,6 +408,20 @@ are not part of the installed package.
   `--max-worktree-mb`/`--max-worktree-files` during a tool call; the
   worktree and branch are kept for salvage. Raise the limit or investigate
   what wrote so much.
+- **`No space left on device` during a package restore in docker mode** —
+  package-manager caches live under `$HOME`, which is a tmpfs capped at
+  `--home-size` (256m by default); a real restore can overflow that. Raise
+  `--home-size` (and `--memory` alongside it — tmpfs writes are charged to
+  the container's memory cgroup), or redirect the cache per command instead.
+  See the `--tmp-size`/`--gitdir-size`/`--home-size` bullet in
+  [Machine contract](machine-contract.md#machine-contract).
+- **`File size limit exceeded` / exit 153 from any `dotnet` command on the
+  published `:0.10` image** — a 0.10 defect, not a dirtywork bug: that
+  image's .NET 8 runtime trips the sandbox's per-command file-size limit
+  (`ulimit -f 524288`, 256 MiB) at startup with W^X enabled, the .NET
+  default. Use the 1.0 image (`:1.0`, once released), or a derived image
+  that adds `ENV DOTNET_EnableWriteXorExecute=0` — see
+  [`docker/README.md`](../docker/README.md).
 - **exit 2, "Docker is the default sandbox since 0.4..."** — Docker
   Desktop/dockerd isn't running or isn't reachable. Start it, or pass
   `--sandbox none` to run unsandboxed on the host.

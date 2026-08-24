@@ -32,6 +32,7 @@ dirtywork run --repo <path> "<task>"
     [--cpus 2]                        # docker mode only
     [--tmp-size 1g]                   # docker mode only
     [--gitdir-size 512m]              # docker mode only
+    [--home-size 256m]                # docker mode only
     [--min-free-mb 2048]              # docker mode only; host free-space floor
     [--keep-volume]                   # docker mode only; skip volume cleanup
     [--max-patch-mb 10]               # docker mode only; diff.patch cap
@@ -44,6 +45,12 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
     [--feedback "<text>"]             # reviewer instructions; REQUIRED to resume a `completed` run
     [--feedback-file <path>]          # same, read from a UTF-8 file (max 64000 chars)
 ```
+
+`--tmp-size`/`--gitdir-size`/`--home-size` default to the earlier run's
+recorded values too (1.0). A run recorded before 1.0 has no `tmp_size`/
+`gitdir_size`/`home_size` in its `run.json` to inherit, so it falls back to
+the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
+`512m`/`256m`) like a fresh run would.
 
 - `--branch-from @<slug>` — start the new run from the branch an earlier run
   left behind instead of from repo HEAD. If that run's worktree still has
@@ -75,6 +82,75 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   then `docker build -t my-worker:0.10 .` and `--image my-worker:0.10`. A custom
   `--image` is never digest-pinned — `PINNED_DIGEST` protects the maintained
   default image only.
+
+  On the supported platforms (macOS/Linux) the worker runs as the **host**
+  uid:gid, not the image's `worker` (uid 1000): `dirtywork/sandbox/docker.py`'s
+  `DockerSandbox.start()` reads `os.getuid()`/`os.getgid()` and passes
+  `--user uid:gid` at `docker create` (every `docker exec` inherits it), and
+  the run volume is chowned to that uid — non-posix falls back to `1000:1000`
+  (Windows is unsupported; see `docs/security.md`). So anything a
+  derived image bakes in for the worker to write or read at run time — a
+  pre-restored package cache, a tool's state dir — must be
+  world-readable/writable (`chmod -R a+rwX`); the #48 soak's derived image
+  failed with `Failed to read NuGet.Config due to unauthorized access` until
+  that was done. dirtywork also sets `HOME=/home/worker` with `-e` at
+  `docker create`, which every `docker exec` inherits — overriding any `ENV
+  HOME` baked into the image. Baked paths are read-only at run time
+  (`--read-only` rootfs), so a baked cache must be complete at build time;
+  a live restore instead needs `--allow-network` plus a big enough
+  `--home-size` (see below). A pre-restored NuGet cache, condensed
+  (`docker/README.md`'s Derived images section has the fuller version):
+
+  ```Dockerfile
+  FROM ghcr.io/jimboschneider/dirtywork-worker:0.10
+  USER root
+  ENV DOTNET_EnableWriteXorExecute=0
+  # until the 1.0 base image bakes this in — see the 0.10 defect note below
+  ENV NUGET_PACKAGES=/opt/nuget
+  RUN dotnet restore <project> --packages /opt/nuget && chmod -R a+rwX /opt/nuget
+  USER worker
+  ```
+
+  The published `:0.10` image ships .NET SDK 8.0 only, and — a 0.10 defect —
+  its .NET 8 runtime dies at startup with `File size limit exceeded` under
+  the sandbox's per-command file-size limit (`bash` runs everything under
+  `ulimit -f 524288`, 256 MiB), so `dotnet restore`/`build`/`test` do not
+  work on it inside dirtywork. The 1.0 image adds SDK 10.0 alongside 8.0 and
+  sets `DOTNET_EnableWriteXorExecute=0`, which fixes that for both runtimes
+  (verified offline: new, build and run of net8.0 and net10.0 apps under the
+  limit); a derived image based on `:0.10` needs that `ENV` line itself.
+  Restoring anything not vendored this way needs `--allow-network`.
+
+- `--tmp-size` / `--gitdir-size` / `--home-size` (docker mode; default `1g` /
+  `512m` / `256m`) — caps on the three tmpfs mounts the **worker** container
+  gets: `/tmp` (exec), `/gitdir` (the run's git dir) and `/home/worker`.
+  The separate, short-lived export container (`docker_args.py`'s
+  `export_create_argv`, spec §7) is unaffected by these flags — it always
+  gets fixed sizes (`/tmp` 256m, `/gitdir` 2g, `/home/worker` 64m), sized for
+  the export step's own needs, not the run's. All three worker-container
+  flags share one validator (1.0): a non-zero leading digit, more digits,
+  then `k`, `m` or `g`, upper-case folded to lower-case — no unit-less
+  bytes, no decimals, no `%`, no `mb`/`MiB`, no `t`, no comma-separated mount
+  options, no leading zero (Docker itself would accept `1g,exec` on that
+  option string, and would read a leading zero as *octal* rather than
+  reject it — the harness rejects leading zeros outright instead of relying
+  on Docker's own reinterpretation). The validator's error text:
+  `expected a size like 256m or 1g (no leading zero; digits then k, m or
+  g)`. Package managers cache under `$HOME` by default (NuGet
+  `~/.nuget/packages`, npm `~/.npm`, pip `~/.cache/pip`); a real NuGet
+  restore overflowed the 256m default home in the #48 soak (`No space left
+  on device`) — npm/pip weren't measured but are likely the same. Raise
+  `--home-size`, or redirect a cache per command instead
+  (`NUGET_PACKAGES=/tmp/nuget dotnet restore …`; npm honours
+  `npm_config_cache`, pip honours `PIP_CACHE_DIR`) — environment does not
+  carry between `bash` calls: each is its own `docker exec`, which starts
+  from the container environment fixed at `docker create` (`HOME=/home/worker`,
+  `TMPDIR=/tmp`, `PATH`), so a `HOME=/tmp` set inside one call cannot be
+  made to stick for the next.
+  All three tmpfs mounts live in RAM and are charged to the container's
+  memory cgroup (verified on Docker 29: a 600 MiB write into a 1g tmpfs
+  under `--memory 256m` was OOM-killed at ~253 MiB) — raise `--memory`
+  alongside them.
 
 - `--stall-turns N` (default 12) — end the run with status `stalled` after N
   consecutive turns that changed no file and produced no new command output;
@@ -363,14 +439,21 @@ A `finish(summary=...)` call appears in the transcript as an ordinary tool call 
 
 Since 1.0 the history sent to the model obeys two rules (#60): a harness follow-up never directly follows a tool result — it rides on the turn's last `tool_result` as `follow_up`, or is the `finish` result — and an assistant reply with no tool call and no text is stored as `[empty reply]` (`assistant.placeholder`), so strict chat templates never see a dropped turn or a user message after a tool result.
 
-The docker settings dict (`run_start`'s `sandbox`, and the same fields in
-`run.json`) includes `image` (the `--image` argument as given),
-`image_digest` (the registry digest from `RepoDigests`, or `null` for a
-locally-built image that was never pushed/pulled) — provenance only — and
-`image_pinned` (`true` only when `--image` was left at its default AND
-`PINNED_DIGEST` was enforced against a pulled default image; `false` for a
-custom `--image` — never pinned — or a locally built/loaded default image,
-which only warns). `run.json` also records the run's key fields: `task`,
+`run_start`'s `sandbox` is the docker settings dict in docker mode (`"none"`
+in host mode) — `{backend, image, image_digest, image_pinned, network,
+memory, cpus, pids_limit, tmp_size, gitdir_size, home_size,
+max_worktree_mb, max_worktree_files, user}`, `home_size` since 1.0. `image`
+is the `--image` argument as given; `image_digest` is the registry digest
+from `RepoDigests`, or `null` for a locally-built image that was never
+pushed/pulled — provenance only; `image_pinned` is `true` only when
+`--image` was left at its default AND `PINNED_DIGEST` was enforced against
+a pulled default image (`false` for a custom `--image` — never pinned — or
+a locally built/loaded default image, which only warns). `run.json` does
+**not** nest that dict: its own `sandbox` field stays the flat string
+`"docker"` \| `"none"`, while `image`, `image_digest` and `image_pinned` are
+recorded as top-level keys, and — since 1.0 (#63) — so are `tmp_size`,
+`gitdir_size` and `home_size` (the canonical lower-cased flag values;
+`null` in host mode). `run.json` also records the run's key fields: `task`,
 `model`, `context_window`, `resumed_from`, and `turns` (at the end); when a
 run is resumed, the earlier run's `resumed_by` field records the slug of the new run that continued it.
 The container itself always runs from the image's local

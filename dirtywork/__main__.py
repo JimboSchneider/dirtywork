@@ -7,6 +7,7 @@ import io
 import json
 import math
 import os
+import re
 import sys
 
 if __name__ == "__main__":
@@ -169,6 +170,50 @@ def _non_negative_int(text: str) -> int:
     if value < 0:
         raise argparse.ArgumentTypeError("must be >= 0")
     return value
+
+
+# Docker 29's own `--tmpfs .../size=VALUE` parser is looser than what we want
+# to hand it: a leading zero is parsed as octal ("00256m" -> 174MiB, not
+# 256MiB, per manual probe), a bare comma after the value silently splices in
+# extra tmpfs mount options ("1g,exec" grants exec on the mount), and a
+# unit-less value is accepted as page-rounded bytes. We accept only
+# digits-then-unit -- no leading zero, no unit-less bytes, no comma, no
+# percent, and no 't': one unit set (k/m/g), one spelling, no ambiguity --
+# NOT a magnitude cap (the regex bounds nothing on its own; 999999g parses
+# fine here -- --memory is the real ceiling).
+_TMPFS_SIZE_RE = re.compile(r"^[1-9][0-9]*[kmg]$")
+
+
+def _tmpfs_size(value: str) -> str:
+    canonical = value.lower()
+    if not _TMPFS_SIZE_RE.fullmatch(canonical):  # fullmatch: `$` alone admits a trailing newline
+        raise argparse.ArgumentTypeError(
+            f"expected a size like 256m or 1g (no leading zero; digits then k, m or g), "
+            f"got {value!r}")
+    return canonical
+
+
+# Single source of truth for the three tmpfs-size defaults: DockerConfig's
+# own dataclass field defaults, not a second copy of "1g"/"512m"/"256m"
+# repeated here (and liable to drift from it).
+_DOCKER_DEFAULTS = DockerConfig()
+
+
+def _inherit_tmpfs_size(prior: dict, key: str, default: str) -> str:
+    """#63 resume inheritance for --tmp-size/--gitdir-size/--home-size,
+    mirroring max_tokens's hardened inheritance policy below: a hand-edited
+    (or pre-1.0) run.json can carry anything JSON allows for `key` -- a
+    missing key, an explicit null, or any other value _tmpfs_size itself
+    would reject (an int, "1t", "00256m", ...). Only a string _tmpfs_size
+    accepts is inherited; everything else falls back to `default` rather
+    than tracebacking or reintroducing an invalid value into DockerConfig."""
+    inherited = prior.get(key)
+    if isinstance(inherited, str):
+        try:
+            return _tmpfs_size(inherited)
+        except argparse.ArgumentTypeError:
+            pass
+    return default
 
 
 _ENDPOINT_HINTS = {
@@ -421,6 +466,7 @@ def _build_sandbox(args, ctx: RunContext, *, run_dir: Path, transcript):
             cpus=args.cpus,
             tmp_size=args.tmp_size,
             gitdir_size=args.gitdir_size,
+            home_size=args.home_size,
             max_worktree_mb=args.max_worktree_mb,
             max_worktree_files=args.max_worktree_files,
             min_free_mb=args.min_free_mb,
@@ -442,7 +488,8 @@ def _build_sandbox(args, ctx: RunContext, *, run_dir: Path, transcript):
             "image_pinned": ctx.image_pinned,
             "network": cfg.network, "memory": cfg.memory, "cpus": cfg.cpus,
             "pids_limit": cfg.pids_limit, "tmp_size": cfg.tmp_size,
-            "gitdir_size": cfg.gitdir_size, "max_worktree_mb": cfg.max_worktree_mb,
+            "gitdir_size": cfg.gitdir_size, "home_size": cfg.home_size,
+            "max_worktree_mb": cfg.max_worktree_mb,
             "max_worktree_files": cfg.max_worktree_files,
             "user": f"{sandbox.uid}:{sandbox.gid}",
         }
@@ -478,6 +525,9 @@ def _write_run_json_start(run_dir: Path, ctx: RunContext, args) -> None:
         "verify_timeout": args.verify_timeout,
         "container": docker_args.container_name(ctx.slug) if is_docker else None,
         "volume": docker_args.volume_name(ctx.slug) if is_docker else None,
+        "tmp_size": args.tmp_size if is_docker else None,
+        "gitdir_size": args.gitdir_size if is_docker else None,
+        "home_size": args.home_size if is_docker else None,
         "image": args.image if is_docker else None,
         "image_digest": ctx.image_digest,
         "image_pinned": ctx.image_pinned,
@@ -734,6 +784,17 @@ def _load_resume_target(args) -> dict:
         args.model = prior["model"]
     if args.image is None:
         args.image = prior.get("image") or DEFAULT_IMAGE
+    # #63: a run that only completed because it was given e.g. --home-size 2g
+    # would otherwise silently drop back to 256m on resume and re-hit the
+    # exact ENOSPC that flag fixed. A prior host-mode run recorded null for
+    # all three (_write_run_json_start only fills these in docker mode), so
+    # that case falls through to the default here same as a missing key.
+    if args.tmp_size is None:
+        args.tmp_size = _inherit_tmpfs_size(prior, "tmp_size", _DOCKER_DEFAULTS.tmp_size)
+    if args.gitdir_size is None:
+        args.gitdir_size = _inherit_tmpfs_size(prior, "gitdir_size", _DOCKER_DEFAULTS.gitdir_size)
+    if args.home_size is None:
+        args.home_size = _inherit_tmpfs_size(prior, "home_size", _DOCKER_DEFAULTS.home_size)
     if args.allow_commit is None:
         args.allow_commit = bool(prior.get("allow_commit", False))
     if getattr(args, "verify", None) is None:
@@ -994,8 +1055,24 @@ def _add_run_flags(p, *, resume: bool) -> None:
     p.add_argument("--allow-network", action="store_true", default=False)
     p.add_argument("--memory", default="4g")
     p.add_argument("--cpus", default="2")
-    p.add_argument("--tmp-size", default="1g")
-    p.add_argument("--gitdir-size", default="512m")
+    p.add_argument("--tmp-size", type=_tmpfs_size,
+                   default=None if resume else _DOCKER_DEFAULTS.tmp_size,
+                   help="docker mode only: cap of the /tmp tmpfs (default 1g, exec); same "
+                        "form as --home-size; this, --gitdir-size and --home-size all count "
+                        "against --memory (resume inherits this from the run it continues)")
+    p.add_argument("--gitdir-size", type=_tmpfs_size,
+                   default=None if resume else _DOCKER_DEFAULTS.gitdir_size,
+                   help="docker mode only: cap of the run's /gitdir tmpfs (default 512m); "
+                        "same form as --home-size; this, --tmp-size and --home-size all "
+                        "count against --memory (resume inherits this from the run it "
+                        "continues)")
+    p.add_argument("--home-size", type=_tmpfs_size,
+                   default=None if resume else _DOCKER_DEFAULTS.home_size,
+                   help="docker mode only: cap of the /home/worker tmpfs (default 256m); "
+                        "package caches (NuGet ~/.nuget/packages, npm ~/.npm, pip "
+                        "~/.cache/pip) live under $HOME; this, --tmp-size and "
+                        "--gitdir-size all count against --memory (resume inherits this "
+                        "from the run it continues)")
     p.add_argument("--min-free-mb", type=int, default=2048)
     p.add_argument("--keep-volume", action="store_true", default=False)
     p.add_argument("--max-patch-mb", type=int, default=10)

@@ -2,10 +2,29 @@
 
 Built from `docker/Dockerfile`: Debian bookworm-slim, `USER worker` (uid
 1000), git, bash, coreutils, findutils, python3, node, .NET SDK, ripgrep,
-and (since 0.8) jq, uuid-runtime, shellcheck and curl. The 0.10 image is a
-rebuild of the 0.8 one — the Dockerfile is unchanged; the tag tracks the minor.
-.NET SDK 8.0 is installed with Microsoft's official `dotnet-install.sh`
-(channel 8.0) because the apt feed lacks arm64 packages for Debian 12.
+and (since 0.8) jq, uuid-runtime, shellcheck and curl. This Dockerfile
+installs .NET SDK **8.0 and 10.0**, both via Microsoft's official
+`dotnet-install.sh` into the same `/usr/share/dotnet` (the apt feed lacks
+arm64 packages for Debian 12). 8.0 stays alongside 10.0 because the sandbox
+runs `--network none`: an SDK-10-only image can't build `net8.0` projects
+offline, since SDK 10 doesn't bundle the 8.0 targeting packs and a restore
+that can't reach NuGet fails with `NETSDK1145`. The **published**
+`ghcr.io/jimboschneider/dirtywork-worker:0.10` image predates this change
+and has SDK 8.0 only; 10.0 arrives with the 1.0 image (#59): that release
+bumps `DEFAULT_IMAGE` to `:1.0` and ships `PINNED_DIGEST = None` (first
+publish of the minor); the pin lands in 1.0.1 — see "Pin a digest" below.
+Unless a repo's `global.json` pins otherwise, `dotnet` resolves to the
+highest installed SDK (10.0.x here), so a repo that previously built on
+8.0.424 in the old `:0.10` image sees a default-SDK change: newer
+analyzers/audit warnings, and `net10.0` as the `dotnet new` default. The
+Dockerfile also sets
+`DOTNET_EnableWriteXorExecute=0`: dirtywork's `bash` tool runs every command
+under `ulimit -f 524288` (256 MiB), and with W^X enabled the .NET 8 runtime
+trips that limit at startup (even at 8 GiB — consistent with the size of its
+double-mapping file), so on the published `:0.10` image every .NET 8 process
+— `dotnet build`, `dotnet test`, a built app — dies with `File size limit
+exceeded` (exit 153); the .NET 10 runtime does not. Verified 2026-08-24; the
+variable fixes both, and a derived image based on `:0.10` must set it too.
 No `ENTRYPOINT`/`CMD` — every `docker create`/`run`/`exec` in dirtywork
 passes its own explicit `--entrypoint` or absolute binary path.
 
@@ -23,7 +42,12 @@ installs) and by `dirtywork runs export` for re-exports.
     docker run --rm --entrypoint /usr/bin/git ghcr.io/jimboschneider/dirtywork-worker:0.10 --version
     docker run --rm --entrypoint /usr/bin/rg ghcr.io/jimboschneider/dirtywork-worker:0.10 --version
     docker run --rm --entrypoint /usr/bin/python3 ghcr.io/jimboschneider/dirtywork-worker:0.10 --version
-    docker run --rm --entrypoint /usr/bin/dotnet ghcr.io/jimboschneider/dirtywork-worker:0.10 --version
+    docker run --rm --entrypoint /usr/bin/dotnet ghcr.io/jimboschneider/dirtywork-worker:0.10 --list-sdks
+
+`dotnet --version` prints only the highest-resolved SDK (`10.0.400`); use
+`--list-sdks` instead and check that both an `8.0.x` and a `10.0.x` line
+appear — that's what confirms the coexisting-SDK build actually shipped,
+not just that *a* .NET SDK is present.
 
 ## Publishing (automated)
 
@@ -35,7 +59,17 @@ the `:X.Y` tag is what `DEFAULT_IMAGE` points at and `PINNED_DIGEST` pins,
 and re-pushing it on every patch would let base-layer drift change the
 digest under a shipped pin. To publish a Dockerfile fix inside a minor, run
 the workflow by hand (`workflow_dispatch`, input: the release tag) and then
-re-pin `PINNED_DIGEST` in a follow-up. It builds both `linux/amd64` and
+re-pin `PINNED_DIGEST` in a follow-up.
+
+**Do not dispatch the current Dockerfile onto a `0.10.x` tag.** It is now
+intentionally *ahead* of the published `:0.10` image (two SDKs plus
+`DOTNET_EnableWriteXorExecute=0`) — it ships with the 1.0 image, not as a
+0.10 patch. Re-pushing `:0.10` from it would mismatch the `PINNED_DIGEST`
+shipped in 0.10.1, and `resolve_image()` refuses to run a *pulled* default
+image on a digest mismatch — breaking fresh 0.10.1 installs rather than
+fixing anything.
+
+It builds both `linux/amd64` and
 `linux/arm64`, tags the push with both the release's minor version
 (`v0.4.0` → `:0.4`) and its full version (`:0.4.0`), and writes the pushed
 manifest digest to the workflow run's job summary. The one manual step it
@@ -125,12 +159,75 @@ USER worker
     docker build -t my-worker:0.10 .
     dirtywork run --repo ~/repos/thing --image my-worker:0.10 "..."
 
-Keep `USER worker` as the last instruction and add no `ENTRYPOINT`/`CMD` —
-dirtywork always passes its own `--entrypoint` and absolute binary paths, and
-the uid must stay 1000 so the run's volume ownership matches. A custom
-`--image` is **never** checked against `PINNED_DIGEST`; that pin protects the
-maintained default image only, so a derived image's provenance is yours to
-manage.
+Keep `USER worker` as the last instruction and add no `ENTRYPOINT`/`CMD`:
+dirtywork always passes its own `--entrypoint` and `--user` explicitly at
+`docker create` (`dirtywork/sandbox/docker.py`'s `DockerSandbox.start()`
+passes `os.getuid()`/`os.getgid()` as `--user uid:gid` on the supported
+platforms — macOS/Linux; non-posix falls back to `1000:1000` and Windows is
+unsupported — the **host's** uid there, not the image's `worker` uid 1000 —
+and the run volume is chowned to that uid), and every later `docker exec`
+inherits that user, so `USER
+worker` here is defence in depth for anyone who runs the image by hand, not
+something dirtywork itself relies on. A custom `--image` is **never** checked against
+`PINNED_DIGEST`; that pin protects the maintained default image only, so a
+derived image's provenance is yours to manage.
+
+### Baking a pre-restored package cache
+
+Because the worker runs as the host uid, not the image's `worker` (uid
+1000), anything a derived image bakes in for the worker to read or write at
+run time — a restored package cache, a tool's state dir — must be
+world-readable/writable (`chmod -R a+rwX`); skip this and a run fails with
+something like `Failed to read NuGet.Config due to unauthorized access`
+(seen in the #48 soak). dirtywork also sets `HOME=/home/worker` (with
+`TMPDIR=/tmp` and `PATH`) with `-e` at `docker create`, and every `docker
+exec` starts from that container environment — so it overrides any `ENV
+HOME` this Dockerfile bakes in, and a cache directory chosen via `ENV
+HOME=...` here is not what the worker sees at run time. And because the
+rootfs is `--read-only` at run time, a baked cache must be complete at
+build time (run the restore as root — `/opt` is root-owned — then open the
+result up to the host uid):
+
+```Dockerfile
+FROM ghcr.io/jimboschneider/dirtywork-worker:0.10
+USER root
+ENV DOTNET_EnableWriteXorExecute=0
+# until the 1.0 base image bakes this in — see the 0.10 defect note above
+ENV NUGET_PACKAGES=/opt/nuget
+COPY MyProject.csproj /tmp/restore/MyProject.csproj
+RUN dotnet restore /tmp/restore/MyProject.csproj --packages /opt/nuget \
+    && rm -rf /tmp/restore \
+    && chmod -R a+rwX /opt/nuget
+USER worker
+```
+
+    docker build -t my-worker:0.10 .
+    dirtywork run --repo ~/repos/thing --image my-worker:0.10 "..."
+
+Issue #63 also considered defaulting the image to redirect
+`NUGET_PACKAGES`/`DOTNET_CLI_HOME` off `$HOME`; the owner declined it — a
+baked `/opt` cache is read-only at run time (so a live restore couldn't
+write it anyway), and redirecting to `/tmp` would just move the
+conventional cache path rather than honour it. `--home-size` and the baked
+`/opt` pattern above are the two supported answers instead. Note from the
+#48 soak: `DOTNET_CLI_HOME` alone does **not** relocate everything under
+`$HOME` — ASP.NET Data Protection keys, the X509 certificate store, and
+NuGet's first-run migration marker all read `$HOME` directly, ignoring that
+variable. dirtywork sidesteps this by fixing `HOME=/home/worker` itself
+rather than relying on per-tool redirect variables.
+
+A baked `ENV NUGET_PACKAGES` (or `npm_config_cache`, `PIP_CACHE_DIR`, …)
+survives into the running container — the `-e` flags dirtywork passes at
+`docker create` only cover `HOME`, `TMPDIR`, `PATH` and the `GIT_*`/`LANG`
+variables, not arbitrary image `ENV` values — so a worker `bash` call needs
+no per-command redirect once the cache is baked in this way.
+
+A live restore instead of a baked one needs `--allow-network` (docker
+mode's `--network none` default blocks NuGet/npm/pip) plus a `--home-size`
+large enough for it — see `docs/machine-contract.md`'s `--tmp-size` /
+`--gitdir-size` / `--home-size` bullet for the tmpfs caps, the default
+package-cache locations under `$HOME`, and why `HOME` can't be redirected
+once for a whole run (only per command).
 
 ## Updating the image
 
@@ -138,3 +235,27 @@ Rebuild (normally by cutting a release, which drives `publish-image.yml`),
 verify with the commands above, then repeat the pin procedure. `--image`
 lets an operator override the default per run; `PINNED_DIGEST` only
 constrains the maintained default.
+
+### 1.0 image checklist
+
+Landing the 1.0 image (#59) is more than a rebuild — it changes the default
+tag. In order:
+
+1. Bump `DEFAULT_IMAGE` to `:1.0` in `dirtywork/sandbox/docker_args.py`.
+2. Sweep the `:0.10` literals in `docker/README.md` and
+   `docs/machine-contract.md` (`grep -n ':0\.10' <file>` in each): the image
+   description/build/verify/pin/manual-push sections and the derived-image
+   and baked-cache Dockerfile snippets in `docker/README.md`; the `--image`
+   default in the flags block and the `--image` bullet's own text and
+   Dockerfile snippets (derived-image and baked-cache) in
+   `docs/machine-contract.md`.
+3. Publish via the `v1.0.0` release: `publish-image.yml` pushes `:1.0`
+   for the first time, so `PINNED_DIGEST` ships `None` — pin it in 1.0.1,
+   same as every other minor.
+4. Verify with `--list-sdks` (both `8.0.x` and `10.0.x` present) and
+   `env | grep DOTNET_EnableWriteXorExecute` (`=0`) against the built image.
+5. Close #59.
+6. Drop the "a derived image based on `:0.10` must set the `ENV` line
+   itself" caveats from both docs — the 1.0 base image bakes
+   `DOTNET_EnableWriteXorExecute=0` in, so a derived `FROM :1.0` no longer
+   needs to repeat it.
