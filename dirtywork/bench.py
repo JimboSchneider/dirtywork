@@ -139,15 +139,26 @@ def _acceptance_run_argv(volume: str, image_ref: str, uid: int, gid: int,
             + ["--entrypoint", "/bin/sh", image_ref, "-c", f"cd /work && {command}"])
 
 
-def _run_acceptance(task: str, bench_data: dict, volume: str, *, run=docker_cli.run) -> str:
+def _run_acceptance(task: str, bench_data: dict, volume: str, *,
+                    acceptance_dir=None, run=docker_cli.run) -> str:
     """'pass' | 'fail' | 'gamed' | 'skipped'. Never raises: a docker failure, OR
     a bench.json missing/malformed `acceptance.hashes`/`acceptance.command`,
-    degrades to 'skipped' rather than aborting the whole bench sweep."""
+    degrades to 'skipped' rather than aborting the whole bench sweep.
+
+    `acceptance_dir` defaults to `BENCH_REPOS/<task>/acceptance` (this
+    module's own fixtures) when not given. A caller scoring a task that does
+    not live under BENCH_REPOS (tools/soak_driver.py's `repo`-shaped and
+    absolute-path plan rows) passes its own acceptance directory instead --
+    this parameter replaces what used to be a ~45-line copy of this whole
+    function in tools/soak_driver.py, differing only in this one path
+    (2026-08-23 soak review, item 10)."""
     acceptance = bench_data.get("acceptance")
     hashes = acceptance.get("hashes") if isinstance(acceptance, dict) else None
     command = acceptance.get("command") if isinstance(acceptance, dict) else None
     if not isinstance(hashes, dict) or not isinstance(command, str):
         return "skipped"
+    if acceptance_dir is None:
+        acceptance_dir = BENCH_REPOS / task / "acceptance"
     image = docker_args.DEFAULT_IMAGE
     try:
         image_ref = docker_cli.resolve_image(image, pinned_digest=docker_args.pin_for(image))
@@ -179,30 +190,40 @@ def _run_acceptance(task: str, bench_data: dict, volume: str, *, run=docker_cli.
 
     try:
         cp = run(_acceptance_run_argv(volume, image_ref, uid, gid,
-                                      BENCH_REPOS / task / "acceptance", command),
+                                      acceptance_dir, command),
                  timeout=docker_cli.T_EXPORT_STEP)
     except Exception:
         return "skipped"
     return "pass" if cp.returncode == 0 else "fail"
 
 
-def _event_counts(run_dir) -> dict:
+def _event_counts(run_dir, *, events=None) -> dict:
     """One pass over the transcript: nudges by kind plus the two whole-run
-    event counters."""
+    event counters.
+
+    `events` lets a caller that already parsed the transcript once (e.g.
+    tools/soak_harvest.py, which also needs it for tool mix and feature
+    detection) pass that list in instead of having this function re-read
+    transcript.jsonl from disk -- a second parse of the same file per run
+    harvested (2026-08-23 soak review, item 5/10). When `events` is given,
+    `run_dir` is ignored entirely (not even used for the None-check below)."""
     counts = {"guardrail_block": 0, "sandbox_reset": 0, "nudge_other": 0}
     counts.update({f"nudge_{kind}": 0 for kind in NUDGE_KINDS})
-    if run_dir is None:
-        return counts
-    transcript_path = Path(run_dir) / "transcript.jsonl"
-    if not transcript_path.is_file():
-        return counts
-    for line in transcript_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(event, dict):
-            continue
+    if events is None:
+        if run_dir is None:
+            return counts
+        transcript_path = Path(run_dir) / "transcript.jsonl"
+        if not transcript_path.is_file():
+            return counts
+        events = []
+        for line in transcript_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+    for event in events:
         name = event.get("event")
         if name in ("guardrail_block", "sandbox_reset"):
             counts[name] += 1

@@ -253,6 +253,45 @@ def test_model_tool_time_excludes_the_trailing_run_end_gap(harvest):
 
 
 # --------------------------------------------------------------------------
+# follow-up: 'slowest tool call' cell is capped and whitespace-collapsed
+# (a devstral run put its own huge raw text into tool_result.tool/args)
+# --------------------------------------------------------------------------
+
+def test_truncate_collapses_whitespace_and_caps_length(harvest):
+    assert harvest._truncate("a  b\nc\r\nd", 100) == "a b c d"
+    result = harvest._truncate("x" * 50, 10)
+    assert result == "xxxxxxx..."
+    assert len(result) == 10
+
+
+def test_truncate_leaves_short_text_alone(harvest):
+    assert harvest._truncate("short", 40) == "short"
+
+
+def test_slowest_tool_call_cell_is_capped_and_whitespace_collapsed(harvest):
+    # Simulates the real devstral finding: tool holds ~200 chars of runaway
+    # text (e.g. the previous result plus a stray "[TOOL_CALLS]bash"), args
+    # holds a multi-line blob well past 120 chars.
+    long_tool = "resultofpreviouscall[TOOL_CALLS]" + ("bash" * 40)
+    long_args = "line one\n\nline   two\r\n" + ("z" * 300)
+    events = [
+        {"ts": _ts(0), "event": "assistant"},
+        {"ts": _ts(5), "event": "tool_result", "tool": long_tool, "args": long_args},
+        {"ts": _ts(6), "event": "run_end"},
+    ]
+    row = harvest._model_tool_row({
+        "label": "r", "status": "completed", "turns": 1, "wall_s": 6.0,
+        "prompt_tok": 10, "compl_tok": 5, "model_tool": harvest.model_tool_time(events),
+    })
+    cell = row["slowest tool call"]
+    assert cell.startswith("5s ")
+    tool_part, args_part = cell[len("5s "):].split(" ", 1)
+    assert len(tool_part) == 40 and tool_part.endswith("...")
+    assert len(args_part) == 120 and args_part.endswith("...")
+    assert "\n" not in cell and "\r" not in cell and "  " not in cell
+
+
+# --------------------------------------------------------------------------
 # review item 4: _last_event is dirtywork.runs's, not a local copy
 # --------------------------------------------------------------------------
 
@@ -262,25 +301,31 @@ def test_last_event_is_reused_from_dirtywork_runs(harvest):
 
 
 # --------------------------------------------------------------------------
-# review item 5: transcript parsed once; _event_counts takes events, not a
-# run_dir re-read
+# review items 5 & 10: transcript parsed once; harvest_run passes the
+# already-parsed events into dirtywork.bench._event_counts(events=...)
+# instead of re-reading transcript.jsonl (no local duplicate left in
+# soak_harvest.py at all once bench.py grew the events= param)
 # --------------------------------------------------------------------------
 
-def test_event_counts_over_an_already_parsed_event_list(harvest):
+def test_harvest_run_passes_events_into_bench_event_counts(tmp_path, harvest, monkeypatch):
     events = [
-        {"event": "nudge", "kind": "stall"},
-        {"event": "nudge", "kind": "timeout"},
-        {"event": "guardrail_block"},
-        {"event": "sandbox_reset"},
-        {"event": "nudge", "kind": "some_unmapped_kind"},
-        {"event": "assistant"},   # ignored -- not a counted event
+        {"ts": _ts(0), "event": "nudge", "kind": "stall"},
+        {"ts": _ts(1), "event": "guardrail_block"},
     ]
-    counts = harvest._event_counts(events)
-    assert counts["nudge_stall"] == 1
-    assert counts["nudge_timeout"] == 1
-    assert counts["guardrail_block"] == 1
-    assert counts["sandbox_reset"] == 1
-    assert counts["nudge_other"] == 1
+    run_dir = _write_run(tmp_path, "run-ec", BASE_RUN_JSON, events)
+
+    calls = []
+    real = harvest.bench._event_counts
+
+    def spy(run_dir_arg, *, events=None):
+        calls.append((run_dir_arg, events))
+        return real(run_dir_arg, events=events)
+
+    monkeypatch.setattr(harvest.bench, "_event_counts", spy)
+    h = harvest.harvest_run("run-ec", run_dir)
+    assert calls == [(None, events)]        # run_dir arg unused; events passed instead
+    assert h["nudges"] == 1
+    assert h["guardrail_blocks"] == 1
 
 
 # --------------------------------------------------------------------------

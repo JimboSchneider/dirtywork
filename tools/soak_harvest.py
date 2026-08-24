@@ -207,31 +207,6 @@ def _tool_mix(events: list) -> str:
     return " ".join(f"{t}:{n}" for t, n in sorted(counts.items()))
 
 
-def _event_counts(events: list) -> dict:
-    """Same shape and same result as `dirtywork.bench._event_counts`, but
-    over an already-parsed event list instead of re-reading transcript.jsonl
-    from disk. `bench._event_counts` only accepts a `run_dir` path (it does
-    its own file read), and `harvest_run` below already parses the
-    transcript once via `soak_common.read_transcript` -- calling
-    `bench._event_counts(run_dir)` on top of that would be a second parse of
-    the same file for every run harvested (review item 5). Kept as a local
-    copy of that loop rather than a call into the package: item 10 of the
-    same review adds a `bench._run_acceptance(acceptance_dir=...)` parameter
-    but does not touch `_event_counts`, and this function must work whether
-    or not that item lands (its sequencing is conditional on no soak sweep
-    being in flight)."""
-    counts = {"guardrail_block": 0, "sandbox_reset": 0, "nudge_other": 0}
-    counts.update({f"nudge_{kind}": 0 for kind in bench.NUDGE_KINDS})
-    for e in events:
-        name = e.get("event")
-        if name in ("guardrail_block", "sandbox_reset"):
-            counts[name] += 1
-        elif name == "nudge":
-            key = f"nudge_{e.get('kind')}"
-            counts[key if key in counts else "nudge_other"] += 1
-    return counts
-
-
 def harvest_run(label: str, run_dir: Path, driver_row: dict = None) -> dict:
     """One run dir's raw numbers, gathered once and shared by all three
     table-row builders below. `driver_row` (a row from a `soak_driver.py
@@ -246,7 +221,9 @@ def harvest_run(label: str, run_dir: Path, driver_row: dict = None) -> dict:
     turns = run_json.get("turns", run_end.get("turns"))
     wall_s = _wall_seconds(run_json, run_end)
 
-    counts = _event_counts(events)
+    # events= (2026-08-23 review item 10) avoids a second parse of the same
+    # transcript file -- `events` above already parsed it once (item 5).
+    counts = bench._event_counts(None, events=events)
     # The runner's own `final_message` (what `_abort_kind` regex-matches for
     # a model_error run's "aborted after N consecutive X failures" text) is
     # NEVER persisted to run.json or the transcript -- it exists only in the
@@ -308,6 +285,20 @@ def _fmt_pct(part, whole):
     return f"{part / whole:.0%}" if whole else "0%"
 
 
+def _truncate(text, limit: int) -> str:
+    """`text`'s whitespace collapsed to single spaces, then cut to at most
+    `limit` chars (ellipsis included when it was cut). A misbehaving model
+    can put its own huge raw text into a `tool_result.tool`/`args` field --
+    seen for real on a devstral run, where `tool` held the PREVIOUS result's
+    text plus a stray "[TOOL_CALLS]bash" -- and an uncapped 'slowest tool
+    call' cell can reach several KB, wide enough to make the rendered table
+    unreadable (2026-08-23 soak review)."""
+    collapsed = " ".join(str(text).split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[:max(limit - 3, 0)] + "..."
+
+
 def _main_row(h: dict) -> dict:
     return {
         "Run": h["label"], "Model": h.get("model") or "-", "Status": h.get("status") or "-",
@@ -340,7 +331,8 @@ def _model_tool_row(h: dict) -> dict:
     total = model_s + tool_s
     turns = h.get("turns")
     slowest = mt["slowest"]
-    slowest_cell = f"{slowest[0]:.0f}s {slowest[1]} {slowest[2]}" if slowest else "-"
+    slowest_cell = (f"{slowest[0]:.0f}s {_truncate(slowest[1], 40)} {_truncate(slowest[2], 120)}"
+                    if slowest else "-")
     return {
         "Run": h["label"], "Status": h.get("status") or "-", "Turns": _fmt_int(turns),
         "Wall": _fmt_minutes(h.get("wall_s")),

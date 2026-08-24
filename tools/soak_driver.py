@@ -60,8 +60,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import soak_common  # noqa: E402
 from dirtywork import bench, rundir  # noqa: E402
-from dirtywork.runs import _uid_gid  # noqa: E402
-from dirtywork.sandbox import docker_args, docker_cli  # noqa: E402
+from dirtywork.sandbox import docker_cli  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MAX_TURNS = 40
@@ -198,54 +197,6 @@ def _invoke_dirtywork(argv: list) -> tuple:
     return payload, proc.returncode, wall_s, proc.stderr
 
 
-def _run_acceptance(acceptance_dir: Path, bench_data: dict, volume: str) -> str:
-    """'pass' | 'fail' | 'gamed' | 'skipped'. Mirrors
-    `dirtywork.bench._run_acceptance` step for step, generalized to take the
-    acceptance/ directory directly instead of deriving it from
-    `BENCH_REPOS/<task>` -- a plan row's task may point at an absolute path
-    outside bench/repos/ (leg D style). Reuses bench.py's own argv builders
-    (`_hash_check_argv`/`_acceptance_run_argv`), which already take the
-    acceptance dir as a parameter; only the orchestration around them (which
-    bench.py hardcodes to BENCH_REPOS) is duplicated here. Never raises."""
-    acceptance = bench_data.get("acceptance")
-    hashes = acceptance.get("hashes") if isinstance(acceptance, dict) else None
-    command = acceptance.get("command") if isinstance(acceptance, dict) else None
-    if not isinstance(hashes, dict) or not isinstance(command, str):
-        return "skipped"
-    image = docker_args.DEFAULT_IMAGE
-    try:
-        image_ref = docker_cli.resolve_image(image, pinned_digest=docker_args.pin_for(image))
-    except Exception:
-        return "skipped"
-    uid, gid = _uid_gid()
-    try:
-        cp = docker_cli.run(bench._hash_check_argv(volume, image_ref, uid, gid,
-                                                    [f"/work/{p}" for p in hashes]),
-                            timeout=docker_cli.T_EXPORT_STEP)
-    except Exception:
-        return "skipped"
-    if cp.returncode not in (0, 1):
-        return "skipped"      # docker itself failed (125/126/127), not the worker's doing
-    actual = {}
-    for line in cp.output.decode("utf-8", errors="replace").splitlines():
-        parts = line.split(None, 1)
-        if len(parts) == 2:
-            digest, path = parts[0], parts[1].strip().lstrip("*")
-            if path.startswith("/work/"):
-                path = path[len("/work/"):]
-            actual[path] = digest
-    for rel_path, expected in hashes.items():
-        if actual.get(rel_path) != expected:
-            return "gamed"
-    try:
-        cp = docker_cli.run(bench._acceptance_run_argv(volume, image_ref, uid, gid,
-                                                        acceptance_dir, command),
-                            timeout=docker_cli.T_EXPORT_STEP)
-    except Exception:
-        return "skipped"
-    return "pass" if cp.returncode == 0 else "fail"
-
-
 def _run_one(row: dict) -> dict:
     """Run (and, for the bench-task row shape, stage first and score) one
     plan row. Never raises `Exception` -- a bad row becomes a result row
@@ -321,7 +272,9 @@ def _run_one(row: dict) -> dict:
         volume = run_json.get("volume")
         # bench_data is None for a `repo` row -- never scored, acceptance_passed stays null.
         if resolved["bench_data"] is not None and volume and status == "completed":
-            acceptance = _run_acceptance(resolved["acceptance_dir"], resolved["bench_data"], volume)
+            acceptance = bench._run_acceptance(
+                resolved["source_dir"].name, resolved["bench_data"], volume,
+                acceptance_dir=resolved["acceptance_dir"])
             result["acceptance_passed"] = {"pass": True, "fail": False,
                                            "gamed": False}.get(acceptance)  # skipped -> None
         if volume:

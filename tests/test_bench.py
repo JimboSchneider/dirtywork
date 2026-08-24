@@ -230,6 +230,53 @@ def test_run_acceptance_skipped_when_bench_json_has_no_acceptance_key(monkeypatc
     assert bench._run_acceptance("sh-fix-script", {}, "dw-x-work", run=_never_called) == "skipped"
 
 
+def test_run_acceptance_dir_override_bypasses_bench_repos_derivation(monkeypatch, tmp_path):
+    # 2026-08-23 soak review item 10: acceptance_dir lets a caller (e.g.
+    # tools/soak_driver.py) score a task that does not live under
+    # BENCH_REPOS at all.
+    data = bench._bench_json("sh-fix-script")
+    _patch_resolve_image(monkeypatch)
+    custom_dir = tmp_path / "custom-acceptance"
+    custom_dir.mkdir()
+    captured = []
+
+    def spy_run(argv, timeout=None):
+        captured.append(argv)
+        return _acceptance_fake(data["acceptance"]["hashes"])(argv, timeout=timeout)
+
+    result = bench._run_acceptance("sh-fix-script", data, "dw-x-work",
+                                   acceptance_dir=custom_dir, run=spy_run)
+    assert result == "pass"
+    mount_args = [a for argv in captured for a in argv
+                 if isinstance(a, str) and "dst=/acceptance" in a]
+    assert any(str(custom_dir.resolve()) in a for a in mount_args)
+    assert not any("sh-fix-script/acceptance" in a for a in mount_args)
+
+
+def test_event_counts_accepts_pre_parsed_events():
+    # 2026-08-23 soak review items 5/10: a caller that already parsed the
+    # transcript (tools/soak_harvest.py) can pass the events list in instead
+    # of forcing a second read of transcript.jsonl.
+    events = [
+        {"event": "nudge", "kind": "stall"},
+        {"event": "guardrail_block"},
+        {"event": "sandbox_reset"},
+        {"event": "nudge", "kind": "unmapped"},
+    ]
+    counts = bench._event_counts(None, events=events)
+    assert counts["nudge_stall"] == 1
+    assert counts["guardrail_block"] == 1
+    assert counts["sandbox_reset"] == 1
+    assert counts["nudge_other"] == 1
+
+
+def test_event_counts_still_reads_run_dir_when_events_not_given(tmp_path):
+    run_dir = tmp_path / "run-x"
+    run_dir.mkdir()
+    (run_dir / "transcript.jsonl").write_text('{"event": "guardrail_block"}\n', encoding="utf-8")
+    assert bench._event_counts(run_dir)["guardrail_block"] == 1
+
+
 def test_run_acceptance_skipped_when_acceptance_missing_command(monkeypatch):
     monkeypatch.setattr(bench.docker_cli, "resolve_image", _never_called)
     data = {"acceptance": {"hashes": {"foo.txt": "abc"}}}   # no "command" key
