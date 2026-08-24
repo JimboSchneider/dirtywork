@@ -5,7 +5,7 @@ copied verbatim from `docs/superpowers/bench/2026-08-18-ops-worker-scoreboard.md
 (main, per-run metrics, model-vs-tool time), with one column added to the
 main table -- **Feature fired** -- computed per the matrix's Feature -> signal
 table (F1/F2/F3/F4/F5/F7/F8/F9; F6 and F9's "no *.tmp left behind" half and
-F10 are not run-local signals and are out of scope for this tool).
+F10 = `feedback` non-null on a resumed run; F6 has no run-local signal and is out of scope for this tool).
 
 Takes run directories directly, and/or a `soak_driver.py --out` JSONL (every
 row with a `run_dir` is harvested). Stdlib only, run from a source checkout.
@@ -116,6 +116,11 @@ def detect_features(run_json: dict, events: list) -> list:
                           for e in events)
     if has_stall_nudge or run_json.get("status") == "stalled":
         fired.append("F8")
+
+    # F10: a resume that carried reviewer feedback (`resume --feedback`):
+    # run.json.feedback is the verbatim text, null otherwise.
+    if run_json.get("feedback"):
+        fired.append("F10")
 
     # F9: sandbox image pinned and enforced.
     if run_json.get("image_pinned") is True:

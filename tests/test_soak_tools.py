@@ -753,3 +753,9 @@ def test_load_jsonl_and_read_transcript_delegate_to_the_package(common):
     import inspect
     assert "bench._load_results" in inspect.getsource(common.load_jsonl)
     assert "runs.read_transcript_events" in inspect.getsource(common.read_transcript)
+
+
+def test_detect_features_f10_feedback_resume():
+    from soak_harvest import detect_features
+    assert "F10" in detect_features({"feedback": "reviewer: continue"}, [])
+    assert "F10" not in detect_features({"feedback": None}, [])
