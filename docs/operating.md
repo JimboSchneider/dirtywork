@@ -14,19 +14,19 @@ Day-to-day usage once dirtywork is installed: running a task, reviewing and resu
   repo's tests — then commit the branch or discard it. (The worktree is
   only populated after the run ends, once the export step completes.)
 
-  > **The worker cannot install dependencies in docker mode** (`--network
-  > none`, no host directories mounted); it can only run what the image
-  > ships — git, bash, coreutils, findutils, python3, node/npm, the .NET
-  > SDKs (8.0 and 10.0 from the 1.0 image; the published `:0.10` image has
-  > 8.0 only), ripgrep, jq, uuid-runtime, shellcheck and curl. Always run the repo's own
-  > gate yourself on the exported worktree, or pass it as
-  > [`--verify`](#verifying-a-run). For a Node repo whose gate needs
-  > `node_modules`, symlink your own into the exported worktree for the gate
-  > and remove it afterwards — a `node_modules/` gitignore pattern does **not**
-  > match a symlink, so a forgotten one shows up as an untracked path. If the
-  > gate needs a tool the image lacks, build a derived image (see the recipe
-  > next to `--image` in [Machine contract](machine-contract.md#machine-contract)).
-- **Clean up a run:** `dirtywork runs clean <slug>` — see
+  > **The worker cannot install dependencies in docker mode** (`--network none`,
+  > no host directories mounted); it can only run what the image ships — git,
+  > bash, coreutils, findutils, python3, node/npm, the .NET SDKs (8.0 and 10.0
+  > from the 1.0 image; the published `:0.10` image has 8.0 only), ripgrep, jq,
+  > uuid-runtime, shellcheck and curl. Always run the repo's own gate yourself
+  > on the exported worktree, or pass it as [`--verify`](#verifying-a-run). For
+  > a Node repo whose gate needs `node_modules`, symlink your own into the
+  > exported worktree for the gate and remove it afterwards — a `node_modules/`
+  > gitignore pattern does **not** match a symlink, so a forgotten one shows up
+  > as an untracked path. If the gate needs a tool the image lacks, build a
+  > derived image (see the recipe next to `--image` in [Machine
+  > contract](machine-contract.md#machine-contract)). Clean up a run:**
+  > `dirtywork runs clean <slug>` — see
   [Inspecting, cleaning up and re-exporting runs](#inspecting-cleaning-up-and-re-exporting-runs)
   for the safety rules and the rest of the `runs` subcommands.
 

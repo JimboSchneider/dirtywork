@@ -105,7 +105,7 @@ the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
   FROM ghcr.io/jimboschneider/dirtywork-worker:0.10
   USER root
   ENV DOTNET_EnableWriteXorExecute=0
-  # until the 1.0 base image bakes this in — see the 0.10 defect note above
+  # until the 1.0 base image bakes this in — see the 0.10 defect note below
   ENV NUGET_PACKAGES=/opt/nuget
   RUN dotnet restore <project> --packages /opt/nuget && chmod -R a+rwX /opt/nuget
   USER worker
