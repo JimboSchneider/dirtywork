@@ -721,6 +721,8 @@ def test_bash_schema_has_description_but_not_unit():
 
     # Should have the updated description
     assert timeout_prop["description"] == 'an integer number of seconds (60) or a duration string ("60s", "2m"); default 120, max 600'
+    # PR #71 review P1: the wire type must admit the strings the runtime accepts.
+    assert timeout_prop["type"] == ["integer", "string"]
     # Should NOT have a unit field (it's internal-only)
     assert "unit" not in json.dumps(bash_schema)
 
@@ -757,3 +759,21 @@ def test_custom_tool_with_unit_seconds_coerces_duration():
     assert result.kind == "error"
     assert result.failure == "bad_args"
     assert "must be a number of seconds — got 'abc'" in result.text
+
+
+def test_canonical_args_normalizes_duration_strings_for_unit_params():
+    # PR #71 review P2: "2m" and 120 execute identically, so they must
+    # canonicalize identically or a stuck model could dodge the stall detector
+    # by alternating spellings. Uses its own tool so the rule is proven for any
+    # unit="seconds" param, not just bash's (whose timeout canonical_args drops).
+    from dirtywork.toolspec import Caps, ParamSpec, ToolRegistry, ToolSpec
+    spec = ToolSpec(
+        name="waiter", description="wait", required=(),
+        params={"delay": ParamSpec(type="integer", description="a number of seconds",
+                                   default=5, unit="seconds")},
+        fn=lambda sandbox, delay: f"delay={delay}", caps=Caps(fs="none"))
+    r = ToolRegistry()
+    r.register(spec)
+    assert r.canonical_args("waiter", {"delay": "2m"}) == r.canonical_args("waiter", {"delay": 120})
+    assert r.canonical_args("waiter", {"delay": "2m"}) == {"delay": 120}
+    assert r.canonical_args("waiter", {"delay": "junk"}) == {"delay": "junk"}  # unparseable stays as sent

@@ -200,7 +200,7 @@ def _coerce_duration(value):
 
 def _coerce_param(pspec, value):
     """Coerce a parameter value based on its spec type.
-    
+
     Returns the coerced value, or None if coercion isn't applicable.
     For duration params (unit="seconds"), uses _coerce_duration.
     For integer/number params, uses _coerce_numeric_string."""
@@ -299,7 +299,7 @@ def _validate_args(spec: ToolSpec, args: dict) -> dict:
                 continue
             # Special handling for duration params (unit="seconds")
             if pspec.unit == "seconds":
-                coerced = _coerce_duration(value)
+                coerced = _coerce_param(pspec, value)
                 if coerced is None:
                     raise ToolValidationError(
                         f"parameter {pname!r} must be {pspec.description} — got {value!r}")
