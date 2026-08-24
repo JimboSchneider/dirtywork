@@ -220,3 +220,49 @@ F2/F3 v1 provokers were superseded after this leg (see ledger); their rows are k
 | F2v2-canon-dev-r2 | max_turns | 20 | 0.8m | 0.7m (92%) | 0.1m (8%) | 2.1s | 0.2s | 1843.7 | 28.7 | 0s bash {"command":"cd /work && python3 -B -m unittest tests.test_config 2>&1"} |
 | F3v2-wait-dev-r2 | completed | 28 | 4.4m | 1.5m (35%) | 2.9m (65%) | 3.2s | 6.1s | 1571.3 | 30.7 | 26s bash {"command":"cd /work && bash -x ./build.sh 2>&1 \| head -30"} |
 | F5-trunc4096-dev-r2 | model_error | 8 | 6.8m | 6.8m (100%) | 0.0m (0%) | 51.1s | 0.1s | 90.6 | 31.4 | 0s bash {"command":"python3 << 'EOF'\nimport datetime\n\n# Start date for id=1\nstart_date = datetime.date(2024, 1, 1)\n\n# G... |
+## Leg B3 — instruction-driven F2/F3 (`F2v2-iterate-*`: "re-run the check after every change"; `F3v2-run-*`: "run build.sh and report")
+## Main
+| Run | Model | Status | Turns | Wall | Prompt tok | Compl tok | Harness failures | Review verdict | Notes | Feature fired |
+|---|---|---|---|---|---|---|---|---|---|---|
+| F2v2-iterate-qwen | qwen/qwen3-coder-next | max_turns | 24 | 1.1m | 112209 | 4813 | max_turns | - | - | F9 |
+| F3v2-run-qwen | qwen/qwen3-coder-next | model_error | 11 | 2.5m | 32720 | 789 | timeouts=1,abort=bad_args | - | - | F3, F9 |
+| F2v2-iterate-dev | mistralai/devstral-small-2-2512 | max_turns | 24 | 2.0m | 108132 | 3665 | max_turns | - | - | F9 |
+| F3v2-run-dev | mistralai/devstral-small-2-2512 | model_error | - | 2.2m | - | - | - | - | - | F3, F9 |
+
+## Per-run metrics (auto)
+| Run | Status | Turns | Wall | s/turn | Prompt tok | Compl tok | prompt tok/s | compl tok/s | nudges | guardrail blocks | tool mix |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| F2v2-iterate-qwen | max_turns | 24 | 1.1m | 2.9s | 112209 | 4813 | 1630.9 | 70.0 | 0 | 0 | bash:24 |
+| F3v2-run-qwen | model_error | 11 | 2.5m | 13.4s | 32720 | 789 | 222.6 | 5.4 | 1 | 0 | bash:6 list_dir:2 read_file:3 |
+| F2v2-iterate-dev | max_turns | 24 | 2.0m | 5.0s | 108132 | 3665 | 896.6 | 30.4 | 0 | 0 | bash:20 exit code: 0 ./config.json ...:1 exit code: 0 000002a0 72 61...:1 exit code: 0 Hash of actual...:1 exit code: 1 fatal: not a r...:1 exit code: 128 fatal: not a...:1 list_dir:1 read_file:4 |
+| F3v2-run-dev | model_error | - | 2.2m | - | - | - | - | - | 1 | 0 | bash:1 list_dir:1 read_file:1 |
+
+## Model vs tool time
+| Run | Status | Turns | Wall | Model time | Tool time | model s/turn | tool s/turn | prompt tok/s (model time) | compl tok/s (model time) | slowest tool call |
+|---|---|---|---|---|---|---|---|---|---|---|
+| F2v2-iterate-qwen | max_turns | 24 | 1.1m | 1.0m (93%) | 0.1m (7%) | 2.6s | 0.2s | 1781.7 | 76.4 | 0s bash {"command":"python3 -m unittest tests.test_config 2>&1"} |
+| F3v2-run-qwen | model_error | 11 | 2.5m | 0.2m (9%) | 2.2m (91%) | 1.2s | 12.1s | 2520.0 | 60.8 | 0s bash {"command":"which python3 python nc ncat socat 2>/dev/null; ls -la /usr/bin/python* 2>/dev/null \|\| true"} |
+| F2v2-iterate-dev | max_turns | 24 | 2.0m | 1.9m (97%) | 0.1m (3%) | 4.8s | 0.2s | 937.0 | 31.8 | 0s bash {"command":"cat -A config.json"} |
+| F3v2-run-dev | model_error | - | 2.2m | 0.0m (1%) | 2.2m (99%) | - | - | - | - | 0s list_dir {"path":"."} |
+
+## Leg C2 — Ollama `qwen3.6:latest` (`dirtywork bench`, 3 tasks × 1). Leg C (`soak-C.jsonl`) was a preflight refusal on the tag-less model id and is not tabulated.
+## Main
+| Run | Model | Status | Turns | Wall | Prompt tok | Compl tok | Harness failures | Review verdict | Notes | Feature fired |
+|---|---|---|---|---|---|---|---|---|---|---|
+| sumrangelow-high-in-sumrangepy-must-0823193743-f6aca66a | qwen3.6:latest | completed | 7 | 0.2m | 17021 | 663 | - | - | - | F7, F9 |
+| add-a-loud-flag-to-0823193758-46b3f99a | qwen3.6:latest | completed | 9 | 0.3m | 23411 | 1078 | - | - | - | F7, F9 |
+| reportsh-a-b-c-must-0823193818-eeca7da2 | qwen3.6:latest | completed | 5 | 0.2m | 11883 | 517 | - | - | - | F7, F9 |
+
+## Per-run metrics (auto)
+| Run | Status | Turns | Wall | s/turn | Prompt tok | Compl tok | prompt tok/s | compl tok/s | nudges | guardrail blocks | tool mix |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| sumrangelow-high-in-sumrangepy-must-0823193743-f6aca66a | completed | 7 | 0.2m | 2.0s | 17021 | 663 | 1224.5 | 47.7 | 0 | 0 | bash:1 edit_file:1 finish:1 list_dir:2 read_file:4 |
+| add-a-loud-flag-to-0823193758-46b3f99a | completed | 9 | 0.3m | 2.1s | 23411 | 1078 | 1251.9 | 57.6 | 0 | 0 | bash:2 edit_file:1 finish:1 grep:1 list_dir:4 read_file:4 |
+| reportsh-a-b-c-must-0823193818-eeca7da2 | completed | 5 | 0.2m | 2.0s | 11883 | 517 | 1200.3 | 52.2 | 0 | 0 | bash:1 edit_file:1 finish:1 list_dir:1 read_file:3 |
+
+## Model vs tool time
+| Run | Status | Turns | Wall | Model time | Tool time | model s/turn | tool s/turn | prompt tok/s (model time) | compl tok/s (model time) | slowest tool call |
+|---|---|---|---|---|---|---|---|---|---|---|
+| sumrangelow-high-in-sumrangepy-must-0823193743-f6aca66a | completed | 7 | 0.2m | 0.2m (93%) | 0.0m (7%) | 1.7s | 0.1s | 1444.4 | 56.3 | 0s edit_file {"path":"sum_range.py","old_string":" for i in range(low, high): # BUG: excludes `high`","new_string":" for i in rang... |
+| add-a-loud-flag-to-0823193758-46b3f99a | completed | 9 | 0.3m | 0.3m (92%) | 0.0m (8%) | 1.8s | 0.2s | 1471.6 | 67.8 | 0s bash {"command":"node acceptance/greet.test.js"} |
+| reportsh-a-b-c-must-0823193818-eeca7da2 | completed | 5 | 0.2m | 0.1m (92%) | 0.0m (8%) | 1.6s | 0.1s | 1512.4 | 65.8 | 0s bash {"command":"bash acceptance/check.sh"} |
