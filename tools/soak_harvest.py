@@ -13,6 +13,7 @@ row with a `run_dir` is harvested). Stdlib only, run from a source checkout.
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import io
 import re
@@ -83,6 +84,10 @@ _WRITE_EXISTING_FILE_PATH_RE = re.compile(
     r"^Wrote (.+?): (?:\+\d+ -\d+|\d+ lines \(diff omitted: file too large\))")
 _APPEND_FILE_PATH_RE = re.compile(
     r"^Appended to (.+?): (?:\+\d+ -\d+|\d+ lines \(diff omitted: file too large\))")
+# The write_file variant of truncated_call_result (runner.py:135-141) embeds the
+# recovered path as {path!r} -- a Python repr, so single- or double-quoted;
+# ast.literal_eval undoes the repr exactly.
+_TRUNCATED_WRITE_PATH_RE = re.compile(r"^ERROR: your write_file for ('.*?'|\".*?\") was cut off")
 
 # The two message shapes `dirtywork.runner.truncated_call_result` (runner.py:128-144)
 # can produce for a tool call cut off by finish_reason=="length": the write_file
@@ -101,11 +106,10 @@ def _event_path(e: dict):
     """The path a write_file/append_file tool_result event names, preferring
     the RESULT text (immune to args' 500-char transcript cap -- see the
     _WRITE_*_PATH_RE/_APPEND_FILE_PATH_RE block above) and falling back to
-    `_recovered_path(args)` only when the result doesn't match one of those
-    success shapes -- which is also exactly what a truncated_call_result
-    ERROR result needs, since it never matches those regexes and args is
-    still the only place `truncated_call_result` put the (possibly
-    recoverable) path."""
+    `_recovered_path(args)` only when the result names no path. The
+    write_file variant of `truncated_call_result` names the path it recovered
+    (repr-quoted) in its ERROR text, so that is parsed too -- the args field
+    is capped and may have lost the key the runner itself still saw."""
     tool = e.get("tool")
     result = e.get("result")
     if isinstance(result, str):
@@ -117,6 +121,12 @@ def _event_path(e: dict):
             m = _APPEND_FILE_PATH_RE.match(result)
             if m:
                 return m.group(1)
+        m = _TRUNCATED_WRITE_PATH_RE.match(result)
+        if m:
+            try:
+                return ast.literal_eval(m.group(1))
+            except (ValueError, SyntaxError):
+                pass
     return _recovered_path(e.get("args"))
 
 

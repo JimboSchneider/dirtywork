@@ -934,3 +934,22 @@ def test_detect_features_f10_feedback_resume():
     from soak_harvest import detect_features
     assert "F10" in detect_features({"feedback": "reviewer: continue"}, [])
     assert "F10" not in detect_features({"feedback": None}, [])
+
+
+def test_f5_path_from_truncated_call_result_text_when_args_are_capped():
+    """runner.truncated_call_result names the recovered path in its ERROR text;
+    tool_result.args is capped at 500 chars and may have lost the key."""
+    from soak_harvest import _event_path, detect_features
+    from dirtywork.runner import truncated_call_result
+    raw = '{"text": "' + "q" * 600 + '", "path": "bonus/lost.txt"}'
+    err = truncated_call_result("write_file", raw)
+    assert "'bonus/lost.txt'" in err
+    ev = {"event": "tool_result", "tool": "write_file", "args": raw[:500], "result": err}
+    assert _event_path(ev) == "bonus/lost.txt"
+    events = [
+        {"event": "assistant", "finish_reason": "length", "tool_calls": [{"name": "write_file", "arguments": raw[:500]}]},
+        ev,
+        {"event": "assistant", "finish_reason": "tool_calls", "tool_calls": [{"name": "append_file", "arguments": raw[:500]}]},
+        {"event": "tool_result", "tool": "append_file", "args": raw[:500], "result": "Appended to bonus/lost.txt: +5 -0"},
+    ]
+    assert "F5" in detect_features({}, events)
