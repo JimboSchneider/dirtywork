@@ -66,3 +66,47 @@ def test_end_to_end_run(tmp_path: Path):
     assert out["status"] == "completed"
     created = Path(out["worktree"]) / "hello.txt"
     assert created.exists() and "hello" in created.read_text()
+
+
+from .test_runner import SCENARIOS, _run_scenario, parts  # noqa: F401  (fixture re-exported)
+
+
+@pytest.mark.live
+@pytest.mark.parametrize("build", SCENARIOS)
+def test_devstral_accepts_runner_histories(parts, build):
+    """Spec #60 §7: replay the runner-produced histories for the #60 shapes
+    against the loaded Devstral; a strict template renders every request.
+
+    Mistral's chat template is documented to require tool-call ids of exactly
+    9 alphanumeric characters; the scenario builders use short ids (f1/b1/c1).
+    Probed directly against this LM Studio build: it accepted the short
+    ids as-is (no 400), so no remapping is applied here -- if a future model
+    build starts rejecting them with a 400 naming the id, pad ids to 9 chars
+    in the serialized wire messages before posting; the shape under test
+    (message role/ordering) is unaffected either way.
+    """
+    import json
+    import urllib.request
+    from dirtywork.providers.openai_compat import _to_openai_messages
+    base = "http://localhost:1234/v1"
+    model = "mistralai/devstral-small-2-2512"
+    try:
+        with urllib.request.urlopen(f"{base}/models", timeout=5) as r:
+            ids = [m["id"] for m in json.load(r)["data"]]
+    except Exception as e:                              # noqa: BLE001
+        pytest.skip(f"LM Studio not reachable: {e}")
+    if model not in ids:
+        pytest.skip(f"{model} not loaded")
+    provider, _r, _e = _run_scenario(parts, build)
+    tools = [{"type": "function", "function": {"name": n, "description": "x",
+              "parameters": {"type": "object", "properties": {"summary": {"type": "string"},
+                                                              "command": {"type": "string"},
+                                                              "path": {"type": "string"}}}}}
+             for n in ("finish", "bash", "read_file", "write_file")]
+    for history in provider.requests:
+        body = json.dumps({"model": model, "messages": _to_openai_messages(history),
+                           "tools": tools, "max_tokens": 1, "temperature": 0}).encode()
+        req = urllib.request.Request(f"{base}/chat/completions", data=body,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            assert r.status == 200

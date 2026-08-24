@@ -1,8 +1,12 @@
 # Transcript schema
 
 `dirtywork` writes one JSON object per line to
-`~/.dirtywork/runs/<slug>/transcript.jsonl` (`tail -f` friendly — each line is
-flushed immediately). Every line has at least `ts` (UTC ISO-8601) and `event`
+`~/.dirtywork/runs/<slug>/transcript.jsonl`. Since 1.0 the events of one model
+turn are flushed together when the turn ends (`run_start`, and a `run_end`
+written by the CLI's own failure path, are flushed immediately), so `tail -f`
+shows a run one turn at a time and a hard kill loses at most the current turn.
+Every line has at least `ts` (UTC ISO-8601, stamped when the event happened,
+not when it was flushed) and `event`
 (one of the eight event names below). `schema_version` marks the overall
 version and appears once, on `run_start`, and again in the CLI's stdout JSON
 and in `run.json` — not on every line.
@@ -62,6 +66,7 @@ One per model turn that produced a reply, with or without tool calls.
 | `text` | ✓ | ✓ | string | the reply text; capped at `MAX_ASSISTANT_TEXT_CHARS` (64 000) **in the transcript only** — the full text is still sent to the model, and the cap is marked inline |
 | `tool_calls` | ✓ | ✓ | list | `[{name, arguments}, …]` — `arguments` is the model's own raw JSON argument string, capped at 2000 chars. Structurally invalid entries the provider could not address are **not** listed here; they appear as `tool_result` records with an empty `tool` |
 | `finish_reason` | | ✓ | string \| null | 0.10: the provider's own stop reason for this turn, passed through. Common values are `stop`, `length` and `tool_calls`, but this is **not a closed enum** — a provider may report anything, and a non-string value (the Anthropic adapter passes unknown stop reasons through raw) is recorded as `null` |
+| `placeholder` | | ✓ | string | 1.0 (#60): **sparse** — present only when the reply had no addressable tool call and no non-whitespace text. The history entry sent to the model on later turns carries this value (currently `[empty reply]`) instead of the empty text, so a strict chat template cannot drop the turn; `text` stays the model's real reply (`""`) |
 
 ### `tool_result`
 
@@ -71,25 +76,43 @@ One per tool call executed, plus one per malformed tool-call entry discarded.
 |---|---|---|---|---|
 | `tool` | ✓ | ✓ | string | tool name — one of `read_file`, `write_file`, `append_file`, `edit_file`, `apply_edits`, `insert_before`, `insert_after`, `list_dir`, `grep`, `bash`, `finish` (`insert_before`/`insert_after` are v2, added in 0.8; `apply_edits` in 0.9; `append_file` in 0.10); `""` for a discarded malformed entry |
 | `args` | ✓ | ✓ | string | the raw JSON argument string, capped at 500 chars; `""` for a discarded malformed entry |
-| `result` | ✓ | ✓ | string | the tool's result, trimmed per the tool's `Caps.transcript` setting. All built-in tools declare `preview`, which caps the record at 2000 chars; the registry also supports `full` and `none`, unused by any shipped tool. Since 0.8 a successful `edit_file`/`write_file`/`insert_before`/`insert_after` result is `<Verb> <path>: +A -D [(removed N non-blank lines)]` followed by a unified diff (capped at 40 lines / 3000 chars, then `[diff truncated: N more lines]`); `write_file` on a new file returns `Wrote N bytes to <path> (new file, M lines)` with no diff. 0.9's `apply_edits` uses the same shape with the verb `Applied N edits to` (`Applied 1 edit to` for a single edit). When either side of the edit exceeds 20000 lines, the diff itself is never computed (it is quadratic-ish on files with popular repeated lines) — the result is just `<Verb> <path>: <N> lines (diff omitted: file too large)`. An in-place tool whose RESULT would exceed the 5 MB write limit returns `ERROR: result is <n> bytes, over the <limit>-byte write limit; nothing was written` on both backends (0.9). 0.10's `append_file` uses the same shape with the verb `Appended to`; it reads `+A -0` only when the file already ended in a newline — when it did not, the final line is a REPLACE and the header reads `+A -1 (removed 1 non-blank line)`, which is the visible consequence of not starting `text` with a newline |
+| `result` | ✓ | ✓ | string | the tool's result, trimmed per the tool's `Caps.transcript` setting. All built-in tools but `finish` declare `preview`, which caps the record at 2000 chars (`finish` declares `full` since 1.0 — its result is harness-authored and bounded); the registry also supports `none`, unused by any shipped tool (`full` is used only by `finish`). Since 0.8 a successful `edit_file`/`write_file`/`insert_before`/`insert_after` result is `<Verb> <path>: +A -D [(removed N non-blank lines)]` followed by a unified diff (capped at 40 lines / 3000 chars, then `[diff truncated: N more lines]`); `write_file` on a new file returns `Wrote N bytes to <path> (new file, M lines)` with no diff. 0.9's `apply_edits` uses the same shape with the verb `Applied N edits to` (`Applied 1 edit to` for a single edit). When either side of the edit exceeds 20000 lines, the diff itself is never computed (it is quadratic-ish on files with popular repeated lines) — the result is just `<Verb> <path>: <N> lines (diff omitted: file too large)`. An in-place tool whose RESULT would exceed the 5 MB write limit returns `ERROR: result is <n> bytes, over the <limit>-byte write limit; nothing was written` on both backends (0.9). 0.10's `append_file` uses the same shape with the verb `Appended to`; it reads `+A -0` only when the file already ended in a newline — when it did not, the final line is a REPLACE and the header reads `+A -1 (removed 1 non-blank line)`, which is the visible consequence of not starting `text` with a newline |
 | `timed_out` | | ✓ | boolean | 0.9: `true` on a `bash` tool result whose command hit its timeout. **Sparse** — the key is absent, not `false`, on every other result, including a `grep` timeout (a different wording and a different meaning: the harness's search, not the worker's command) and the `--verify` command (not a tool call, so it produces no `tool_result` at all; its outcome is in `verify`) |
+| `follow_up` | | ✓ | string | 1.0 (#60): **sparse** — present when this result carried harness text on the wire. The exact text appended after the tool's own result, uncapped (harness-authored and bounded): the model received `result + "\n\n" + follow_up` as this call's result. Only the **last** tool result of a turn can carry one; it merges every nudge of that turn in the order `malformed_entry`, `timeout`, `stall` (or `timeout` alone on a verify-feedback turn) |
 
 A `finish(summary=…)` call is an ordinary tool call: it appears in the
-`assistant` event's `tool_calls` and produces a `tool_result` whose `result` is
-`run finished`. The summary becomes the run's `final_message` and the run ends
-`completed`.
+`assistant` event's `tool_calls` and produces a `tool_result`. Since 1.0 (#60)
+its `result` is honest about what happened: `run finished` when the agent loop
+ended `completed` (an interrupt or export failure *after* that point is
+reported in `run_end.status` / the CLI status, not here); the full `VERIFY
+FAILED (round r of R) …` feedback text when
+`--verify` failed and a fix round remains (the run continues — that text is what
+the model receives as the call's result); `run not finished: verify failed (exit
+N); no fix rounds remain` (run ends `verify_failed`); `run not finished: verify
+could not run (<reason>)` (`budget_exceeded`/`sandbox_error` raised by the verify
+command); `run not finished: <status>` when the turn ended before verify ran (a
+later call in the same turn raised, three consecutive failures, or an
+interrupt); and `run not finished: verify did not run` only if an unhandled
+exception left the turn. The summary becomes the run's `final_message`.
 
 ### `nudge`
 
-**v2 only.** One per turn in which the harness injected corrective guidance
-into the next user message. Several nudges in one turn are merged into a
-single user message (the chat history must never carry two consecutive user
-messages), but each is recorded here separately.
+**v2 only.** One per corrective text the harness injected on a turn. Where the
+text lands (since 1.0, #60): on a turn that made at least one addressable tool
+call it is appended to that turn's **last** tool result (`via: "tool_result"`;
+the exact text is in that `tool_result` event's `follow_up`); on a text-only
+turn it is the next `user` message (`via: "user"`). Several nudges on one turn
+are merged into a single follow-up (in the order `malformed_entry`, `timeout`,
+`stall`; `truncated`/`empty`/`text_tool_call` then `stall` on a text turn), but
+each is recorded here separately. The history never carries a `user` message
+directly after a tool result, nor two consecutive `user` messages — the shapes
+strict chat templates (Mistral/Devstral) reject.
 
 | Field | v1 | v2 | Type | Notes |
 |---|---|---|---|---|
-| `kind` | | ✓ | string | `truncated` (the reply hit the token limit), `empty` (no tool call and no answer), `text_tool_call` (a tool call written as prose instead of through the tools API), `stall` (no progress for `--stall-turns // 2` turns), `timeout` (0.9: at least one `bash` command timed out on this turn — exactly one per turn however many timed out, and only on a turn that continues; a timeout is not a `FailureTracker` event) |
+| `kind` | | ✓ | string | `truncated` (the reply hit the token limit), `empty` (no tool call and no answer), `text_tool_call` (a tool call written as prose instead of through the tools API), `stall` (no progress for `--stall-turns // 2` turns), `timeout` (0.9: at least one `bash` command timed out on this turn — exactly one per turn however many timed out, and only on a turn that continues; a timeout is not a `FailureTracker` event), `malformed_entry` (1.0: N tool-call entries had no usable id/name and were discarded — delivered since 0.5, recorded since 1.0) |
 | `turn` | | ✓ | integer | 1-based turn number the nudge was issued on |
+| `via` | | ✓ | string | 1.0: `tool_result` or `user` — the carrier this nudge rode on (see above). **Sparse**: absent when the run ended on that same turn before the text was delivered (the third empty-reply strike → `model_error`; a stall verdict on a text turn → `stalled`); the event is still written, as in 0.9, so nudge counts stay comparable |
 
 ### `guardrail_block`
 
@@ -123,6 +146,38 @@ the export runs.
 | `round` | | ✓ | integer | 1-based; at most `--verify-rounds` + 1 of them |
 | `exit_code` | | ✓ | integer \| null | the integer after `exit code: ` in the bash result; `null` for an `ERROR:`/`BLOCKED:` result that never produced a status |
 | `passed` | | ✓ | boolean | true only for exit code 0 |
+| `via` | | ✓ | string | 1.0 (#60): **sparse** — present only when feedback for another round was delivered: `finish_result` (the feedback became the `finish` call's result) or `user` (the worker answered in prose, so the feedback is the next user message) |
+
+### Wire shape (1.0, #60)
+
+Two rules the runner enforces on the history it sends every provider:
+
+- **R1 — a harness follow-up never directly follows a tool result.** On a turn
+  with at least one addressable tool call, verify feedback becomes the
+  `finish` call's own `result` and every nudge is appended to that turn's
+  last tool result (`follow_up`); on a turn with none, the follow-up is the
+  next `user` message.
+- **R2 — an assistant history entry is never droppable.** A reply with no
+  addressable tool call and no non-whitespace text is stored as
+  `[empty reply]` (`assistant.placeholder`).
+
+Mistral-family templates count only `user` messages and tool-call-free
+assistant messages and require them to alternate; a `user` after a `tool`,
+or after an assistant message the server dropped as empty, is an HTTP 400.
+
+**Reconstructing what the model was sent.** A tool message is
+`result + "\n\n" + follow_up` (`result` alone without a `follow_up`); an
+assistant message is `placeholder` when present, else `text`. Three limits:
+a non-`finish` `result` is the 2000-char preview (exact only under the cap;
+`follow_up` and `finish` results are always exact); on later turns
+`trim_messages` replaces the oldest tool results in *history* with
+`[result trimmed — re-run the tool if needed]` (their `follow_up` included)
+and the transcript records only `run_end.trimmed_turns`, not which results —
+so the transcript is exact for what the model saw *when the result was
+produced*, not for what a later request re-sent; user-carried nudges are
+recorded by `kind` and `via` only (the stall count and the malformed count are
+not transcribed), and plain-answer verify feedback is summarized by `verify`
+and `run_end.verify` (last round's tail).
 
 ### `run_end`
 
@@ -148,7 +203,7 @@ run-level fields that are known even when the agent loop never started).
 | `export_status` | | ✓ | string | `"ok"`, `"export_failed: <reason>"`, or `"n/a"` (host mode never exports) |
 | `watchdog_violation` | | ✓ | string \| null | Docker mode: the reason the watchdog killed the container, when that happened after the last tool call returned |
 | `watchdog_violation_kind` | | ✓ | string \| null | `"budget"` (worktree-size or host-disk-floor breach) or `"sandbox_error"` (the watchdog's own sampling exec failed twice); meaningful only alongside `watchdog_violation` |
-| `finalize_error` | | ✓ | string \| null | set when the finalize/export step itself raised after the agent loop finished; the run's own status is unaffected except that `completed` becomes `export_failed` |
+| `finalize_error` | | ✓ | string \| null | set when the finalize/export step itself raised after the agent loop finished; the run's own status is unaffected except that `completed` becomes `export_failed`; `KeyboardInterrupt: interrupted during finalize` when an interrupt landed inside the export — the export is attempted once and never re-run, and `run_end.status` is `interrupted` |
 | `stuck_on` | | ✓ | object \| null | 0.8: `{command, output, repeats}` for the failing bash call that ended the run as `stuck` (`output` capped at 4000 chars); `null` on every other status |
 | `files_changed` | | ✓ | list | 0.8: repo-relative paths the run changed, sorted, capped at 1000. Docker mode: `git diff --cached --name-only <base_commit>` in the container right after the export's `git add -A`. Host mode: `git diff --name-only <base_commit>` plus `git ls-files --others --exclude-standard`. `[]` when nothing changed or the export never ran |
 | `files_changed_truncated` | | ✓ | boolean | 0.8: true when `files_changed` was cut at the 1000-path cap |
@@ -266,8 +321,12 @@ reconstructed from the transcript. `dirtywork runs show <slug> --markdown
 `run.json` for the header block and the `## Result` section (the header's own
 `task` field is only a one-line preview; a `## Task` section holds the full
 task text), the transcript for one `### Turn N` per `assistant` event with its
-`tool_result`s as `<details>` blocks (capped at the same 2000-char preview the
-transcript itself applies) and its `nudge`/`guardrail_block`/`sandbox_reset`
-events as blockquote callouts. Token counts in the header come from
+`tool_result`s as `<details>` blocks (capped at the transcript's 2000-char
+preview; `finish` results are shown in full), a `> **harness → model:**`
+callout with the fenced `follow_up` text under a result that carried one,
+`_(sent as: [empty reply])_` under an assistant turn stored with a
+placeholder, `[not finished]` on a `finish` that did not finish the run, and
+its `nudge`/`guardrail_block`/`sandbox_reset` events as blockquote callouts.
+Token counts in the header come from
 `run_end.usage`, and the final message from the `finish` call's `summary`,
 because `run.json` records neither.

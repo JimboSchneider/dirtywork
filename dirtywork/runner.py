@@ -26,6 +26,15 @@ LAST_TEXT_CHARS = 2000
 # scoreboard all refer to the tool by name.
 FINISH_TOOL = "finish"
 
+# Spec #60 §4. `finish` is executed by verifying, so its result is resolved
+# when the turn's verify outcome is known. Until then the history message and
+# the buffered tool_result record hold FINISH_PROVISIONAL -- which reaches disk
+# only when an exception the runner does not handle leaves the turn (true, and
+# the only case it is written). FINISH_DONE is the only value on a run that
+# actually finished; every other exit resolves to "run not finished: <why>".
+FINISH_DONE = "run finished"
+FINISH_PROVISIONAL = "run not finished: verify did not run"
+
 # The per-model context-window table moved to the provider that serves those
 # models (providers/openai_compat.py): resolve_context_window asks the provider.
 DEFAULT_WINDOW = 32768
@@ -87,6 +96,15 @@ NUDGES = {
                        "executes tool calls made through the tools API. Re-issue it as a "
                        "real tool call."),
 }
+
+# Spec #60 §5 (R2): an assistant history entry with no addressable tool call
+# and no non-whitespace text is stored with this content, so no chat template
+# or server preprocessing (LM Studio drops empty assistant messages) can delete
+# it and pull the following user message up against a tool result. The
+# transcript keeps the model's real text ("") and records the substitution in
+# `assistant.placeholder`. One constant: the wording can change without a
+# schema change.
+EMPTY_REPLY_PLACEHOLDER = "[empty reply]"
 
 
 def _join_nudges(*parts) -> str:
@@ -539,6 +557,44 @@ class Runner:
         start = time.monotonic()
         deadline = start + self.timeout
 
+        # Spec #60 §3/§4: the current turn's tool messages, in call order, each
+        # paired with its buffered transcript record so a follow-up or the
+        # finish resolution rewrites BOTH (transcript == wire). Cleared at the
+        # start of every turn; a carrier is only ever chosen from here.
+        turn_tool_msgs = []     # [(history message, tool_result record)]
+        turn_terminal = []      # the subset that were terminal (finish) calls
+
+        def resolve_finish(text: str) -> None:
+            """Spec #60 §4: rewrite EVERY terminal record and history message of
+            the current turn to `text`."""
+            # Written uncapped by design: the finish result is harness-authored
+            # and bounded (FINISH_SPEC declares transcript="full"); registry.
+            # transcript_preview is bypassed here.
+            for msg, record in turn_terminal:
+                msg["content"] = text
+                record["result"] = text
+
+        def deliver(text, nudge_records) -> None:
+            """Spec #60 §3 (R1): the ONE place harness text enters history. On a
+            turn with addressable tool calls it rides on the LAST tool result of
+            this turn (wire = result + "\\n\\n" + text; the transcript record
+            gets `follow_up`); otherwise it is the next user message, legal
+            because the preceding assistant entry is counted and non-empty (R2).
+            Every nudge record handed in is stamped with the carrier (`via`)."""
+            if not text:
+                return
+            if turn_tool_msgs:
+                msg, record = turn_tool_msgs[-1]
+                msg["content"] = f"{msg['content']}\n\n{text}"
+                record["follow_up"] = text
+                via = "tool_result"
+            else:
+                messages.append({"role": "user", "content": text})
+                via = "user"
+            for record in nudge_records:
+                if record is not None:
+                    record["via"] = via
+
         def note_last_tool_result(tool: str, args: str, result) -> None:
             # spec §2: tracks the SAME values just written to the "tool_result"
             # transcript event, for both a real tool call and a malformed entry
@@ -551,7 +607,70 @@ class Runner:
                 "result": result[:LAST_RESULT_CHARS] if isinstance(result, str) else "",
             }
 
+        def append_assistant(text, tool_calls, finish_reason) -> None:
+            """Spec #60 §5: the ONE place the model's turn enters history and
+            the transcript. `tool_calls` are the addressable calls (id-bearing);
+            with none of them and no non-whitespace text the history entry
+            carries EMPTY_REPLY_PLACEHOLDER (R2) and the event says so."""
+            nonlocal last_assistant_text
+            transcript_text = text
+            if isinstance(transcript_text, str) and len(transcript_text) > MAX_ASSISTANT_TEXT_CHARS:
+                transcript_text = (
+                    transcript_text[:MAX_ASSISTANT_TEXT_CHARS]
+                    + f"\n[truncated at {MAX_ASSISTANT_TEXT_CHARS} chars in the transcript "
+                      f"only — the full text was sent to the model]"
+                )
+            has_text = isinstance(text, str) and bool(text.strip())
+            fields = {}
+            if not tool_calls and not has_text:
+                fields["placeholder"] = EMPTY_REPLY_PLACEHOLDER
+            self.transcript.write(
+                "assistant", text=transcript_text,
+                tool_calls=[{"name": tc.name, "arguments": (tc.raw_arguments or "")[:2000]}
+                            for tc in tool_calls],
+                # Spec §1.5: an OPEN enum. Adapters do not guarantee a
+                # string (Anthropic passes an unknown stop reason through
+                # raw), so anything else is recorded as null rather than
+                # emitted as some other JSON type.
+                finish_reason=finish_reason if isinstance(finish_reason, str) else None,
+                **fields)
+            if has_text:
+                last_assistant_text = transcript_text[:LAST_TEXT_CHARS]
+            messages.append(assistant_message(fields.get("placeholder", text), tool_calls))
+
+        # A run finishes once. finalize() (docker mode: the export -- git add,
+        # patch, worktree sampling) is not idempotent, but a KeyboardInterrupt
+        # landing inside it propagates out of finish() (BaseException; the
+        # except below only catches Exception) into the turn's interrupt
+        # handler, which calls finish("interrupted") again. This state makes
+        # the second call skip the export it already started and say so, and
+        # keeps run_end to a single record.
+        finalize_state = {"attempted": False, "done": False, "result": None, "error": None}
+        run_end_written = False
+
+        def run_finalize() -> None:
+            if finalize_state["attempted"]:
+                if not finalize_state["done"]:
+                    finalize_state["error"] = "KeyboardInterrupt: interrupted during finalize"
+                    finalize_state["done"] = True
+                return
+            finalize_state["attempted"] = True
+            try:
+                finalize_state["result"] = self.finalize()
+            except Exception as e:
+                finalize_state["error"] = f"{type(e).__name__}: {e}"
+            finalize_state["done"] = True
+
         def finish(status: str, final: str) -> RunResult:
+            nonlocal run_end_written
+            # Spec #60 §4(c): the single exit point resolves any terminal record
+            # the verify path never reached (a later call raised, the failure
+            # tracker aborted, Ctrl-C) -- then flushes the turn so its evidence
+            # is on disk BEFORE finalize() (docker export) runs (§6.1).
+            if any(record.get("result") == FINISH_PROVISIONAL for _, record in turn_terminal):
+                resolve_finish(FINISH_DONE if status == "completed"
+                               else f"run not finished: {status}")
+            self.transcript.flush()
             # This evidence rides on EVERY result (null when there is none), so
             # a consumer never has to branch on status to read the fields. A
             # `max_turns` run with final_message "" is the case that made this
@@ -563,43 +682,41 @@ class Runner:
                            "trimmed_turns": trimmed_turns,
                            "timeouts": timeouts,
                            "context_window_source": self.context_window_source}
-            finalize_error = None
             if self.finalize is not None:
-                try:
-                    finalize_result = self.finalize()
-                    if isinstance(finalize_result, dict):
-                        extra.update(finalize_result)
-                except Exception as e:
-                    finalize_error = f"{type(e).__name__}: {e}"
-            if finalize_error is not None:
-                extra["finalize_error"] = finalize_error
-            self.transcript.write("run_end", status=status, turns=turns,
-                                  duration_s=round(time.monotonic() - start, 1),
-                                  usage=usage, **extra)
+                run_finalize()
+                if isinstance(finalize_state["result"], dict):
+                    extra.update(finalize_state["result"])
+                if finalize_state["error"] is not None:
+                    extra["finalize_error"] = finalize_state["error"]
+            if not run_end_written:
+                self.transcript.write("run_end", status=status, turns=turns,
+                                      duration_s=round(time.monotonic() - start, 1),
+                                      usage=usage, **extra)
+                run_end_written = True
             return RunResult(status, turns, final, usage, extra=extra)
 
         def check_progress():
-            """(RunResult to end the run with, or None; stall-nudge text to
-            deliver, or None). The caller merges the nudge text into the one
-            user message it is about to append — history must never carry
-            two consecutive user messages (strict chat templates reject
-            non-alternating roles)."""
+            """(RunResult to end the run with, or None; stall-nudge text, or
+            None; the buffered stall-nudge record, or None). The caller hands
+            the text and record to deliver(), which picks the carrier (spec #60
+            §3) -- history never carries a harness message after a tool result
+            nor two consecutive user messages."""
             verdict = progress.end_turn()
             if verdict == "stalled":
-                return finish("stalled", f"no progress in {self.stall_turns} consecutive turns"), None
+                return finish("stalled", f"no progress in {self.stall_turns} consecutive turns"), None, None
             if verdict == "nudge":
-                self.transcript.write("nudge", kind="stall", turn=turns)
-                return None, STALL_NUDGE.format(n=self.stall_turns // 2)
-            return None, None
+                record = self.transcript.write("nudge", kind="stall", turn=turns)
+                return None, STALL_NUDGE.format(n=self.stall_turns // 2), record
+            return None, None, None
 
         def run_verify():
             """One execution of the operator's gate (spec §4.2). Runs through
             the same sandbox.bash the tool uses — same guardrails, same budget
             watchdog, same reaper, same environment the worker's bash had — and
             happens BEFORE finalize(), so in docker mode the container is still
-            alive and nothing has been exported yet. Returns the feedback text
-            for another round, or None when the run may end now (verify_state
-            says whether it passed)."""
+            alive and nothing has been exported yet. Returns (feedback text for
+            another round or None when the run may end now, the buffered
+            `verify` record) -- verify_state says whether it passed."""
             nonlocal verify_state, verify_rounds_used
             verify_rounds_used += 1
             result = self.sandbox.bash(self.verify, self.verify_timeout)
@@ -609,29 +726,36 @@ class Runner:
             verify_state = {"command": self.verify, "exit_code": exit_code,
                             "output_tail": tail, "rounds": verify_rounds_used,
                             "passed": passed}
-            self.transcript.write("verify", round=verify_rounds_used,
-                                  exit_code=exit_code, passed=passed)
+            record = self.transcript.write("verify", round=verify_rounds_used,
+                                           exit_code=exit_code, passed=passed)
             if passed or verify_rounds_used > self.verify_rounds:
-                return None
+                return None, record
             return VERIFY_FEEDBACK.format(round=verify_rounds_used,
                                           rounds=self.verify_rounds + 1,
                                           command=self.verify,
-                                          exit_code=exit_code, output=tail)
+                                          exit_code=exit_code, output=tail), record
 
-        def check_verify(final: str):
-            """(RunResult to return, or None; feedback to append, or None) for a
+        def check_verify(final: str, via: str):
+            """(RunResult to return, or None; feedback to deliver, or None) for a
             completion path. Both completion paths — the finish tool and a plain
             answer — go through this one function, so they can never disagree
-            about what verifying means. BudgetExceeded/SandboxError end the run
-            with the same statuses a tool call would."""
+            about what verifying means. `via` names the carrier the caller will
+            use for feedback ("finish_result" / "user") and is stamped on the
+            verify event only when feedback is delivered (spec #60 §6.2). Every
+            branch resolves the turn's terminal records (§4) -- a no-op on the
+            plain-answer path, which has none. BudgetExceeded/SandboxError end
+            the run with the same statuses a tool call would."""
             nonlocal stuck
             if not self.verify:
+                resolve_finish(FINISH_DONE)
                 return finish("completed", final), None
             try:
-                feedback = run_verify()
+                feedback, record = run_verify()
             except BudgetExceeded as e:
+                resolve_finish(f"run not finished: verify could not run ({e.reason})")
                 return finish("budget_exceeded", e.reason), None
             except SandboxError as e:
+                resolve_finish(f"run not finished: verify could not run ({e})")
                 return finish("sandbox_error", str(e)), None
             if feedback is not None:
                 # A feedback round is a fresh episode: the worker is retrying
@@ -641,225 +765,237 @@ class Runner:
                 # reflects what the worker is doing.
                 stuck = None
                 repeats.reset()
+                if record is not None:
+                    record["via"] = via
+                resolve_finish(feedback)
                 return None, feedback
             if verify_state["passed"]:
+                resolve_finish(FINISH_DONE)
                 return finish("completed", final), None
+            code = verify_state["exit_code"]
+            resolve_finish("run not finished: verify failed "
+                           f"(exit {code if code is not None else 'unknown'}); no fix rounds remain")
             return finish("verify_failed", final), None
 
-        try:
-            while True:
-                if turns >= self.max_turns:
-                    return finish("max_turns", "")
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+        def one_turn():
+            """One model turn (spec #60 §6.1: runs inside transcript.turn()).
+            Returns the RunResult that ends the run, or None to continue."""
+            nonlocal turns, trimmed_turns, timeouts, stuck
+            turn_tool_msgs.clear()
+            turn_terminal.clear()
+            if turns >= self.max_turns:
+                return finish("max_turns", "")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return finish("timeout", "")
+            fits, newly_trimmed = trim_messages(messages, self.char_budget)
+            if newly_trimmed > 0:
+                # Counted BEFORE the fits check, so the final call that
+                # trimmed something and still could not fit counts too
+                # (spec §2.2).
+                trimmed_turns += 1
+            if not fits:
+                return finish("context_exhausted", "")
+
+            try:
+                resp = self.provider.chat(self.model, messages, self.registry.schemas(),
+                                          temperature=self.temperature,
+                                          max_tokens=self.max_tokens,
+                                          timeout=max(1.0, remaining))
+            except LLMTimeout:
+                if time.monotonic() >= deadline - 0.5:
                     return finish("timeout", "")
-                fits, newly_trimmed = trim_messages(messages, self.char_budget)
-                if newly_trimmed > 0:
-                    # Counted BEFORE the fits check, so the final call that
-                    # trimmed something and still could not fit counts too
-                    # (spec §2.2).
-                    trimmed_turns += 1
-                if not fits:
-                    return finish("context_exhausted", "")
-
-                try:
-                    resp = self.provider.chat(self.model, messages, self.registry.schemas(),
-                                              temperature=self.temperature,
-                                              max_tokens=self.max_tokens,
-                                              timeout=max(1.0, remaining))
-                except LLMTimeout:
-                    if time.monotonic() >= deadline - 0.5:
-                        return finish("timeout", "")
-                    else:
-                        return finish("model_error",
-                                      "model request timed out before the run deadline")
-                except MalformedResponse as e:
-                    # A body we cannot read is a model failure, not a transport
-                    # failure: end through finish() so finalize() runs and a
-                    # run_end event is written. A plain LLMError deliberately
-                    # escapes to __main__._fail_run instead. The request was
-                    # made and answered, so it counts as a turn (as it did when
-                    # the runner parsed bodies itself).
-                    turns += 1
-                    return finish("model_error", str(e))
-                turns += 1
-                finish_reason = resp.finish_reason
-                # The adapter already sanitized usage (finite, non-negative).
-                for k in usage:
-                    usage[k] += resp.usage.get(k, 0)
-                # An entry the provider could not address (no id) cannot be
-                # answered with a tool result: that is a malformed *entry*. One
-                # with an id but undecodable arguments is answerable.
-                malformed_entries = [tc for tc in resp.tool_calls
-                                     if tc.error is not None and not tc.id]
-                malformed_count = len(malformed_entries)
-                tool_calls = [tc for tc in resp.tool_calls if tc.id]
-                transcript_text = resp.text
-                if isinstance(transcript_text, str) and len(transcript_text) > MAX_ASSISTANT_TEXT_CHARS:
-                    transcript_text = (
-                        transcript_text[:MAX_ASSISTANT_TEXT_CHARS]
-                        + f"\n[truncated at {MAX_ASSISTANT_TEXT_CHARS} chars in the transcript "
-                          f"only — the full text was sent to the model]"
-                    )
-                self.transcript.write(
-                    "assistant", text=transcript_text,
-                    tool_calls=[{"name": tc.name, "arguments": (tc.raw_arguments or "")[:2000]}
-                                for tc in tool_calls],
-                    # Spec §1.5: an OPEN enum. Adapters do not guarantee a
-                    # string (Anthropic passes an unknown stop reason through
-                    # raw), so anything else is recorded as null rather than
-                    # emitted as some other JSON type.
-                    finish_reason=finish_reason if isinstance(finish_reason, str) else None)
-                if isinstance(transcript_text, str) and transcript_text.strip():
-                    last_assistant_text = transcript_text[:LAST_TEXT_CHARS]
-                if resp.tool_calls:
-                    # The adapter re-serializes these into whatever wire shape
-                    # its protocol needs; the runner keeps neutral objects.
-                    messages.append(assistant_message(resp.text, tool_calls))
                 else:
-                    content = resp.text
-                    kind = classify_text_reply(content, finish_reason)
-                    if kind == "answer":
-                        messages.append(assistant_message(content, None))
-                        ended, feedback = check_verify(content)
-                        if ended is not None:
-                            return ended
-                        messages.append({"role": "user", "content": feedback})
-                        continue
-                    messages.append(assistant_message(content, None))
-                    self.transcript.write("nudge", kind=kind, turn=turns)
-                    abort_reason = failures.record("empty_reply")
-                    if abort_reason is not None:
-                        return finish("model_error", abort_reason)
-                    stalled, stall_text = check_progress()
-                    if stalled is not None:
-                        return stalled
-                    messages.append({"role": "user", "content": _join_nudges(NUDGES[kind], stall_text)})
-                    continue
+                    return finish("model_error",
+                                  "model request timed out before the run deadline")
+            except MalformedResponse as e:
+                # A body we cannot read is a model failure, not a transport
+                # failure: end through finish() so finalize() runs and a
+                # run_end event is written. A plain LLMError deliberately
+                # escapes to __main__._fail_run instead. The request was
+                # made and answered, so it counts as a turn (as it did when
+                # the runner parsed bodies itself).
+                turns += 1
+                return finish("model_error", str(e))
+            turns += 1
+            finish_reason = resp.finish_reason
+            # The adapter already sanitized usage (finite, non-negative).
+            for k in usage:
+                usage[k] += resp.usage.get(k, 0)
+            # An entry the provider could not address (no id) cannot be
+            # answered with a tool result: that is a malformed *entry*. One
+            # with an id but undecodable arguments is answerable.
+            malformed_entries = [tc for tc in resp.tool_calls
+                                 if tc.error is not None and not tc.id]
+            malformed_count = len(malformed_entries)
+            tool_calls = [tc for tc in resp.tool_calls if tc.id]
+            append_assistant(resp.text, tool_calls, finish_reason)
+            if not resp.tool_calls:
+                content = resp.text
+                kind = classify_text_reply(content, finish_reason)
+                if kind == "answer":
+                    ended, feedback = check_verify(content, via="user")
+                    if ended is not None:
+                        return ended
+                    deliver(feedback, [])
+                    return None
+                kind_record = self.transcript.write("nudge", kind=kind, turn=turns)
+                abort_reason = failures.record("empty_reply")
+                if abort_reason is not None:
+                    return finish("model_error", abort_reason)
+                stalled, stall_text, stall_record = check_progress()
+                if stalled is not None:
+                    return stalled
+                deliver(_join_nudges(NUDGES[kind], stall_text), [kind_record, stall_record])
+                return None
 
+            abort_reason = None
+            for entry in malformed_entries:
+                reason = failures.record("malformed_entry")
+                if abort_reason is None:
+                    abort_reason = reason
+                # The adapter knows the wire shape it failed to parse; its
+                # error text is what the transcript records.
+                result = f"ERROR: {entry.error}"
+                self.transcript.write("tool_result", tool="", args="", result=result)
+                note_last_tool_result("", "", result)
+            if abort_reason is not None:
+                return finish("model_error", abort_reason)
+
+            pending_finish = None
+            timed_out_this_turn = False   # spec §4.3: at most ONE nudge per turn
+            for tc in tool_calls:
+                name = tc.name
+                raw_args = tc.raw_arguments or "{}"
+                args = tc.arguments
                 abort_reason = None
-                for entry in malformed_entries:
-                    reason = failures.record("malformed_entry")
-                    if abort_reason is None:
-                        abort_reason = reason
-                    # The adapter knows the wire shape it failed to parse; its
-                    # error text is what the transcript records.
-                    result = f"ERROR: {entry.error}"
-                    self.transcript.write("tool_result", tool="", args="", result=result)
-                    note_last_tool_result("", "", result)
+                terminal = False
+                if tc.error is not None:
+                    abort_reason = failures.record("malformed_args")
+                    if finish_reason == "length":
+                        result = truncated_call_result(name, tc.raw_arguments)
+                    else:
+                        result = f"ERROR: {tc.error}"
+                elif finish_reason == "length" and self._missing_required(name, args):
+                    # Spec §1.3 case (b): the Anthropic shape. A truncated
+                    # tool_use whose `input` came back {} parses
+                    # "successfully", so tc.error is None -- but a required
+                    # parameter is simply absent. Checked BEFORE dispatch so
+                    # the registry's bad_args path never swallows it: this
+                    # is a truncation, not an argument mistake, and it is
+                    # accounted as malformed_args exactly like case (a).
+                    abort_reason = failures.record("malformed_args")
+                    result = truncated_call_result(name, tc.raw_arguments)
+                else:
+                    try:
+                        spec = self.registry.spec(name)
+                        if spec is not None and spec.terminal:
+                            summary = args.get("summary")
+                            pending_finish = summary if isinstance(summary, str) else ""
+                            result = FINISH_PROVISIONAL
+                            terminal = True
+                        else:
+                            tool_result = self.registry.execute(
+                                name, args, sandbox=self.sandbox, deadline=deadline)
+                            result = tool_result.text
+                            if tool_result.failure is not None:
+                                abort_reason = failures.record(tool_result.failure)
+                            else:
+                                failures.reset()
+                    except BudgetExceeded as e:
+                        return finish("budget_exceeded", e.reason)
+                    except SandboxError as e:
+                        return finish("sandbox_error", str(e))
+                progress.note_call(name, self.registry.canonical_args(name, args), result)
+                timed_out_fields = {}
+                if name == "bash":
+                    command = args.get("command") if isinstance(args, dict) else None
+                    if repeats.note_bash(command, result) == "stuck":
+                        stuck = repeats.stuck_on()
+                    if is_timeout_result(result):
+                        # Spec §4.3: worker bash TOOL CALLS only. The
+                        # --verify command goes through sandbox.bash
+                        # directly, is never a tool call and is never
+                        # transcribed here, so it can never reach this.
+                        timeouts += 1
+                        timed_out_this_turn = True
+                        timed_out_fields["timed_out"] = True
+                record = self.transcript.write("tool_result", tool=name,
+                                               args=raw_args[:500],
+                                               result=self.registry.transcript_preview(name, result),
+                                               **timed_out_fields)
+                if name != FINISH_TOOL:
+                    note_last_tool_result(name, raw_args, result)
+                msg = tool_message(tc.id, result)
+                messages.append(msg)
+                turn_tool_msgs.append((msg, record))
+                if terminal:
+                    turn_terminal.append((msg, record))
                 if abort_reason is not None:
                     return finish("model_error", abort_reason)
 
-                pending_finish = None
-                timed_out_this_turn = False   # spec §4.3: at most ONE nudge per turn
-                for tc in tool_calls:
-                    name = tc.name
-                    raw_args = tc.raw_arguments or "{}"
-                    args = tc.arguments
-                    abort_reason = None
-                    if tc.error is not None:
-                        abort_reason = failures.record("malformed_args")
-                        if finish_reason == "length":
-                            result = truncated_call_result(name, tc.raw_arguments)
-                        else:
-                            result = f"ERROR: {tc.error}"
-                    elif finish_reason == "length" and self._missing_required(name, args):
-                        # Spec §1.3 case (b): the Anthropic shape. A truncated
-                        # tool_use whose `input` came back {} parses
-                        # "successfully", so tc.error is None -- but a required
-                        # parameter is simply absent. Checked BEFORE dispatch so
-                        # the registry's bad_args path never swallows it: this
-                        # is a truncation, not an argument mistake, and it is
-                        # accounted as malformed_args exactly like case (a).
-                        abort_reason = failures.record("malformed_args")
-                        result = truncated_call_result(name, tc.raw_arguments)
-                    else:
-                        try:
-                            spec = self.registry.spec(name)
-                            if spec is not None and spec.terminal:
-                                summary = args.get("summary")
-                                pending_finish = summary if isinstance(summary, str) else ""
-                                result = "run finished"
-                            else:
-                                tool_result = self.registry.execute(
-                                    name, args, sandbox=self.sandbox, deadline=deadline)
-                                result = tool_result.text
-                                if tool_result.failure is not None:
-                                    abort_reason = failures.record(tool_result.failure)
-                                else:
-                                    failures.reset()
-                        except BudgetExceeded as e:
-                            return finish("budget_exceeded", e.reason)
-                        except SandboxError as e:
-                            return finish("sandbox_error", str(e))
-                    progress.note_call(name, self.registry.canonical_args(name, args), result)
-                    timed_out_fields = {}
-                    if name == "bash":
-                        command = args.get("command") if isinstance(args, dict) else None
-                        if repeats.note_bash(command, result) == "stuck":
-                            stuck = repeats.stuck_on()
-                        if is_timeout_result(result):
-                            # Spec §4.3: worker bash TOOL CALLS only. The
-                            # --verify command goes through sandbox.bash
-                            # directly, is never a tool call and is never
-                            # transcribed here, so it can never reach this.
-                            timeouts += 1
-                            timed_out_this_turn = True
-                            timed_out_fields["timed_out"] = True
-                    self.transcript.write("tool_result", tool=name,
-                                          args=raw_args[:500],
-                                          result=self.registry.transcript_preview(name, result),
-                                          **timed_out_fields)
-                    if name != FINISH_TOOL:
-                        note_last_tool_result(name, raw_args, result)
-                    messages.append(tool_message(tc.id, result))
-                    if abort_reason is not None:
-                        return finish("model_error", abort_reason)
+            # Composed here (text only, no transcript write yet) so both
+            # paths below that may CONTINUE the run -- the verify-feedback
+            # path just below, and the ordinary nudge path at the bottom --
+            # can carry it. The transcript event itself is written at
+            # exactly one of those two points (never both: they are
+            # mutually exclusive per turn), and never at all on a turn that
+            # ENDS the run (finish/stuck/verify-passed all return above or
+            # below without reaching either write) -- spec §4.3: the nudge
+            # is emitted on turns that continue.
+            timeout_text = TIMEOUT_NUDGE if timed_out_this_turn else None
 
-                # Composed here (text only, no transcript write yet) so both
-                # paths below that may CONTINUE the run -- the verify-feedback
-                # path just below, and the ordinary nudge path at the bottom --
-                # can carry it. The transcript event itself is written at
-                # exactly one of those two points (never both: they are
-                # mutually exclusive per turn), and never at all on a turn that
-                # ENDS the run (finish/stuck/verify-passed all return above or
-                # below without reaching either write) -- spec §4.3: the nudge
-                # is emitted on turns that continue.
-                timeout_text = TIMEOUT_NUDGE if timed_out_this_turn else None
-
-                if pending_finish is not None:
-                    ended, feedback = check_verify(pending_finish)
-                    if ended is not None:
-                        return ended
-                    if timed_out_this_turn:
-                        self.transcript.write("nudge", kind="timeout", turn=turns)
-                        feedback = _join_nudges(feedback, timeout_text)
-                    messages.append({"role": "user", "content": feedback})
-                    continue
-
-                # Same rule as `finish` in a mixed turn: the turn's remaining
-                # tool calls have already run. `finish` still wins — a worker
-                # that declared itself done did so with full knowledge of the
-                # failure it had just seen.
-                if stuck is not None:
-                    return finish("stuck",
-                                  f"the same failing command ran {stuck['repeats']} "
-                                  f"times in a row")
-
-                stalled, stall_text = check_progress()
-                if stalled is not None:
-                    return stalled
-
-                malformed_text = None
-                if malformed_count > 0:
-                    malformed_text = (f"{malformed_count} of your tool calls were malformed "
-                                      "(unaddressable: no usable id/name) and were "
-                                      "discarded. Re-issue them as valid tool calls.")
+            if pending_finish is not None:
+                ended, feedback = check_verify(pending_finish, via="finish_result")
+                if ended is not None:
+                    return ended
+                # The feedback is already the finish result (resolve_finish);
+                # only the timeout nudge still needs delivering.
                 if timed_out_this_turn:
-                    # Once per turn, however many commands timed out in it.
-                    self.transcript.write("nudge", kind="timeout", turn=turns)
-                nudge_text = _join_nudges(malformed_text, timeout_text, stall_text)
-                if nudge_text:
-                    messages.append({"role": "user", "content": nudge_text})
+                    timeout_record = self.transcript.write("nudge", kind="timeout", turn=turns)
+                    deliver(timeout_text, [timeout_record])
+                return None
+
+            # Same rule as `finish` in a mixed turn: the turn's remaining
+            # tool calls have already run. `finish` still wins — a worker
+            # that declared itself done did so with full knowledge of the
+            # failure it had just seen.
+            if stuck is not None:
+                return finish("stuck",
+                              f"the same failing command ran {stuck['repeats']} "
+                              f"times in a row")
+
+            stalled, stall_text, stall_record = check_progress()
+            if stalled is not None:
+                return stalled
+
+            malformed_text = malformed_record = None
+            if malformed_count > 0:
+                malformed_text = (f"{malformed_count} of your tool calls were malformed "
+                                  "(unaddressable: no usable id/name) and were "
+                                  "discarded. Re-issue them as valid tool calls.")
+                # Spec #60 §6.2: delivered since 0.5, transcribed since 1.0.
+                malformed_record = self.transcript.write("nudge", kind="malformed_entry", turn=turns)
+            timeout_record = None
+            if timed_out_this_turn:
+                # Once per turn, however many commands timed out in it.
+                timeout_record = self.transcript.write("nudge", kind="timeout", turn=turns)
+            deliver(_join_nudges(malformed_text, timeout_text, stall_text),
+                    [malformed_record, timeout_record, stall_record])
+            return None
+        try:
+            while True:
+                with self.transcript.turn():
+                    try:
+                        ended = one_turn()
+                    except KeyboardInterrupt:
+                        # Spec #60 §4 (v3): caught INSIDE the turn so finish()
+                        # resolves the finish record and flushes before the
+                        # turn's buffer is written.
+                        ended = finish("interrupted", "")
+                if ended is not None:
+                    return ended
         except KeyboardInterrupt:
+            # Between turns only: nothing is buffered and no finish record can
+            # be pending here.
             return finish("interrupted", "")

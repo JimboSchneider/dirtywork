@@ -255,3 +255,14 @@ def test_loaded_context_window_is_none_when_the_probe_times_out():
 
     client = OpenAICompatClient(base_url="http://fake/v1", http_json=slow)
     assert client.loaded_context_window("m") is None
+
+
+def test_runner_shaped_history_is_legal_for_strict_templates():
+    from dirtywork.providers import ToolCall, assistant_message, tool_message
+    from .provider_doubles import assert_strict_template_legal
+    tc = ToolCall(id="abc123def", name="finish", arguments={"summary": "s"}, error=None,
+                  raw_arguments='{"summary": "s"}')
+    history = [{"role": "system", "content": "s"}, {"role": "user", "content": "task"},
+               assistant_message("", [tc]),
+               tool_message("abc123def", "VERIFY FAILED (round 1 of 2) ...\n\n" + "timeout nudge")]
+    assert_strict_template_legal(history)

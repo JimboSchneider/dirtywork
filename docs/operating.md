@@ -79,9 +79,11 @@ export. A zero exit leaves the run `completed`; anything else ends it
 `verify_failed` (exit 1), with the command, its exit code and a 4000-char
 output tail in `verify` on the stdout JSON, the `run_end` event and `run.json`.
 `--verify-rounds N` (default 1) is how many fix rounds follow a failure: the
-default hands the first failure back to the worker as a message naming the
-command, the exit code and the output tail, and lets it try once more against
-the ordinary `--max-turns`/`--timeout` budget (the command may run N+1 times);
+default hands the first failure back to the worker — as the `finish` call's
+own result when it finished through `finish(summary=…)`, or as the next
+message when it answered in prose — naming the command, the exit code and the
+output tail, and lets it try once more against the ordinary
+`--max-turns`/`--timeout` budget (the command may run N+1 times);
 `0` verifies once and ends the run either way. `--verify-timeout S` (default 600, clamped to
 1–600) bounds each run. In docker mode the command can only use what the image
 ships — see the callout under *Review a run*. `dirtywork resume` inherits the
@@ -101,8 +103,10 @@ and returns exactly:
 **No partial output is appended**, deliberately: the host backend could produce
 a tail and the container backend cannot, and a tail is exactly what a small
 model reads as "the command's result" when the command never finished. The same
-turn also gets a one-line nudge telling the worker in words that the result is
-unknown and must not be reported as a pass, the `tool_result` transcript event
+turn also carries a one-line nudge — appended to the turn's last tool result,
+so no chat template sees a user message after a tool result (1.0, #60) —
+telling the worker in words that the result is unknown and must not be
+reported as a pass, the `tool_result` transcript event
 carries `timed_out: true`, and the run's `timeouts` counter rises — visible on
 the stdout JSON, in `run_end`, in `run.json`, in `dirtywork runs show`
 (where the call renders `[timed out]` rather than `[ERROR]`), and in
@@ -178,8 +182,11 @@ of whether the run is still going:
   run as a Markdown report instead (header block whose `task` field is a
   one-line preview, a `## Task` section with the full task text, one
   `### Turn N` section per assistant turn, collapsible `<details>` tool
-  results, blockquote callouts for nudges/guardrail blocks/sandbox resets, a
-  `## Result` section, and with `--diff` the patch in a fenced block) —
+  results, blockquote callouts for nudges/guardrail blocks/sandbox resets,
+  the harness text a tool result carried to the model (1.0: a fenced
+  "harness → model" block), `(sent as: [empty reply])` on a turn the harness
+  had to pad, a `## Result` section, and with `--diff` the patch in a fenced
+  block) —
   paste-ready for a PR or an issue; `--out FILE` writes it to a file instead
   of stdout.
 - `dirtywork runs export <slug> [--max-worktree-mb 2048] [--max-worktree-files 200000] [--max-patch-mb 10] [--keep-volume]` —

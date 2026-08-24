@@ -1374,3 +1374,69 @@ def test_render_markdown_notes_a_truncated_files_changed_list():
                                            "files_changed_truncated": False}, [])
     assert "**files changed (2)**" in plain
     assert "list truncated" not in plain
+
+
+ADVERSARIAL_FOLLOW_UP = "```\n> quoted\n# heading\n</details>\r\nlast line"
+
+
+def _followup_run(tmp_path):
+    # _write_run creates the run dir itself (tests/test_runs.py:33-37)
+    run_dir = _write_run(tmp_path / "runs", "fu1", {
+        "slug": "fu1", "task": "t", "status": "verify_failed", "repo": "/r", "worktree": "/w",
+        "model": "m", "provider": "openai", "turns": 2, "started": "2026-08-23T00:00:00+00:00",
+        "sandbox": "none",
+    })
+    events = [
+        {"ts": "t1", "event": "run_start", "model": "m", "task": "t"},
+        {"ts": "t2", "event": "assistant", "text": "", "tool_calls": [{"name": "bash", "arguments": "{}"}]},
+        {"ts": "t3", "event": "tool_result", "tool": "bash", "args": "{}", "result": "exit code: 0",
+         "follow_up": ADVERSARIAL_FOLLOW_UP},
+        {"ts": "t4", "event": "nudge", "kind": "timeout", "turn": 1, "via": "tool_result"},
+        {"ts": "t5", "event": "assistant", "text": "", "placeholder": "[empty reply]"},
+        {"ts": "t6", "event": "nudge", "kind": "empty", "turn": 2, "via": "user"},
+        {"ts": "t7", "event": "assistant", "text": "", "tool_calls": [{"name": "finish", "arguments": "{}"}]},
+        {"ts": "t8", "event": "tool_result", "tool": "finish", "args": "{\"summary\": \"s\"}",
+         "result": "run not finished: verify failed (exit 1); no fix rounds remain"},
+        {"ts": "t9", "event": "tool_result", "tool": "finish", "args": "{}", "result": "x" * 2500},
+        {"ts": "t10", "event": "run_end", "status": "verify_failed", "turns": 3},
+    ]
+    (run_dir / "transcript.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    return run_dir
+
+
+def test_cmd_show_timeline_marks_follow_up_placeholder_and_not_finished(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _followup_run(tmp_path)
+    assert runs.cmd_show(argparse.Namespace(slug="fu1", diff=False)) == 0
+    out = capsys.readouterr().out
+    bash_line = next(l for l in out.splitlines() if "tool_result" in l and "bash" in l)
+    assert bash_line.rstrip().endswith("[ok] +follow_up")
+    assert ADVERSARIAL_FOLLOW_UP.splitlines()[1] not in out          # the text itself is not dumped in the timeline
+    assert "(sent as: [empty reply])" in out
+    assert "[not finished]" in out
+    assert out.count("[not finished]") == 2
+
+
+def test_cmd_show_markdown_fences_follow_up_and_shows_finish_in_full(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _followup_run(tmp_path)
+    assert runs.cmd_show(argparse.Namespace(slug="fu1", diff=False, markdown=True, out=None)) == 0
+    out = capsys.readouterr().out
+    # spec §6.3 (v4): a callout line, then the text verbatim inside a fence
+    # longer than any backtick run it contains -- never a raw blockquote.
+    assert "> **harness → model:**\n\n````\n" + ADVERSARIAL_FOLLOW_UP + "\n````\n" in out
+    assert "\n# heading\n" not in out.replace("````\n" + ADVERSARIAL_FOLLOW_UP + "\n````", "")
+    assert "> > quoted" not in out and "> # heading" not in out
+    assert "_[fence auto-closed by the exporter]_" not in out
+    assert "_(sent as: [empty reply])_" in out
+    assert "[not finished]" in out
+    assert "x" * 2500 in out                                           # finish exempt from the 2000 trim
+    assert "... [truncated]" not in out
+
+
+def test_runs_show_tolerates_old_transcripts_without_the_new_keys(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    _markdown_run(tmp_path)
+    assert runs.cmd_show(argparse.Namespace(slug="md1", diff=False, markdown=True, out=None)) == 0
+    out = capsys.readouterr().out
+    assert "harness → model" not in out and "sent as" not in out and "[not finished]" not in out

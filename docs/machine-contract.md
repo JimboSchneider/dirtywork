@@ -94,7 +94,9 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   the rounds, and the timeout — from the run it continues (recorded in `run.json`
   at run start, so this works even when the prior run ended before verify ever
   ran, e.g. `max_turns`/`stalled`/`stuck`/`timeout`/`budget_exceeded`); an
-  explicit flag on `resume` overrides the inherited value.
+  explicit flag on `resume` overrides the inherited value. Feedback for a fix
+  round is delivered as the `finish` call's tool result (or as the next user
+  message after a prose answer); the `verify` event records which (`via`).
 - `--context-window TOKENS` — the model's context window, used to size the
   transcript trimming budget. Precedence: flag, then `DIRTYWORK_CONTEXT_WINDOW`,
   then **what the server reports it actually loaded the model with** (LM Studio's
@@ -324,7 +326,7 @@ never got far enough to know.
   loaded, `--repo` not a git repo, etc.); nothing is created.
 
 All progress (transcript path, worktree path, `error:`-prefixed messages) is
-written to stderr; watch a live run with `tail -f` on the transcript path.
+written to stderr; watch a live run with `tail -f` on the transcript path (events land one turn at a time since 1.0).
 
 Full field-by-field schema, including every v1→v2 addition and the
 `run.json` field list: [`docs/transcript-schema.md`](transcript-schema.md).
@@ -337,7 +339,11 @@ config, `schema_version: 2`, plus provenance: `worktree`, `base_commit`,
 `assistant` (text + tool calls — text capped at 64 000 chars in the
 transcript only, the full text is still sent to the model), `tool_result`
 (truncated), `guardrail_block`, `nudge` (`{"event": "nudge", "kind":
-"truncated|empty|text_tool_call|stall", "turn": N}`), `sandbox_reset`
+"truncated|empty|text_tool_call|stall|timeout|malformed_entry", "turn": N,
+"via": "tool_result|user"}` — since 1.0 a nudge on a tool-call turn rides on
+the turn's last `tool_result` (its `follow_up` field) and never as a user
+message after a tool result; the history never carries two consecutive user
+messages), `sandbox_reset`
 (docker mode: the container was reset — reason), and `run_end` (status, turns,
 duration, cumulative
 usage, plus the run's artifacts: in host mode `diff_stat` — `git diff
@@ -352,8 +358,10 @@ null unless the watchdog killed the container), `watchdog_violation_kind`
 host-disk-floor breach, `"sandbox_error"` for the watchdog's own
 worktree-sampling exec failing twice; otherwise `null`), and
 `finalize_error` (set when the finalize/export step itself raised an
-exception after the agent loop otherwise finished; `null` normally)).
-A `finish(summary=...)` call appears in the transcript as an ordinary tool call in its `assistant` event followed by a `tool_result` event whose `result` is `run finished`; the summary becomes the run's `final_message`.
+exception after the agent loop otherwise finished; `null` normally; `KeyboardInterrupt: interrupted during finalize` when an interrupt landed inside the export — the export is attempted once and never re-run, and `run_end.status` is `interrupted`)).
+A `finish(summary=...)` call appears in the transcript as an ordinary tool call in its `assistant` event followed by a `tool_result` event whose `result` is `run finished` when the agent loop ended `completed` (an interrupt or export failure *after* that point is reported in `run_end.status` / the CLI status, not here) — otherwise the verify feedback text (a fix round follows) or a `run not finished: …` reason (see `transcript-schema.md`); the summary becomes the run's `final_message`.
+
+Since 1.0 the history sent to the model obeys two rules (#60): a harness follow-up never directly follows a tool result — it rides on the turn's last `tool_result` as `follow_up`, or is the `finish` result — and an assistant reply with no tool call and no text is stored as `[empty reply]` (`assistant.placeholder`), so strict chat templates never see a dropped turn or a user message after a tool result.
 
 The docker settings dict (`run_start`'s `sandbox`, and the same fields in
 `run.json`) includes `image` (the `--image` argument as given),

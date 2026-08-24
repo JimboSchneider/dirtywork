@@ -45,7 +45,7 @@ BENCH_REPOS = Path(__file__).resolve().parent.parent / "bench" / "repos"
 BENCH_HOME = rundir.BENCH_HOME
 # Order is the order the NUDGES column prints in; the plain summary's legend
 # line spells it out and must stay in step.
-NUDGE_KINDS = ("stall", "empty", "truncated", "text_tool_call", "timeout")
+NUDGE_KINDS = ("stall", "empty", "truncated", "text_tool_call", "timeout", "malformed_entry")
 ACCEPTANCE_MEMORY = "2g"
 ACCEPTANCE_CPUS = "2"
 ACCEPTANCE_PIDS = 256
@@ -251,14 +251,15 @@ def _harness_failures(counts: dict, status, final_message, timeouts=0) -> dict:
     """The harness-failure classes the scoreboard reports. `empty_reply` is the
     FailureTracker kind: the runner records exactly one per non-stall nudge --
     EXCEPT 0.9's `timeout` nudge, which is not a FailureTracker event at all
-    (a timed-out command is not a model mistake), so it is excluded here too and
-    gets its own class.
+    (a timed-out command is not a model mistake), and 1.0's `malformed_entry`
+    nudge, which is its own FailureTracker kind, not an empty reply -- both are
+    excluded here and get their own classes.
 
     `timeouts` is the RUNNER's own count, taken from the payload by the caller
     and never re-derived from the nudge events: a turn with two timed-out
     commands emits ONE nudge and counts TWO timeouts."""
     non_stall = sum(counts[f"nudge_{kind}"] for kind in NUDGE_KINDS
-                    if kind not in ("stall", "timeout"))
+                    if kind not in ("stall", "timeout", "malformed_entry"))
     failures = {f"nudge_{kind}": counts[f"nudge_{kind}"] for kind in NUDGE_KINDS}
     failures["nudge_other"] = counts["nudge_other"]
     failures["empty_reply"] = non_stall
@@ -772,7 +773,7 @@ def cmd_summarize(args) -> int:
             reviews.setdefault(model, []).append(review)
 
     if detail:
-        print("nudges: stall/empty/truncated/text_tool_call/timeout")
+        print("nudges: " + "/".join(NUDGE_KINDS))
         print("failures: harness classes for the run; timeouts=N counts timed-out bash "
               "calls (excluded from empty_reply, which is the FailureTracker kind)")
         print(format_table(DETAIL_COLUMNS, detail))

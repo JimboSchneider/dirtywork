@@ -378,6 +378,17 @@ def test_run_one_bench_case_counts_harness_failures(tmp_path, monkeypatch):
     assert row["acceptance"] == "skipped"    # a non-completed run is never scored
 
 
+def test_harness_failures_excludes_malformed_entry_from_empty_reply():
+    # Spec #60 review fix: malformed_entry is its own FailureTracker kind, not
+    # an empty reply -- excluded from `empty_reply` the same as `timeout`.
+    counts = {f"nudge_{kind}": 0 for kind in bench.NUDGE_KINDS}
+    counts["nudge_malformed_entry"] = 2
+    counts["nudge_other"] = 0
+    failures = bench._harness_failures(counts, "completed", None)
+    assert failures["empty_reply"] == 0
+    assert failures["nudge_malformed_entry"] == 2
+
+
 def test_abort_kind_is_parsed_from_the_final_message():
     assert bench._abort_kind("aborted after 3 consecutive bad_args failures") == "bad_args"
     assert bench._abort_kind("aborted after 6 consecutive tool failures") == "mixed"
@@ -483,7 +494,7 @@ def test_summarize_prints_detail_table_and_per_model_stats(tmp_path, monkeypatch
     out = capsys.readouterr().out
     # detail table
     assert "MODEL" in out and "NUDGES" in out and "FAILURES" in out
-    assert "2/1/0/0/0" in out          # m2's nudge counts (0.9 added the timeout kind)
+    assert "2/1/0/0/0/0" in out        # m2's nudge counts (1.0 added the malformed_entry kind)
     assert "stalled" in out
     assert "accept" in out and "reject" in out
     # per-model block
@@ -790,7 +801,7 @@ def test_summarize_reports_timeouts_in_the_failures_cell_and_the_legends(
     results.write_text(json.dumps(_result_row(slug=None, harness=harness)) + "\n")
     assert bench.cmd_summarize(argparse.Namespace(file=str(results))) == 0
     out = capsys.readouterr().out
-    assert "nudges: stall/empty/truncated/text_tool_call/timeout" in out
+    assert "nudges: stall/empty/truncated/text_tool_call/timeout/malformed_entry" in out
     assert "timeouts=3" in out
 
     other = tmp_path / "b.jsonl"

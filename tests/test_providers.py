@@ -117,3 +117,68 @@ def test_ollama_default_base_url_agrees_with_the_adapter():
     # imports its adapters lazily); this is what keeps them in step.
     from dirtywork.providers.ollama import OLLAMA_DEFAULT_BASE_URL
     assert DEFAULT_BASE_URLS["ollama"] == OLLAMA_DEFAULT_BASE_URL
+
+
+from dirtywork.providers import ToolCall, assistant_message, tool_message
+from .provider_doubles import assert_strict_template_legal
+
+
+def _tc(cid, name="bash"):
+    return ToolCall(id=cid, name=name, arguments={"command": "ls"}, error=None,
+                    raw_arguments='{"command": "ls"}')
+
+
+def _sys_user():
+    return [{"role": "system", "content": "s"}, {"role": "user", "content": "task"}]
+
+
+@pytest.mark.parametrize("tail", [
+    # S1: tool -> user (verify feedback after finish)
+    [assistant_message("", [_tc("abc123def", "finish")]), tool_message("abc123def", "run finished"),
+     {"role": "user", "content": "VERIFY FAILED"}],
+    # S7: assistant(text + tool_call) -> tool -> user
+    [assistant_message("let me finish", [_tc("abc123def", "finish")]),
+     tool_message("abc123def", "run finished"), {"role": "user", "content": "x"}],
+    # S11: two tool results then user
+    [assistant_message("", [_tc("a1"), _tc("b1")]), tool_message("a1", "x"), tool_message("b1", "y"),
+     {"role": "user", "content": "nudge"}],
+    # S16: tool_call -> tool -> empty assistant -> user (the F5 truncation shape)
+    [assistant_message("", [_tc("b1")]), tool_message("b1", "ok"), assistant_message("", None),
+     {"role": "user", "content": "cut off"}],
+    # whitespace-only assistant reply followed by user (stricter than the template, by design)
+    [assistant_message("   ", None), {"role": "user", "content": "x"}],
+    # two consecutive user messages
+    [{"role": "user", "content": "again"}],
+    # empty assistant reply with no tool calls, even without a following user
+    [assistant_message("", None)],
+])
+def test_oracle_rejects_illegal_shapes(tail):
+    with pytest.raises(AssertionError):
+        assert_strict_template_legal(_sys_user() + tail)
+
+
+@pytest.mark.parametrize("tail", [
+    # S4: feedback inside the tool result
+    [assistant_message("", [_tc("abc123def", "finish")]),
+     tool_message("abc123def", "run finished\n\nVERIFY FAILED ...")],
+    # S17: tool -> assistant(placeholder) -> user
+    [assistant_message("", [_tc("b1")]), tool_message("b1", "ok"),
+     assistant_message("[empty reply]", None), {"role": "user", "content": "cut off"}],
+    # S6: normal tool turn
+    [assistant_message("", [_tc("b1")]), tool_message("b1", "ok")],
+    # plain answer then user feedback
+    [assistant_message("done", None), {"role": "user", "content": "VERIFY FAILED"}],
+    # a longer legal run: tool turn, text turn, user, tool turn
+    [assistant_message("", [_tc("b1")]), tool_message("b1", "ok"), assistant_message("hm", None),
+     {"role": "user", "content": "go on"}, assistant_message("", [_tc("b2")]), tool_message("b2", "ok")],
+])
+def test_oracle_accepts_legal_shapes(tail):
+    assert_strict_template_legal(_sys_user() + tail)
+
+
+def test_oracle_skips_a_leading_system_message_only():
+    assert_strict_template_legal([{"role": "user", "content": "no system prompt"}])
+    with pytest.raises(AssertionError):
+        # a history that STARTS with an assistant turn is illegal
+        assert_strict_template_legal([{"role": "system", "content": "s"},
+                                      assistant_message("hi", None)])
