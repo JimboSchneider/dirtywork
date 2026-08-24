@@ -184,7 +184,7 @@ _TMPFS_SIZE_RE = re.compile(r"^[1-9][0-9]*[kmg]$")
 
 def _tmpfs_size(value: str) -> str:
     canonical = value.lower()
-    if not _TMPFS_SIZE_RE.match(canonical):
+    if not _TMPFS_SIZE_RE.fullmatch(canonical):  # fullmatch: `$` alone admits a trailing newline
         raise argparse.ArgumentTypeError(
             f"expected a size like 256m or 1g (digits followed by k, m or g), got {value!r}")
     return canonical

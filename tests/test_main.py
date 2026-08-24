@@ -2453,7 +2453,7 @@ def test_tmpfs_size_fields_are_null_in_host_mode(tmp_path, monkeypatch, capsys):
 @pytest.mark.parametrize("flag", ["--tmp-size", "--gitdir-size", "--home-size"])
 @pytest.mark.parametrize("value", [
     "1024", "0", "00256m", "1.5g", "256mb", "256MiB", "50%",
-    "1g,exec", "1t", "+256m", "256 m", "",
+    "1g,exec", "1t", "+256m", "256 m", "", "256m\n",
 ])
 def test_bad_tmpfs_size_rejected_by_all_three_flags(flag, value, capsys):
     import dirtywork.__main__ as m
