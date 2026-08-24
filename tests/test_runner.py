@@ -1502,8 +1502,9 @@ def test_verify_failure_with_a_round_left_feeds_back_and_retries(parts, tmp_path
     # Spec #60 §4: the failed round IS the finish call's result -- no user message
     last = provider.requests[-1]
     f1 = next(m for m in last if m["role"] == "tool" and m["tool_call_id"] == "f1")
-    assert f1["content"].startswith("VERIFY FAILED (round 1 of 2)")
-    assert "test -e fixed" in f1["content"]
+    assert f1["content"] == VERIFY_FEEDBACK.format(
+        round=1, rounds=2, command="test -e fixed", exit_code=1,
+        output=f1["content"].split("Output tail:\n", 1)[1].rsplit("\nFix the problem", 1)[0])
     assert not any(m["role"] == "user" and "VERIFY FAILED" in m["content"] for m in last)
     # the last request was captured BEFORE f2 (called in that very reply) existed at all
     assert not any(m["role"] == "tool" and m["tool_call_id"] == "f2" for m in last)
@@ -1931,6 +1932,27 @@ def test_interrupt_inside_verify_resolves_the_finish_result_before_the_flush(par
     assert events[-1]["event"] == "run_end"
 
 
+def test_unhandled_exception_after_finish_leaves_the_provisional_result_on_disk(parts):
+    # Spec #60 §4 last row: the ONLY way the provisional string is written --
+    # an exception the runner does not handle leaves the turn; turn() flushes
+    # the buffered records as they stand and no runner run_end is written
+    # (the CLI's _fail_run supplies one).
+    wt, registry, sandbox, transcript, tmp = parts
+
+    class Exploding:
+        def bash(self, command, timeout=120):
+            raise RuntimeError("disk on fire")
+
+    provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "s"}), _bash_call("b1")])])
+    r = Runner(provider, registry, Exploding(), transcript, model="m")
+    with pytest.raises(RuntimeError):
+        r.run("s", "t")
+    transcript.close()
+    events = _events(tmp)
+    assert _finish_results(events) == [FINISH_PROVISIONAL]
+    assert [e["event"] for e in events if e["event"] == "run_end"] == []
+
+
 def test_multiple_finish_calls_in_one_turn_resolve_to_the_same_string(parts):
     wt, registry, sandbox, transcript, tmp = parts
     provider = FakeProvider([
@@ -2236,16 +2258,30 @@ def test_transcript_equals_wire_for_every_tool_and_assistant_message(parts):
     r.run("s", "t")
     transcript.close()
     events = _events(tmp)
+    tool_events = _tool_events(events)
+    assistant_events = [e for e in events if e["event"] == "assistant"]
     final = provider.requests[-1]
     wire_tools = [m for m in final if m["role"] == "tool"]
-    for msg, ev in zip(wire_tools, _tool_events(events)):
-        expected = ev["result"] + ("\n\n" + ev["follow_up"] if "follow_up" in ev else "")
-        assert msg["content"] == expected, (msg, ev)
     wire_assistants = [m for m in final if m["role"] == "assistant"]
-    for msg, ev in zip(wire_assistants, [e for e in events if e["event"] == "assistant"]):
-        assert msg["content"] == ev.get("placeholder", ev["text"])
-    assert len(wire_tools) == 3 and len(wire_assistants) == 3
-    assert len(next(e for e in _tool_events(events) if e["tool"] == "finish")["result"]) > 3000
+    assert len(tool_events) == len(wire_tools) == 3
+    # 4 turns run (verify fails on the finish call, feeds back, the plain "ok"
+    # reply on turn 4 fails verify again and ends the run) -- turn 4's own
+    # assistant reply is appended to history but never sent back to the model
+    # in a further request, so the transcript has one more than the wire
+    # ever carries.
+    assert len(assistant_events) == 4
+    assert len(wire_assistants) == 3
+    # every request the model actually received is a prefix of the final one,
+    # and every message in it matches the transcript record it came from
+    for request in provider.requests:
+        req_tools = [m for m in request if m["role"] == "tool"]
+        req_assistants = [m for m in request if m["role"] == "assistant"]
+        for msg, ev in zip(req_tools, tool_events[:len(req_tools)]):
+            expected = ev["result"] + ("\n\n" + ev["follow_up"] if "follow_up" in ev else "")
+            assert msg["content"] == expected, (msg, ev)
+        for msg, ev in zip(req_assistants, assistant_events[:len(req_assistants)]):
+            assert msg["content"] == ev.get("placeholder", ev["text"])
+    assert len(next(e for e in tool_events if e["tool"] == "finish")["result"]) > 3000
 
 
 @pytest.mark.parametrize("build", SCENARIOS)

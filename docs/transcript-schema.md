@@ -82,8 +82,10 @@ One per tool call executed, plus one per malformed tool-call entry discarded.
 
 A `finish(summary=…)` call is an ordinary tool call: it appears in the
 `assistant` event's `tool_calls` and produces a `tool_result`. Since 1.0 (#60)
-its `result` is honest about what happened: `run finished` only when the run
-ends `completed`; the full `VERIFY FAILED (round r of R) …` feedback text when
+its `result` is honest about what happened: `run finished` when the agent loop
+ended `completed` (an interrupt or export failure *after* that point is
+reported in `run_end.status` / the CLI status, not here); the full `VERIFY
+FAILED (round r of R) …` feedback text when
 `--verify` failed and a fix round remains (the run continues — that text is what
 the model receives as the call's result); `run not finished: verify failed (exit
 N); no fix rounds remain` (run ends `verify_failed`); `run not finished: verify

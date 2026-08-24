@@ -78,8 +78,8 @@ def test_devstral_accepts_runner_histories(parts, build):
     against the loaded Devstral; a strict template renders every request.
 
     Mistral's chat template is documented to require tool-call ids of exactly
-    9 alphanumeric characters; the scenario builders use short ids (f1/b1/c1/
-    c2). Probed directly against this LM Studio build: it accepted the short
+    9 alphanumeric characters; the scenario builders use short ids (f1/b1/c1).
+    Probed directly against this LM Studio build: it accepted the short
     ids as-is (no 400), so no remapping is applied here -- if a future model
     build starts rejecting them with a 400 naming the id, pad ids to 9 chars
     in the serialized wire messages before posting; the shape under test

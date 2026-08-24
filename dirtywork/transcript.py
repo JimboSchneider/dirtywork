@@ -40,7 +40,7 @@ class Transcript:
         self._lock = threading.Lock()
         self._buffer = None      # a list while a turn is open, else None
 
-    def write(self, event: str, **fields):
+    def write(self, event: str, **fields) -> dict | None:
         """Record the event. Returns the record (a dict the caller may amend
         until its turn flushes) while a turn is open; None otherwise, when the
         line is already on disk. `ts` is stamped here, never at flush time."""

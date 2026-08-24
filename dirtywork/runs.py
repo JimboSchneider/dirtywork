@@ -292,7 +292,7 @@ def _timeline_line(event: dict) -> str:
     if name == "tool_result":
         result = str(event.get("result", ""))
         tool = event.get("tool") or "(malformed call)"
-        outcome = _tool_result_outcome(result, event.get("tool"))
+        outcome = _tool_result_outcome(result, event.get("tool"))  # the raw tool, never the "(malformed call)" fallback
         suffix = " +follow_up" if "follow_up" in event else ""
         return (f"{ts}  {name:<15} {tool:<12} {str(event.get('args', ''))[:80]:<80} "
                 f"[{outcome}]{suffix}")
@@ -365,7 +365,7 @@ def _md_event_lines(event: dict) -> list:
     if name == "tool_result":
         tool = event.get("tool") or "(malformed call)"
         result = str(event.get("result", ""))
-        outcome = _tool_result_outcome(result, event.get("tool"))
+        outcome = _tool_result_outcome(result, event.get("tool"))  # the raw tool, never the "(malformed call)" fallback
         summary = (f"{html.escape(str(tool), quote=False)}"
                    f"({_md_inline(event.get('args', ''), MD_ARGS_CHARS)}) [{outcome}]")
         lines = ["<details>", f"<summary>{summary}</summary>", ""]

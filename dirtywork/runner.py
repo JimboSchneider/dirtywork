@@ -567,6 +567,9 @@ class Runner:
         def resolve_finish(text: str) -> None:
             """Spec #60 §4: rewrite EVERY terminal record and history message of
             the current turn to `text`."""
+            # Written uncapped by design: the finish result is harness-authored
+            # and bounded (FINISH_SPEC declares transcript="full"); registry.
+            # transcript_preview is bypassed here.
             for msg, record in turn_terminal:
                 msg["content"] = text
                 record["result"] = text

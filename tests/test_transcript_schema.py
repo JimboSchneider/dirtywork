@@ -205,7 +205,6 @@ class _FollowUpProvider(DictProvider):
 
 
 def test_a_verify_run_emits_the_documented_follow_up_fields(tmp_path):
-    from dirtywork.sandbox.host import HostSandbox   # noqa: F401  (kept for parity with the sibling test)
     from .provider_doubles import TimeoutThenFailingVerifySandbox
     transcript = Transcript(tmp_path / "t.jsonl")
     registry = default_registry(transcript=transcript)
