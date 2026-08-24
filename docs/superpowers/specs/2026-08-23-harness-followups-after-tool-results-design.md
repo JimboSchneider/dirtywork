@@ -517,6 +517,15 @@ detectors fire as designed; plus their Qwen counterparts (`F4b-round2-qwen` must
 appended to the ledger with the soak's usual columns; the placeholder-imitation question of §5 is
 answered by reading those transcripts.
 
+*(Implementation ruling, 2026-08-24.)* The bar above conflated "no #60 failure" with "run
+succeeds". Measured: zero `Error rendering prompt`/"roles must alternate"/400 across all six
+reruns; `F4b-round2-dev` 400 → `completed`; `F3v2-run-dev` 400 → 18 turns past the timeout nudge
+(then #67's `[TOOL_CALLS]`-polluted tool names); both F5 rows end on the 2048-token provoker's
+"3 consecutive empty_reply failures" — identically to the Qwen control at `b94dec9` (#65/#66).
+The #60-specific bar (no template rejection; every follow-up carried legally; Devstral passes each
+formerly fatal point) is met; the literal "no `model_error`" bar is not, for causes outside this
+spec. The ledger says both.
+
 ## 11. Out of scope
 
 - Adapter-level normalization for OpenAI-compatible backends (approach A/C) — rejected in chat.
