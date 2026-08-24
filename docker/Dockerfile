@@ -40,9 +40,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends libicu72 libssl
     && ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet \
     && rm /tmp/dotnet-install.sh \
     && rm -rf /var/lib/apt/lists/*
+# DOTNET_EnableWriteXorExecute=0: dirtywork's bash tool runs every command
+# under `ulimit -f 524288` (256 MiB, dirtywork/sandbox/docker.py). With W^X
+# enabled (the default) the .NET 8 runtime trips that RLIMIT_FSIZE at
+# startup -- even at an 8 GiB limit, consistent with the size it gives its
+# double-mapping file -- so on the published :0.10 image every .NET 8
+# process (dotnet restore/build/test, a built app) died with "File size
+# limit exceeded" (SIGXFSZ, exit 153); the .NET 10 runtime does not trip
+# it. Verified 2026-08-24: with the variable set, new/build/run of net8.0
+# and net10.0 apps all pass under the limit. W^X is runtime-level hardening
+# that adds little inside a read-only, cap-dropped, no-new-privileges
+# container.
 ENV DOTNET_ROOT=/usr/share/dotnet \
     DOTNET_CLI_TELEMETRY_OPTOUT=1 \
-    DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
+    DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 \
+    DOTNET_EnableWriteXorExecute=0
 
 RUN useradd -u 1000 -m worker
 

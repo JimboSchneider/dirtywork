@@ -11,7 +11,14 @@ offline, since SDK 10 doesn't bundle the 8.0 targeting packs and a restore
 that can't reach NuGet fails with `NETSDK1145`. The **published**
 `ghcr.io/jimboschneider/dirtywork-worker:0.10` image predates this change
 and has SDK 8.0 only; 10.0 arrives with the 1.0 image (#59), which also
-re-pins `PINNED_DIGEST`.
+re-pins `PINNED_DIGEST`. The Dockerfile also sets
+`DOTNET_EnableWriteXorExecute=0`: dirtywork's `bash` tool runs every command
+under `ulimit -f 524288` (256 MiB), and with W^X enabled the .NET 8 runtime
+trips that limit at startup (even at 8 GiB — consistent with the size of its
+double-mapping file), so on the published `:0.10` image every .NET 8 process
+— `dotnet build`, `dotnet test`, a built app — dies with `File size limit
+exceeded` (exit 153); the .NET 10 runtime does not. Verified 2026-08-24; the
+variable fixes both, and a derived image based on `:0.10` must set it too.
 No `ENTRYPOINT`/`CMD` — every `docker create`/`run`/`exec` in dirtywork
 passes its own explicit `--entrypoint` or absolute binary path.
 

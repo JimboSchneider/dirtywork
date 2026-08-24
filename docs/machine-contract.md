@@ -102,9 +102,15 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   USER worker
   ```
 
-  The published `:0.10` image ships .NET SDK 8.0 only; the 1.0 image adds
-  SDK 10.0 alongside it. Restoring anything not vendored this way needs
-  `--allow-network`.
+  The published `:0.10` image ships .NET SDK 8.0 only, and — a 0.10 defect —
+  its .NET 8 runtime dies at startup with `File size limit exceeded` under
+  the sandbox's per-command file-size limit (`bash` runs everything under
+  `ulimit -f 524288`, 256 MiB), so `dotnet restore`/`build`/`test` do not
+  work on it inside dirtywork. The 1.0 image adds SDK 10.0 alongside 8.0 and
+  sets `DOTNET_EnableWriteXorExecute=0`, which fixes that for both runtimes
+  (verified offline: new, build and run of net8.0 and net10.0 apps under the
+  limit); a derived image based on `:0.10` needs that `ENV` line itself.
+  Restoring anything not vendored this way needs `--allow-network`.
 
 - `--tmp-size` / `--gitdir-size` / `--home-size` (docker mode; default `1g` /
   `512m` / `256m`) — caps on the three tmpfs mounts every run gets: `/tmp`
