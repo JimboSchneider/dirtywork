@@ -54,12 +54,18 @@ def test_bench_json_schema():
 
 
 def test_bench_json_hashes_match_files_on_disk():
+    # `hashes` used to be restricted to acceptance/ (the only mounted-read-only
+    # dir), but _hash_check_argv verifies arbitrary /work paths, and a mutable
+    # tests/*.py or app.py a worker could tamper with is exactly what needs
+    # protecting too (2026-08-23 review: py-canonical-config, py-rename-symbol
+    # both hash their test file now) -- so any in-tree relative path is valid
+    # here; the check below just guards against a path escaping task_dir.
     for name in TASK_NAMES:
         task_dir = BENCH_REPOS / name
         data = _bench_json(name)
         for rel_path, expected_hash in data["acceptance"]["hashes"].items():
-            assert rel_path.startswith("acceptance/"), (
-                f"{name}: hashed path '{rel_path}' is not under acceptance/")
+            assert not rel_path.startswith("/") and ".." not in Path(rel_path).parts, (
+                f"{name}: hashed path '{rel_path}' must be a relative in-tree path")
             p = task_dir / rel_path
             assert p.is_file(), f"{name}: hashed path '{rel_path}' does not exist"
             actual = hashlib.sha256(p.read_bytes()).hexdigest()

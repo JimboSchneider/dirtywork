@@ -26,6 +26,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import soak_common  # noqa: E402
 from dirtywork import bench  # noqa: E402
 from dirtywork.runs import _last_event  # noqa: E402  (DRY: reuse, don't re-copy -- review item 4)
+from dirtywork.runner import _recovered_path  # noqa: E402  (same regex scan runner.py itself
+# uses to recover a truncated write_file/append_file call's "path" argument out of raw,
+# possibly-incomplete JSON bytes -- reused here for F5 path matching, not re-copied)
 
 MAIN_COLUMNS = ("Run", "Model", "Status", "Turns", "Wall", "Prompt tok", "Compl tok",
                 "Harness failures", "Review verdict", "Notes", "Feature fired")
@@ -56,6 +59,24 @@ MODEL_TOOL_COLUMNS = ("Run", "Status", "Turns", "Wall", "Model time", "Tool time
 # args-based fallback is needed.
 _APPLY_EDITS_RE = re.compile(r"^Applied (\d+) edits? to ")
 _APPEND_FILE_RE = re.compile(r"^Appended to ")
+# write_file's success result always starts "Wrote " -- either "Wrote N bytes
+# to <path> (new file, M lines)" (dirtywork/tools.py:488, describe_write's
+# old_text-is-None branch) or, for an existing file, describe_change's own
+# "Wrote <path>: +A -D ..." (describe_write:489, verb="Wrote"). Both branches
+# share the prefix, so one regex covers write_file success either way.
+_WRITE_FILE_RE = re.compile(r"^Wrote ")
+
+# The two message shapes `dirtywork.runner.truncated_call_result` (runner.py:128-144)
+# can produce for a tool call cut off by finish_reason=="length": the write_file
+# variant with a recoverable path ("ERROR: your write_file for %r was cut off at
+# the token limit — nothing was written. ...") and the generic variant for every
+# other tool, or a write_file whose path could not be recovered ("ERROR: your
+# {tool} call was cut off at the token limit before it completed. ..."). Matched
+# by prefix only -- the matrix doc's signal is "result starts with the
+# truncated_call_result text", not a byte-for-byte reproduction.
+_TRUNCATED_CALL_RESULT_RE = re.compile(
+    r"^ERROR: your (?:write_file for |\S+ call was cut off at the token limit "
+    r"before it completed\.)")
 
 
 # --------------------------------------------------------------------------
@@ -90,22 +111,65 @@ def detect_features(run_json: dict, events: list) -> list:
     if has_timeout_result and has_timeout_nudge:
         fired.append("F3")
 
-    # F4: run_end.verify non-null -- append passed/rounds.
+    # F4: run_end.verify non-null AND passed == True -- append rounds. A
+    # verify_failed run (verify present but passed is not True) is NOT the
+    # feature firing -- --verify ran and the run's own check failed, which is
+    # an outcome, not confirmation the feature worked -- so it must not be
+    # counted as F4. The round count is still worth keeping, so it renders as
+    # F4-failed(rounds=N): visible in the table, but never mistaken for F4
+    # having fired by anything doing an exact/prefix match on "F4(".
     verify = run_json.get("verify")
     if isinstance(verify, dict):
-        fired.append(f"F4(passed={verify.get('passed')},rounds={verify.get('rounds')})")
+        if verify.get("passed") is True:
+            fired.append(f"F4(passed=True,rounds={verify.get('rounds')})")
+        else:
+            fired.append(f"F4-failed(rounds={verify.get('rounds')})")
 
-    # F5: an assistant finish_reason=="length", followed later in the
-    # transcript by a successful append_file call.
-    seen_length = False
+    # F5: the harness actually communicated a truncation back to the model --
+    # an assistant finish_reason=="length" IMMEDIATELY followed (next
+    # transcript event) by either a "truncated" nudge (a truncated text
+    # reply, no tool call) or a tool_result whose result starts with
+    # truncated_call_result's text (a truncated tool call) -- and AFTER that
+    # point a successful append_file (`^Appended to `) whose path is either
+    # the path that truncated call named (when recoverable), or the path of
+    # ANY successful write_file anywhere in the run, before or after the
+    # truncation (a model may write_file to start a large file, then get
+    # truncated mid-append while extending it, unrelated to which call the
+    # truncation itself happened to name). A finish_reason=="length" that
+    # ISN'T followed by one of those two signals (e.g. a tool call that
+    # finished successfully despite hitting the length limit) establishes no
+    # truncation point at all -- any append_file success after it is
+    # unrelated and must not count.
+    written_paths = {
+        path for e in events
+        if e.get("event") == "tool_result" and e.get("tool") == "write_file"
+        and _WRITE_FILE_RE.match(e.get("result") or "")
+        for path in [_recovered_path(e.get("args"))]
+        if path is not None
+    }
+
+    truncation_active = False
+    truncation_path = None      # the specific path a truncated call named, if recoverable
+    awaiting_signal = False     # True for exactly the event right after finish_reason=="length"
     for e in events:
         ev = e.get("event")
+        if awaiting_signal:
+            awaiting_signal = False
+            if ev == "nudge" and e.get("kind") == "truncated":
+                truncation_active = True
+                truncation_path = None
+            elif ev == "tool_result" and _TRUNCATED_CALL_RESULT_RE.match(e.get("result") or ""):
+                truncation_active = True
+                truncation_path = _recovered_path(e.get("args"))
         if ev == "assistant" and e.get("finish_reason") == "length":
-            seen_length = True
-        elif (seen_length and ev == "tool_result" and e.get("tool") == "append_file"
-              and _APPEND_FILE_RE.match(e.get("result") or "")):
-            fired.append("F5")
-            break
+            awaiting_signal = True
+        if (truncation_active and ev == "tool_result" and e.get("tool") == "append_file"
+                and _APPEND_FILE_RE.match(e.get("result") or "")):
+            append_path = _recovered_path(e.get("args"))
+            if append_path is not None and (
+                    append_path == truncation_path or append_path in written_paths):
+                fired.append("F5")
+                break
 
     # F7: provider == "ollama".
     if run_json.get("provider") == "ollama":

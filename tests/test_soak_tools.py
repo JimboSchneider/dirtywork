@@ -146,14 +146,17 @@ def test_f3_does_not_fire_with_only_one_signal(harvest, events):
 
 
 # --------------------------------------------------------------------------
-# F4: run_end.verify non-null, with passed/rounds appended
+# F4: run_end.verify non-null AND passed == True, with rounds appended.
+# A verify_failed run (verify present, passed is not True) must not count as
+# fired -- it renders as F4-failed(rounds=N) instead (2026-08-23 review).
 # --------------------------------------------------------------------------
 
-def test_f4_fires_on_non_null_verify_and_appends_passed_rounds(harvest):
+def test_f4_fires_on_passed_verify_and_appends_passed_rounds(harvest):
     run_json = {**BASE_RUN_JSON, "verify": {"command": "pytest", "exit_code": 0,
                                              "rounds": 2, "passed": True}}
     fired = harvest.detect_features(run_json, [])
     assert "F4(passed=True,rounds=2)" in fired
+    assert not any(f.startswith("F4-failed") for f in fired)
 
 
 def test_f4_does_not_fire_when_verify_is_null(harvest):
@@ -161,17 +164,61 @@ def test_f4_does_not_fire_when_verify_is_null(harvest):
     assert not any(f.startswith("F4") for f in harvest.detect_features(run_json, []))
 
 
+def test_f4_renders_as_failed_and_does_not_count_as_fired_when_verify_failed(harvest):
+    run_json = {**BASE_RUN_JSON, "verify": {"command": "pytest", "exit_code": 1,
+                                             "rounds": 3, "passed": False}}
+    fired = harvest.detect_features(run_json, [])
+    assert "F4-failed(rounds=3)" in fired
+    # Not "fired": no entry that is F4 itself or that a prefix match on
+    # "F4(" (the real firing shape) would pick up.
+    assert not any(f.startswith("F4(") for f in fired)
+    assert "F4" not in fired
+
+
 # --------------------------------------------------------------------------
-# F5: finish_reason "length" followed later by a successful append_file
+# F5: finish_reason "length" IMMEDIATELY followed by an actual truncation
+# signal (a "truncated" nudge, or a tool_result starting with
+# truncated_call_result's text), and AFTER that a successful append_file
+# whose path matches either the truncated call's own path or any successful
+# write_file's path anywhere in the run (2026-08-23 review: the old version
+# remembered ANY earlier finish_reason=="length" forever and accepted ANY
+# later append_file, with no path check and no requirement that the
+# truncation was ever actually communicated back to the model).
 # --------------------------------------------------------------------------
 
-def test_f5_fires_on_truncation_then_later_successful_append_file(harvest):
+def test_f5_fires_when_append_after_truncation_targets_the_written_path(harvest):
     events = [
-        {"ts": _ts(0), "event": "assistant", "text": "...", "finish_reason": "length"},
-        {"ts": _ts(1), "event": "nudge", "kind": "truncated", "turn": 1},
+        {"ts": _ts(0), "event": "tool_result", "tool": "write_file",
+         "args": '{"path": "fixtures/rows.csv", "text": "header\\n"}',
+         "result": "Wrote 7 bytes to fixtures/rows.csv (new file, 1 line)"},
+        {"ts": _ts(1), "event": "assistant", "text": "...", "finish_reason": "length"},
+        {"ts": _ts(2), "event": "nudge", "kind": "truncated", "turn": 1},
+        {"ts": _ts(3), "event": "assistant", "tool_calls": [{"name": "append_file"}]},
+        {"ts": _ts(4), "event": "tool_result", "tool": "append_file",
+         "args": '{"path": "fixtures/rows.csv", "text": "row1\\n"}',
+         "result": "Appended to fixtures/rows.csv: +200 -0"},
+    ]
+    assert "F5" in harvest.detect_features(BASE_RUN_JSON, events)
+
+
+def test_f5_fires_on_truncated_call_result_path_match(harvest):
+    # Truncated TOOL CALL (not a text reply): the model's write_file call
+    # itself got cut off, and the tool_result carries runner.py's
+    # truncated_call_result text -- no "truncated" nudge at all in this
+    # shape. The later append_file's path matches the path recovered from
+    # THAT tool_result's own args, with no write_file success anywhere.
+    events = [
+        {"ts": _ts(0), "event": "assistant", "text": "", "finish_reason": "length",
+         "tool_calls": [{"name": "write_file", "arguments": '{"path": "big.txt", "tex'}]},
+        {"ts": _ts(1), "event": "tool_result", "tool": "write_file",
+         "args": '{"path": "big.txt", "tex',
+         "result": "ERROR: your write_file for 'big.txt' was cut off at the token limit "
+                   "— nothing was written. Write the file in chunks: write_file with "
+                   "the first part, then append_file for each following part."},
         {"ts": _ts(2), "event": "assistant", "tool_calls": [{"name": "append_file"}]},
         {"ts": _ts(3), "event": "tool_result", "tool": "append_file",
-         "result": "Appended to fixtures/rows.csv: +200 -0"},
+         "args": '{"path": "big.txt", "text": "rest"}',
+         "result": "Appended to big.txt: +50 -0"},
     ]
     assert "F5" in harvest.detect_features(BASE_RUN_JSON, events)
 
@@ -180,16 +227,39 @@ def test_f5_does_not_fire_without_a_later_append_file(harvest):
     events = [
         {"ts": _ts(0), "event": "assistant", "text": "...", "finish_reason": "length"},
         {"ts": _ts(1), "event": "tool_result", "tool": "write_file",
+         "args": '{"path": "fixtures/rows.csv", "text": "..."}',
          "result": "Wrote 100 bytes to fixtures/rows.csv (new file, 5 lines)"},
     ]
     assert "F5" not in harvest.detect_features(BASE_RUN_JSON, events)
 
 
 def test_f5_does_not_fire_on_append_file_before_any_truncation(harvest):
+    # All appends precede the truncation, none after (the real
+    # F5-trunc2048-dev-r1 run's shape: 38 appends before, none after).
     events = [
-        {"ts": _ts(0), "event": "tool_result", "tool": "append_file",
+        {"ts": _ts(0), "event": "tool_result", "tool": "write_file",
+         "args": '{"path": "fixtures/rows.csv", "text": "header\\n"}',
+         "result": "Wrote 7 bytes to fixtures/rows.csv (new file, 1 line)"},
+        {"ts": _ts(1), "event": "tool_result", "tool": "append_file",
+         "args": '{"path": "fixtures/rows.csv", "text": "row1\\n"}',
          "result": "Appended to fixtures/rows.csv: +200 -0"},
+        {"ts": _ts(2), "event": "assistant", "text": "...", "finish_reason": "length"},
+        {"ts": _ts(3), "event": "nudge", "kind": "truncated", "turn": 1},
+    ]
+    assert "F5" not in harvest.detect_features(BASE_RUN_JSON, events)
+
+
+def test_f5_does_not_fire_when_append_after_truncation_targets_an_unrelated_path(harvest):
+    events = [
+        {"ts": _ts(0), "event": "tool_result", "tool": "write_file",
+         "args": '{"path": "fixtures/rows.csv", "text": "header\\n"}',
+         "result": "Wrote 7 bytes to fixtures/rows.csv (new file, 1 line)"},
         {"ts": _ts(1), "event": "assistant", "text": "...", "finish_reason": "length"},
+        {"ts": _ts(2), "event": "nudge", "kind": "truncated", "turn": 1},
+        {"ts": _ts(3), "event": "assistant", "tool_calls": [{"name": "append_file"}]},
+        {"ts": _ts(4), "event": "tool_result", "tool": "append_file",
+         "args": '{"path": "unrelated/other.txt", "text": "row1\\n"}',
+         "result": "Appended to unrelated/other.txt: +200 -0"},
     ]
     assert "F5" not in harvest.detect_features(BASE_RUN_JSON, events)
 

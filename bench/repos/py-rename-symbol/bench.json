@@ -3,7 +3,8 @@
   "acceptance": {
     "command": "bash /acceptance/check.sh",
     "hashes": {
-      "acceptance/check.sh": "ce46e3eab15ad59f19a3d5034cf14630974d92904eb1bc8efdc690f3e025891f"
+      "acceptance/check.sh": "ce46e3eab15ad59f19a3d5034cf14630974d92904eb1bc8efdc690f3e025891f",
+      "tests/test_ledger.py": "903f1435d2b144945ce54cedc53e2badf308a5fc9950c4700433248f9363039a"
     }
   }
 }

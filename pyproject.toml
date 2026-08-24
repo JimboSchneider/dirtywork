@@ -34,6 +34,12 @@ dirtywork = "dirtywork.__main__:main"
 packages = ["dirtywork", "dirtywork.providers", "dirtywork.sandbox"]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
+# Belt and braces: testpaths alone stops bare `pytest`/`pytest -q` from
+# walking bench/repos/*/tests (deliberately-failing solver fixtures), but a
+# dev or CI invocation that passes an explicit path (e.g. `pytest bench/`)
+# bypasses testpaths. norecursedirs keeps that path safe too.
+norecursedirs = ["bench", "*/bench/*", ".git", ".worktrees", "*.egg-info"]
 markers = [
     "live: requires a running LM Studio server",
     "docker: requires a running Docker daemon",
