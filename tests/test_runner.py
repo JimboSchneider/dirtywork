@@ -2358,8 +2358,8 @@ def test_bash_timeout_duration_strings_do_not_strike_issue_64(parts):
     result = runner.run("system prompt", "initial task")
     transcript.close()
     # No tool_result text should start with ERROR: bad arguments
-    from .test_runner import _tool_events, _events
     tool_results = [e["result"] for e in _tool_events(_events(tmp_path)) if "result" in e]
     for tr in tool_results:
         assert not tr.startswith("ERROR: bad arguments"), f"Unexpected error in tool result: {tr}"
     assert result.status == "completed"
+

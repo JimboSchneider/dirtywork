@@ -38,7 +38,12 @@ class ParamSpec:
     on tool name for anything in runner._MUTATING_TOOLS before it ever hashes
     canonical_args), which is the only kind of tool a schema-bearing param is
     expected to belong to. Leave it None for a flat param and nothing about
-    that param changes."""
+    that param changes.
+
+    ``unit="seconds"`` makes ``_validate_args`` coerce the value with
+    ``_coerce_duration`` instead of ``_check_scalar``, and build a rejection
+    message from the param's ``description`` (so that description must read as a
+    "must be …" predicate); ``schemas()`` never emits ``unit``."""
 
     type: str
     description: str = ""
@@ -152,7 +157,7 @@ def _check_scalar(ptype: str, value, label: str):
 
 
 # Compiled regex for duration string parsing: digits followed by optional whitespace and unit
-_DURATION_REGEX = re.compile(r'^\s*(\d+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes)\s*$', re.IGNORECASE)
+_DURATION_REGEX = re.compile(r'^\s*(\d{1,9})\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes)\s*$', re.IGNORECASE | re.ASCII)
 
 
 def _coerce_duration(value):

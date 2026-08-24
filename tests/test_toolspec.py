@@ -617,6 +617,8 @@ class TestCoerceDuration:
         True,            # bool (even though it's an int subclass)
         1.5,             # float
         None,            # NoneType
+        "9" * 5000 + "s",   # too many digits ( SECURITY: prevent ValueError)
+        "٦٠s",           # Arabic-Indic digits (re.ASCII prevents these)
     ])
     def test_coerce_duration_returns_none(self, value):
         from dirtywork.toolspec import _coerce_duration
@@ -721,3 +723,37 @@ def test_bash_schema_has_description_but_not_unit():
     assert timeout_prop["description"] == 'an integer number of seconds (60) or a duration string ("60s", "2m"); default 120, max 600'
     # Should NOT have a unit field (it's internal-only)
     assert "unit" not in json.dumps(bash_schema)
+
+
+def test_custom_tool_with_unit_seconds_coerces_duration():
+    """Custom tool with unit="seconds" should coerce duration strings."""
+    from dirtywork.toolspec import Caps, ParamSpec, ToolRegistry, ToolSpec
+
+    def _custom_fn(sandbox, delay):
+        return f"delay={delay}"
+
+    custom_spec = ToolSpec(
+        name="custom_tool",
+        description="A test tool with duration param.",
+        params={
+            "delay": ParamSpec(type="integer", description="a number of seconds", default=5, unit="seconds"),
+        },
+        required=(),
+        fn=_custom_fn,
+        caps=Caps(fs="none"),
+    )
+    
+    r = ToolRegistry()
+    r.register(custom_spec)
+    
+    # Test with "2m" - should be converted to 120
+    mock_sandbox = _MockSandbox()
+    result = r.execute("custom_tool", {"delay": "2m"}, sandbox=mock_sandbox, deadline=None)
+    assert result.kind == "ok"
+    assert "delay=120" in result.text
+    
+    # Test with invalid value
+    result = r.execute("custom_tool", {"delay": "abc"}, sandbox=mock_sandbox, deadline=None)
+    assert result.kind == "error"
+    assert result.failure == "bad_args"
+    assert "must be a number of seconds — got 'abc'" in result.text
