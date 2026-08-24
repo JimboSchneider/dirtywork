@@ -203,6 +203,10 @@ def _tool_mix(events: list) -> str:
         if e.get("event") == "tool_result":
             tool = e.get("tool")
             if tool:
+                # A model can return a garbage tool name (devstral emitted the
+                # previous result + "[TOOL_CALLS]bash" as the name); cap it so
+                # one bad call cannot blow the cell up to kilobytes.
+                tool = _truncate(tool, 30)
                 counts[tool] = counts.get(tool, 0) + 1
     return " ".join(f"{t}:{n}" for t, n in sorted(counts.items()))
 
