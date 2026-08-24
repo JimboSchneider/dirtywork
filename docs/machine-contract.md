@@ -46,6 +46,12 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
     [--feedback-file <path>]          # same, read from a UTF-8 file (max 64000 chars)
 ```
 
+`--tmp-size`/`--gitdir-size`/`--home-size` default to the earlier run's
+recorded values too (1.0). A run recorded before 1.0 has no `tmp_size`/
+`gitdir_size`/`home_size` in its `run.json` to inherit, so it falls back to
+the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
+`512m`/`256m`) like a fresh run would.
+
 - `--branch-from @<slug>` — start the new run from the branch an earlier run
   left behind instead of from repo HEAD. If that run's worktree still has
   uncommitted work, dirtywork snapshots it first (`dirtywork runs snapshot`'s
@@ -77,11 +83,12 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   `--image` is never digest-pinned — `PINNED_DIGEST` protects the maintained
   default image only.
 
-  The worker always runs as the **host** uid:gid, not the image's `worker`
-  (uid 1000): `dirtywork/sandbox/docker.py`'s `DockerSandbox.start()` reads
-  `os.getuid()`/`os.getgid()` and passes `--user uid:gid` at `docker create`
-  (every `docker exec` inherits it), and the run volume is chowned to that
-  uid. So anything a
+  On the supported platforms (macOS/Linux) the worker runs as the **host**
+  uid:gid, not the image's `worker` (uid 1000): `dirtywork/sandbox/docker.py`'s
+  `DockerSandbox.start()` reads `os.getuid()`/`os.getgid()` and passes
+  `--user uid:gid` at `docker create` (every `docker exec` inherits it), and
+  the run volume is chowned to that uid — non-posix falls back to `1000:1000`
+  (Windows is unsupported; see `docs/security.md`). So anything a
   derived image bakes in for the worker to write or read at run time — a
   pre-restored package cache, a tool's state dir — must be
   world-readable/writable (`chmod -R a+rwX`); the #48 soak's derived image
@@ -97,6 +104,8 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   ```Dockerfile
   FROM ghcr.io/jimboschneider/dirtywork-worker:0.10
   USER root
+  ENV DOTNET_EnableWriteXorExecute=0
+  # until the 1.0 base image bakes this in — see the 0.10 defect note above
   ENV NUGET_PACKAGES=/opt/nuget
   RUN dotnet restore <project> --packages /opt/nuget && chmod -R a+rwX /opt/nuget
   USER worker
@@ -113,13 +122,21 @@ dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch
   Restoring anything not vendored this way needs `--allow-network`.
 
 - `--tmp-size` / `--gitdir-size` / `--home-size` (docker mode; default `1g` /
-  `512m` / `256m`) — caps on the three tmpfs mounts every run gets: `/tmp`
-  (exec), `/gitdir` (the run's git dir) and `/home/worker`. All three share
-  one validator (1.0): digits followed by `k`, `m` or `g`, upper-case folded
-  to lower-case — no unit-less bytes, no decimals, no `%`, no `mb`/`MiB`, no
-  `t`, no comma-separated mount options (Docker itself would accept
-  `1g,exec` and would read a leading zero as octal, which is why the harness
-  validates). Package managers cache under `$HOME` by default (NuGet
+  `512m` / `256m`) — caps on the three tmpfs mounts the **worker** container
+  gets: `/tmp` (exec), `/gitdir` (the run's git dir) and `/home/worker`.
+  The separate, short-lived export container (`docker_args.py`'s
+  `export_create_argv`, spec §7) is unaffected by these flags — it always
+  gets fixed sizes (`/tmp` 256m, `/gitdir` 2g, `/home/worker` 64m), sized for
+  the export step's own needs, not the run's. All three worker-container
+  flags share one validator (1.0): a non-zero leading digit, more digits,
+  then `k`, `m` or `g`, upper-case folded to lower-case — no unit-less
+  bytes, no decimals, no `%`, no `mb`/`MiB`, no `t`, no comma-separated mount
+  options, no leading zero (Docker itself would accept `1g,exec` on that
+  option string, and would read a leading zero as *octal* rather than
+  reject it — the harness rejects leading zeros outright instead of relying
+  on Docker's own reinterpretation). The validator's error text:
+  `expected a size like 256m or 1g (no leading zero; digits then k, m or
+  g)`. Package managers cache under `$HOME` by default (NuGet
   `~/.nuget/packages`, npm `~/.npm`, pip `~/.cache/pip`); a real NuGet
   restore overflowed the 256m default home in the #48 soak (`No space left
   on device`) — npm/pip weren't measured but are likely the same. Raise

@@ -27,7 +27,16 @@ Every tool call (`read_file`/`write_file`/`append_file`/`edit_file`/`apply_edits
 locked-down container: `--network none` by default,
 `--read-only` root filesystem, `--cap-drop ALL`, kernel-enforced memory/CPU/
 process-count/per-file-size limits, and no host path mounted in except the
-parent repository's read-only git object store. The worker's tree lives on
+parent repository's read-only git object store. The worker image also sets
+`DOTNET_EnableWriteXorExecute=0`, disabling one of .NET's own runtime
+hardening features (W^X, which keeps a given page either writable or
+executable, never both): with it left on, the per-file-size limit above
+kills the .NET 8 runtime at startup (it trips `RLIMIT_FSIZE` against its
+double-mapping file). That trade is acceptable here because the container
+already supplies the isolation W^X would otherwise add on top of — read-only
+root filesystem, `--cap-drop ALL`, `no-new-privileges`, and no network — so
+giving up in-process W^X does not open a path W^X was the only thing
+closing. The worker's tree lives on
 a Docker volume, never a bind mount, so host git never touches worker
 content — a hostile `.gitattributes` plus a local git filter cannot execute
 on the host. The tree reaches your worktree only after the run ends,
