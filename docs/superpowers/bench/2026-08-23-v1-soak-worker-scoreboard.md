@@ -5,7 +5,6 @@ Final (2026-08-23 19:58 CDT). Matrix: `2026-08-23-v1-soak-matrix.md`; ledger: `2
 Environment: dirtywork 0.10.1 (`82a353e`) + this branch; worker image `:0.10` @ `sha256:4fc400ca…` (pinned); LM Studio `qwen/qwen3-coder-next` (65,536 ctx, PARALLEL 4) and `mistralai/devstral-small-2-2512` (loaded_context_length 325,120 — CLI `-c` ignored, see ledger), both resident; Apple Silicon, 128 GB. Runs are serial.
 
 ## Leg A — baseline `dirtywork bench` (3 tasks × 2 models × 2 repeats)
-## Leg A — baseline `dirtywork bench` (3 tasks × 2 models × 2 repeats)
 ## Main
 | Run | Model | Status | Turns | Wall | Prompt tok | Compl tok | Harness failures | Review verdict | Notes | Feature fired |
 |---|---|---|---|---|---|---|---|---|---|---|
