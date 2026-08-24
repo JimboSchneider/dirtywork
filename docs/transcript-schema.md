@@ -275,9 +275,9 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `verify_timeout` | start | 0.8: `--verify-timeout` as given (clamped to 1-600 by the runner), else `600` |
 | `container` | start | Docker mode container name, else null |
 | `volume` | start | Docker mode volume name, else null |
-| `tmp_size` | start | Docker mode `--tmp-size` as given (default `1g`), else null |
-| `gitdir_size` | start | Docker mode `--gitdir-size` as given (default `512m`), else null |
-| `home_size` | start | 1.0 (#63): Docker mode `--home-size` as given (default `256m`), else null — the `/home/worker` tmpfs cap; package caches (`~/.nuget/packages`, `~/.npm`, `~/.cache/pip`) live under `$HOME`, and it counts against `--memory` alongside `tmp_size`/`gitdir_size` |
+| `tmp_size` | start | 1.0 (#63): Docker mode `--tmp-size`, the canonical lower-cased value (default `1g`); null in host mode. `dirtywork resume` does not inherit `tmp_size`/`gitdir_size`/`home_size` — a resumed run gets the defaults unless the flags are passed again |
+| `gitdir_size` | start | 1.0 (#63): Docker mode `--gitdir-size`, the canonical lower-cased value (default `512m`); null in host mode |
+| `home_size` | start | 1.0 (#63): Docker mode `--home-size`, the canonical lower-cased value (default `256m`); null in host mode — the `/home/worker` tmpfs cap. Package caches (`~/.nuget/packages`, `~/.npm`, `~/.cache/pip`) live under `$HOME` by default, and this counts against `--memory` alongside `tmp_size`/`gitdir_size` |
 | `image` | start | `--image` as given (Docker mode), else null |
 | `image_digest` | start | registry digest from `RepoDigests`, or null for a locally built image — provenance only |
 | `image_pinned` | start | true only when the maintained default image was pinned and enforced |
