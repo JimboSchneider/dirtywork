@@ -307,7 +307,7 @@ immediate.
 | `tool_result` | `follow_up` | string | this result carried harness text on the wire; the exact joined text appended (uncapped — harness-authored and bounded) |
 | `tool_result` (`tool: "finish"`) | `result` | string | unchanged field, new values: the strings of §4, recorded in full (`transcript="full"`) |
 | `assistant` | `placeholder` | string | the entry was stored with placeholder content (§5); the value sent, currently `[empty reply]`. `text` stays the model's actual text (`""`) |
-| `nudge` | `via` | string | always, from 1.0: `tool_result` or `user` — which carrier this nudge rode on |
+| `nudge` | `via` | string | from 1.0: `tool_result` or `user` — which carrier this nudge rode on. **Sparse** *(implementation ruling, 2026-08-24)*: absent when the run ended on that same turn before the text was delivered (the third empty-reply strike → `model_error`; a stall verdict on a text turn → `stalled`) — the event is still written, as in 0.9, so nudge counts stay comparable with the #48 soak ledger |
 | `nudge` | `kind` | string | *(v2)* new value `malformed_entry`: the "N of your tool calls were malformed" text, which today is delivered but never transcribed (`:853-857`). Written where the text is composed, on both carriers. `bench.NUDGE_KINDS`, `tests/test_transcript_schema.py`'s kinds list and the soak `nudges` column (which sums over `NUDGE_KINDS`) gain it; `bench.py:230-232` already buckets unknown kinds, so old readers are safe |
 | `verify` | `via` | string | only when feedback was delivered for another round: `finish_result` or `user` |
 
