@@ -265,6 +265,111 @@ def test_f5_does_not_fire_when_append_after_truncation_targets_an_unrelated_path
 
 
 # --------------------------------------------------------------------------
+# F5 round 2 (2026-08-23 adversarial re-review): the truncation marker can be
+# the 2nd/3rd tool_result of an assistant(length) turn, not just the 1st
+# (runner.py:704-817: one assistant event, then one tool_result per
+# malformed entry (tool="", :741-749), then one tool_result per real call
+# attempted that turn, in order, :754-817) -- and tool_result.args is capped
+# at 500 chars (runner.py:810) so a long "text" value ahead of "path" in the
+# call's own JSON key order can push the path past that cap.
+# --------------------------------------------------------------------------
+
+def test_f5_fires_when_the_truncated_call_is_the_second_tool_result_in_its_turn(harvest):
+    # Same turn: write_file completes fine, THEN append_file gets cut off --
+    # the truncation marker is the 2nd tool_result after assistant(length),
+    # not the 1st (the old "immediate next event" rule would have missed
+    # this entirely).
+    events = [
+        {"ts": _ts(0), "event": "assistant", "text": "", "finish_reason": "length",
+         "tool_calls": [
+             {"name": "write_file",
+              "arguments": '{"path": "fixtures/rows.csv", "text": "header\\n"}'},
+             {"name": "append_file", "arguments": '{"path": "fixtures/rows.csv", "tex'},
+         ]},
+        {"ts": _ts(1), "event": "tool_result", "tool": "write_file",
+         "args": '{"path": "fixtures/rows.csv", "text": "header\\n"}',
+         "result": "Wrote 7 bytes to fixtures/rows.csv (new file, 1 line)"},
+        {"ts": _ts(2), "event": "tool_result", "tool": "append_file",
+         "args": '{"path": "fixtures/rows.csv", "tex',
+         "result": "ERROR: your append_file call was cut off at the token limit before "
+                   "it completed. Emit smaller tool calls — for a large file, write_file "
+                   "the first part and append_file the rest."},
+        {"ts": _ts(3), "event": "assistant", "tool_calls": [{"name": "append_file"}]},
+        {"ts": _ts(4), "event": "tool_result", "tool": "append_file",
+         "args": '{"path": "fixtures/rows.csv", "text": "row1\\n"}',
+         "result": "Appended to fixtures/rows.csv: +200 -0"},
+    ]
+    assert "F5" in harvest.detect_features(BASE_RUN_JSON, events)
+
+
+def test_f5_fires_when_a_malformed_entry_precedes_the_truncated_call(harvest):
+    # A malformed tool-call entry (tool="", no `id`) gets its own tool_result
+    # BEFORE the real named calls' tool_results in the same turn -- the
+    # truncation marker is still found by scanning past it.
+    events = [
+        {"ts": _ts(0), "event": "assistant", "text": "", "finish_reason": "length",
+         "tool_calls": [{"name": "write_file", "arguments": '{"path": "big.txt", "tex'}]},
+        {"ts": _ts(1), "event": "tool_result", "tool": "", "args": "",
+         "result": "ERROR: could not parse tool call arguments"},
+        {"ts": _ts(2), "event": "tool_result", "tool": "write_file",
+         "args": '{"path": "big.txt", "tex',
+         "result": "ERROR: your write_file for 'big.txt' was cut off at the token limit "
+                   "— nothing was written. Write the file in chunks: write_file with "
+                   "the first part, then append_file for each following part."},
+        {"ts": _ts(3), "event": "assistant", "tool_calls": [{"name": "append_file"}]},
+        {"ts": _ts(4), "event": "tool_result", "tool": "append_file",
+         "args": '{"path": "big.txt", "text": "rest"}',
+         "result": "Appended to big.txt: +50 -0"},
+    ]
+    assert "F5" in harvest.detect_features(BASE_RUN_JSON, events)
+
+
+def test_f5_does_not_fire_when_a_truncated_marker_only_appears_in_a_later_turn(harvest):
+    # The finish_reason=="length" turn's OWN results (just the one
+    # write_file tool_result) carry no truncation marker at all -- the call
+    # simply finished despite hitting the length limit. A "truncated" nudge
+    # shows up later, but in a SEPARATE, later turn; it must not
+    # retroactively satisfy the earlier length event's signal requirement.
+    events = [
+        {"ts": _ts(0), "event": "assistant", "text": "", "finish_reason": "length",
+         "tool_calls": [{"name": "write_file",
+                          "arguments": '{"path": "fixtures/rows.csv", "text": "header\\n"}'}]},
+        {"ts": _ts(1), "event": "tool_result", "tool": "write_file",
+         "args": '{"path": "fixtures/rows.csv", "text": "header\\n"}',
+         "result": "Wrote 7 bytes to fixtures/rows.csv (new file, 1 line)"},
+        {"ts": _ts(2), "event": "assistant", "tool_calls": [{"name": "bash"}]},
+        {"ts": _ts(3), "event": "nudge", "kind": "truncated", "turn": 2},
+        {"ts": _ts(4), "event": "assistant", "tool_calls": [{"name": "append_file"}]},
+        {"ts": _ts(5), "event": "tool_result", "tool": "append_file",
+         "args": '{"path": "fixtures/rows.csv", "text": "row1\\n"}',
+         "result": "Appended to fixtures/rows.csv: +200 -0"},
+    ]
+    assert "F5" not in harvest.detect_features(BASE_RUN_JSON, events)
+
+
+def test_f5_fires_using_result_text_path_when_args_cap_truncates_it(harvest):
+    # A 600-char "text" value ahead of "path" in the call's own JSON key
+    # order means args[:500] (runner.py:810) never contains "path" at all --
+    # _recovered_path(args) alone would find nothing for either event. The
+    # path must come from the RESULT text instead.
+    long_text = "x" * 600
+    capped_args = ('{"text": "' + long_text + '", "path": "fixtures/rows.csv"}')[:500]
+    assert '"path"' not in capped_args   # sanity: the cap really did eat the key
+    events = [
+        {"ts": _ts(0), "event": "tool_result", "tool": "write_file",
+         "args": capped_args,
+         "result": "Wrote 22446 bytes to fixtures/rows.csv (new file, 401 lines)"},
+        {"ts": _ts(1), "event": "assistant", "text": "...", "finish_reason": "length"},
+        {"ts": _ts(2), "event": "nudge", "kind": "truncated", "turn": 1},
+        {"ts": _ts(3), "event": "assistant", "tool_calls": [{"name": "append_file"}]},
+        {"ts": _ts(4), "event": "tool_result", "tool": "append_file",
+         "args": capped_args,
+         "result": "Appended to fixtures/rows.csv: +100 -0"},
+    ]
+    assert "F5" in harvest.detect_features(BASE_RUN_JSON, events)
+
+
+# --------------------------------------------------------------------------
 # F7 / F8 / F9 -- quick coverage, run.json-only signals
 # --------------------------------------------------------------------------
 

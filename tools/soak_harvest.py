@@ -66,6 +66,24 @@ _APPEND_FILE_RE = re.compile(r"^Appended to ")
 # share the prefix, so one regex covers write_file success either way.
 _WRITE_FILE_RE = re.compile(r"^Wrote ")
 
+# 2026-08-23 review round 2: tool_result.args is capped at 500 chars
+# (runner.py:810, `args=raw_args[:500]`) -- a call whose JSON puts a long
+# "text" value before "path" pushes the path past that cap, so
+# _recovered_path(args) can silently come back None even though the path is
+# perfectly readable out of the RESULT text instead. One regex per shape,
+# read straight off dirtywork/tools.py: describe_write's new-file branch
+# (:485-488, "Wrote N bytes to <path> (new file, M lines)"), and
+# describe_change's own head line (:445, "<verb> <path>: +A -D ...", or,
+# when the diff itself was skipped for size, :439 "<verb> <path>: N lines
+# (diff omitted: file too large)") -- verb="Wrote" for an existing-file
+# write_file (describe_write:489) and verb="Appended to" for append_file
+# (tools.py:885).
+_WRITE_NEW_FILE_PATH_RE = re.compile(r"^Wrote \d+ bytes to (.+) \(new file, \d+ lines?\)$")
+_WRITE_EXISTING_FILE_PATH_RE = re.compile(
+    r"^Wrote (.+?): (?:\+\d+ -\d+|\d+ lines \(diff omitted: file too large\))")
+_APPEND_FILE_PATH_RE = re.compile(
+    r"^Appended to (.+?): (?:\+\d+ -\d+|\d+ lines \(diff omitted: file too large\))")
+
 # The two message shapes `dirtywork.runner.truncated_call_result` (runner.py:128-144)
 # can produce for a tool call cut off by finish_reason=="length": the write_file
 # variant with a recoverable path ("ERROR: your write_file for %r was cut off at
@@ -77,6 +95,29 @@ _WRITE_FILE_RE = re.compile(r"^Wrote ")
 _TRUNCATED_CALL_RESULT_RE = re.compile(
     r"^ERROR: your (?:write_file for |\S+ call was cut off at the token limit "
     r"before it completed\.)")
+
+
+def _event_path(e: dict):
+    """The path a write_file/append_file tool_result event names, preferring
+    the RESULT text (immune to args' 500-char transcript cap -- see the
+    _WRITE_*_PATH_RE/_APPEND_FILE_PATH_RE block above) and falling back to
+    `_recovered_path(args)` only when the result doesn't match one of those
+    success shapes -- which is also exactly what a truncated_call_result
+    ERROR result needs, since it never matches those regexes and args is
+    still the only place `truncated_call_result` put the (possibly
+    recoverable) path."""
+    tool = e.get("tool")
+    result = e.get("result")
+    if isinstance(result, str):
+        if tool == "write_file":
+            m = _WRITE_NEW_FILE_PATH_RE.match(result) or _WRITE_EXISTING_FILE_PATH_RE.match(result)
+            if m:
+                return m.group(1)
+        elif tool == "append_file":
+            m = _APPEND_FILE_PATH_RE.match(result)
+            if m:
+                return m.group(1)
+    return _recovered_path(e.get("args"))
 
 
 # --------------------------------------------------------------------------
@@ -126,9 +167,9 @@ def detect_features(run_json: dict, events: list) -> list:
             fired.append(f"F4-failed(rounds={verify.get('rounds')})")
 
     # F5: the harness actually communicated a truncation back to the model --
-    # an assistant finish_reason=="length" IMMEDIATELY followed (next
-    # transcript event) by either a "truncated" nudge (a truncated text
-    # reply, no tool call) or a tool_result whose result starts with
+    # an assistant finish_reason=="length" followed, anywhere in that SAME
+    # turn's results, by either a "truncated" nudge (a truncated text reply,
+    # no tool call) or a tool_result whose result starts with
     # truncated_call_result's text (a truncated tool call) -- and AFTER that
     # point a successful append_file (`^Appended to `) whose path is either
     # the path that truncated call named (when recoverable), or the path of
@@ -136,36 +177,46 @@ def detect_features(run_json: dict, events: list) -> list:
     # truncation (a model may write_file to start a large file, then get
     # truncated mid-append while extending it, unrelated to which call the
     # truncation itself happened to name). A finish_reason=="length" that
-    # ISN'T followed by one of those two signals (e.g. a tool call that
-    # finished successfully despite hitting the length limit) establishes no
-    # truncation point at all -- any append_file success after it is
-    # unrelated and must not count.
+    # ISN'T followed by one of those two signals anywhere in its own turn
+    # (e.g. every tool call in that turn finished successfully despite
+    # hitting the length limit) establishes no truncation point at all --
+    # any append_file success after it is unrelated and must not count.
+    #
+    # "Same turn" is NOT just the next transcript event: per runner.py
+    # (:704-817) one assistant event is followed by one tool_result PER call
+    # attempted that turn, in order -- malformed entries (tool="", no `id`)
+    # first (:741-749), then the real named calls (:754-817) -- so a
+    # truncated call can be the 2nd or 3rd tool_result after the assistant
+    # event, not just the 1st. The scan below covers every event from right
+    # after an assistant(length) event up to (not including) the next
+    # `assistant` event, which is exactly that turn's results.
     written_paths = {
         path for e in events
         if e.get("event") == "tool_result" and e.get("tool") == "write_file"
         and _WRITE_FILE_RE.match(e.get("result") or "")
-        for path in [_recovered_path(e.get("args"))]
+        for path in [_event_path(e)]
         if path is not None
     }
 
     truncation_active = False
     truncation_path = None      # the specific path a truncated call named, if recoverable
-    awaiting_signal = False     # True for exactly the event right after finish_reason=="length"
+    scanning_turn = False       # True across an entire assistant(length) turn's own results
     for e in events:
         ev = e.get("event")
-        if awaiting_signal:
-            awaiting_signal = False
+        if ev == "assistant":
+            scanning_turn = e.get("finish_reason") == "length"
+        elif scanning_turn:
             if ev == "nudge" and e.get("kind") == "truncated":
                 truncation_active = True
                 truncation_path = None
+                scanning_turn = False   # signal found; rest of this turn no longer matters here
             elif ev == "tool_result" and _TRUNCATED_CALL_RESULT_RE.match(e.get("result") or ""):
                 truncation_active = True
-                truncation_path = _recovered_path(e.get("args"))
-        if ev == "assistant" and e.get("finish_reason") == "length":
-            awaiting_signal = True
+                truncation_path = _event_path(e)
+                scanning_turn = False
         if (truncation_active and ev == "tool_result" and e.get("tool") == "append_file"
                 and _APPEND_FILE_RE.match(e.get("result") or "")):
-            append_path = _recovered_path(e.get("args"))
+            append_path = _event_path(e)
             if append_path is not None and (
                     append_path == truncation_path or append_path in written_paths):
                 fired.append("F5")
