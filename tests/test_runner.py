@@ -12,6 +12,7 @@ from dirtywork.providers.openai_compat import CONTEXT_WINDOWS
 from dirtywork.runner import (
     DEFAULT_STALL_TURNS,
     DEFAULT_WINDOW,
+    EMPTY_REPLY_PLACEHOLDER,
     FailureTracker,
     MAX_TOTAL_CONSECUTIVE_FAILURES,
     NUDGES,
@@ -268,6 +269,114 @@ def test_malformed_tool_call_entry_recovers(parts):
     # knows the wire shape it failed to parse), not runner-invented wording.
     bad_results = [e for e in _events(tmp) if e.get("event") == "tool_result" and e.get("tool") == ""]
     assert bad_results and bad_results[0]["result"] == "ERROR: " + _bad_entry().error
+
+
+def test_empty_reply_after_a_tool_turn_gets_the_placeholder(parts):
+    # Spec §5 / probe S16: the F5 truncation shape. LM Studio drops an empty
+    # assistant message, which leaves `tool -> user` and a 400 from Mistral.
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("c1", "read_file", {"path": "f.txt"})]),
+        _resp(content="", finish_reason="length"),
+        _resp(content="done"),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    third = provider.requests[2]
+    assert third[-3]["role"] == "tool"
+    assert third[-2] == {"role": "assistant", "content": EMPTY_REPLY_PLACEHOLDER}
+    assert third[-1]["role"] == "user" and third[-1]["content"] == NUDGES["truncated"]
+    events = _events(tmp)
+    assistants = [e for e in events if e["event"] == "assistant"]
+    assert "placeholder" not in assistants[0]                # a tool-call turn: never a placeholder
+    assert assistants[1]["placeholder"] == EMPTY_REPLY_PLACEHOLDER and assistants[1]["text"] == ""
+    assert "placeholder" not in assistants[2]
+
+
+def test_think_only_and_text_tool_call_replies_get_no_placeholder(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    think = "<" + "think>hmm</" + "think>"
+    provider = FakeProvider([_resp(content=think),
+                             _resp(content="<tool_call>{}</tool_call>"),
+                             _resp(content="done")])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    r.run("s", "t")
+    transcript.close()
+    assistants = [e for e in _events(tmp) if e["event"] == "assistant"]
+    assert all("placeholder" not in e for e in assistants)
+    last = provider.requests[2]                              # [system, user(task), assistant, ...]
+    assert last[2]["content"] == think                       # the model's own text is what is sent
+
+
+def test_malformed_only_turn_gets_placeholder_and_a_user_nudge_without_touching_prior_turns(parts):
+    # Spec §5 + §9.4: no addressable call and no text -> placeholder; the
+    # malformed nudge is a user message; the previous turn's tool message is
+    # byte-equal before and after, and its event never grows a follow_up.
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("c1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_bad_entry()]),
+        _resp(content="done"),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    second, third = provider.requests[1], provider.requests[2]
+    prior_tool_before = next(m for m in second if m["role"] == "tool")
+    prior_tool_after = next(m for m in third if m["role"] == "tool")
+    assert prior_tool_before == prior_tool_after
+    assert third[-2] == {"role": "assistant", "content": EMPTY_REPLY_PLACEHOLDER}
+    assert third[-1]["role"] == "user" and "were malformed" in third[-1]["content"]
+    events = _events(tmp)
+    prior_event = next(e for e in events if e["event"] == "tool_result" and e["tool"] == "read_file")
+    assert "follow_up" not in prior_event
+    assert [e["event"] for e in events if e["event"] == "nudge"] == []   # (Task 5 adds malformed_entry)
+
+
+def test_malformed_only_turn_with_text_gets_no_placeholder(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(content="I'll call a tool", tool_calls=[_bad_entry()]),
+                             _resp(content="done")])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    r.run("s", "t")
+    transcript.close()
+    second = provider.requests[1]
+    assert second[-2] == {"role": "assistant", "content": "I'll call a tool"}
+    assert second[-1]["role"] == "user"
+    assert "placeholder" not in next(e for e in _events(tmp) if e["event"] == "assistant")
+
+
+def test_malformed_only_length_turn_gets_placeholder_and_no_truncated_nudge(parts):
+    # The turn takes the tool path (resp.tool_calls is non-empty) -> malformed
+    # nudge only, never `truncated`.
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(content="", tool_calls=[_bad_entry()], finish_reason="length"),
+                             _resp(content="done")])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    r.run("s", "t")
+    transcript.close()
+    second = provider.requests[1]
+    assert second[-2] == {"role": "assistant", "content": EMPTY_REPLY_PLACEHOLDER}
+    assert second[-1]["role"] == "user" and "were malformed" in second[-1]["content"]
+    assert NUDGES["truncated"] not in second[-1]["content"]
+
+
+def test_third_malformed_entry_strike_ends_after_recording_the_placeholder(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    bad = _resp(tool_calls=[_bad_entry()])
+    provider = FakeProvider([bad, bad, bad])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+    events = _events(tmp)
+    assistants = [e for e in events if e["event"] == "assistant"]
+    assert len(assistants) == 3 and all(e["placeholder"] == EMPTY_REPLY_PLACEHOLDER for e in assistants)
+    assert events[-1]["event"] == "run_end"
+    assert events[-2]["event"] == "tool_result"          # the strike itself; no nudge, no user message after it
 
 
 def test_malformed_response_is_model_error(parts):
@@ -771,11 +880,13 @@ def test_empty_reply_is_nudged_not_completed(parts):
     assert result.final_message == "done for real"
     second = provider.requests[1]
     assert second[-1]["role"] == "user" and second[-1]["content"] == NUDGES["empty"]
-    assert second[-2] == {"role": "assistant", "content": ""}
+    assert second[-2] == {"role": "assistant", "content": EMPTY_REPLY_PLACEHOLDER}
     events = _events(tmp)
     nudges = [e for e in events if e["event"] == "nudge"]
     assert len(nudges) == 1
     assert nudges[0]["kind"] == "empty" and nudges[0]["turn"] == 1
+    assistant = next(e for e in events if e["event"] == "assistant")
+    assert assistant["text"] == "" and assistant["placeholder"] == EMPTY_REPLY_PLACEHOLDER
 
 
 def test_think_only_reply_is_nudged(parts):

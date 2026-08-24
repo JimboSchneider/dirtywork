@@ -21,7 +21,7 @@ NUDGE_KINDS = ["truncated", "empty", "text_tool_call", "stall", "timeout"]
 STATUSES = ["completed", "max_turns", "timeout", "context_exhausted", "model_error",
             "interrupted", "stalled", "stuck", "verify_failed", "budget_exceeded",
             "sandbox_error", "export_failed"]
-ASSISTANT_FIELDS = ["text", "tool_calls", "finish_reason"]
+ASSISTANT_FIELDS = ["text", "tool_calls", "finish_reason", "placeholder"]
 RUN_END_FIELDS = ["diff_stat", "untracked", "patch_path", "escaping_symlinks",
                   "dropped_git_entries", "worktree_bytes", "worktree_files",
                   "export_status", "watchdog_violation", "watchdog_violation_kind",

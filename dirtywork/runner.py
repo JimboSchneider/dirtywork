@@ -88,6 +88,15 @@ NUDGES = {
                        "real tool call."),
 }
 
+# Spec #60 §5 (R2): an assistant history entry with no addressable tool call
+# and no non-whitespace text is stored with this content, so no chat template
+# or server preprocessing (LM Studio drops empty assistant messages) can delete
+# it and pull the following user message up against a tool result. The
+# transcript keeps the model's real text ("") and records the substitution in
+# `assistant.placeholder`. One constant: the wording can change without a
+# schema change.
+EMPTY_REPLY_PLACEHOLDER = "[empty reply]"
+
 
 def _join_nudges(*parts) -> str:
     """One user message per turn: merge whichever nudge texts apply."""
@@ -551,6 +560,37 @@ class Runner:
                 "result": result[:LAST_RESULT_CHARS] if isinstance(result, str) else "",
             }
 
+        def append_assistant(text, tool_calls, finish_reason) -> None:
+            """Spec #60 §5: the ONE place the model's turn enters history and
+            the transcript. `tool_calls` are the addressable calls (id-bearing);
+            with none of them and no non-whitespace text the history entry
+            carries EMPTY_REPLY_PLACEHOLDER (R2) and the event says so."""
+            nonlocal last_assistant_text
+            transcript_text = text
+            if isinstance(transcript_text, str) and len(transcript_text) > MAX_ASSISTANT_TEXT_CHARS:
+                transcript_text = (
+                    transcript_text[:MAX_ASSISTANT_TEXT_CHARS]
+                    + f"\n[truncated at {MAX_ASSISTANT_TEXT_CHARS} chars in the transcript "
+                      f"only — the full text was sent to the model]"
+                )
+            has_text = isinstance(text, str) and bool(text.strip())
+            fields = {}
+            if not tool_calls and not has_text:
+                fields["placeholder"] = EMPTY_REPLY_PLACEHOLDER
+            self.transcript.write(
+                "assistant", text=transcript_text,
+                tool_calls=[{"name": tc.name, "arguments": (tc.raw_arguments or "")[:2000]}
+                            for tc in tool_calls],
+                # Spec §1.5: an OPEN enum. Adapters do not guarantee a
+                # string (Anthropic passes an unknown stop reason through
+                # raw), so anything else is recorded as null rather than
+                # emitted as some other JSON type.
+                finish_reason=finish_reason if isinstance(finish_reason, str) else None,
+                **fields)
+            if has_text:
+                last_assistant_text = transcript_text[:LAST_TEXT_CHARS]
+            messages.append(assistant_message(fields.get("placeholder", text), tool_calls))
+
         def finish(status: str, final: str) -> RunResult:
             # This evidence rides on EVERY result (null when there is none), so
             # a consumer never has to branch on status to read the fields. A
@@ -694,39 +734,16 @@ class Runner:
                                      if tc.error is not None and not tc.id]
                 malformed_count = len(malformed_entries)
                 tool_calls = [tc for tc in resp.tool_calls if tc.id]
-                transcript_text = resp.text
-                if isinstance(transcript_text, str) and len(transcript_text) > MAX_ASSISTANT_TEXT_CHARS:
-                    transcript_text = (
-                        transcript_text[:MAX_ASSISTANT_TEXT_CHARS]
-                        + f"\n[truncated at {MAX_ASSISTANT_TEXT_CHARS} chars in the transcript "
-                          f"only — the full text was sent to the model]"
-                    )
-                self.transcript.write(
-                    "assistant", text=transcript_text,
-                    tool_calls=[{"name": tc.name, "arguments": (tc.raw_arguments or "")[:2000]}
-                                for tc in tool_calls],
-                    # Spec §1.5: an OPEN enum. Adapters do not guarantee a
-                    # string (Anthropic passes an unknown stop reason through
-                    # raw), so anything else is recorded as null rather than
-                    # emitted as some other JSON type.
-                    finish_reason=finish_reason if isinstance(finish_reason, str) else None)
-                if isinstance(transcript_text, str) and transcript_text.strip():
-                    last_assistant_text = transcript_text[:LAST_TEXT_CHARS]
-                if resp.tool_calls:
-                    # The adapter re-serializes these into whatever wire shape
-                    # its protocol needs; the runner keeps neutral objects.
-                    messages.append(assistant_message(resp.text, tool_calls))
-                else:
+                append_assistant(resp.text, tool_calls, finish_reason)
+                if not resp.tool_calls:
                     content = resp.text
                     kind = classify_text_reply(content, finish_reason)
                     if kind == "answer":
-                        messages.append(assistant_message(content, None))
                         ended, feedback = check_verify(content)
                         if ended is not None:
                             return ended
                         messages.append({"role": "user", "content": feedback})
                         continue
-                    messages.append(assistant_message(content, None))
                     self.transcript.write("nudge", kind=kind, turn=turns)
                     abort_reason = failures.record("empty_reply")
                     if abort_reason is not None:

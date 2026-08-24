@@ -66,6 +66,7 @@ One per model turn that produced a reply, with or without tool calls.
 | `text` | ✓ | ✓ | string | the reply text; capped at `MAX_ASSISTANT_TEXT_CHARS` (64 000) **in the transcript only** — the full text is still sent to the model, and the cap is marked inline |
 | `tool_calls` | ✓ | ✓ | list | `[{name, arguments}, …]` — `arguments` is the model's own raw JSON argument string, capped at 2000 chars. Structurally invalid entries the provider could not address are **not** listed here; they appear as `tool_result` records with an empty `tool` |
 | `finish_reason` | | ✓ | string \| null | 0.10: the provider's own stop reason for this turn, passed through. Common values are `stop`, `length` and `tool_calls`, but this is **not a closed enum** — a provider may report anything, and a non-string value (the Anthropic adapter passes unknown stop reasons through raw) is recorded as `null` |
+| `placeholder` | | ✓ | string | 1.0 (#60): **sparse** — present only when the reply had no addressable tool call and no non-whitespace text. The history entry sent to the model on later turns carries this value (currently `[empty reply]`) instead of the empty text, so a strict chat template cannot drop the turn; `text` stays the model's real reply (`""`) |
 
 ### `tool_result`
 
