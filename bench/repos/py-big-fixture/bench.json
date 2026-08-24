@@ -1,0 +1,9 @@
+{
+  "task": "Create `fixtures/rows.csv` with a header row and exactly 400 data rows following README.md. Author the CSV contents directly with the file-writing tools (write_file / append_file). Do not write or run a generator script or a one-liner that produces the file -- this fixture is checked in as literal data and reviewed as such.",
+  "acceptance": {
+    "command": "bash /acceptance/check.sh",
+    "hashes": {
+      "acceptance/check.sh": "aa1c9a940dd8e69cfdbd054e307fc1b3d80e3a6512577cf14f3a8033f5d0cd1b"
+    }
+  }
+}

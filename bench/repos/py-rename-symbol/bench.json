@@ -1,0 +1,10 @@
+{
+  "task": "Rename the function `calc_total` to `compute_total` throughout ledger.py -- including its docstring mention -- and update every call site (there are 8) so `tests/test_ledger.py`, which already imports and calls `compute_total`, passes. Prefer a single multi-hunk edit (`apply_edits`) over many single edits. Fix so `bash acceptance/check.sh`, run from the repo root, passes.",
+  "acceptance": {
+    "command": "bash /acceptance/check.sh",
+    "hashes": {
+      "acceptance/check.sh": "ce46e3eab15ad59f19a3d5034cf14630974d92904eb1bc8efdc690f3e025891f",
+      "tests/test_ledger.py": "903f1435d2b144945ce54cedc53e2badf308a5fc9950c4700433248f9363039a"
+    }
+  }
+}

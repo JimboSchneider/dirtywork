@@ -1,0 +1,11 @@
+{
+  "task": "`bash acceptance/check.sh` fails because `config.json` drifted from the canonical fixture. Restore `config.json` so the check passes. `tests/` and `acceptance/` are fixed by the grader and must not be modified.",
+  "acceptance": {
+    "command": "bash /acceptance/check.sh",
+    "hashes": {
+      "acceptance/check.sh": "a20bf4c7c90251e42765d1016d4492ea7a9f840d3cdfe6e1e0b584a9d1c9045f",
+      "tests/test_config.py": "e3f361cc62ad4036c5bf23332fc8f4e5f7fd0d2f4ad8298940f68f3d9f3a84a5",
+      "app.py": "ee83f034c7fd49f2c4490d5a6d260a62987d5cf17610afacf39925fd1dd409fd"
+    }
+  }
+}

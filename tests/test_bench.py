@@ -19,7 +19,9 @@ from dirtywork.sandbox import docker_args
 from .fake_docker import FakeCaptured
 
 BENCH_REPOS = Path(__file__).resolve().parent.parent / "bench" / "repos"
-TASK_NAMES = ["py-fix-off-by-one", "node-add-cli-flag", "sh-fix-script"]
+TASK_NAMES = ["py-fix-off-by-one", "node-add-cli-flag", "sh-fix-script",
+              "py-rename-symbol",
+              "py-big-fixture", "py-canonical-config", "sh-wait-for-service"]
 
 
 def _bench_json(task_name: str) -> dict:
@@ -52,12 +54,18 @@ def test_bench_json_schema():
 
 
 def test_bench_json_hashes_match_files_on_disk():
+    # `hashes` used to be restricted to acceptance/ (the only mounted-read-only
+    # dir), but _hash_check_argv verifies arbitrary /work paths, and a mutable
+    # tests/*.py or app.py a worker could tamper with is exactly what needs
+    # protecting too (2026-08-23 review: py-canonical-config, py-rename-symbol
+    # both hash their test file now) -- so any in-tree relative path is valid
+    # here; the check below just guards against a path escaping task_dir.
     for name in TASK_NAMES:
         task_dir = BENCH_REPOS / name
         data = _bench_json(name)
         for rel_path, expected_hash in data["acceptance"]["hashes"].items():
-            assert rel_path.startswith("acceptance/"), (
-                f"{name}: hashed path '{rel_path}' is not under acceptance/")
+            assert not rel_path.startswith("/") and ".." not in Path(rel_path).parts, (
+                f"{name}: hashed path '{rel_path}' must be a relative in-tree path")
             p = task_dir / rel_path
             assert p.is_file(), f"{name}: hashed path '{rel_path}' does not exist"
             actual = hashlib.sha256(p.read_bytes()).hexdigest()
@@ -80,7 +88,9 @@ def test_task_source_files_are_unsolved():
     # Fixtures ship the BUGGY state -- if the acceptance check already passes
     # against the fixture as committed, the task gives the model nothing to do.
     runtimes = {"py-fix-off-by-one": "python3", "sh-fix-script": "bash",
-                "node-add-cli-flag": "node"}
+                "node-add-cli-flag": "node", "py-rename-symbol": "bash",
+                "py-big-fixture": "bash", "py-canonical-config": "bash",
+                "sh-wait-for-service": "bash"}
     for name in TASK_NAMES:
         if shutil.which(runtimes[name]) is None:
             continue  # optional runtime not installed in this environment
@@ -224,6 +234,53 @@ def test_run_acceptance_skipped_when_bench_json_has_no_acceptance_key(monkeypatc
     # bench.json too, not just a docker failure.
     monkeypatch.setattr(bench.docker_cli, "resolve_image", _never_called)
     assert bench._run_acceptance("sh-fix-script", {}, "dw-x-work", run=_never_called) == "skipped"
+
+
+def test_run_acceptance_dir_override_bypasses_bench_repos_derivation(monkeypatch, tmp_path):
+    # 2026-08-23 soak review item 10: acceptance_dir lets a caller (e.g.
+    # tools/soak_driver.py) score a task that does not live under
+    # BENCH_REPOS at all.
+    data = bench._bench_json("sh-fix-script")
+    _patch_resolve_image(monkeypatch)
+    custom_dir = tmp_path / "custom-acceptance"
+    custom_dir.mkdir()
+    captured = []
+
+    def spy_run(argv, timeout=None):
+        captured.append(argv)
+        return _acceptance_fake(data["acceptance"]["hashes"])(argv, timeout=timeout)
+
+    result = bench._run_acceptance("sh-fix-script", data, "dw-x-work",
+                                   acceptance_dir=custom_dir, run=spy_run)
+    assert result == "pass"
+    mount_args = [a for argv in captured for a in argv
+                 if isinstance(a, str) and "dst=/acceptance" in a]
+    assert any(str(custom_dir.resolve()) in a for a in mount_args)
+    assert not any("sh-fix-script/acceptance" in a for a in mount_args)
+
+
+def test_event_counts_accepts_pre_parsed_events():
+    # 2026-08-23 soak review items 5/10: a caller that already parsed the
+    # transcript (tools/soak_harvest.py) can pass the events list in instead
+    # of forcing a second read of transcript.jsonl.
+    events = [
+        {"event": "nudge", "kind": "stall"},
+        {"event": "guardrail_block"},
+        {"event": "sandbox_reset"},
+        {"event": "nudge", "kind": "unmapped"},
+    ]
+    counts = bench._event_counts(None, events=events)
+    assert counts["nudge_stall"] == 1
+    assert counts["guardrail_block"] == 1
+    assert counts["sandbox_reset"] == 1
+    assert counts["nudge_other"] == 1
+
+
+def test_event_counts_still_reads_run_dir_when_events_not_given(tmp_path):
+    run_dir = tmp_path / "run-x"
+    run_dir.mkdir()
+    (run_dir / "transcript.jsonl").write_text('{"event": "guardrail_block"}\n', encoding="utf-8")
+    assert bench._event_counts(run_dir)["guardrail_block"] == 1
 
 
 def test_run_acceptance_skipped_when_acceptance_missing_command(monkeypatch):
