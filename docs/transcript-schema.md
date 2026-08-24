@@ -76,13 +76,21 @@ One per tool call executed, plus one per malformed tool-call entry discarded.
 |---|---|---|---|---|
 | `tool` | ✓ | ✓ | string | tool name — one of `read_file`, `write_file`, `append_file`, `edit_file`, `apply_edits`, `insert_before`, `insert_after`, `list_dir`, `grep`, `bash`, `finish` (`insert_before`/`insert_after` are v2, added in 0.8; `apply_edits` in 0.9; `append_file` in 0.10); `""` for a discarded malformed entry |
 | `args` | ✓ | ✓ | string | the raw JSON argument string, capped at 500 chars; `""` for a discarded malformed entry |
-| `result` | ✓ | ✓ | string | the tool's result, trimmed per the tool's `Caps.transcript` setting. All built-in tools declare `preview`, which caps the record at 2000 chars; the registry also supports `full` and `none`, unused by any shipped tool. Since 0.8 a successful `edit_file`/`write_file`/`insert_before`/`insert_after` result is `<Verb> <path>: +A -D [(removed N non-blank lines)]` followed by a unified diff (capped at 40 lines / 3000 chars, then `[diff truncated: N more lines]`); `write_file` on a new file returns `Wrote N bytes to <path> (new file, M lines)` with no diff. 0.9's `apply_edits` uses the same shape with the verb `Applied N edits to` (`Applied 1 edit to` for a single edit). When either side of the edit exceeds 20000 lines, the diff itself is never computed (it is quadratic-ish on files with popular repeated lines) — the result is just `<Verb> <path>: <N> lines (diff omitted: file too large)`. An in-place tool whose RESULT would exceed the 5 MB write limit returns `ERROR: result is <n> bytes, over the <limit>-byte write limit; nothing was written` on both backends (0.9). 0.10's `append_file` uses the same shape with the verb `Appended to`; it reads `+A -0` only when the file already ended in a newline — when it did not, the final line is a REPLACE and the header reads `+A -1 (removed 1 non-blank line)`, which is the visible consequence of not starting `text` with a newline |
+| `result` | ✓ | ✓ | string | the tool's result, trimmed per the tool's `Caps.transcript` setting. All built-in tools but `finish` declare `preview`, which caps the record at 2000 chars (`finish` declares `full` since 1.0 — its result is harness-authored and bounded); the registry also supports `full` and `none`, unused by any shipped tool. Since 0.8 a successful `edit_file`/`write_file`/`insert_before`/`insert_after` result is `<Verb> <path>: +A -D [(removed N non-blank lines)]` followed by a unified diff (capped at 40 lines / 3000 chars, then `[diff truncated: N more lines]`); `write_file` on a new file returns `Wrote N bytes to <path> (new file, M lines)` with no diff. 0.9's `apply_edits` uses the same shape with the verb `Applied N edits to` (`Applied 1 edit to` for a single edit). When either side of the edit exceeds 20000 lines, the diff itself is never computed (it is quadratic-ish on files with popular repeated lines) — the result is just `<Verb> <path>: <N> lines (diff omitted: file too large)`. An in-place tool whose RESULT would exceed the 5 MB write limit returns `ERROR: result is <n> bytes, over the <limit>-byte write limit; nothing was written` on both backends (0.9). 0.10's `append_file` uses the same shape with the verb `Appended to`; it reads `+A -0` only when the file already ended in a newline — when it did not, the final line is a REPLACE and the header reads `+A -1 (removed 1 non-blank line)`, which is the visible consequence of not starting `text` with a newline |
 | `timed_out` | | ✓ | boolean | 0.9: `true` on a `bash` tool result whose command hit its timeout. **Sparse** — the key is absent, not `false`, on every other result, including a `grep` timeout (a different wording and a different meaning: the harness's search, not the worker's command) and the `--verify` command (not a tool call, so it produces no `tool_result` at all; its outcome is in `verify`) |
 
 A `finish(summary=…)` call is an ordinary tool call: it appears in the
-`assistant` event's `tool_calls` and produces a `tool_result` whose `result` is
-`run finished`. The summary becomes the run's `final_message` and the run ends
-`completed`.
+`assistant` event's `tool_calls` and produces a `tool_result`. Since 1.0 (#60)
+its `result` is honest about what happened: `run finished` only when the run
+ends `completed`; the full `VERIFY FAILED (round r of R) …` feedback text when
+`--verify` failed and a fix round remains (the run continues — that text is what
+the model receives as the call's result); `run not finished: verify failed (exit
+N); no fix rounds remain` (run ends `verify_failed`); `run not finished: verify
+could not run (<reason>)` (`budget_exceeded`/`sandbox_error` raised by the verify
+command); `run not finished: <status>` when the turn ended before verify ran (a
+later call in the same turn raised, three consecutive failures, or an
+interrupt); and `run not finished: verify did not run` only if an unhandled
+exception left the turn. The summary becomes the run's `final_message`.
 
 ### `nudge`
 
@@ -128,6 +136,7 @@ the export runs.
 | `round` | | ✓ | integer | 1-based; at most `--verify-rounds` + 1 of them |
 | `exit_code` | | ✓ | integer \| null | the integer after `exit code: ` in the bash result; `null` for an `ERROR:`/`BLOCKED:` result that never produced a status |
 | `passed` | | ✓ | boolean | true only for exit code 0 |
+| `via` | | ✓ | string | 1.0 (#60): **sparse** — present only when feedback for another round was delivered: `finish_result` (the feedback became the `finish` call's result) or `user` (the worker answered in prose, so the feedback is the next user message) |
 
 ### `run_end`
 

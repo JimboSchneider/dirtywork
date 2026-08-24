@@ -14,6 +14,8 @@ from dirtywork.runner import (
     DEFAULT_WINDOW,
     EMPTY_REPLY_PLACEHOLDER,
     FailureTracker,
+    FINISH_DONE,
+    FINISH_PROVISIONAL,
     MAX_TOTAL_CONSECUTIVE_FAILURES,
     NUDGES,
     ProgressTracker,
@@ -21,6 +23,7 @@ from dirtywork.runner import (
     Runner,
     STALL_NUDGE,
     TRIM_MARKER,
+    VERIFY_FEEDBACK,
     _bash_fingerprint,
     classify_text_reply,
     resolve_context_window,
@@ -1445,10 +1448,22 @@ def test_verify_failure_with_a_round_left_feeds_back_and_retries(parts, tmp_path
     assert result.status == "completed"
     assert result.final_message == "second try"
     assert result.extra["verify"]["rounds"] == 2 and result.extra["verify"]["passed"] is True
-    # the failed round was fed back as a user message naming the command
-    feedback = [m for m in provider.requests[-1] if m["role"] == "user"]
-    assert any("VERIFY FAILED (round 1 of 2)" in m["content"] for m in feedback)
-    assert any("test -e fixed" in m["content"] for m in feedback)
+    # Spec #60 §4: the failed round IS the finish call's result -- no user message
+    last = provider.requests[-1]
+    f1 = next(m for m in last if m["role"] == "tool" and m["tool_call_id"] == "f1")
+    assert f1["content"].startswith("VERIFY FAILED (round 1 of 2)")
+    assert "test -e fixed" in f1["content"]
+    assert not any(m["role"] == "user" and "VERIFY FAILED" in m["content"] for m in last)
+    # the last request was captured BEFORE f2 (called in that very reply) existed at all
+    assert not any(m["role"] == "tool" and m["tool_call_id"] == "f2" for m in last)
+    events = _events(tmp)
+    finish_events = [e for e in events if e["event"] == "tool_result" and e["tool"] == "finish"]
+    assert finish_events[0]["result"] == f1["content"]
+    assert finish_events[1]["result"] == FINISH_DONE
+    verify_events = [e for e in events if e["event"] == "verify"]
+    assert verify_events[0]["via"] == "finish_result" and "via" not in verify_events[1]
+    # the transcript shows the resolved finish result BEFORE its verify event
+    assert events.index(finish_events[0]) < events.index(verify_events[0])
     verify_events = [e for e in _events(tmp) if e["event"] == "verify"]
     assert [e["passed"] for e in verify_events] == [False, True]
 
@@ -1720,12 +1735,12 @@ def test_verify_feedback_carries_the_timeout_nudge_from_the_same_turn(parts):
     assert [n["kind"] for n in nudges] == ["timeout"]
     assert nudges[0]["turn"] == 1
 
-    # the next user message carries BOTH texts, merged into one message
+    # Spec #60 §4: the feedback is the finish result; the timeout nudge is (Task 5)
+    # the follow_up on the turn's last tool result, which here is finish itself.
     second_request = provider.requests[1]
-    assert second_request[-1]["role"] == "user"
-    content = second_request[-1]["content"]
-    assert "VERIFY FAILED (round 1 of 2)" in content
-    assert "A command timed out and did not finish" in content
+    f1 = next(m for m in second_request if m["role"] == "tool" and m["tool_call_id"] == "f1")
+    assert f1["content"].startswith("VERIFY FAILED (round 1 of 2)")
+    assert "A command timed out and did not finish" in second_request[-1]["content"]
 
 
 def test_a_verify_timeout_is_not_counted(parts):
@@ -1740,6 +1755,180 @@ def test_a_verify_timeout_is_not_counted(parts):
     assert box.commands == ["npm test"]        # it DID run, and it DID time out
     assert result.extra["timeouts"] == 0       # spec §4.3: worker tool calls only
     assert [e for e in _events(tmp) if e["event"] == "nudge"] == []
+
+
+def _finish_results(events):
+    return [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "finish"]
+
+
+def test_finish_result_is_the_full_verify_feedback_even_past_the_preview_cap(parts):
+    # Spec #60 §4 "Transcript cap": FINISH_SPEC is transcript="full", so a
+    # 3000-char verify tail is recorded byte-for-byte.
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "first"})]),
+        _resp(content="ok"),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m",
+               verify="python3 -c \"print('x' * 3000)\"; exit 1", verify_rounds=1)
+    r.run("s", "t")
+    transcript.close()
+    f1 = next(m for m in provider.requests[1] if m["role"] == "tool")
+    assert len(f1["content"]) > 3000
+    assert _finish_results(_events(tmp)) == [f1["content"]]
+    assert provider.requests[1][-1]["role"] == "tool"          # no user message follows
+
+
+def test_verify_rounds_zero_leaves_an_honest_finish_result(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "done"})])])
+    r = Runner(provider, registry, sandbox, transcript, model="m",
+               verify="echo boom; exit 3", verify_rounds=0)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "verify_failed"
+    events = _events(tmp)
+    assert _finish_results(events) == ["run not finished: verify failed (exit 3); no fix rounds remain"]
+    assert "via" not in next(e for e in events if e["event"] == "verify")
+
+
+def test_last_round_failure_leaves_an_honest_finish_result(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "a"})]),
+                             _resp(tool_calls=[_call("f2", "finish", {"summary": "b"})])])
+    r = Runner(provider, registry, sandbox, transcript, model="m", verify="exit 2", verify_rounds=1)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "verify_failed"
+    results = _finish_results(_events(tmp))
+    assert results[0].startswith("VERIFY FAILED (round 1 of 2)")
+    assert results[1] == "run not finished: verify failed (exit 2); no fix rounds remain"
+
+
+def test_verify_that_cannot_run_leaves_an_honest_finish_result(parts):
+    from dirtywork.budget import BudgetExceeded
+    from dirtywork.sandbox import SandboxError          # the same import runner.py uses
+
+    class Raising:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def bash(self, command, timeout=120):
+            raise self.exc
+
+    for exc, status, reason in ((BudgetExceeded("worktree exceeds 2048 MB"), "budget_exceeded",
+                                 "worktree exceeds 2048 MB"),
+                                (SandboxError("container gone"), "sandbox_error", "container gone")):
+        wt, registry, sandbox, transcript, tmp = parts
+        transcript_i = Transcript(tmp / f"t-{status}.jsonl")
+        provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "done"})])])
+        r = Runner(provider, registry, Raising(exc), transcript_i, model="m", verify="true")
+        result = r.run("s", "t")
+        transcript_i.close()
+        assert result.status == status
+        events = [json.loads(l) for l in (tmp / f"t-{status}.jsonl").read_text().splitlines()]
+        assert _finish_results(events) == [f"run not finished: verify could not run ({reason})"]
+
+
+def test_terminal_exits_before_verify_never_leave_run_finished(parts):
+    # Spec #60 §4 row 5 + §9.9: a later call ends the run before check_verify;
+    # finish() resolves the still-provisional record from the status.
+    from dirtywork.budget import BudgetExceeded
+
+    class BudgetBustingSandbox:
+        def write_file(self, path, content):
+            raise BudgetExceeded("worktree exceeds 2048 MB")
+
+    class InterruptingSandbox:
+        def bash(self, command, timeout=120):
+            raise KeyboardInterrupt
+
+    cases = [
+        ([_call("f1", "finish", {"summary": "s"}), _call("w1", "write_file", {"path": "x", "content": "y"})],
+         BudgetBustingSandbox(), "budget_exceeded"),
+        ([_call("f1", "finish", {"summary": "s"}), _bash_call("b1")],
+         InterruptingSandbox(), "interrupted"),
+        ([_call("f1", "finish", {"summary": "s"})] + [_call(f"u{i}", "no_such_tool", {}) for i in range(3)],
+         None, "model_error"),
+    ]
+    for calls, box, status in cases:
+        wt, registry, sandbox, transcript, tmp = parts
+        transcript_i = Transcript(tmp / f"t-{status}.jsonl")
+        provider = FakeProvider([_resp(tool_calls=calls)])
+        r = Runner(provider, registry, box or sandbox, transcript_i, model="m")
+        result = r.run("s", "t")
+        transcript_i.close()
+        assert result.status == status
+        events = [json.loads(l) for l in (tmp / f"t-{status}.jsonl").read_text().splitlines()]
+        assert _finish_results(events) == [f"run not finished: {status}"]
+        assert not any(e.get("result") == FINISH_DONE for e in events)
+        assert events[-1]["event"] == "run_end" and events[-1]["status"] == status
+
+
+def test_interrupt_inside_verify_resolves_the_finish_result_before_the_flush(parts):
+    # Spec #60 §4 (v3): KeyboardInterrupt is caught INSIDE the turn block.
+    wt, registry, sandbox, transcript, tmp = parts
+
+    class InterruptingVerify:
+        def bash(self, command, timeout=120):
+            raise KeyboardInterrupt
+
+    provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "s"})])])
+    r = Runner(provider, registry, InterruptingVerify(), transcript, model="m", verify="npm test")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "interrupted"
+    events = _events(tmp)
+    assert _finish_results(events) == ["run not finished: interrupted"]
+    assert events[-1]["event"] == "run_end"
+
+
+def test_multiple_finish_calls_in_one_turn_resolve_to_the_same_string(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "a"}), _call("f2", "finish", {"summary": "b"})]),
+        _resp(content="ok"),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m", verify="exit 1", verify_rounds=1)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.final_message == "ok"
+    second = provider.requests[1]
+    tools = [m for m in second if m["role"] == "tool"]
+    assert len(tools) == 2 and tools[0]["content"] == tools[1]["content"]
+    assert tools[0]["content"].startswith("VERIFY FAILED (round 1 of 2)")
+    assert _finish_results(_events(tmp)) == [tools[0]["content"], tools[1]["content"]]
+    # (Task 5 adds the [finish, bash(timeout), finish] variant: follow_up on f2 only)
+
+
+def test_a_malformed_finish_is_not_terminal_and_is_never_rewritten(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(tool_calls=[_bad_args(call_id="f1", name="finish")]),
+                             _resp(tool_calls=[_call("f2", "finish", {"summary": "ok"})])])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    results = _finish_results(_events(tmp))
+    assert results[0].startswith("ERROR:") and results[1] == FINISH_DONE
+
+
+def test_finish_flushes_the_turn_before_finalize(parts):
+    # Spec #60 §6.1 (v2): the turn's evidence is on disk before the export runs.
+    wt, registry, sandbox, transcript, tmp = parts
+    seen = {}
+
+    def finalize():
+        seen["events"] = [e["event"] for e in _events(tmp)]
+        return {}
+
+    provider = FakeProvider([_resp(tool_calls=[_call("c1", "read_file", {"path": "f.txt"}),
+                                               _call("f1", "finish", {"summary": "s"})])])
+    r = Runner(provider, registry, sandbox, transcript, model="m", finalize=finalize)
+    r.run("s", "t")
+    transcript.close()
+    assert seen["events"] == ["run_start", "assistant", "tool_result", "tool_result"]
+    assert _events(tmp)[-1]["event"] == "run_end"
 
 
 def test_mutating_tools_includes_every_tool_that_changes_a_file():

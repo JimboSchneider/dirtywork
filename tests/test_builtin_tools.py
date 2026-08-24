@@ -323,3 +323,11 @@ def test_append_file_description_warns_about_the_leading_newline():
         "your text — include a leading newline if the file does not end with one. "
         "Use write_file + append_file to produce a file too large for one reply.")
     assert set(spec.required) == {"path", "text"}
+
+
+def test_finish_result_reaches_the_transcript_in_full():
+    from dirtywork.builtin_tools import default_registry
+    registry = default_registry()
+    long = "x" * 5000
+    assert registry.transcript_preview("finish", long) == long
+    assert len(registry.transcript_preview("bash", long)) == 2000

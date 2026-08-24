@@ -253,7 +253,11 @@ FINISH_SPEC = ToolSpec(
     params={"summary": ParamSpec(type="string")},
     required=("summary",),
     fn=_finish,
-    caps=Caps(fs="none", max_output_chars=TOOL_OUTPUT_CAP, transcript="preview"),
+    # Spec #60 §4: the finish result is harness-authored and bounded (the verify
+    # feedback carries a VERIFY_OUTPUT_CHARS tail), so the transcript keeps it
+    # byte-for-byte instead of the 2000-char preview every model/tool-authored
+    # result gets.
+    caps=Caps(fs="none", max_output_chars=TOOL_OUTPUT_CAP, transcript="full"),
     terminal=True,
 )
 
