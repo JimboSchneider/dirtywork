@@ -1,6 +1,7 @@
 # tests/test_docker_live.py
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -9,8 +10,36 @@ from pathlib import Path
 
 import pytest
 
+from dirtywork.sandbox.docker_args import DEFAULT_IMAGE
 from tests.docker_live_helpers import _call, _make_live_repo, _resp
 from tests.provider_doubles import DictProvider, patch_provider
+
+# issue #63: override the image used by the live docker tests below (both
+# the --home-size test and the .NET SDK build test) -- e.g. to point at a
+# locally built docker/Dockerfile before it is tagged/published. Unset in
+# CI's docker-live job, which builds the image and tags it as the CLI's own
+# default, so the same tests exercise that build without an env var.
+LIVE_IMAGE = os.environ.get("DIRTYWORK_LIVE_IMAGE")
+
+
+def _image_kwargs() -> dict:
+    """The --image override to pass through _run_docker_main, or {} to let
+    the CLI's own default apply."""
+    return {"image": LIVE_IMAGE} if LIVE_IMAGE else {}
+
+
+@functools.lru_cache(maxsize=None)
+def _dotnet_list_sdks(image: str) -> str:
+    """stdout of `dotnet --list-sdks` inside `image`, cached per image so
+    the two .NET parametrizations only invoke docker once each. Never
+    raises on a non-zero exit (an image with no /usr/bin/dotnet at all) --
+    callers check for a major-version substring, which just won't be
+    present."""
+    result = subprocess.run(
+        ["docker", "run", "--rm", "--entrypoint", "/usr/bin/dotnet", image, "--list-sdks"],
+        capture_output=True, text=True,
+    )
+    return result.stdout
 
 
 class ScriptedClient(DictProvider):
@@ -370,3 +399,82 @@ def test_docker_live_resume_seeds_worktree_keeps_branch_and_exports(tmp_path, mo
     assert not (worktree / "README.md").exists()
     prior = json.loads((Path(first["run_dir"]) / "run.json").read_text())
     assert prior["resumed_by"] == json.loads((Path(second["run_dir"]) / "run.json").read_text())["slug"]
+
+
+@pytest.mark.docker
+def test_docker_live_home_size_flag_caps_home_tmpfs(tmp_path, monkeypatch, capsys):
+    # issue #63: --home-size 300m (a non-default value, so a passing
+    # assertion actually proves the flag reached the docker create argv --
+    # the 256m default would pass a same-shaped assertion by accident).
+    repo = _make_live_repo(tmp_path)
+    responses = [
+        _resp(tool_calls=[_call("c1", "bash",
+              {"command": "df -B1 --output=size /home/worker | tail -1"})]),
+        _resp(content="done"),
+    ]
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, home_size="300m", **_image_kwargs())
+    payload = json.loads(capsys.readouterr().out)
+    _assert_status(payload, "completed")
+
+    events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
+    bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
+    assert len(bash_results) == 1
+    # bash results are "exit code: N\n<stdout>" (dirtywork/tools.py); df's
+    # own output is the last non-empty line.
+    lines = [l for l in bash_results[0].strip().splitlines() if l.strip()]
+    assert lines[0] == "exit code: 0", bash_results[0]
+    reported_bytes = int(lines[-1].strip())
+
+    # tmpfs reports the cap exactly on Linux, but don't assert exact equality
+    # here -- that would make this test an OOM/write-failure trap disguised
+    # as a size check. 1% tolerance only.
+    expected_bytes = 300 * 1024 * 1024  # 314572800
+    assert abs(reported_bytes - expected_bytes) <= expected_bytes * 0.01, (
+        f"reported {reported_bytes} bytes, expected ~{expected_bytes}"
+    )
+
+    run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert run_json["home_size"] == "300m"
+    assert run_json["sandbox"] == "docker"
+
+    run_start = next(e for e in events if e["event"] == "run_start")
+    assert run_start["sandbox"]["home_size"] == "300m"
+
+
+@pytest.mark.docker
+@pytest.mark.parametrize("tfm", ["net8.0", "net10.0"])
+def test_docker_live_dotnet_builds_and_runs_offline(tmp_path, monkeypatch, capsys, tfm):
+    # issue #63 / #59: docker/Dockerfile installs .NET SDK 8.0 and 10.0 and
+    # sets DOTNET_EnableWriteXorExecute=0 -- prove both targeting packs work
+    # end-to-end offline (--network none) AND that the built app runs under
+    # the bash tool's `ulimit -f 524288`: without that variable the .NET 8
+    # runtime dies with SIGXFSZ (exit 153) at startup, which is exactly what
+    # the published :0.10 image does. Gate on SDK 10 being present: an image
+    # without it predates that Dockerfile and is known to fail the net8.0
+    # case, so there is nothing to learn from running it there.
+    image = LIVE_IMAGE or DEFAULT_IMAGE
+    sdks = _dotnet_list_sdks(image)
+    if not any(line.startswith("10.") for line in sdks.splitlines()):
+        pytest.skip(f"image {image} predates the 1.0 Dockerfile (no .NET SDK 10.x, so no "
+                    f"DOTNET_EnableWriteXorExecute=0 either) -- build docker/Dockerfile")
+
+    repo = _make_live_repo(tmp_path)
+    build_cmd = (
+        f"cd /tmp && dotnet new console -f {tfm} -o app && "
+        f"DOTNET_CLI_USE_MSBUILD_SERVER=0 MSBUILDDISABLENODEREUSE=1 "
+        f"dotnet build app -nologo -p:UseSharedCompilation=false && echo BUILD_OK_{tfm} && "
+        f"dotnet app/bin/Debug/{tfm}/app.dll && echo RUN_OK_{tfm}"
+    )
+    responses = [
+        _resp(tool_calls=[_call("c1", "bash", {"command": build_cmd, "timeout": 600})]),
+        _resp(content="done"),
+    ]
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, **_image_kwargs())
+    payload = json.loads(capsys.readouterr().out)
+    _assert_status(payload, "completed")
+
+    events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
+    bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
+    assert len(bash_results) == 1
+    assert f"BUILD_OK_{tfm}" in bash_results[0], bash_results[0]
+    assert f"RUN_OK_{tfm}" in bash_results[0], bash_results[0]
