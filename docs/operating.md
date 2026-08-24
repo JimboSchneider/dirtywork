@@ -178,8 +178,11 @@ of whether the run is still going:
   run as a Markdown report instead (header block whose `task` field is a
   one-line preview, a `## Task` section with the full task text, one
   `### Turn N` section per assistant turn, collapsible `<details>` tool
-  results, blockquote callouts for nudges/guardrail blocks/sandbox resets, a
-  `## Result` section, and with `--diff` the patch in a fenced block) —
+  results, blockquote callouts for nudges/guardrail blocks/sandbox resets,
+  the harness text a tool result carried to the model (1.0: a fenced
+  "harness → model" block), `(sent as: [empty reply])` on a turn the harness
+  had to pad, a `## Result` section, and with `--diff` the patch in a fenced
+  block) —
   paste-ready for a PR or an issue; `--out FILE` writes it to a file instead
   of stdout.
 - `dirtywork runs export <slug> [--max-worktree-mb 2048] [--max-worktree-files 200000] [--max-patch-mb 10] [--keep-volume]` —

@@ -265,14 +265,18 @@ def read_transcript_events(path) -> tuple:
     return events, None
 
 
-def _tool_result_outcome(result_text) -> str:
-    """'timed out' / ERROR / BLOCKED / ok, from the tool result's leading token
-    -- the one classification both the text timeline and the Markdown export
-    use, composed into `[{outcome}]` by each. The timeout class is checked FIRST
-    because a timed-out result also starts with ERROR, and "the command never
-    finished, so its result is unknown" is a different thing to an operator than
-    "the command failed" (spec §4.3). No emoji, one rule, both views."""
+def _tool_result_outcome(result_text, tool=None) -> str:
+    """'timed out' / ERROR / BLOCKED / 'not finished' / ok, from the tool
+    result's leading token -- the one classification both the text timeline
+    and the Markdown export use, composed into `[{outcome}]` by each. The
+    timeout class is checked FIRST because a timed-out result also starts
+    with ERROR, and "the command never finished, so its result is unknown"
+    is a different thing to an operator than "the command failed" (spec
+    §4.3). No emoji, one rule, both views. Since 1.0 a `finish` result other
+    than `run finished` is `not finished` (#60 §4)."""
     text = str(result_text or "")
+    if tool == "finish" and text != "run finished":
+        return "not finished"
     if is_timeout_result(text):
         return "timed out"
     if text.startswith("ERROR"):
@@ -287,13 +291,16 @@ def _timeline_line(event: dict) -> str:
     name = str(event.get("event", ""))
     if name == "tool_result":
         result = str(event.get("result", ""))
-        outcome = _tool_result_outcome(result)
         tool = event.get("tool") or "(malformed call)"
-        return f"{ts}  {name:<15} {tool:<12} {str(event.get('args', ''))[:80]:<80} [{outcome}]"
+        outcome = _tool_result_outcome(result, event.get("tool"))
+        suffix = " +follow_up" if "follow_up" in event else ""
+        return (f"{ts}  {name:<15} {tool:<12} {str(event.get('args', ''))[:80]:<80} "
+                f"[{outcome}]{suffix}")
     if name == "assistant":
         tools = ",".join(str(tc.get("name")) for tc in (event.get("tool_calls") or [])
                          if isinstance(tc, dict))
-        return f"{ts}  {name:<15} " + (f"tools: {tools}" if tools else "text reply")
+        sent_as = f" (sent as: {event['placeholder']})" if event.get("placeholder") else ""
+        return f"{ts}  {name:<15} " + (f"tools: {tools}" if tools else "text reply") + sent_as
     if name == "nudge":
         return f"{ts}  {name:<15} kind={event.get('kind', '')} turn={event.get('turn', '')}"
     if name == "guardrail_block":
@@ -316,7 +323,7 @@ MD_VERDICT_FIELDS = ("verdict", "note")
 MD_RESULT_FIELDS = ("status", "error", "export_status", "finalize_error",
                     "watchdog_violation", "trimmed_turns", "timeouts")
 MD_ARGS_CHARS = 200      # the transcript already caps `args` at 500
-MD_RESULT_CHARS = 2000   # the transcript's own `preview` cap for a tool result
+MD_RESULT_CHARS = 2000   # the transcript's preview cap for model/tool-authored results; finish is exempt (#60)
 
 
 def _md_trim(value, limit: int) -> str:
@@ -358,12 +365,21 @@ def _md_event_lines(event: dict) -> list:
     if name == "tool_result":
         tool = event.get("tool") or "(malformed call)"
         result = str(event.get("result", ""))
-        outcome = _tool_result_outcome(result)
+        outcome = _tool_result_outcome(result, event.get("tool"))
         summary = (f"{html.escape(str(tool), quote=False)}"
                    f"({_md_inline(event.get('args', ''), MD_ARGS_CHARS)}) [{outcome}]")
         lines = ["<details>", f"<summary>{summary}</summary>", ""]
-        lines += _md_block(_md_trim(result, MD_RESULT_CHARS))
+        # Spec #60 §4/§6.3: the finish result is harness-authored, bounded and
+        # recorded in full; trimming it here would reproduce the truncation the
+        # transcript no longer has.
+        lines += _md_block(result if event.get("tool") == "finish" else _md_trim(result, MD_RESULT_CHARS))
         lines += ["</details>", ""]
+        if "follow_up" in event:
+            # Spec #60 §6.3 (v4): verify output and the operator's command can
+            # hold fences, `>`, headings or HTML -- a fence longer than any
+            # backtick run inside is the only rendering that survives them.
+            lines += ["> **harness → model:**", ""]
+            lines += _md_block(str(event["follow_up"]))
         return lines
     if name == "nudge":
         return [f"> **nudge** `{event.get('kind', '')}` (turn {event.get('turn', '')})", ""]
@@ -422,6 +438,8 @@ def _md_timeline(events: list) -> list:
                 lines.append("")
             else:
                 lines += ["_text reply, no tool calls_", ""]
+            if event.get("placeholder"):
+                lines += [f"_(sent as: {_md_inline(event['placeholder'], MD_ARGS_CHARS)})_", ""]
             continue
         lines += _md_event_lines(event)
     if len(lines) == 2:   # nothing was appended after the '## Timeline' heading

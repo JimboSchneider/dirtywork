@@ -288,8 +288,12 @@ reconstructed from the transcript. `dirtywork runs show <slug> --markdown
 `run.json` for the header block and the `## Result` section (the header's own
 `task` field is only a one-line preview; a `## Task` section holds the full
 task text), the transcript for one `### Turn N` per `assistant` event with its
-`tool_result`s as `<details>` blocks (capped at the same 2000-char preview the
-transcript itself applies) and its `nudge`/`guardrail_block`/`sandbox_reset`
-events as blockquote callouts. Token counts in the header come from
+`tool_result`s as `<details>` blocks (capped at the transcript's 2000-char
+preview; `finish` results are shown in full), a `> **harness → model:**`
+callout with the fenced `follow_up` text under a result that carried one,
+`_(sent as: [empty reply])_` under an assistant turn stored with a
+placeholder, `[not finished]` on a `finish` that did not finish the run, and
+its `nudge`/`guardrail_block`/`sandbox_reset` events as blockquote callouts.
+Token counts in the header come from
 `run_end.usage`, and the final message from the `finish` call's `summary`,
 because `run.json` records neither.
