@@ -2347,7 +2347,6 @@ def test_bash_timeout_duration_strings_do_not_strike_issue_64(parts):
         _resp(tool_calls=[_call("c3", "bash", {"command": "echo 3", "timeout": "60s"})]),
         _resp(content="done"),
     ])
-    from dirtywork.runner import Runner
     runner = Runner(
         provider=provider,
         registry=default_registry(),
