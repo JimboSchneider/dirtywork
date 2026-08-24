@@ -7,6 +7,7 @@ import io
 import json
 import math
 import os
+import re
 import sys
 
 if __name__ == "__main__":
@@ -169,6 +170,24 @@ def _non_negative_int(text: str) -> int:
     if value < 0:
         raise argparse.ArgumentTypeError("must be >= 0")
     return value
+
+
+# Docker 29's own `--tmpfs .../size=VALUE` parser is looser than what we want
+# to hand it: a leading zero is parsed as octal ("00256m" -> 174MiB, not
+# 256MiB, per manual probe), a bare comma after the value silently splices in
+# extra tmpfs mount options ("1g,exec" grants exec on the mount), and a
+# unit-less value is accepted as page-rounded bytes. We accept only
+# digits-then-unit -- no leading zero, no unit-less bytes, no comma, no
+# percent, and no 't' (a terabyte cap is meaningless against --memory).
+_TMPFS_SIZE_RE = re.compile(r"^[1-9][0-9]*[kmg]$")
+
+
+def _tmpfs_size(value: str) -> str:
+    canonical = value.lower()
+    if not _TMPFS_SIZE_RE.match(canonical):
+        raise argparse.ArgumentTypeError(
+            f"expected a size like 256m or 1g (digits followed by k, m or g), got {value!r}")
+    return canonical
 
 
 _ENDPOINT_HINTS = {
@@ -421,6 +440,7 @@ def _build_sandbox(args, ctx: RunContext, *, run_dir: Path, transcript):
             cpus=args.cpus,
             tmp_size=args.tmp_size,
             gitdir_size=args.gitdir_size,
+            home_size=args.home_size,
             max_worktree_mb=args.max_worktree_mb,
             max_worktree_files=args.max_worktree_files,
             min_free_mb=args.min_free_mb,
@@ -442,7 +462,8 @@ def _build_sandbox(args, ctx: RunContext, *, run_dir: Path, transcript):
             "image_pinned": ctx.image_pinned,
             "network": cfg.network, "memory": cfg.memory, "cpus": cfg.cpus,
             "pids_limit": cfg.pids_limit, "tmp_size": cfg.tmp_size,
-            "gitdir_size": cfg.gitdir_size, "max_worktree_mb": cfg.max_worktree_mb,
+            "gitdir_size": cfg.gitdir_size, "home_size": cfg.home_size,
+            "max_worktree_mb": cfg.max_worktree_mb,
             "max_worktree_files": cfg.max_worktree_files,
             "user": f"{sandbox.uid}:{sandbox.gid}",
         }
@@ -478,6 +499,9 @@ def _write_run_json_start(run_dir: Path, ctx: RunContext, args) -> None:
         "verify_timeout": args.verify_timeout,
         "container": docker_args.container_name(ctx.slug) if is_docker else None,
         "volume": docker_args.volume_name(ctx.slug) if is_docker else None,
+        "tmp_size": args.tmp_size if is_docker else None,
+        "gitdir_size": args.gitdir_size if is_docker else None,
+        "home_size": args.home_size if is_docker else None,
         "image": args.image if is_docker else None,
         "image_digest": ctx.image_digest,
         "image_pinned": ctx.image_pinned,
@@ -994,8 +1018,13 @@ def _add_run_flags(p, *, resume: bool) -> None:
     p.add_argument("--allow-network", action="store_true", default=False)
     p.add_argument("--memory", default="4g")
     p.add_argument("--cpus", default="2")
-    p.add_argument("--tmp-size", default="1g")
-    p.add_argument("--gitdir-size", default="512m")
+    p.add_argument("--tmp-size", type=_tmpfs_size, default="1g")
+    p.add_argument("--gitdir-size", type=_tmpfs_size, default="512m")
+    p.add_argument("--home-size", type=_tmpfs_size, default="256m",
+                   help="docker mode only: cap of the /home/worker tmpfs (default 256m); "
+                        "package caches (NuGet ~/.nuget/packages, npm ~/.npm, pip "
+                        "~/.cache/pip) live under $HOME; this, --tmp-size and "
+                        "--gitdir-size all count against --memory")
     p.add_argument("--min-free-mb", type=int, default=2048)
     p.add_argument("--keep-volume", action="store_true", default=False)
     p.add_argument("--max-patch-mb", type=int, default=10)

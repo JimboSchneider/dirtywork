@@ -342,13 +342,14 @@ def test_main_docker_build_sandbox_passes_preflight_image_ref(tmp_path, monkeypa
     assert run_json["image_digest"] is None  # provenance, resolved separately from image_ref
 
 
-def _install_immediate_done_docker_fakes(m, monkeypatch, *, constructed_with=None):
+def _install_immediate_done_docker_fakes(m, monkeypatch, *, constructed_with=None, cfgs=None):
     """Shared plumbing for the two image_pinned tests below: a
     FakeDockerSandbox that records the image_ref it was constructed with (if
     a list is given) and completes start()/finalize() as no-ops, plus an
     LM Studio client that replies "done" on the first turn -- just enough
     for main() to reach rc 0 and a written run.json without a real Docker
-    daemon or a real LLM."""
+    daemon or a real LLM. `cfgs`, if given, collects the DockerConfig each
+    fake sandbox was constructed with."""
     from dirtywork.sandbox import RunArtifacts
     from dirtywork.sandbox.docker import DockerSandbox as RealDockerSandbox
 
@@ -362,6 +363,8 @@ def _install_immediate_done_docker_fakes(m, monkeypatch, *, constructed_with=Non
         def __init__(self, cfg, *, run_dir, transcript=None, image_ref=None):
             if constructed_with is not None:
                 constructed_with.append(image_ref)
+            if cfgs is not None:
+                cfgs.append(cfg)
             self.uid, self.gid = 501, 20
             self.watchdog = FakeWatchdog()
 
@@ -2379,3 +2382,103 @@ def test_explicit_null_verify_fields_in_run_json_fall_back_to_defaults(tmp_path,
     resumed = json.loads((Path(second["run_dir"]) / "run.json").read_text())
     assert resumed["verify_rounds"] == m.DEFAULT_VERIFY_ROUNDS
     assert resumed["verify_timeout"] == m.DEFAULT_VERIFY_TIMEOUT
+
+
+# --- issue #63: --home-size, and the shared _tmpfs_size validator it shares
+# with --tmp-size/--gitdir-size -----------------------------------------
+
+
+def test_home_size_docker_mode_custom_value_flows_to_config_transcript_and_run_json(
+        tmp_path, monkeypatch, capsys):
+    from dirtywork.procs import Captured
+    m, repo = _docker_mode_scaffold(tmp_path, monkeypatch)
+    monkeypatch.setattr(m.docker_cli, "run",
+                        lambda argv, *, timeout, stdin=None: Captured(1, b"", False, False))
+    cfgs = []
+    _install_immediate_done_docker_fakes(m, monkeypatch, cfgs=cfgs)
+
+    rc = m.main(["run", "--repo", str(repo), "--home-size", "1G", "some task"])
+
+    assert rc == 0
+    assert cfgs[0].home_size == "1g"  # the DockerConfig the sandbox was built with
+
+    payload = json.loads(capsys.readouterr().out)
+    run_dir = Path(payload["run_dir"])
+    run_json = json.loads((run_dir / "run.json").read_text())
+    assert run_json["home_size"] == "1g"
+    assert run_json["tmp_size"] == "1g"          # untouched default, still recorded
+    assert run_json["gitdir_size"] == "512m"     # untouched default, still recorded
+    assert run_json["sandbox"] == "docker"       # unchanged shape: a string, not a dict
+
+    transcript_files = list((tmp_path / "runs").rglob("transcript.jsonl"))
+    events = [json.loads(l) for l in transcript_files[0].read_text().splitlines()]
+    run_start = next(e for e in events if e["event"] == "run_start")
+    assert run_start["sandbox"]["home_size"] == "1g"
+
+
+def test_home_size_docker_mode_default_is_256m(tmp_path, monkeypatch, capsys):
+    from dirtywork.procs import Captured
+    m, repo = _docker_mode_scaffold(tmp_path, monkeypatch)
+    monkeypatch.setattr(m.docker_cli, "run",
+                        lambda argv, *, timeout, stdin=None: Captured(1, b"", False, False))
+    _install_immediate_done_docker_fakes(m, monkeypatch)
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert run_json["home_size"] == "256m"
+
+    transcript_files = list((tmp_path / "runs").rglob("transcript.jsonl"))
+    events = [json.loads(l) for l in transcript_files[0].read_text().splitlines()]
+    run_start = next(e for e in events if e["event"] == "run_start")
+    assert run_start["sandbox"]["home_size"] == "256m"
+
+
+def test_tmpfs_size_fields_are_null_in_host_mode(tmp_path, monkeypatch, capsys):
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "some task"])
+
+    assert rc == 0
+    run_json = _read_only_run_json(tmp_path)
+    assert run_json["tmp_size"] is None
+    assert run_json["gitdir_size"] is None
+    assert run_json["home_size"] is None
+    assert run_json["sandbox"] == "none"
+
+
+@pytest.mark.parametrize("flag", ["--tmp-size", "--gitdir-size", "--home-size"])
+@pytest.mark.parametrize("value", [
+    "1024", "0", "00256m", "1.5g", "256mb", "256MiB", "50%",
+    "1g,exec", "1t", "+256m", "256 m", "",
+])
+def test_bad_tmpfs_size_rejected_by_all_three_flags(flag, value, capsys):
+    import dirtywork.__main__ as m
+    with pytest.raises(SystemExit) as ei:
+        m._parse_args(["run", "--repo", "/x", flag, value, "task"])
+    assert ei.value.code == 2
+    err = capsys.readouterr().err
+    assert flag in err
+    assert "expected a size like 256m or 1g" in err
+
+
+_CANONICAL_TMPFS_SIZES = [  # (as typed, as recorded) -- case folds, nothing else changes
+    ("256m", "256m"), ("256M", "256m"), ("1G", "1g"),
+    ("1024k", "1024k"), ("1024K", "1024k"), ("999999g", "999999g"),
+]
+
+
+@pytest.mark.parametrize("raw,canonical", _CANONICAL_TMPFS_SIZES)
+def test_home_size_flag_canonicalizes_through_the_cli_parser(raw, canonical):
+    import dirtywork.__main__ as m
+    args = m._parse_args(["run", "--repo", "/x", "--home-size", raw, "task"])
+    assert args.home_size == canonical
+
+
+@pytest.mark.parametrize("raw,canonical", _CANONICAL_TMPFS_SIZES)
+def test_tmpfs_size_direct(raw, canonical):
+    import dirtywork.__main__ as m
+    assert m._tmpfs_size(raw) == canonical

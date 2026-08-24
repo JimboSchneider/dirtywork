@@ -55,7 +55,7 @@ One per run, always the first line.
 | `provider` | | ✓ | `"openai"` \| `"anthropic"` \| `"ollama"` | |
 | `resumed_from` | | ✓ | string \| null | slug of the run this one continues |
 | `feedback` | | ✓ | string \| null | 0.8: `resume --feedback`/`--feedback-file` text, verbatim (max 64 000 chars); null on a fresh run or a resume without feedback. Since 0.10 an EMPTY or whitespace-only `--feedback`/`--feedback-file` is normalized to null at parse, so it is treated as absent everywhere — including by the gate that refuses to resume a `completed` run without feedback |
-| `sandbox` | | ✓ | `"none"` \| object | `"none"` in host mode; in Docker mode `{backend, image, image_digest, image_pinned, network, memory, cpus, pids_limit, tmp_size, gitdir_size, max_worktree_mb, max_worktree_files, user}` |
+| `sandbox` | | ✓ | `"none"` \| object | `"none"` in host mode; in Docker mode `{backend, image, image_digest, image_pinned, network, memory, cpus, pids_limit, tmp_size, gitdir_size, home_size, max_worktree_mb, max_worktree_files, user}` |
 
 ### `assistant`
 
@@ -275,6 +275,9 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `verify_timeout` | start | 0.8: `--verify-timeout` as given (clamped to 1-600 by the runner), else `600` |
 | `container` | start | Docker mode container name, else null |
 | `volume` | start | Docker mode volume name, else null |
+| `tmp_size` | start | Docker mode `--tmp-size` as given (default `1g`), else null |
+| `gitdir_size` | start | Docker mode `--gitdir-size` as given (default `512m`), else null |
+| `home_size` | start | 1.0 (#63): Docker mode `--home-size` as given (default `256m`), else null — the `/home/worker` tmpfs cap; package caches (`~/.nuget/packages`, `~/.npm`, `~/.cache/pip`) live under `$HOME`, and it counts against `--memory` alongside `tmp_size`/`gitdir_size` |
 | `image` | start | `--image` as given (Docker mode), else null |
 | `image_digest` | start | registry digest from `RepoDigests`, or null for a locally built image — provenance only |
 | `image_pinned` | start | true only when the maintained default image was pinned and enforced |
