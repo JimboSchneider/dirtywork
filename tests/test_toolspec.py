@@ -617,7 +617,7 @@ class TestCoerceDuration:
         True,            # bool (even though it's an int subclass)
         1.5,             # float
         None,            # NoneType
-        "9" * 5000 + "s",   # too many digits ( SECURITY: prevent ValueError)
+        "9" * 5000 + "s",   # digit run beyond the regex bound; int() on it would raise on 3.11+
         "٦٠s",           # Arabic-Indic digits (re.ASCII prevents these)
     ])
     def test_coerce_duration_returns_none(self, value):
@@ -742,16 +742,16 @@ def test_custom_tool_with_unit_seconds_coerces_duration():
         fn=_custom_fn,
         caps=Caps(fs="none"),
     )
-    
+
     r = ToolRegistry()
     r.register(custom_spec)
-    
+
     # Test with "2m" - should be converted to 120
     mock_sandbox = _MockSandbox()
     result = r.execute("custom_tool", {"delay": "2m"}, sandbox=mock_sandbox, deadline=None)
     assert result.kind == "ok"
     assert "delay=120" in result.text
-    
+
     # Test with invalid value
     result = r.execute("custom_tool", {"delay": "abc"}, sandbox=mock_sandbox, deadline=None)
     assert result.kind == "error"
