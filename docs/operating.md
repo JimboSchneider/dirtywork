@@ -25,8 +25,8 @@ Day-to-day usage once dirtywork is installed: running a task, reviewing and resu
   > gitignore pattern does **not** match a symlink, so a forgotten one shows up
   > as an untracked path. If the gate needs a tool the image lacks, build a
   > derived image (see the recipe next to `--image` in [Machine
-  > contract](machine-contract.md#machine-contract)). Clean up a run:**
-  > `dirtywork runs clean <slug>` — see
+  > contract](machine-contract.md#machine-contract)).
+- **Clean up a run:** `dirtywork runs clean <slug>` — see
   [Inspecting, cleaning up and re-exporting runs](#inspecting-cleaning-up-and-re-exporting-runs)
   for the safety rules and the rest of the `runs` subcommands.
 
