@@ -223,7 +223,6 @@ GREP_SPEC = ToolSpec(
               transcript="preview"),
 )
 
-# this description is also the error text's accepted-form, so the wire contract and the runtime match
 BASH_SPEC = ToolSpec(
     name="bash",
     description="Run a shell command in the worktree (cwd is the worktree "
@@ -238,6 +237,8 @@ BASH_SPEC = ToolSpec(
                 "anything already written to disk are unaffected.",
     params={
         "command": ParamSpec(type="string"),
+        # This description is also the bad_args error's accepted-form text (#64):
+        # the wire contract and the runtime message are one string.
         "timeout": ParamSpec(type="integer", description='an integer number of seconds (60) or a duration string ("60s", "2m"); default 120, max 600', default=120, unit="seconds"),
     },
     required=("command",),

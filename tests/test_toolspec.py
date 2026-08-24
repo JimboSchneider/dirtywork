@@ -652,7 +652,7 @@ def test_execute_coerces_duration_string_for_timeout_param():
     from dirtywork.builtin_tools import BASH_SPEC
     r = ToolRegistry()
     r.register(BASH_SPEC)
-    
+
     # Test with "60s" - should be converted to 60
     mock_sandbox = _MockSandbox()
     result = r.execute("bash", {"command": "echo test", "timeout": "60s"}, 
@@ -667,7 +667,7 @@ def test_execute_timeout_clamps_duration_strings():
     from dirtywork.builtin_tools import BASH_SPEC
     r = ToolRegistry()
     r.register(BASH_SPEC)
-    
+
     # Test with "20m" - should be clamped to max (600)
     mock_sandbox = _MockSandbox()
     result = r.execute("bash", {"command": "echo test", "timeout": "20m"}, 
@@ -682,12 +682,13 @@ def test_execute_duration_string_invalid_format_returns_bad_args():
     from dirtywork.builtin_tools import BASH_SPEC
     r = ToolRegistry()
     r.register(BASH_SPEC)
-    
+
     result = r.execute("bash", {"command": "echo test", "timeout": "60x"}, 
                        sandbox=None, deadline=None)
     assert result.kind == "error"
     assert result.failure == "bad_args"
-    assert 'parameter \'timeout\' must be an integer number of seconds (60) or a duration string ("60s", "2m"); default 120, max 600 — got \'60x\'' in result.text
+    assert ('parameter \'timeout\' must be an integer number of seconds (60) or a duration '
+            'string ("60s", "2m"); default 120, max 600 — got \'60x\'') in result.text
 
 
 def test_read_file_limit_still_requires_integer():
@@ -695,7 +696,7 @@ def test_read_file_limit_still_requires_integer():
     from dirtywork.builtin_tools import READ_FILE_SPEC
     r = ToolRegistry()
     r.register(READ_FILE_SPEC)
-    
+
     mock_sandbox = _MockSandbox()
     result = r.execute("read_file", {"path": "test.txt", "limit": "60s"}, 
                        sandbox=mock_sandbox, deadline=None)
@@ -711,11 +712,11 @@ def test_bash_schema_has_description_but_not_unit():
     from dirtywork.builtin_tools import BASH_SPEC
     r = ToolRegistry()
     r.register(BASH_SPEC)
-    
+
     schemas = r.schemas()
     bash_schema = next(s for s in schemas if s["function"]["name"] == "bash")
     timeout_prop = bash_schema["function"]["parameters"]["properties"]["timeout"]
-    
+
     # Should have the updated description
     assert timeout_prop["description"] == 'an integer number of seconds (60) or a duration string ("60s", "2m"); default 120, max 600'
     # Should NOT have a unit field (it's internal-only)
