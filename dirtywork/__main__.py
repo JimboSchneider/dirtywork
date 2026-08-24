@@ -178,7 +178,9 @@ def _non_negative_int(text: str) -> int:
 # extra tmpfs mount options ("1g,exec" grants exec on the mount), and a
 # unit-less value is accepted as page-rounded bytes. We accept only
 # digits-then-unit -- no leading zero, no unit-less bytes, no comma, no
-# percent, and no 't' (a terabyte cap is meaningless against --memory).
+# percent, and no 't': one unit set (k/m/g), one spelling, no ambiguity --
+# NOT a magnitude cap (the regex bounds nothing on its own; 999999g parses
+# fine here -- --memory is the real ceiling).
 _TMPFS_SIZE_RE = re.compile(r"^[1-9][0-9]*[kmg]$")
 
 
@@ -186,7 +188,8 @@ def _tmpfs_size(value: str) -> str:
     canonical = value.lower()
     if not _TMPFS_SIZE_RE.fullmatch(canonical):  # fullmatch: `$` alone admits a trailing newline
         raise argparse.ArgumentTypeError(
-            f"expected a size like 256m or 1g (digits followed by k, m or g), got {value!r}")
+            f"expected a size like 256m or 1g (no leading zero; digits then k, m or g), "
+            f"got {value!r}")
     return canonical
 
 
@@ -1018,8 +1021,14 @@ def _add_run_flags(p, *, resume: bool) -> None:
     p.add_argument("--allow-network", action="store_true", default=False)
     p.add_argument("--memory", default="4g")
     p.add_argument("--cpus", default="2")
-    p.add_argument("--tmp-size", type=_tmpfs_size, default="1g")
-    p.add_argument("--gitdir-size", type=_tmpfs_size, default="512m")
+    p.add_argument("--tmp-size", type=_tmpfs_size, default="1g",
+                   help="docker mode only: cap of the /tmp tmpfs (default 1g, exec); same "
+                        "form as --home-size; this, --gitdir-size and --home-size all count "
+                        "against --memory")
+    p.add_argument("--gitdir-size", type=_tmpfs_size, default="512m",
+                   help="docker mode only: cap of the run's /gitdir tmpfs (default 512m); "
+                        "same form as --home-size; this, --tmp-size and --home-size all "
+                        "count against --memory")
     p.add_argument("--home-size", type=_tmpfs_size, default="256m",
                    help="docker mode only: cap of the /home/worker tmpfs (default 256m); "
                         "package caches (NuGet ~/.nuget/packages, npm ~/.npm, pip "

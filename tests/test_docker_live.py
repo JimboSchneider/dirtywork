@@ -31,15 +31,40 @@ def _image_kwargs() -> dict:
 @functools.lru_cache(maxsize=None)
 def _dotnet_list_sdks(image: str) -> str:
     """stdout of `dotnet --list-sdks` inside `image`, cached per image so
-    the two .NET parametrizations only invoke docker once each. Never
-    raises on a non-zero exit (an image with no /usr/bin/dotnet at all) --
-    callers check for a major-version substring, which just won't be
-    present."""
+    the two .NET parametrizations only invoke docker once each. A non-zero
+    exit fails the test loudly instead of returning '' -- silently returning
+    '' let a missing/broken image (not just one that genuinely predates the
+    1.0 Dockerfile) read as "no SDK 10.x" and skip green."""
     result = subprocess.run(
         ["docker", "run", "--rm", "--entrypoint", "/usr/bin/dotnet", image, "--list-sdks"],
         capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        pytest.fail(
+            f"docker run --entrypoint /usr/bin/dotnet {image} --list-sdks failed "
+            f"(rc {result.returncode}): {result.stderr.strip()[:500]}")
     return result.stdout
+
+
+def test_dotnet_list_sdks_fails_loudly_on_nonzero_exit(monkeypatch):
+    # Unit-level (no docker daemon needed): a broken/missing image must fail
+    # the test rather than read as '' and let the SDK-10 gate in
+    # test_docker_live_dotnet_builds_and_runs_offline skip green as though it
+    # merely predates the 1.0 Dockerfile.
+    _dotnet_list_sdks.cache_clear()
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            a[0], 1, stdout="", stderr="Unable to find image 'bogus:latest' locally"))
+    try:
+        with pytest.raises(pytest.fail.Exception) as ei:
+            _dotnet_list_sdks("bogus:latest")
+        msg = str(ei.value)
+        assert ("docker run --entrypoint /usr/bin/dotnet bogus:latest --list-sdks failed "
+                "(rc 1)") in msg
+        assert "Unable to find image 'bogus:latest' locally" in msg
+    finally:
+        _dotnet_list_sdks.cache_clear()  # don't leak the faked result into the live tests
 
 
 class ScriptedClient(DictProvider):
