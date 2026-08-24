@@ -193,6 +193,29 @@ def _tmpfs_size(value: str) -> str:
     return canonical
 
 
+# Single source of truth for the three tmpfs-size defaults: DockerConfig's
+# own dataclass field defaults, not a second copy of "1g"/"512m"/"256m"
+# repeated here (and liable to drift from it).
+_DOCKER_DEFAULTS = DockerConfig()
+
+
+def _inherit_tmpfs_size(prior: dict, key: str, default: str) -> str:
+    """#63 resume inheritance for --tmp-size/--gitdir-size/--home-size,
+    mirroring max_tokens's hardened inheritance policy below: a hand-edited
+    (or pre-1.0) run.json can carry anything JSON allows for `key` -- a
+    missing key, an explicit null, or any other value _tmpfs_size itself
+    would reject (an int, "1t", "00256m", ...). Only a string _tmpfs_size
+    accepts is inherited; everything else falls back to `default` rather
+    than tracebacking or reintroducing an invalid value into DockerConfig."""
+    inherited = prior.get(key)
+    if isinstance(inherited, str):
+        try:
+            return _tmpfs_size(inherited)
+        except argparse.ArgumentTypeError:
+            pass
+    return default
+
+
 _ENDPOINT_HINTS = {
     "openai": "Is the OpenAI-compatible server running? Try: lms ps",
     "anthropic": "Check ANTHROPIC_API_KEY and that api.anthropic.com is reachable.",
@@ -761,6 +784,17 @@ def _load_resume_target(args) -> dict:
         args.model = prior["model"]
     if args.image is None:
         args.image = prior.get("image") or DEFAULT_IMAGE
+    # #63: a run that only completed because it was given e.g. --home-size 2g
+    # would otherwise silently drop back to 256m on resume and re-hit the
+    # exact ENOSPC that flag fixed. A prior host-mode run recorded null for
+    # all three (_write_run_json_start only fills these in docker mode), so
+    # that case falls through to the default here same as a missing key.
+    if args.tmp_size is None:
+        args.tmp_size = _inherit_tmpfs_size(prior, "tmp_size", _DOCKER_DEFAULTS.tmp_size)
+    if args.gitdir_size is None:
+        args.gitdir_size = _inherit_tmpfs_size(prior, "gitdir_size", _DOCKER_DEFAULTS.gitdir_size)
+    if args.home_size is None:
+        args.home_size = _inherit_tmpfs_size(prior, "home_size", _DOCKER_DEFAULTS.home_size)
     if args.allow_commit is None:
         args.allow_commit = bool(prior.get("allow_commit", False))
     if getattr(args, "verify", None) is None:
@@ -1021,19 +1055,24 @@ def _add_run_flags(p, *, resume: bool) -> None:
     p.add_argument("--allow-network", action="store_true", default=False)
     p.add_argument("--memory", default="4g")
     p.add_argument("--cpus", default="2")
-    p.add_argument("--tmp-size", type=_tmpfs_size, default="1g",
+    p.add_argument("--tmp-size", type=_tmpfs_size,
+                   default=None if resume else _DOCKER_DEFAULTS.tmp_size,
                    help="docker mode only: cap of the /tmp tmpfs (default 1g, exec); same "
                         "form as --home-size; this, --gitdir-size and --home-size all count "
-                        "against --memory")
-    p.add_argument("--gitdir-size", type=_tmpfs_size, default="512m",
+                        "against --memory (resume inherits this from the run it continues)")
+    p.add_argument("--gitdir-size", type=_tmpfs_size,
+                   default=None if resume else _DOCKER_DEFAULTS.gitdir_size,
                    help="docker mode only: cap of the run's /gitdir tmpfs (default 512m); "
                         "same form as --home-size; this, --tmp-size and --home-size all "
-                        "count against --memory")
-    p.add_argument("--home-size", type=_tmpfs_size, default="256m",
+                        "count against --memory (resume inherits this from the run it "
+                        "continues)")
+    p.add_argument("--home-size", type=_tmpfs_size,
+                   default=None if resume else _DOCKER_DEFAULTS.home_size,
                    help="docker mode only: cap of the /home/worker tmpfs (default 256m); "
                         "package caches (NuGet ~/.nuget/packages, npm ~/.npm, pip "
                         "~/.cache/pip) live under $HOME; this, --tmp-size and "
-                        "--gitdir-size all count against --memory")
+                        "--gitdir-size all count against --memory (resume inherits this "
+                        "from the run it continues)")
     p.add_argument("--min-free-mb", type=int, default=2048)
     p.add_argument("--keep-volume", action="store_true", default=False)
     p.add_argument("--max-patch-mb", type=int, default=10)

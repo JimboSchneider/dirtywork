@@ -275,9 +275,9 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `verify_timeout` | start | 0.8: `--verify-timeout` as given (clamped to 1-600 by the runner), else `600` |
 | `container` | start | Docker mode container name, else null |
 | `volume` | start | Docker mode volume name, else null |
-| `tmp_size` | start | 1.0 (#63): Docker mode `--tmp-size`, the canonical lower-cased value (default `1g`); null in host mode. `dirtywork resume` does not inherit `tmp_size`/`gitdir_size`/`home_size` — a resumed run gets the defaults unless the flags are passed again |
-| `gitdir_size` | start | 1.0 (#63): Docker mode `--gitdir-size`, the canonical lower-cased value (default `512m`); null in host mode |
-| `home_size` | start | 1.0 (#63): Docker mode `--home-size`, the canonical lower-cased value (default `256m`); null in host mode — the `/home/worker` tmpfs cap. Package caches (`~/.nuget/packages`, `~/.npm`, `~/.cache/pip`) live under `$HOME` by default, and this counts against `--memory` alongside `tmp_size`/`gitdir_size` |
+| `tmp_size` | start | 1.0 (#63): Docker mode `--tmp-size`, the canonical lower-cased value (default `1g`); null in host mode. `dirtywork resume` inherits it when the flag is not given; a `run.json` written before 1.0 has no such key, and the resume falls back to the default |
+| `gitdir_size` | start | 1.0 (#63): Docker mode `--gitdir-size`, the canonical lower-cased value (default `512m`); null in host mode. `dirtywork resume` inherits it when the flag is not given; a `run.json` written before 1.0 has no such key, and the resume falls back to the default |
+| `home_size` | start | 1.0 (#63): Docker mode `--home-size`, the canonical lower-cased value (default `256m`); null in host mode — the `/home/worker` tmpfs cap. Package caches (`~/.nuget/packages`, `~/.npm`, `~/.cache/pip`) live under `$HOME` by default, and this counts against `--memory` alongside `tmp_size`/`gitdir_size`. `dirtywork resume` inherits it when the flag is not given; a `run.json` written before 1.0 has no such key, and the resume falls back to the default |
 | `image` | start | `--image` as given (Docker mode), else null |
 | `image_digest` | start | registry digest from `RepoDigests`, or null for a locally built image — provenance only |
 | `image_pinned` | start | true only when the maintained default image was pinned and enforced |

@@ -2482,3 +2482,127 @@ def test_home_size_flag_canonicalizes_through_the_cli_parser(raw, canonical):
 def test_tmpfs_size_direct(raw, canonical):
     import dirtywork.__main__ as m
     assert m._tmpfs_size(raw) == canonical
+
+
+def test_tmpfs_size_parser_defaults_match_dockerconfig(tmp_path, monkeypatch):
+    # Item 4: one place for the three tmpfs-size defaults -- DockerConfig's
+    # own dataclass field defaults -- not a second "1g"/"512m"/"256m" copy
+    # in the argparse setup.
+    import dirtywork.__main__ as m
+    from dirtywork.sandbox.docker_args import DockerConfig
+    defaults = DockerConfig()
+    args = m._parse_args(["run", "--repo", "/x", "task"])
+    assert args.tmp_size == defaults.tmp_size
+    assert args.gitdir_size == defaults.gitdir_size
+    assert args.home_size == defaults.home_size
+    # resume: None until _load_resume_target fills it in from run.json/default
+    resume_args = m._parse_args(["resume", "slug"])
+    assert resume_args.tmp_size is None
+    assert resume_args.gitdir_size is None
+    assert resume_args.home_size is None
+
+
+# --- issue #63: resume inherits --tmp-size/--gitdir-size/--home-size from
+# the run it continues -----------------------------------------------------
+
+
+def _docker_run_and_resume_scaffold(tmp_path, monkeypatch):
+    """First-run + resume plumbing for the docker-mode tmpfs-size resume
+    tests below (same fakes as _install_immediate_done_docker_fakes: a
+    scripted 'done' LLM reply and a no-op DockerSandbox). `cfgs` collects
+    the DockerConfig each fake sandbox construction got, in call order --
+    cfgs[0] is the first run, cfgs[1] the first resume, and so on."""
+    from dirtywork.procs import Captured
+    m, repo = _docker_mode_scaffold(tmp_path, monkeypatch)
+    monkeypatch.setattr(m.docker_cli, "run",
+                        lambda argv, *, timeout, stdin=None: Captured(1, b"", False, False))
+    cfgs = []
+    _install_immediate_done_docker_fakes(m, monkeypatch, cfgs=cfgs)
+    return m, repo, cfgs
+
+
+def test_resume_inherits_and_overrides_tmpfs_sizes_in_docker_mode(tmp_path, monkeypatch, capsys):
+    m, repo, cfgs = _docker_run_and_resume_scaffold(tmp_path, monkeypatch)
+    rc = m.main(["run", "--repo", str(repo), "--home-size", "2g", "--tmp-size", "2g",
+                 "--gitdir-size", "1g", "some task"])
+    assert rc == 0
+    first = json.loads(capsys.readouterr().out)
+    assert cfgs[0].home_size == "2g"
+    assert cfgs[0].tmp_size == "2g"
+    assert cfgs[0].gitdir_size == "1g"
+
+    # (a) resume without flags inherits all three from the run it continues
+    rc = m.main(["resume", Path(first["run_dir"]).name, "--feedback", "keep going"])
+    assert rc == 0
+    second = json.loads(capsys.readouterr().out)
+    assert cfgs[1].home_size == "2g"
+    assert cfgs[1].tmp_size == "2g"
+    assert cfgs[1].gitdir_size == "1g"
+    second_json = json.loads((Path(second["run_dir"]) / "run.json").read_text())
+    assert second_json["home_size"] == "2g"
+    assert second_json["tmp_size"] == "2g"
+    assert second_json["gitdir_size"] == "1g"
+
+    # (b) an explicit flag on resume overrides the inherited value
+    rc = m.main(["resume", Path(second["run_dir"]).name, "--feedback", "keep going",
+                 "--home-size", "1G"])
+    assert rc == 0
+    third = json.loads(capsys.readouterr().out)
+    assert cfgs[2].home_size == "1g"    # canonicalized, and NOT the inherited 2g
+    assert cfgs[2].tmp_size == "2g"     # unflagged sibling still inherits
+    third_json = json.loads((Path(third["run_dir"]) / "run.json").read_text())
+    assert third_json["home_size"] == "1g"
+
+
+def test_resume_tmpfs_sizes_fall_back_to_defaults_for_missing_null_and_invalid_values(
+        tmp_path, monkeypatch, capsys):
+    # Mirrors test_resume_inherits_max_tokens_and_a_pre_0_10_run_falls_back_to_the_default's
+    # shape: repeatedly hand-edit the SAME prior run.json and resume it again,
+    # covering the fallback cases _inherit_tmpfs_size exists for.
+    m, repo, cfgs = _docker_run_and_resume_scaffold(tmp_path, monkeypatch)
+    rc = m.main(["run", "--repo", str(repo), "--home-size", "2g", "--tmp-size", "2g",
+                 "--gitdir-size", "1g", "some task"])
+    assert rc == 0
+    first = json.loads(capsys.readouterr().out)
+    run_dir = Path(first["run_dir"])
+
+    # (c) a pre-1.0 run.json has no tmp_size/gitdir_size/home_size keys at all
+    prior = json.loads((run_dir / "run.json").read_text())
+    prior["status"] = "max_turns"
+    del prior["tmp_size"], prior["gitdir_size"], prior["home_size"]
+    (run_dir / "run.json").write_text(json.dumps(prior))
+    assert m.main(["resume", run_dir.name]) == 0
+    resumed = json.loads((Path(json.loads(capsys.readouterr().out)["run_dir"])
+                          / "run.json").read_text())
+    assert resumed["home_size"] == "256m"
+    assert resumed["tmp_size"] == "1g"
+    assert resumed["gitdir_size"] == "512m"
+
+    # (d) an explicit null (hand-edited, not merely a missing key) also
+    # falls back to the default
+    prior["status"] = "max_turns"
+    prior["tmp_size"] = None
+    prior["gitdir_size"] = None
+    prior["home_size"] = None
+    (run_dir / "run.json").write_text(json.dumps(prior))
+    assert m.main(["resume", run_dir.name]) == 0
+    resumed = json.loads((Path(json.loads(capsys.readouterr().out)["run_dir"])
+                          / "run.json").read_text())
+    assert resumed["home_size"] == "256m"
+    assert resumed["tmp_size"] == "1g"
+    assert resumed["gitdir_size"] == "512m"
+
+    # (e) an invalid recorded value -- something _tmpfs_size itself would
+    # reject (a 't' unit, an int, ...) -- also falls back to the default
+    # rather than tracebacking or handing DockerConfig a bad value.
+    prior["status"] = "max_turns"
+    prior["home_size"] = "1t"
+    prior["tmp_size"] = 2048            # not even a string
+    prior["gitdir_size"] = "00256m"     # leading zero, same rule as the CLI parser
+    (run_dir / "run.json").write_text(json.dumps(prior))
+    assert m.main(["resume", run_dir.name]) == 0
+    resumed_json = json.loads(capsys.readouterr().out)
+    resumed = json.loads((Path(resumed_json["run_dir"]) / "run.json").read_text())
+    assert resumed["home_size"] == "256m"
+    assert resumed["tmp_size"] == "1g"
+    assert resumed["gitdir_size"] == "512m"
