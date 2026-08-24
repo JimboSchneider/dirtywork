@@ -378,6 +378,17 @@ def test_run_one_bench_case_counts_harness_failures(tmp_path, monkeypatch):
     assert row["acceptance"] == "skipped"    # a non-completed run is never scored
 
 
+def test_harness_failures_excludes_malformed_entry_from_empty_reply():
+    # Spec #60 review fix: malformed_entry is its own FailureTracker kind, not
+    # an empty reply -- excluded from `empty_reply` the same as `timeout`.
+    counts = {f"nudge_{kind}": 0 for kind in bench.NUDGE_KINDS}
+    counts["nudge_malformed_entry"] = 2
+    counts["nudge_other"] = 0
+    failures = bench._harness_failures(counts, "completed", None)
+    assert failures["empty_reply"] == 0
+    assert failures["nudge_malformed_entry"] == 2
+
+
 def test_abort_kind_is_parsed_from_the_final_message():
     assert bench._abort_kind("aborted after 3 consecutive bad_args failures") == "bad_args"
     assert bench._abort_kind("aborted after 6 consecutive tool failures") == "mixed"

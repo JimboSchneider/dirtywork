@@ -251,14 +251,15 @@ def _harness_failures(counts: dict, status, final_message, timeouts=0) -> dict:
     """The harness-failure classes the scoreboard reports. `empty_reply` is the
     FailureTracker kind: the runner records exactly one per non-stall nudge --
     EXCEPT 0.9's `timeout` nudge, which is not a FailureTracker event at all
-    (a timed-out command is not a model mistake), so it is excluded here too and
-    gets its own class.
+    (a timed-out command is not a model mistake), and 1.0's `malformed_entry`
+    nudge, which is its own FailureTracker kind, not an empty reply -- both are
+    excluded here and get their own classes.
 
     `timeouts` is the RUNNER's own count, taken from the payload by the caller
     and never re-derived from the nudge events: a turn with two timed-out
     commands emits ONE nudge and counts TWO timeouts."""
     non_stall = sum(counts[f"nudge_{kind}"] for kind in NUDGE_KINDS
-                    if kind not in ("stall", "timeout"))
+                    if kind not in ("stall", "timeout", "malformed_entry"))
     failures = {f"nudge_{kind}": counts[f"nudge_{kind}"] for kind in NUDGE_KINDS}
     failures["nudge_other"] = counts["nudge_other"]
     failures["empty_reply"] = non_stall

@@ -110,7 +110,7 @@ strict chat templates (Mistral/Devstral) reject.
 |---|---|---|---|---|
 | `kind` | | ✓ | string | `truncated` (the reply hit the token limit), `empty` (no tool call and no answer), `text_tool_call` (a tool call written as prose instead of through the tools API), `stall` (no progress for `--stall-turns // 2` turns), `timeout` (0.9: at least one `bash` command timed out on this turn — exactly one per turn however many timed out, and only on a turn that continues; a timeout is not a `FailureTracker` event), `malformed_entry` (1.0: N tool-call entries had no usable id/name and were discarded — delivered since 0.5, recorded since 1.0) |
 | `turn` | | ✓ | integer | 1-based turn number the nudge was issued on |
-| `via` | | ✓ | string | 1.0: `tool_result` or `user` — the carrier this nudge rode on (see above) |
+| `via` | | ✓ | string | 1.0: `tool_result` or `user` — the carrier this nudge rode on (see above). **Sparse**: absent when the run ended on that same turn before the text was delivered (the third empty-reply strike → `model_error`; a stall verdict on a text turn → `stalled`); the event is still written, as in 0.9, so nudge counts stay comparable |
 
 ### `guardrail_block`
 

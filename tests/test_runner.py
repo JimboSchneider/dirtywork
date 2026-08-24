@@ -939,6 +939,23 @@ def test_three_empty_replies_abort_as_model_error(parts):
     assert result.final_message == "aborted after 3 consecutive empty_reply failures"
 
 
+def test_nudge_via_is_absent_on_the_turn_that_aborts_as_model_error(parts):
+    # Spec #60 §6.2 (review fix): the nudge event on the 3rd empty reply is
+    # written BEFORE the abort check returns, so the run ends before deliver()
+    # ever runs -- `via` is sparse, not defaulted, on that one event. Earlier
+    # turns in the same run DID reach deliver() and carry `via`.
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(content=""), _resp(content=""), _resp(content="")])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "model_error"
+    nudges = [e for e in _events(tmp) if e["event"] == "nudge"]
+    assert len(nudges) == 3
+    assert nudges[0]["via"] == "user" and nudges[1]["via"] == "user"
+    assert "via" not in nudges[2]
+
+
 def test_successful_call_resets_empty_reply_count(parts):
     wt, registry, sandbox, transcript, tmp = parts
     provider = FakeProvider([_resp(content=""), _resp(content=""),
@@ -1078,6 +1095,25 @@ def test_runner_empty_replies_count_as_idle_turns(parts):
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "stalled" and result.turns == 2
+
+
+def test_nudge_via_is_absent_on_the_turn_that_ends_stalled(parts):
+    # Spec #60 §6.2 (review fix): turn 2's "empty" nudge is written before
+    # check_progress() returns "stalled", which ends the run before deliver()
+    # ever runs -- `via` is sparse on that one event. Turn 1's two nudges
+    # ("empty" then "stall") both reached deliver() and carry `via`.
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(content=""), _resp(content=""), _resp(content="")])
+    r = Runner(provider, registry, sandbox, transcript, model="m", stall_turns=2)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "stalled"
+    nudges = [e for e in _events(tmp) if e["event"] == "nudge"]
+    assert len(nudges) == 3
+    assert [n["kind"] for n in nudges] == ["empty", "stall", "empty"]
+    assert nudges[0]["turn"] == 1 and nudges[1]["turn"] == 1 and nudges[2]["turn"] == 2
+    assert nudges[0]["via"] == "user" and nudges[1]["via"] == "user"
+    assert "via" not in nudges[2]
 
 
 def test_runner_default_stall_turns_is_twelve(parts):
