@@ -4,8 +4,8 @@
 copied verbatim from `docs/superpowers/bench/2026-08-18-ops-worker-scoreboard.md`
 (main, per-run metrics, model-vs-tool time), with one column added to the
 main table -- **Feature fired** -- computed per the matrix's Feature -> signal
-table (F1/F2/F3/F4/F5/F7/F8/F9; F6 and F9's "no *.tmp left behind" half and
-F10 = `feedback` non-null on a resumed run; F6 has no run-local signal and is out of scope for this tool).
+table (F1/F2/F3/F4/F5/F7/F8/F9/F10; F6 and the "no *.tmp left behind" half of F9 have no
+run-local signal and are out of scope for this tool).
 
 Takes run directories directly, and/or a `soak_driver.py --out` JSONL (every
 row with a `run_dir` is harvested). Stdlib only, run from a source checkout.
