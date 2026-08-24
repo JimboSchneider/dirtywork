@@ -1,8 +1,12 @@
 # Transcript schema
 
 `dirtywork` writes one JSON object per line to
-`~/.dirtywork/runs/<slug>/transcript.jsonl` (`tail -f` friendly — each line is
-flushed immediately). Every line has at least `ts` (UTC ISO-8601) and `event`
+`~/.dirtywork/runs/<slug>/transcript.jsonl`. Since 1.0 the events of one model
+turn are flushed together when the turn ends (`run_start`, and a `run_end`
+written by the CLI's own failure path, are flushed immediately), so `tail -f`
+shows a run one turn at a time and a hard kill loses at most the current turn.
+Every line has at least `ts` (UTC ISO-8601, stamped when the event happened,
+not when it was flushed) and `event`
 (one of the eight event names below). `schema_version` marks the overall
 version and appears once, on `run_start`, and again in the CLI's stdout JSON
 and in `run.json` — not on every line.

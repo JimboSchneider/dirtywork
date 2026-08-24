@@ -324,7 +324,7 @@ never got far enough to know.
   loaded, `--repo` not a git repo, etc.); nothing is created.
 
 All progress (transcript path, worktree path, `error:`-prefixed messages) is
-written to stderr; watch a live run with `tail -f` on the transcript path.
+written to stderr; watch a live run with `tail -f` on the transcript path (events land one turn at a time since 1.0).
 
 Full field-by-field schema, including every v1→v2 addition and the
 `run.json` field list: [`docs/transcript-schema.md`](transcript-schema.md).
