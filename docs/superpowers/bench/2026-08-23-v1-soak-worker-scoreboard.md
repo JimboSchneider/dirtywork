@@ -1,6 +1,6 @@
 # v1 soak — worker scoreboard (#48)
 
-Draft — regenerated as legs complete. Matrix: `2026-08-23-v1-soak-matrix.md`; ledger: `2026-08-23-v1-soak-sdd-ledger.md`. Tables are emitted by `tools/soak_harvest.py` from each leg's JSONL (`~/.dirtywork/bench/soak-*.jsonl`); the **Feature fired** column lists the matrix F-ids whose transcript signal is present. Rows written before commit d648cae have no `final_message`, so their Harness-failures cell cannot show `abort=`; the ledger names the abort kind for those (F5@1024 rows: consecutive `truncated`; F5-default-dev: consecutive unknown-tool).
+Final (2026-08-23 19:58 CDT). Matrix: `2026-08-23-v1-soak-matrix.md`; ledger: `2026-08-23-v1-soak-sdd-ledger.md`. Tables are emitted by `tools/soak_harvest.py` from each leg's JSONL (`~/.dirtywork/bench/soak-*.jsonl`); the **Feature fired** column lists the matrix F-ids whose transcript signal is present. Rows written before commit d648cae have no `final_message`, so their Harness-failures cell cannot show `abort=`; the ledger names the abort kind for those (F5@1024 rows: consecutive `truncated`; F5-default-dev: consecutive unknown-tool).
 
 Environment: dirtywork 0.10.1 (`82a353e`) + this branch; worker image `:0.10` @ `sha256:4fc400ca…` (pinned); LM Studio `qwen/qwen3-coder-next` (65,536 ctx, PARALLEL 4) and `mistralai/devstral-small-2-2512` (loaded_context_length 325,120 — CLI `-c` ignored, see ledger), both resident; Apple Silicon, 128 GB. Runs are serial.
 
@@ -220,6 +220,7 @@ F2/F3 v1 provokers were superseded after this leg (see ledger); their rows are k
 | F2v2-canon-dev-r2 | max_turns | 20 | 0.8m | 0.7m (92%) | 0.1m (8%) | 2.1s | 0.2s | 1843.7 | 28.7 | 0s bash {"command":"cd /work && python3 -B -m unittest tests.test_config 2>&1"} |
 | F3v2-wait-dev-r2 | completed | 28 | 4.4m | 1.5m (35%) | 2.9m (65%) | 3.2s | 6.1s | 1571.3 | 30.7 | 26s bash {"command":"cd /work && bash -x ./build.sh 2>&1 \| head -30"} |
 | F5-trunc4096-dev-r2 | model_error | 8 | 6.8m | 6.8m (100%) | 0.0m (0%) | 51.1s | 0.1s | 90.6 | 31.4 | 0s bash {"command":"python3 << 'EOF'\nimport datetime\n\n# Start date for id=1\nstart_date = datetime.date(2024, 1, 1)\n\n# G... |
+
 ## Leg B3 — instruction-driven F2/F3 (`F2v2-iterate-*`: "re-run the check after every change"; `F3v2-run-*`: "run build.sh and report")
 ## Main
 | Run | Model | Status | Turns | Wall | Prompt tok | Compl tok | Harness failures | Review verdict | Notes | Feature fired |
@@ -266,3 +267,49 @@ F2/F3 v1 provokers were superseded after this leg (see ledger); their rows are k
 | sumrangelow-high-in-sumrangepy-must-0823193743-f6aca66a | completed | 7 | 0.2m | 0.2m (93%) | 0.0m (7%) | 1.7s | 0.1s | 1444.4 | 56.3 | 0s edit_file {"path":"sum_range.py","old_string":" for i in range(low, high): # BUG: excludes `high`","new_string":" for i in rang... |
 | add-a-loud-flag-to-0823193758-46b3f99a | completed | 9 | 0.3m | 0.3m (92%) | 0.0m (8%) | 1.8s | 0.2s | 1471.6 | 67.8 | 0s bash {"command":"node acceptance/greet.test.js"} |
 | reportsh-a-b-c-must-0823193818-eeca7da2 | completed | 5 | 0.2m | 0.1m (92%) | 0.0m (8%) | 1.6s | 0.1s | 1512.4 | 65.8 | 0s bash {"command":"bash acceptance/check.sh"} |
+
+## Leg D — invoicr real tasks on `dirtywork-worker-net10:0.10` (custom image ⇒ `image_pinned=false`, so F9 is absent by design)
+D1 (`…-49920796`) was killed by the operator after the 256 MB home tmpfs filled (image fault, see ledger) and is not tabulated. D2 = #94 first run (max_turns, work mostly done); D2b = `dirtywork resume --feedback` of D2 (F10), verify green; D3 = #97 on a scratch clone carrying D2b's patch.
+## Main
+| Run | Model | Status | Turns | Wall | Prompt tok | Compl tok | Harness failures | Review verdict | Notes | Feature fired |
+|---|---|---|---|---|---|---|---|---|---|---|
+| invoicr-94-feat-add-billing-0823194500-cd825a30 | qwen/qwen3-coder-next | max_turns | 60 | 2.8m | 1903372 | 8015 | max_turns | - | - | - |
+| invoicr-94-feat-add-billing-0823194926-fa299176 | qwen/qwen3-coder-next | completed | 9 | 0.7m | 104263 | 1271 | - | - | - | F4(passed=True,rounds=1), F10 |
+| invoicr-97-feat-add-requirepro-0823195110-4aaee17a | qwen/qwen3-coder-next | completed | 43 | 1.9m | 1005525 | 4776 | - | - | - | F4(passed=True,rounds=1) |
+
+## Per-run metrics (auto)
+| Run | Status | Turns | Wall | s/turn | Prompt tok | Compl tok | prompt tok/s | compl tok/s | nudges | guardrail blocks | tool mix |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| invoicr-94-feat-add-billing-0823194500-cd825a30 | max_turns | 60 | 2.8m | 2.8s | 1903372 | 8015 | 11459.2 | 48.3 | 0 | 0 | bash:13 edit_file:11 list_dir:7 read_file:34 run:1 write_file:5 |
+| invoicr-94-feat-add-billing-0823194926-fa299176 | completed | 9 | 0.7m | 4.6s | 104263 | 1271 | 2494.3 | 30.4 | 0 | 0 | bash:4 edit_file:2 finish:1 read_file:2 |
+| invoicr-97-feat-add-requirepro-0823195110-4aaee17a | completed | 43 | 1.9m | 2.7s | 1005525 | 4776 | 8713.4 | 41.4 | 0 | 0 | apply_edits:1 bash:15 edit_file:1 glob:1 grep:4 list_dir:6 read_file:16 write_file:4 |
+
+## Model vs tool time
+| Run | Status | Turns | Wall | Model time | Tool time | model s/turn | tool s/turn | prompt tok/s (model time) | compl tok/s (model time) | slowest tool call |
+|---|---|---|---|---|---|---|---|---|---|---|
+| invoicr-94-feat-add-billing-0823194500-cd825a30 | max_turns | 60 | 2.8m | 2.6m (95%) | 0.1m (5%) | 2.6s | 0.1s | 12204.1 | 51.4 | 1s bash {"command":"cd /work/api/Invoicr.Api && dotnet build --no-restore 2>&1 \| head -80","description":"Build Invoicr.Api w... |
+| invoicr-94-feat-add-billing-0823194926-fa299176 | completed | 9 | 0.7m | 0.5m (72%) | 0.2m (28%) | 3.2s | 1.2s | 3598.6 | 43.9 | 2s bash {"command":"cd /work && dotnet test api/Invoicr.Api.Tests 2>&1","timeout":120000} |
+| invoicr-97-feat-add-requirepro-0823195110-4aaee17a | completed | 43 | 1.9m | 1.5m (79%) | 0.4m (21%) | 2.1s | 0.6s | 11182.7 | 53.1 | 0s bash {"command":"cd /work && ls -la api/Invoicr.Api.Tests/Auth/","description":"Check if test file was created"} |
+
+### Leg D review verdicts
+| Task | Run | Verdict | Notes |
+|---|---|---|---|
+| #94 billing data model + test scaffold | D2 → D2b | **Needs changes** (independent Sonnet review) | 9 files, build clean, 40/40 tests. High: `updated_at` trigger missing from the migration; `xmin` mapped as a real `uint` property (`AppDbContext.cs:209-211`) instead of the spec's shadow property — InMemory tolerates it, Postgres will reject writes. Medium: no `BillingResponse` test; three tautological tests. Low: policy-name comment mismatch; `Plan` inserted mid-record instead of trailing. |
+| #97 RequirePro policy | D3 | **Needs changes** | `PlanAuthorization.cs` + handler tests present and green, but the `Program.cs` policy registration was lost to a sandbox reset that wiped `/gitdir` after the worker's `git stash` (ledger S11) — deliverable incomplete despite the green gate |
+
+## Sampler
+`tools/soak_sampler.sh`, 5 s cadence, 23:04:17Z–00:55:53Z (1,296 samples, `~/.dirtywork/bench/soak-sampler.csv`): free RAM min 0.0 / median 8.0 / max 32.9 GB, inactive 13.3–46.0 GB, with qwen (44.9 GB) + devstral (15.1 GB) resident throughout and Ollama `qwen3.6` (≈27 GB) loaded only for leg C2. Throughput (from the tables): qwen ≈ 1,000–11,000 prompt tok/s and 25–85 completion tok/s; devstral ≈ 300–2,700 / 30–70.
+
+## Feature tally
+| Feature | Fired | Where | Note |
+|---|---|---|---|
+| F1 `apply_edits` | 4/4 | B | one multi-hunk call on both models |
+| F2 `stuck` | 0/12 (+0/2 instructed) | B, B2, B3 | neither model repeats an identical failing command; see ledger S4 |
+| F3 bash timeout | 0/7 neutral; **2/2 instructed** | B, B2, B3 | fires when the task says "run build.sh"; devstral's run then hit S1 |
+| F4 `--verify` | 8/8 (+2 real tasks) | A′, A2, D | round-2 retry fired on qwen; devstral round-2 hit S1 |
+| F5 truncation → `append_file` | 2/2 at 8192; 0/8 at ≤4096 | B, B2 | recovery works only when the self-sized chunk fits (S2, S3) |
+| F6 atomic writes | clean | all 63 runs | no `.dw-tmp.*` anywhere |
+| F7 Ollama | 3/3 | C2 | `/api/ps` window discovery (262,144) |
+| F8 stall | 0 | — | never idle; not provoked |
+| F9 pinned image | all default-image runs | A–C | custom image ⇒ `false` by design (D) |
+| F10 `resume --feedback` | 1/1 | D2b | turned a `max_turns` run into a verified completion |
