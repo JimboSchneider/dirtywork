@@ -198,6 +198,19 @@ def _coerce_duration(value):
     return None
 
 
+def _coerce_param(pspec, value):
+    """Coerce a parameter value based on its spec type.
+    
+    Returns the coerced value, or None if coercion isn't applicable.
+    For duration params (unit="seconds"), uses _coerce_duration.
+    For integer/number params, uses _coerce_numeric_string."""
+    if pspec.unit == "seconds":
+        return _coerce_duration(value)
+    elif pspec.type in ("integer", "number"):
+        return _coerce_numeric_string(pspec.type, value)
+    return None
+
+
 def _validate_against_schema(value, schema: dict, path: str):
     """Validate `value` against the minimal JSON-Schema subset a ParamSpec.schema
     may use (spec §1.3): type, minItems, maxItems, items, properties, required,
@@ -327,7 +340,13 @@ class ToolRegistry:
                 # ParamSpec's dict is shared with every future call. The merge
                 # runs last for both kinds of param, so `description` is always
                 # the final key -- flat and nested render the same way.
-                prop = dict(pspec.schema) if pspec.schema is not None else {"type": pspec.type}
+                if pspec.unit == "seconds":
+                    # Duration params accept both integer and string values
+                    prop = {"type": ["integer", "string"]}
+                elif pspec.schema is not None:
+                    prop = dict(pspec.schema)
+                else:
+                    prop = {"type": pspec.type}
                 if pspec.description:
                     prop["description"] = pspec.description
                 properties[pname] = prop
@@ -363,10 +382,9 @@ class ToolRegistry:
                 continue
             if pname in args:
                 value = args[pname]
-                if pspec.type in ("integer", "number"):
-                    coerced = _coerce_numeric_string(pspec.type, value)
-                    if coerced is not None:
-                        value = coerced   # "5" and 5 must canonicalize the same way execute() sees them
+                coerced = _coerce_param(pspec, value)
+                if coerced is not None:
+                    value = coerced   # "5" and 5, or "2m" and 120 must canonicalize the same way
                 out[pname] = value
             elif pspec.default is not MISSING:
                 out[pname] = pspec.default
