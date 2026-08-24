@@ -200,13 +200,11 @@ def detect_features(run_json: dict, events: list) -> list:
     # event, not just the 1st. The scan below covers every event from right
     # after an assistant(length) event up to (not including) the next
     # `assistant` event, which is exactly that turn's results.
-    written_paths = {
-        path for e in events
-        if e.get("event") == "tool_result" and e.get("tool") == "write_file"
-        and _WRITE_FILE_RE.match(e.get("result") or "")
-        for path in [_event_path(e)]
-        if path is not None
-    }
+    # `written_paths` accumulates DURING the scan so only a successful
+    # write_file that precedes an append can vouch for it -- a write that
+    # happens after the append is not the file the append extended (PR #62
+    # review round 2).
+    written_paths = set()
 
     truncation_active = False
     truncation_path = None      # the specific path a truncated call named, if recoverable
@@ -224,6 +222,11 @@ def detect_features(run_json: dict, events: list) -> list:
                 truncation_active = True
                 truncation_path = _event_path(e)
                 scanning_turn = False
+        if (ev == "tool_result" and e.get("tool") == "write_file"
+                and _WRITE_FILE_RE.match(e.get("result") or "")):
+            written = _event_path(e)
+            if written is not None:
+                written_paths.add(written)
         if (truncation_active and ev == "tool_result" and e.get("tool") == "append_file"
                 and _APPEND_FILE_RE.match(e.get("result") or "")):
             append_path = _event_path(e)

@@ -953,3 +953,24 @@ def test_f5_path_from_truncated_call_result_text_when_args_are_capped():
         {"event": "tool_result", "tool": "append_file", "args": raw[:500], "result": "Appended to bonus/lost.txt: +5 -0"},
     ]
     assert "F5" in detect_features({}, events)
+
+
+def test_f5_ignores_a_write_file_that_comes_after_the_append():
+    """A later write_file must not retroactively vouch for an earlier append
+    (PR #62 review round 2): the write is not the file the append extended."""
+    from soak_harvest import detect_features
+    def a(**kw): return {"event": "assistant", "tool_calls": [], **kw}
+    def r(tool, result, path):
+        return {"event": "tool_result", "tool": tool, "args": '{"path": "%s"}' % path, "result": result}
+    common = [
+        a(finish_reason="length"),
+        {"event": "nudge", "kind": "truncated"},
+        a(finish_reason="tool_calls"),
+        r("append_file", "Appended to out.csv: +10 -0", "out.csv"),
+        a(finish_reason="tool_calls"),
+    ]
+    write_after = common + [r("write_file", "Wrote 12 bytes to out.csv (new file, 1 line)", "out.csv")]
+    assert "F5" not in detect_features({}, write_after)
+    write_before = [a(finish_reason="tool_calls"),
+                    r("write_file", "Wrote 12 bytes to out.csv (new file, 1 line)", "out.csv")] + common
+    assert "F5" in detect_features({}, write_before)
