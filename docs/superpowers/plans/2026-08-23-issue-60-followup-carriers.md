@@ -226,7 +226,7 @@ def test_atomic_close_never_loses_a_racing_write(tmp_path: Path):
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `/usr/bin/python3 -m pytest -q tests/test_transcript.py`
-Expected: the new tests FAIL with `AttributeError: 'Transcript' object has no attribute 'turn'` (and `assert None is not None` shapes); the five pre-existing tests still pass.
+Expected: the new tests FAIL with `AttributeError: 'Transcript' object has no attribute 'turn'` (and `assert None is not None` shapes); the six pre-existing tests still pass.
 
 - [ ] **Step 3: Implement the buffer**
 
@@ -340,7 +340,7 @@ class Transcript:
 - [ ] **Step 4: Run the transcript tests**
 
 Run: `/usr/bin/python3 -m pytest -q tests/test_transcript.py`
-Expected: all pass (5 old + 12 new).
+Expected: all pass (6 old + 12 new).
 
 - [ ] **Step 5: Update the two doc passages that promise per-line flushing**
 
@@ -460,7 +460,7 @@ def test_oracle_skips_a_leading_system_message_only():
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `/usr/bin/python3 -m pytest -q tests/test_providers.py`
-Expected: FAIL at import: `ImportError: cannot import name 'assert_strict_template_legal'`.
+Expected: the module fails to collect (`ImportError: cannot import name 'assert_strict_template_legal'`), so every test in the file is reported as an error until Step 3.
 
 - [ ] **Step 3: Implement the helper**
 
@@ -511,7 +511,7 @@ Expected: all pass.
 - [ ] **Step 5: Full suite and commit**
 
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: `1264 passed` (…+15), 1 skipped, 20 deselected.
+Expected: `1262 passed` (…+13: 7 + 5 parametrized cases + 1), 1 skipped, 20 deselected.
 
 ```bash
 git add tests/provider_doubles.py tests/test_providers.py
@@ -597,8 +597,8 @@ def test_think_only_and_text_tool_call_replies_get_no_placeholder(parts):
     transcript.close()
     assistants = [e for e in _events(tmp) if e["event"] == "assistant"]
     assert all("placeholder" not in e for e in assistants)
-    last = provider.requests[2]
-    assert last[1]["content"] == think                       # the model's own text is what is sent
+    last = provider.requests[2]                              # [system, user(task), assistant, ...]
+    assert last[2]["content"] == think                       # the model's own text is what is sent
 
 
 def test_malformed_only_turn_gets_placeholder_and_a_user_nudge_without_touching_prior_turns(parts):
@@ -670,12 +670,7 @@ def test_third_malformed_entry_strike_ends_after_recording_the_placeholder(parts
     assert events[-2]["event"] == "tool_result"          # the strike itself; no nudge, no user message after it
 ```
 
-And in `tests/test_transcript_schema.py:21` change `ASSISTANT_FIELDS = ["text", "tool_calls", "finish_reason"]` to `ASSISTANT_FIELDS = ["text", "tool_calls", "finish_reason", "placeholder"]`, and in `test_doc_documents_schema_version_v1_v2_statuses_and_nudge_kinds` add after the `RUN_END_FIELDS` loop:
-
-```python
-    for field in ASSISTANT_FIELDS:
-        assert field in tokens, f"assistant field '{field}' is not documented"
-```
+And in `tests/test_transcript_schema.py:24` change `ASSISTANT_FIELDS = ["text", "tool_calls", "finish_reason"]` to `ASSISTANT_FIELDS = ["text", "tool_calls", "finish_reason", "placeholder"]` (the existing `test_doc_documents_every_assistant_field` at `:184` already loops over it — add nothing else).
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -772,7 +767,7 @@ In `docs/transcript-schema.md`, in the `assistant` table after the `finish_reaso
 Run: `/usr/bin/python3 -m pytest -q tests/test_runner.py tests/test_transcript_schema.py`
 Expected: all pass (including `test_a_real_run_emits_the_documented_events`, whose empty-reply turn now emits `placeholder`).
 Run: `/usr/bin/python3 -m pytest -q`
-Expected: `1270 passed` (…+6), 1 skipped, 20 deselected.
+Expected: `1268 passed` (…+6), 1 skipped, 20 deselected.
 
 - [ ] **Step 6: Commit**
 
@@ -906,7 +901,7 @@ def test_last_round_failure_leaves_an_honest_finish_result(parts):
 
 def test_verify_that_cannot_run_leaves_an_honest_finish_result(parts):
     from dirtywork.budget import BudgetExceeded
-    from dirtywork.sandbox.base import SandboxError
+    from dirtywork.sandbox import SandboxError          # the same import runner.py uses
 
     class Raising:
         def __init__(self, exc):
@@ -997,6 +992,7 @@ def test_multiple_finish_calls_in_one_turn_resolve_to_the_same_string(parts):
     assert len(tools) == 2 and tools[0]["content"] == tools[1]["content"]
     assert tools[0]["content"].startswith("VERIFY FAILED (round 1 of 2)")
     assert _finish_results(_events(tmp)) == [tools[0]["content"], tools[1]["content"]]
+    # (Task 5 adds the [finish, bash(timeout), finish] variant: follow_up on f2 only)
 
 
 def test_a_malformed_finish_is_not_terminal_and_is_never_rewritten(parts):
@@ -1309,7 +1305,7 @@ exception left the turn. The summary becomes the run's `final_message`.
 - [ ] **Step 8: Run the suite**
 
 Run: `/usr/bin/python3 -m pytest -q tests/test_runner.py tests/test_builtin_tools.py tests/test_transcript_schema.py`
-Expected: pass. Then `/usr/bin/python3 -m pytest -q` → `1281 passed` (…+11), 1 skipped, 20 deselected.
+Expected: pass. Then `/usr/bin/python3 -m pytest -q` → `1278 passed` (…+10: 9 runner + 1 builtin_tools), 1 skipped, 20 deselected.
 
 - [ ] **Step 9: Commit**
 
@@ -1360,7 +1356,7 @@ with `from .provider_doubles import assert_strict_template_legal` added to the i
 ```
 
 Run: `/usr/bin/python3 -m pytest -q tests/test_runner.py tests/test_main.py tests/test_transcript_schema.py`
-Expected: the tests whose scenarios produce `tool -> user` FAIL with the oracle's "user message directly after a tool result" message (at least `test_runner_stalled_status_after_idle_turns`, `test_one_timeout_nudge_per_turn_even_with_two_timeouts`, `test_timeout_nudge_merges_with_the_stall_nudge`, `test_verify_feedback_carries_the_timeout_nudge_from_the_same_turn`, `test_malformed_entries_on_stall_nudge_turn_send_one_merged_user_message`). Note the list; every one must pass by Step 6.
+Expected: the tests whose scenarios produce `tool -> user` FAIL with the oracle's "user message directly after a tool result" message (at least `test_runner_stalled_status_after_idle_turns`, `test_one_timeout_nudge_per_turn_even_with_two_timeouts`, `test_timeout_nudge_merges_with_the_stall_nudge`, `test_verify_feedback_carries_the_timeout_nudge_from_the_same_turn`; `test_malformed_entries_on_stall_nudge_turn_send_one_merged_user_message` stays green — its nudge turn is malformed-only, so the carrier is already a `user` after the placeholder). Note the list; every one must pass by Step 6.
 
 - [ ] **Step 2: Write the new and updated runner tests**
 
@@ -1394,6 +1390,12 @@ Update `test_malformed_entries_on_stall_nudge_turn_send_one_merged_user_message`
 ```python
     kinds = [(e["kind"], e["via"]) for e in _events(tmp) if e["event"] == "nudge"]
     assert kinds == [("stall", "user"), ("malformed_entry", "user")]
+```
+
+Update Task 3's `test_malformed_only_turn_gets_placeholder_and_a_user_nudge_without_touching_prior_turns`: replace its last line (`assert [e["event"] for e in events if e["event"] == "nudge"] == []   # (Task 5 adds malformed_entry)`) with
+
+```python
+    assert [(e["kind"], e["via"]) for e in events if e["event"] == "nudge"] == [("malformed_entry", "user")]
 ```
 
 Update `test_one_timeout_nudge_per_turn_even_with_two_timeouts` (`:1518`): replace from `# the nudge text reached the model as the next user message` to the end with
@@ -1493,7 +1495,28 @@ def test_mixed_turn_finish_first_then_timeout(parts):
     assert tools[1]["content"].endswith("\n\n" + TIMEOUT_NUDGE)
     f1, b1 = _tool_events(events)
     assert "follow_up" not in f1 and b1["follow_up"] == TIMEOUT_NUDGE
-    assert result.status == "completed"
+    # the verify command fails on the plain-answer round too and no round is left
+    assert result.status == "verify_failed"
+
+
+def test_two_finish_calls_around_a_timeout_put_the_follow_up_on_the_last_call_only(parts):
+    # Spec §9.3: both terminal results resolve to the same string; the follow_up
+    # attaches only to the turn's last addressable call, which is f2 here.
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "a"}), _bash_call("b1"),
+                          _call("f2", "finish", {"summary": "b"})]),
+        _resp(content="ok"),
+    ])
+    r = Runner(provider, registry, _TimeoutThenFailingVerifySandbox("npm test"), transcript,
+               model="m", verify="npm test", verify_rounds=1)
+    r.run("s", "t")
+    transcript.close()
+    f1, b1, f2 = _tool_events(_events(tmp))
+    assert f1["result"] == f2["result"] and f1["result"].startswith("VERIFY FAILED")
+    assert "follow_up" not in f1 and "follow_up" not in b1 and f2["follow_up"] == TIMEOUT_NUDGE
+    tools = [m for m in provider.requests[1] if m["role"] == "tool"]
+    assert tools[2]["content"] == f2["result"] + "\n\n" + TIMEOUT_NUDGE
 
 
 def test_mixed_turn_timeout_finish_timeout_carrier_is_the_last_call(parts):
@@ -1515,10 +1538,20 @@ def test_mixed_turn_timeout_finish_timeout_carrier_is_the_last_call(parts):
     assert [e["kind"] for e in _events(tmp) if e["event"] == "nudge"] == ["timeout"]
 
 
+class _TimeoutThenPassingVerifySandbox(_TimeoutThenFailingVerifySandbox):
+    """Worker bash calls time out; the --verify command passes."""
+
+    def bash(self, command, timeout=120):
+        if command == self.verify_command:
+            return "exit code: 0\n"
+        return super().bash(command, timeout)
+
+
 def test_mixed_turn_finish_first_then_timeout_with_passing_verify_ends_clean(parts):
     wt, registry, sandbox, transcript, tmp = parts
     provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "s"}), _bash_call("b1")])])
-    r = Runner(provider, registry, _TimeoutSandbox(), transcript, model="m")
+    r = Runner(provider, registry, _TimeoutThenPassingVerifySandbox("npm test"), transcript,
+               model="m", verify="npm test")
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -1566,6 +1599,9 @@ def test_transcript_equals_wire_for_every_tool_and_assistant_message(parts):
             if command == self.verify_command:
                 return "exit code: 1\n" + "y" * 3000
             return super().bash(command, timeout)
+
+        def read_file(self, path, offset=0, limit=400):   # turn 1 reads f.txt; keep it under the preview cap
+            return "data\n"
 
     provider = FakeProvider([
         _resp(tool_calls=[_bash_call("b1"), _call("c1", "read_file", {"path": "f.txt"})]),
@@ -1723,7 +1759,7 @@ Then the four delivery sites inside `one_turn()`:
                 return None
 ```
 
-`dirtywork/bench.py:48`: `NUDGE_KINDS = ("stall", "empty", "truncated", "text_tool_call", "timeout", "malformed_entry")`.
+`dirtywork/bench.py:48`: `NUDGE_KINDS = ("stall", "empty", "truncated", "text_tool_call", "timeout", "malformed_entry")`, and the legend at `dirtywork/bench.py:775` becomes `print("nudges: " + "/".join(NUDGE_KINDS))` so it can never drift again; update `tests/test_bench.py:793` to assert `"nudges: stall/empty/truncated/text_tool_call/timeout/malformed_entry" in out`.
 
 - [ ] **Step 4: Documentation rows**
 
@@ -1759,7 +1795,7 @@ strict chat templates (Mistral/Devstral) reject.
 - [ ] **Step 5: Run the suite**
 
 Run: `/usr/bin/python3 -m pytest -q tests/test_runner.py tests/test_main.py tests/test_transcript_schema.py tests/test_bench.py tests/test_provider_openai.py tests/test_provider_ollama.py tests/test_soak_tools.py`
-Expected: pass — including every test from the Step 1 failure list. Then `/usr/bin/python3 -m pytest -q` → `1296 passed` (…+15), 1 skipped, 20 deselected.
+Expected: pass — including every test from the Step 1 failure list. Then `/usr/bin/python3 -m pytest -q` → `1292 passed` (…+14: 8 plain + 4 parametrized scenario cases + 1 anthropic-order + 1 openai + 1 ollama, minus nothing), 1 skipped, 20 deselected. If your count differs by one or two, recount the tests you added rather than hunting for phantom ones — "all green and the count rose by what you added" is the gate.
 
 - [ ] **Step 6: Commit**
 
@@ -1794,10 +1830,8 @@ ADVERSARIAL_FOLLOW_UP = "```\n> quoted\n# heading\n</details>\r\nlast line"
 
 
 def _followup_run(tmp_path):
-    runs_dir = tmp_path / "runs"
-    run_dir = runs_dir / "fu1"
-    run_dir.mkdir(parents=True)
-    _write_run(runs_dir, "fu1", {
+    # _write_run creates the run dir itself (tests/test_runs.py:33-37)
+    run_dir = _write_run(tmp_path / "runs", "fu1", {
         "slug": "fu1", "task": "t", "status": "verify_failed", "repo": "/r", "worktree": "/w",
         "model": "m", "provider": "openai", "turns": 2, "started": "2026-08-23T00:00:00+00:00",
         "sandbox": "none",
@@ -1942,7 +1976,7 @@ def _tool_result_outcome(result_text, tool=None) -> str:
 
 - [ ] **Step 5: Run and commit**
 
-Run: `/usr/bin/python3 -m pytest -q tests/test_runs.py` then the full suite → `1299 passed` (…+3).
+Run: `/usr/bin/python3 -m pytest -q tests/test_runs.py` then the full suite → `1295 passed` (…+3).
 
 ```bash
 git add dirtywork/runs.py tests/test_runs.py docs/transcript-schema.md docs/operating.md
@@ -2072,12 +2106,12 @@ and `run_end.verify` (last round's tail).
 
 `docs/machine-contract.md:339-340`: change `` `nudge` (`{"event": "nudge", "kind": "truncated|empty|text_tool_call|stall", "turn": N}`) `` to `` `nudge` (`{"event": "nudge", "kind": "truncated|empty|text_tool_call|stall|timeout|malformed_entry", "turn": N, "via": "tool_result|user"}` — since 1.0 a nudge on a tool-call turn rides on the turn's last `tool_result` (its `follow_up` field) and never as a user message after a tool result; the history never carries two consecutive user messages) ``.
 
-`docs/machine-contract.md:356`: replace `followed by a `tool_result` event whose `result` is `run finished`;` with `followed by a `tool_result` event whose `result` is `run finished` only when the run ends `completed` — otherwise the verify feedback text (a fix round follows) or a `run not finished: …` reason (see `transcript-schema.md`);`.
+`docs/machine-contract.md:356`: replace `followed by a `tool_result` event whose `result` is `run finished`;` with `followed by a `tool_result` event whose `result` is `run finished` only when the run ends `completed` — otherwise the verify feedback text (a fix round follows) or a `run not finished: …` reason (see `transcript-schema.md`);`. Then append, as its own paragraph right after that sentence's paragraph: `Since 1.0 the history sent to the model obeys two rules (#60): a harness follow-up never directly follows a tool result — it rides on the turn's last `tool_result` as `follow_up`, or is the `finish` result — and an assistant reply with no tool call and no text is stored as `[empty reply]` (`assistant.placeholder`), so strict chat templates never see a dropped turn or a user message after a tool result.`
 
 - [ ] **Step 5: Run and commit**
 
-Run: `/usr/bin/python3 -m pytest -q tests/test_transcript_schema.py tests/test_runner.py` then the full suite → `1300 passed` (…+1).
-Also run `grep -rn "next user message\|as a user message\|flushed per line\|flushed immediately" docs/*.md dirtywork/*.py` and confirm every hit is either historical (`docs/2026-08-14-*.md`) or already rewritten.
+Run: `/usr/bin/python3 -m pytest -q tests/test_transcript_schema.py tests/test_runner.py` then the full suite → `1296 passed` (…+1). (Task 8 adds four `live`-marked cases, so the default run then reports `24 deselected`.)
+Also run `grep -rn "next user message\|as a user message\|flushed per line\|flushed immediately" docs/*.md dirtywork/*.py` and confirm every hit is either historical (`docs/2026-08-14-*.md`), already rewritten, or one of the two correct descriptions of the plain-answer carrier this plan itself adds (the `verify.via` row in `transcript-schema.md` and `deliver()`'s docstring in `runner.py`).
 
 ```bash
 git add docs/ tests/provider_doubles.py tests/test_runner.py tests/test_transcript_schema.py
