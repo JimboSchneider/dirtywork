@@ -146,6 +146,37 @@ the export runs.
 | `passed` | | ✓ | boolean | true only for exit code 0 |
 | `via` | | ✓ | string | 1.0 (#60): **sparse** — present only when feedback for another round was delivered: `finish_result` (the feedback became the `finish` call's result) or `user` (the worker answered in prose, so the feedback is the next user message) |
 
+### Wire shape (1.0, #60)
+
+Two rules the runner enforces on the history it sends every provider:
+
+- **R1 — a harness follow-up never directly follows a tool result.** On a turn
+  with at least one addressable tool call, verify feedback becomes the
+  `finish` call's own `result` and every nudge is appended to that turn's
+  last tool result (`follow_up`); on a turn with none, the follow-up is the
+  next `user` message.
+- **R2 — an assistant history entry is never droppable.** A reply with no
+  addressable tool call and no non-whitespace text is stored as
+  `[empty reply]` (`assistant.placeholder`).
+
+Mistral-family templates count only `user` messages and tool-call-free
+assistant messages and require them to alternate; a `user` after a `tool`,
+or after an assistant message the server dropped as empty, is an HTTP 400.
+
+**Reconstructing what the model was sent.** A tool message is
+`result + "\n\n" + follow_up` (`result` alone without a `follow_up`); an
+assistant message is `placeholder` when present, else `text`. Three limits:
+a non-`finish` `result` is the 2000-char preview (exact only under the cap;
+`follow_up` and `finish` results are always exact); on later turns
+`trim_messages` replaces the oldest tool results in *history* with
+`[result trimmed — re-run the tool if needed]` (their `follow_up` included)
+and the transcript records only `run_end.trimmed_turns`, not which results —
+so the transcript is exact for what the model saw *when the result was
+produced*, not for what a later request re-sent; user-carried nudges are
+recorded by `kind` and `via` only (the stall count and the malformed count are
+not transcribed), and plain-answer verify feedback is summarized by `verify`
+and `run_end.verify` (last round's tail).
+
 ### `run_end`
 
 One per run, always the last line. Written by the runner on every terminal

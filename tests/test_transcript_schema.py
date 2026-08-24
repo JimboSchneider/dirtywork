@@ -185,3 +185,50 @@ def test_doc_documents_every_assistant_field():
     tokens = _doc_tokens()
     for field in ASSISTANT_FIELDS:
         assert field in tokens, f"assistant field '{field}' is not documented in {DOC.name}"
+
+
+class _FollowUpProvider(DictProvider):
+    """Turn 1: a wire body whose tool_calls entry has no id (-> malformed_entry)
+    beside a bash call that times out; turn 2: finish into a failing verify with
+    one round left; turn 3: a plain answer (verify fails again; run ends
+    verify_failed). Emits follow_up, nudge.via, verify.via, malformed_entry."""
+
+    def reply(self, model, history, tools):
+        if self.calls == 1:
+            body = tool_call_body("bash", {"command": "sleep 999"}, call_id="b1")
+            body["choices"][0]["message"]["tool_calls"].insert(
+                0, {"type": "function", "function": {"name": "bash", "arguments": "{}"}})
+            return body
+        if self.calls == 2:
+            return tool_call_body("finish", {"summary": "s"}, call_id="f1")
+        return text_body("done")
+
+
+def test_a_verify_run_emits_the_documented_follow_up_fields(tmp_path):
+    from dirtywork.sandbox.host import HostSandbox   # noqa: F401  (kept for parity with the sibling test)
+    from .provider_doubles import TimeoutThenFailingVerifySandbox
+    transcript = Transcript(tmp_path / "t.jsonl")
+    registry = default_registry(transcript=transcript)
+    r = Runner(_FollowUpProvider(), registry, TimeoutThenFailingVerifySandbox("npm test"), transcript,
+               model="m", verify="npm test", verify_rounds=1)
+    result = r.run("s", "t")
+    transcript.close()
+    events = [json.loads(l) for l in (tmp_path / "t.jsonl").read_text().splitlines()]
+    assert result.status == "verify_failed"
+    tool_events = [e for e in events if e["event"] == "tool_result"]
+    assert any("follow_up" in e for e in tool_events)
+    kinds = {(e["kind"], e["via"]) for e in events if e["event"] == "nudge"}
+    assert {("malformed_entry", "tool_result"), ("timeout", "tool_result")} <= kinds
+    verify_events = [e for e in events if e["event"] == "verify"]
+    assert verify_events[0]["via"] == "finish_result" and "via" not in verify_events[1]
+    finish = next(e for e in tool_events if e["tool"] == "finish")
+    assert finish["result"].startswith("VERIFY FAILED")
+    documented = _doc_tokens()
+    for e in events:
+        for key in e:
+            if key in ("ts", "event"):
+                continue
+            assert key in documented, f"{e['event']}.{key} is not documented in {DOC.name}"
+    text = DOC.read_text(encoding="utf-8")
+    for phrase in ("run not finished", "Wire shape", "malformed_entry", "finish_result"):
+        assert phrase in text

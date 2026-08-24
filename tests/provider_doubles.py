@@ -100,3 +100,19 @@ def assert_strict_template_legal(history: list) -> None:
                                  f"counted messages (got {role} at counted index {index}): "
                                  f"{messages}")
         index += 1
+
+
+class TimeoutThenFailingVerifySandbox:
+    """Shared with test_transcript_schema (spec #60 §9.15).
+    Worker bash calls time out; the --verify command runs "for real" and
+    fails with a plain nonzero exit -- distinguished by command so the
+    verify-failure text stays clean instead of itself reading as a timeout."""
+
+    def __init__(self, verify_command):
+        self.verify_command = verify_command
+
+    def bash(self, command, timeout=120):
+        if command == self.verify_command:
+            return "exit code: 1\nboom"
+        from dirtywork.tools import timeout_result
+        return timeout_result(timeout)

@@ -36,6 +36,7 @@ from dirtywork.builtin_tools import default_registry
 from dirtywork.transcript import Transcript
 
 from .provider_doubles import assert_strict_template_legal
+from .provider_doubles import TimeoutThenFailingVerifySandbox as _TimeoutThenFailingVerifySandbox
 
 
 def _resp(content=None, tool_calls=None, usage=None, finish_reason=None):
@@ -1751,21 +1752,6 @@ def test_no_timeout_nudge_when_the_turn_ends_the_run(parts):
     assert result.status == "completed"
     assert [e for e in _events(tmp) if e["event"] == "nudge"] == []
     assert result.extra["timeouts"] == 1       # the COUNT is unaffected by finishing
-
-
-class _TimeoutThenFailingVerifySandbox:
-    """Worker bash calls time out; the --verify command runs "for real" and
-    fails with a plain nonzero exit -- distinguished by command so the
-    verify-failure text stays clean instead of itself reading as a timeout."""
-
-    def __init__(self, verify_command):
-        self.verify_command = verify_command
-
-    def bash(self, command, timeout=120):
-        if command == self.verify_command:
-            return "exit code: 1\nboom"
-        from dirtywork.tools import timeout_result
-        return timeout_result(timeout)
 
 
 def test_verify_feedback_carries_the_timeout_nudge_from_the_same_turn(parts):
