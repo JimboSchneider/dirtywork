@@ -2001,6 +2001,38 @@ def test_finish_flushes_the_turn_before_finalize(parts):
     assert _events(tmp)[-1]["event"] == "run_end"
 
 
+def test_interrupt_inside_finalize_does_not_run_the_export_twice(parts):
+    # Owner-found P2 on PR #68: finalize() (the docker export) is not
+    # idempotent. A Ctrl-C landing inside it propagates out of finish() into
+    # the turn's interrupt handler, which calls finish("interrupted"); that
+    # second call must not export again, must say what happened, and must
+    # write exactly one run_end.
+    wt, registry, sandbox, transcript, tmp = parts
+    calls = []
+
+    def finalize():
+        calls.append(1)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        return {"export_status": "ok"}
+
+    provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "s"})])])
+    r = Runner(provider, registry, sandbox, transcript, model="m", finalize=finalize)
+    result = r.run("s", "t")
+    transcript.close()
+    assert calls == [1]                                    # exported once
+    assert result.status == "interrupted"
+    assert result.extra["finalize_error"] == "KeyboardInterrupt: interrupted during finalize"
+    assert "export_status" not in result.extra
+    events = _events(tmp)
+    assert [e["event"] for e in events].count("run_end") == 1
+    assert events[-1]["status"] == "interrupted"
+    assert events[-1]["finalize_error"] == "KeyboardInterrupt: interrupted during finalize"
+    # the finish result stays `run finished`: the agent loop DID end completed
+    # (contract: an interrupt after that point is reported in run_end.status)
+    assert _finish_results(events) == [FINISH_DONE]
+
+
 def test_mutating_tools_includes_every_tool_that_changes_a_file():
     # Spec §6: a run whose only progress is inserts/batches/appends must not be
     # called stalled. _MUTATING_TOOLS is what ProgressTracker reads.

@@ -358,7 +358,7 @@ null unless the watchdog killed the container), `watchdog_violation_kind`
 host-disk-floor breach, `"sandbox_error"` for the watchdog's own
 worktree-sampling exec failing twice; otherwise `null`), and
 `finalize_error` (set when the finalize/export step itself raised an
-exception after the agent loop otherwise finished; `null` normally)).
+exception after the agent loop otherwise finished; `null` normally; `KeyboardInterrupt: interrupted during finalize` when an interrupt landed inside the export — the export is attempted once and never re-run, and `run_end.status` is `interrupted`)).
 A `finish(summary=...)` call appears in the transcript as an ordinary tool call in its `assistant` event followed by a `tool_result` event whose `result` is `run finished` when the agent loop ended `completed` (an interrupt or export failure *after* that point is reported in `run_end.status` / the CLI status, not here) — otherwise the verify feedback text (a fix round follows) or a `run not finished: …` reason (see `transcript-schema.md`); the summary becomes the run's `final_message`.
 
 Since 1.0 the history sent to the model obeys two rules (#60): a harness follow-up never directly follows a tool result — it rides on the turn's last `tool_result` as `follow_up`, or is the `finish` result — and an assistant reply with no tool call and no text is stored as `[empty reply]` (`assistant.placeholder`), so strict chat templates never see a dropped turn or a user message after a tool result.

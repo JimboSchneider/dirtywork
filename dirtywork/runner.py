@@ -638,7 +638,31 @@ class Runner:
                 last_assistant_text = transcript_text[:LAST_TEXT_CHARS]
             messages.append(assistant_message(fields.get("placeholder", text), tool_calls))
 
+        # A run finishes once. finalize() (docker mode: the export -- git add,
+        # patch, worktree sampling) is not idempotent, but a KeyboardInterrupt
+        # landing inside it propagates out of finish() (BaseException; the
+        # except below only catches Exception) into the turn's interrupt
+        # handler, which calls finish("interrupted") again. This state makes
+        # the second call skip the export it already started and say so, and
+        # keeps run_end to a single record.
+        finalize_state = {"attempted": False, "done": False, "result": None, "error": None}
+        run_end_written = False
+
+        def run_finalize() -> None:
+            if finalize_state["attempted"]:
+                if not finalize_state["done"]:
+                    finalize_state["error"] = "KeyboardInterrupt: interrupted during finalize"
+                    finalize_state["done"] = True
+                return
+            finalize_state["attempted"] = True
+            try:
+                finalize_state["result"] = self.finalize()
+            except Exception as e:
+                finalize_state["error"] = f"{type(e).__name__}: {e}"
+            finalize_state["done"] = True
+
         def finish(status: str, final: str) -> RunResult:
+            nonlocal run_end_written
             # Spec #60 §4(c): the single exit point resolves any terminal record
             # the verify path never reached (a later call raised, the failure
             # tracker aborted, Ctrl-C) -- then flushes the turn so its evidence
@@ -658,19 +682,17 @@ class Runner:
                            "trimmed_turns": trimmed_turns,
                            "timeouts": timeouts,
                            "context_window_source": self.context_window_source}
-            finalize_error = None
             if self.finalize is not None:
-                try:
-                    finalize_result = self.finalize()
-                    if isinstance(finalize_result, dict):
-                        extra.update(finalize_result)
-                except Exception as e:
-                    finalize_error = f"{type(e).__name__}: {e}"
-            if finalize_error is not None:
-                extra["finalize_error"] = finalize_error
-            self.transcript.write("run_end", status=status, turns=turns,
-                                  duration_s=round(time.monotonic() - start, 1),
-                                  usage=usage, **extra)
+                run_finalize()
+                if isinstance(finalize_state["result"], dict):
+                    extra.update(finalize_state["result"])
+                if finalize_state["error"] is not None:
+                    extra["finalize_error"] = finalize_state["error"]
+            if not run_end_written:
+                self.transcript.write("run_end", status=status, turns=turns,
+                                      duration_s=round(time.monotonic() - start, 1),
+                                      usage=usage, **extra)
+                run_end_written = True
             return RunResult(status, turns, final, usage, extra=extra)
 
         def check_progress():
