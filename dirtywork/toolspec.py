@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import posixpath
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -43,6 +44,7 @@ class ParamSpec:
     description: str = ""
     default: Any = MISSING
     schema: dict | None = None
+    unit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +151,48 @@ def _check_scalar(ptype: str, value, label: str):
     return coerced
 
 
+# Compiled regex for duration string parsing: digits followed by optional whitespace and unit
+_DURATION_REGEX = re.compile(r'^\s*(\d+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes)\s*$', re.IGNORECASE)
+
+
+def _coerce_duration(value):
+    """Convert a duration value to seconds (int).
+
+    Accepts:
+      - int (but not bool): returns as-is
+      - string of digits: parses as seconds via int()
+      - string with unit suffix (s/sec/secs/second/seconds/m/min/mins/minute/minutes):
+        parses and multiplies accordingly (case-insensitive)
+
+    Returns None for anything else: "60ms", "1.5s", "-5s", "", "abc", "s",
+    floats, bools, None.
+    """
+    # Booleans are ints in Python but we never want to accept them
+    if isinstance(value, bool):
+        return None
+    # int: return as-is
+    if isinstance(value, int):
+        return value
+    # string: try to parse as duration or plain number
+    if isinstance(value, str):
+        # Try parsing as a plain integer first (for backward compatibility)
+        try:
+            return int(value)
+        except ValueError:
+            pass
+        # Try parsing as a duration string
+        match = _DURATION_REGEX.match(value)
+        if match:
+            num = int(match.group(1))
+            unit = match.group(2).lower()
+            if unit in ('s', 'sec', 'secs', 'second', 'seconds'):
+                return num
+            elif unit in ('m', 'min', 'mins', 'minute', 'minutes'):
+                return num * 60
+        return None
+    return None
+
+
 def _validate_against_schema(value, schema: dict, path: str):
     """Validate `value` against the minimal JSON-Schema subset a ParamSpec.schema
     may use (spec §1.3): type, minItems, maxItems, items, properties, required,
@@ -235,7 +279,15 @@ def _validate_args(spec: ToolSpec, args: dict) -> dict:
                 # so a tool function never has to re-check nested item shapes.
                 call_args[pname] = _validate_against_schema(value, pspec.schema, pname)
                 continue
-            value = _check_scalar(pspec.type, value, f"parameter '{pname}'")
+            # Special handling for duration params (unit="seconds")
+            if pspec.unit == "seconds":
+                coerced = _coerce_duration(value)
+                if coerced is None:
+                    raise ToolValidationError(
+                        f"parameter {pname!r} must be {pspec.description} — got {value!r}")
+                value = coerced
+            else:
+                value = _check_scalar(pspec.type, value, f"parameter '{pname}'")
             call_args[pname] = value
         elif pspec.default is not MISSING:
             call_args[pname] = pspec.default
