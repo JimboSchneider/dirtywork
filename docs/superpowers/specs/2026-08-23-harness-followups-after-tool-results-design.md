@@ -11,7 +11,12 @@ before verify), 12 Importants and the Minors that survived, each marked *(v2)* w
 the design. v3 folds in a two-agent closure/consistency pass on v2 (22:46 CDT): 1 Blocker (§4/§6.1
 — the `KeyboardInterrupt` handler sits outside the loop, so the turn would flush the provisional
 string before `finish()` resolved it), the true count of delivery/append sites, the `verify.via`
-writer, and five Minors, marked *(v3)*. Owner review pending.
+writer, and five Minors, marked *(v3)*. **v4 — approved by the owner (2026-08-23 22:53 CDT)
+with four amendments folded, marked *(v4)*:** the equivalence claim narrowed for `trim_messages`
+and the preview cap (§6.4); turn close made atomic under the lock (§6.1); safe Markdown rendering
+of `follow_up` through the existing fence helper with an adversarial test (§6.3, §9.14); the
+`run_start.config.stall_turns` reconstruction claim removed (no such field exists). Placeholder
+wording and turn-granularity flushing accepted as stated.
 **Origin:** issue #60, milestone **1.0.0 — contract freeze**. Evidence: `#48` soak rows
 `F4b-round2-dev` (leg A2), `F5-trunc2048-dev-r1` (leg B2), `F3v2-run-dev` (leg B3);
 `docs/superpowers/bench/2026-08-23-v1-soak-sdd-ledger.md`.
@@ -29,9 +34,9 @@ template the runner talks to will render. Today five harness follow-ups can land
 message directly after a `tool` result, and Mistral-family templates (Devstral Small 2 on
 LM Studio, the documented second worker) reject that with HTTP 400 → `model_error`. After this
 spec the runner's neutral history is legal for strict templates *by construction*; the `finish`
-tool result is honest on every path the run can take; and every tool and assistant message the
-model was sent is reconstructable from the transcript (user-carried harness text is recorded by
-kind, as today — §6.4 states the exact scope).
+tool result is honest on every path the run can take; and every tool and assistant message is
+recorded as the model was sent it on the turn it was produced, within the caps §6.4 states
+(user-carried harness text is recorded by kind, as today).
 
 ## 1. The failure (facts, measured 2026-08-23)
 
@@ -275,6 +280,12 @@ exists today and would otherwise survive)*. A write from any thread while a turn
 buffered (it lands in order with the turn); a write while no turn is open goes straight to disk
 under the same lock. No record can be lost between the flush loop and the clear.
 
+*(v4)* **Atomic close — a `turn()` invariant.** Leaving a turn is one critical section under the
+lock: flush every buffered record, then mark the turn closed. A write from another thread
+therefore either takes the lock before the close (it is buffered and flushed with the turn) or
+after it (it sees no open turn and writes directly). There is no instant at which a record can
+enter the buffer and then be cleared unflushed. Every record written is on disk exactly once.
+
 *(v2)* **`finish()` flushes before the export.** The `finish(status, final)` closure resolves the
 turn's terminal records (§4c), calls `transcript.flush()`, *then* `finalize()` (in docker mode the
 full export, minutes at worst), then writes `run_end`. The turn's evidence is therefore on disk
@@ -318,21 +329,39 @@ transcripts):
   ` +follow_up` when the key is present; an `assistant` line gains ` (sent as: [empty reply])`
   when `placeholder` is present.
 - Markdown export (`_md_event_lines`, `:354-375`): after a `tool_result`'s `<details>` block,
-  `> **harness → model:** <follow_up>` as a blockquote; after an assistant line,
-  `(sent as: <placeholder>)`. *(v3)* A `finish` result is exempt from `_md_trim`'s
+  a `> **harness → model:**` callout line followed by the follow-up text as a fenced block through
+  the existing `_md_block`/`_md_fence` helpers (`:327-337` — the fence is longer than any backtick
+  run inside the text), **never** as raw blockquoted text *(v4: verify output and the operator's
+  command can contain newlines, backticks, `>`, headings or `</details>`, any of which would
+  corrupt a raw blockquote)*; after an assistant line, `(sent as: <placeholder>)` through
+  `_md_inline`. *(v3)* A `finish` result is exempt from `_md_trim`'s
   `MD_RESULT_CHARS` (`:319`, `:366`) for the same reason it is exempt from the transcript preview
   cap — otherwise the review artifact would reproduce the F4b truncation the transcript no longer
   has.
 - `_tool_result_outcome` (`:266-282`): a `finish` result other than `run finished` renders
   `[not finished]` instead of `[ok]` in both renderers.
 
-### 6.4 Scope of the equivalence claim *(v2)*
+### 6.4 Scope of the equivalence claim *(v2, v4)*
 
-Every tool and assistant message the model was sent is reconstructable from the transcript by the
-§6.2 rule. User-carried harness text is recorded by `nudge.kind` (+`via`), from which the text
-follows via the constants and `run_start.config` (`stall_turns`) — except the malformed count,
-which stays untranscribed as today; plain-answer verify feedback remains summarized by the
-`verify` event and `run_end.verify` (last round's tail only), as today. No `user` event is added.
+The transcript records each tool and assistant message **as the model was sent it on the turn it
+was produced**, by the §6.2 rule, with three stated limits:
+
+- **Preview cap.** A non-`finish` tool result is recorded through the 2000-char preview
+  (`Caps.transcript="preview"`, unchanged); its `follow_up` is exact, its `result` is exact only
+  under the cap. `finish` results are exact (`full`).
+- **Trimming.** On later turns `trim_messages` (`runner.py:428-446`) replaces the oldest tool
+  results in *history* with `TRIM_MARKER`; the transcript keeps the original event and does not
+  record per-message which results were trimmed on which turn — only `run_end.trimmed_turns`
+  (turns on which trimming happened) says that it occurred. A trimmed result loses its
+  `follow_up` along with its text on the wire (§11). So the transcript is exact for what the
+  model saw *when the result was produced*, not for what a later request re-sent.
+- **User-carried text.** Recorded by `nudge.kind` (+`via`) only; the stall count `n` and the
+  malformed count are not transcribed, as today. Plain-answer verify feedback remains summarized
+  by the `verify` event and `run_end.verify` (last round's tail only), as today. No `user` event
+  is added.
+
+The "Wire shape" subsection §8 adds to `docs/transcript-schema.md` states these three limits in
+the same words.
 
 ## 7. Providers
 
@@ -375,8 +404,8 @@ rewritten; nothing is left implying "the next user message" or `run finished` un
   section at `:82-93` (carrier rule, `via`, `malformed_entry`; the kinds list there already has
   `timeout`); `verify` table (+`via`); `:263-273` (`runs show` callouts, and `:269`'s "the same
   2000-char preview the transcript itself applies" → "the transcript's preview cap; `finish`
-  results are shown in full" *(v3)*); a short **"Wire shape"** subsection stating R1/R2 and the
-  §6.2 reconstruction rule.
+  results are shown in full" *(v3)*); a short **"Wire shape"** subsection stating R1/R2, the
+  §6.2 reconstruction rule and the three §6.4 limits *(v4)*.
 - `dirtywork/runs.py:319` comment (`# the transcript's own preview cap`) *(v3)*.
 - Dated session logs under `docs/` (`2026-08-14-building-localagent.md:70`, `:181` say "flushed
   per line") are historical record and are left as written *(v3)*.
@@ -443,7 +472,10 @@ provider, sandbox and runner kwargs), so test 12 iterates them instead of copyin
     `KeyboardInterrupt` raised inside the block flushes before propagating; a record resolved
     inside an `except` handler within the block is written resolved *(v3)*; `flush()` mid-turn
     writes and keeps the turn open; a write from another thread during `turn()` is on disk after
-    exit; `write()` outside a turn is immediate; `close()` flushes *(v2)*.
+    exit; `write()` outside a turn is immediate; `close()` flushes *(v2)*; *(v4)* **atomic
+    close** — a thread writing in a tight loop while the main thread exits the turn (repeated
+    over many iterations): every record it wrote is on disk exactly once, none lost, none
+    duplicated, and the buffered ones precede any written after the close.
 12. **All three providers** — the shared scenarios of tests 1, 2, 4 and 7 serialized through
     `_to_openai_messages` (OpenAI and Ollama) pass the helper, and through the Anthropic
     serializer pass `_assert_alternating` with `tool_result` block ids in call order
@@ -462,7 +494,11 @@ provider, sandbox and runner kwargs), so test 12 iterates them instead of copyin
     finish event); `:1345` has no shape assertion and is unchanged.
 14. **`runs show`** — one test per renderer for `follow_up`, `placeholder` and `[not finished]`,
     and the Markdown export showing a >2000-char `finish` result untrimmed *(v3)*; old-shape
-    events without the keys still render.
+    events without the keys still render. *(v4)* **Adversarial follow-up:** a `follow_up`
+    containing a triple-backtick fence, a line starting `> `, a `# heading`, `</details>` and
+    CRLF line ends — the export has balanced fences (`_balance_fences` adds nothing), the text
+    appears verbatim inside one fenced block, and no line of it is rendered as a heading,
+    blockquote or HTML.
 15. **Schema coverage** *(v2, v3)* — a second `test_transcript_schema` scenario: a turn whose
     wire body carries a `tool_calls` entry without an `id` (→ `malformed_entry` through
     `parse_chat_response`), then a bash that times out + `finish` + failing verify with
