@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import posixpath
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -37,12 +38,18 @@ class ParamSpec:
     on tool name for anything in runner._MUTATING_TOOLS before it ever hashes
     canonical_args), which is the only kind of tool a schema-bearing param is
     expected to belong to. Leave it None for a flat param and nothing about
-    that param changes."""
+    that param changes.
+
+    ``unit="seconds"`` makes ``_validate_args`` coerce the value with
+    ``_coerce_duration`` instead of ``_check_scalar``, and build a rejection
+    message from the param's ``description`` (so that description must read as a
+    "must be …" predicate); ``schemas()`` never emits ``unit``."""
 
     type: str
     description: str = ""
     default: Any = MISSING
     schema: dict | None = None
+    unit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +156,61 @@ def _check_scalar(ptype: str, value, label: str):
     return coerced
 
 
+# Compiled regex for duration string parsing: digits followed by optional whitespace and unit
+_DURATION_REGEX = re.compile(r'^\s*(\d{1,9})\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes)\s*$', re.IGNORECASE | re.ASCII)
+
+
+def _coerce_duration(value):
+    """Convert a duration value to seconds (int).
+
+    Accepts:
+      - int (but not bool): returns as-is
+      - string of digits: parses as seconds via int()
+      - string with unit suffix (s/sec/secs/second/seconds/m/min/mins/minute/minutes):
+        parses and multiplies accordingly (case-insensitive)
+
+    Returns None for anything else: "60ms", "1.5s", "-5s", "", "abc", "s",
+    floats, bools, None.
+    """
+    # Booleans are ints in Python but we never want to accept them
+    if isinstance(value, bool):
+        return None
+    # int: return as-is
+    if isinstance(value, int):
+        return value
+    # string: try to parse as duration or plain number
+    if isinstance(value, str):
+        # Try parsing as a plain integer first (for backward compatibility)
+        try:
+            return int(value)
+        except ValueError:
+            pass
+        # Try parsing as a duration string
+        match = _DURATION_REGEX.match(value)
+        if match:
+            num = int(match.group(1))
+            unit = match.group(2).lower()
+            if unit in ('s', 'sec', 'secs', 'second', 'seconds'):
+                return num
+            elif unit in ('m', 'min', 'mins', 'minute', 'minutes'):
+                return num * 60
+        return None
+    return None
+
+
+def _coerce_param(pspec, value):
+    """Coerce a parameter value based on its spec type.
+
+    Returns the coerced value, or None if coercion isn't applicable.
+    For duration params (unit="seconds"), uses _coerce_duration.
+    For integer/number params, uses _coerce_numeric_string."""
+    if pspec.unit == "seconds":
+        return _coerce_duration(value)
+    elif pspec.type in ("integer", "number"):
+        return _coerce_numeric_string(pspec.type, value)
+    return None
+
+
 def _validate_against_schema(value, schema: dict, path: str):
     """Validate `value` against the minimal JSON-Schema subset a ParamSpec.schema
     may use (spec §1.3): type, minItems, maxItems, items, properties, required,
@@ -235,7 +297,15 @@ def _validate_args(spec: ToolSpec, args: dict) -> dict:
                 # so a tool function never has to re-check nested item shapes.
                 call_args[pname] = _validate_against_schema(value, pspec.schema, pname)
                 continue
-            value = _check_scalar(pspec.type, value, f"parameter '{pname}'")
+            # Special handling for duration params (unit="seconds")
+            if pspec.unit == "seconds":
+                coerced = _coerce_param(pspec, value)
+                if coerced is None:
+                    raise ToolValidationError(
+                        f"parameter {pname!r} must be {pspec.description} — got {value!r}")
+                value = coerced
+            else:
+                value = _check_scalar(pspec.type, value, f"parameter '{pname}'")
             call_args[pname] = value
         elif pspec.default is not MISSING:
             call_args[pname] = pspec.default
@@ -270,7 +340,13 @@ class ToolRegistry:
                 # ParamSpec's dict is shared with every future call. The merge
                 # runs last for both kinds of param, so `description` is always
                 # the final key -- flat and nested render the same way.
-                prop = dict(pspec.schema) if pspec.schema is not None else {"type": pspec.type}
+                if pspec.unit == "seconds":
+                    # Duration params accept both integer and string values
+                    prop = {"type": ["integer", "string"]}
+                elif pspec.schema is not None:
+                    prop = dict(pspec.schema)
+                else:
+                    prop = {"type": pspec.type}
                 if pspec.description:
                     prop["description"] = pspec.description
                 properties[pname] = prop
@@ -306,10 +382,9 @@ class ToolRegistry:
                 continue
             if pname in args:
                 value = args[pname]
-                if pspec.type in ("integer", "number"):
-                    coerced = _coerce_numeric_string(pspec.type, value)
-                    if coerced is not None:
-                        value = coerced   # "5" and 5 must canonicalize the same way execute() sees them
+                coerced = _coerce_param(pspec, value)
+                if coerced is not None:
+                    value = coerced   # "5" and 5, or "2m" and 120 must canonicalize the same way
                 out[pname] = value
             elif pspec.default is not MISSING:
                 out[pname] = pspec.default

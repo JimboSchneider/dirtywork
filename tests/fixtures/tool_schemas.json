@@ -243,8 +243,11 @@
             "type": "string"
           },
           "timeout": {
-            "type": "integer",
-            "description": "Seconds, default 120, max 600"
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "an integer number of seconds (60) or a duration string (\"60s\", \"2m\"); default 120, max 600"
           }
         },
         "required": [

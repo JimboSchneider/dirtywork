@@ -2337,3 +2337,28 @@ def test_anthropic_serializes_a_mixed_turn_with_tool_result_blocks_in_call_order
     _system, messages = _to_anthropic_messages(provider.requests[1])
     last_user = [m for m in messages if m["role"] == "user"][-1]
     assert [b["tool_use_id"] for b in last_user["content"] if b.get("type") == "tool_result"] == ["f1", "b1"]
+
+def test_bash_timeout_duration_strings_do_not_strike_issue_64(parts):
+    """Regression test for issue #64: duration strings should not cause bad_args strikes."""
+    wt, registry, sandbox, transcript, tmp_path = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("c1", "bash", {"command": "echo 1", "timeout": "30s"})]),
+        _resp(tool_calls=[_call("c2", "bash", {"command": "echo 2", "timeout": "60s"})]),
+        _resp(tool_calls=[_call("c3", "bash", {"command": "echo 3", "timeout": "60s"})]),
+        _resp(content="done"),
+    ])
+    runner = Runner(
+        provider=provider,
+        registry=default_registry(),
+        sandbox=sandbox,
+        transcript=transcript,
+        model="qwen/qwen3-coder-next",
+    )
+    result = runner.run("system prompt", "initial task")
+    transcript.close()
+    # No tool_result text should start with ERROR: bad arguments
+    tool_results = [e["result"] for e in _tool_events(_events(tmp_path)) if "result" in e]
+    for tr in tool_results:
+        assert not tr.startswith("ERROR: bad arguments"), f"Unexpected error in tool result: {tr}"
+    assert result.status == "completed"
+

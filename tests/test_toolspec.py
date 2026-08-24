@@ -588,3 +588,192 @@ def test_top_level_object_schema_validates_and_path_qualifies_a_missing_required
     bad = registry.execute("t", {"opts": {}}, sandbox=None, deadline=None)
     assert bad.failure == "bad_args"
     assert bad.text == "ERROR: bad arguments for t: opts is missing required property 'verbose'"
+
+
+class TestCoerceDuration:
+    """Tests for _coerce_duration helper function."""
+
+    @pytest.mark.parametrize("value,expected", [
+        ("60s", 60),
+        ("60S", 60),           # case-insensitive
+        (" 60 sec ", 60),      # whitespace and alternate unit
+        ("2m", 120),
+        ("2 minutes", 120),    # spaces in unit name
+        ("60", 60),            # plain numeric string
+        (60, 60),              # plain int
+        ("1seconds", 1),       # no space between number and unit
+    ])
+    def test_coerce_duration_returns_int(self, value, expected):
+        from dirtywork.toolspec import _coerce_duration
+        assert _coerce_duration(value) == expected
+
+    @pytest.mark.parametrize("value", [
+        "60ms",          # milliseconds not supported
+        "1.5s",          # float string
+        "-5s",           # negative: the regex allows digits only
+        "",              # empty string
+        "abc",           # non-numeric
+        "s",             # just unit, no number
+        True,            # bool (even though it's an int subclass)
+        1.5,             # float
+        None,            # NoneType
+        "9" * 5000 + "s",   # digit run beyond the regex bound; int() on it would raise on 3.11+
+        "٦٠s",           # Arabic-Indic digits (re.ASCII prevents these)
+    ])
+    def test_coerce_duration_returns_none(self, value):
+        from dirtywork.toolspec import _coerce_duration
+        assert _coerce_duration(value) is None
+
+
+class _MockSandbox:
+    """Minimal mock for sandbox to test tool validation without actually running commands."""
+    def bash(self, command, timeout=120):
+        return f"command executed with timeout={timeout}"
+    def read_file(self, path, offset=0, limit=400):
+        return "mock file content"
+    def write_file(self, path, content):
+        return "file written"
+    def append_file(self, path, text):
+        return "appended"
+    def edit_file(self, path, old_string, new_string):
+        return "edited"
+    def apply_edits(self, path, edits):
+        return "edits applied"
+    def insert_before(self, path, anchor, text):
+        return "inserted before"
+    def insert_after(self, path, anchor, text):
+        return "inserted after"
+    def list_dir(self, path="."):
+        return "dir listing"
+    def grep(self, pattern, path=".", glob=None, timeout=30):
+        return "grep result"
+
+
+def test_execute_coerces_duration_string_for_timeout_param():
+    """Duration strings should be converted to seconds for timeout params."""
+    from dirtywork.builtin_tools import BASH_SPEC
+    r = ToolRegistry()
+    r.register(BASH_SPEC)
+
+    # Test with "60s" - should be converted to 60
+    mock_sandbox = _MockSandbox()
+    result = r.execute("bash", {"command": "echo test", "timeout": "60s"}, 
+                       sandbox=mock_sandbox, deadline=None)
+    assert result.kind == "ok"
+    # Verify the timeout was coerced to int
+    assert "timeout=60" in result.text
+
+
+def test_execute_timeout_clamps_duration_strings():
+    """Duration strings should respect timeout clamping."""
+    from dirtywork.builtin_tools import BASH_SPEC
+    r = ToolRegistry()
+    r.register(BASH_SPEC)
+
+    # Test with "20m" - should be clamped to max (600)
+    mock_sandbox = _MockSandbox()
+    result = r.execute("bash", {"command": "echo test", "timeout": "20m"}, 
+                       sandbox=mock_sandbox, deadline=None)
+    assert result.kind == "ok"
+    # The timeout should be clamped to 600
+    assert "timeout=600" in result.text
+
+
+def test_execute_duration_string_invalid_format_returns_bad_args():
+    """Invalid duration format should return bad_args with descriptive message."""
+    from dirtywork.builtin_tools import BASH_SPEC
+    r = ToolRegistry()
+    r.register(BASH_SPEC)
+
+    result = r.execute("bash", {"command": "echo test", "timeout": "60x"}, 
+                       sandbox=None, deadline=None)
+    assert result.kind == "error"
+    assert result.failure == "bad_args"
+    assert ('parameter \'timeout\' must be an integer number of seconds (60) or a duration '
+            'string ("60s", "2m"); default 120, max 600 — got \'60x\'') in result.text
+
+
+def test_read_file_limit_still_requires_integer():
+    """Non-duration params (like read_file's limit) should still require integers."""
+    from dirtywork.builtin_tools import READ_FILE_SPEC
+    r = ToolRegistry()
+    r.register(READ_FILE_SPEC)
+
+    mock_sandbox = _MockSandbox()
+    result = r.execute("read_file", {"path": "test.txt", "limit": "60s"}, 
+                       sandbox=mock_sandbox, deadline=None)
+    assert result.kind == "error"
+    assert result.failure == "bad_args"
+    # The error message should mention integer, not duration
+    assert "parameter 'limit' must be integer" in result.text
+
+
+def test_bash_schema_has_description_but_not_unit():
+    """The bash tool schema should have the updated description but no unit field."""
+    import json
+    from dirtywork.builtin_tools import BASH_SPEC
+    r = ToolRegistry()
+    r.register(BASH_SPEC)
+
+    schemas = r.schemas()
+    bash_schema = next(s for s in schemas if s["function"]["name"] == "bash")
+    timeout_prop = bash_schema["function"]["parameters"]["properties"]["timeout"]
+
+    # Should have the updated description
+    assert timeout_prop["description"] == 'an integer number of seconds (60) or a duration string ("60s", "2m"); default 120, max 600'
+    # PR #71 review P1: the wire type must admit the strings the runtime accepts.
+    assert timeout_prop["type"] == ["integer", "string"]
+    # Should NOT have a unit field (it's internal-only)
+    assert "unit" not in json.dumps(bash_schema)
+
+
+def test_custom_tool_with_unit_seconds_coerces_duration():
+    """Custom tool with unit="seconds" should coerce duration strings."""
+    from dirtywork.toolspec import Caps, ParamSpec, ToolRegistry, ToolSpec
+
+    def _custom_fn(sandbox, delay):
+        return f"delay={delay}"
+
+    custom_spec = ToolSpec(
+        name="custom_tool",
+        description="A test tool with duration param.",
+        params={
+            "delay": ParamSpec(type="integer", description="a number of seconds", default=5, unit="seconds"),
+        },
+        required=(),
+        fn=_custom_fn,
+        caps=Caps(fs="none"),
+    )
+
+    r = ToolRegistry()
+    r.register(custom_spec)
+
+    # Test with "2m" - should be converted to 120
+    mock_sandbox = _MockSandbox()
+    result = r.execute("custom_tool", {"delay": "2m"}, sandbox=mock_sandbox, deadline=None)
+    assert result.kind == "ok"
+    assert "delay=120" in result.text
+
+    # Test with invalid value
+    result = r.execute("custom_tool", {"delay": "abc"}, sandbox=mock_sandbox, deadline=None)
+    assert result.kind == "error"
+    assert result.failure == "bad_args"
+    assert "must be a number of seconds — got 'abc'" in result.text
+
+
+def test_canonical_args_normalizes_duration_strings_for_unit_params():
+    # PR #71 review P2: "2m" and 120 execute identically, so they must
+    # canonicalize identically or a stuck model could dodge the stall detector
+    # by alternating spellings. Uses its own tool so the rule is proven for any
+    # unit="seconds" param, not just bash's (whose timeout canonical_args drops).
+    from dirtywork.toolspec import Caps, ParamSpec, ToolRegistry, ToolSpec
+    spec = ToolSpec(
+        name="waiter", description="wait", required=(),
+        params={"delay": ParamSpec(type="integer", description="a number of seconds",
+                                   default=5, unit="seconds")},
+        fn=lambda sandbox, delay: f"delay={delay}", caps=Caps(fs="none"))
+    r = ToolRegistry()
+    r.register(spec)
+    assert r.canonical_args("waiter", {"delay": "2m"}) == r.canonical_args("waiter", {"delay": 120})
+    assert r.canonical_args("waiter", {"delay": "2m"}) == {"delay": 120}
+    assert r.canonical_args("waiter", {"delay": "junk"}) == {"delay": "junk"}  # unparseable stays as sent

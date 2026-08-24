@@ -237,7 +237,9 @@ BASH_SPEC = ToolSpec(
                 "anything already written to disk are unaffected.",
     params={
         "command": ParamSpec(type="string"),
-        "timeout": ParamSpec(type="integer", description="Seconds, default 120, max 600", default=120),
+        # This description is also the bad_args error's accepted-form text (#64):
+        # the wire contract and the runtime message are one string.
+        "timeout": ParamSpec(type="integer", description='an integer number of seconds (60) or a duration string ("60s", "2m"); default 120, max 600', default=120, unit="seconds"),
     },
     required=("command",),
     fn=_bash,

@@ -260,7 +260,13 @@ not configurable; a run's tool surface is the same in host and docker mode.
 - `grep(pattern, path=".", glob=None)` — regex search (ripgrep when the image
   has it, `grep -rn` otherwise).
 - `bash(command, timeout=120)` — a shell command in the worktree; 600 s
-  maximum. A command that hits its timeout returns
+  maximum. Since 1.0 (#64) `timeout` accepts an integer number of seconds
+  (`60`) or a duration string (`"60s"`, `"2m"`); on the wire its schema type
+  is `["integer", "string"]` and the description says exactly that, and a
+  rejected value's `bad arguments` error repeats the same accepted form
+  (`… — got '60x'`) instead of naming only the type. Either spelling
+  canonicalizes to the same seconds for the stall detector. A command that
+  hits its timeout returns
   `ERROR: command timed out after <n>s — it did not finish and its result is
   unknown. …` with **no partial output**, the `tool_result` event carries
   `timed_out: true`, and the run's `timeouts` counter rises.
