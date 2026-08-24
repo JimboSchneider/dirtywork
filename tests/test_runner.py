@@ -22,6 +22,7 @@ from dirtywork.runner import (
     RunResult,
     Runner,
     STALL_NUDGE,
+    TIMEOUT_NUDGE,
     TRIM_MARKER,
     VERIFY_FEEDBACK,
     _bash_fingerprint,
@@ -33,6 +34,8 @@ from dirtywork.runner import (
 from dirtywork.sandbox.host import HostSandbox
 from dirtywork.builtin_tools import default_registry
 from dirtywork.transcript import Transcript
+
+from .provider_doubles import assert_strict_template_legal
 
 
 def _resp(content=None, tool_calls=None, usage=None, finish_reason=None):
@@ -78,6 +81,8 @@ class FakeProvider:
         return self._context_window
 
     def chat(self, model, history, tools, *, temperature=None, max_tokens=4096, timeout=None):
+        # Spec #60 §7: every request the runner makes is legal for strict templates.
+        assert_strict_template_legal(history)
         # Deep-copy the history the way the old FakeProvider did, so later
         # mutation (trim_messages) cannot rewrite what a test already saw.
         self.requests.append([dict(m) for m in history])
@@ -336,7 +341,7 @@ def test_malformed_only_turn_gets_placeholder_and_a_user_nudge_without_touching_
     events = _events(tmp)
     prior_event = next(e for e in events if e["event"] == "tool_result" and e["tool"] == "read_file")
     assert "follow_up" not in prior_event
-    assert [e["event"] for e in events if e["event"] == "nudge"] == []   # (Task 5 adds malformed_entry)
+    assert [(e["kind"], e["via"]) for e in events if e["event"] == "nudge"] == [("malformed_entry", "user")]
 
 
 def test_malformed_only_turn_with_text_gets_no_placeholder(parts):
@@ -1052,10 +1057,17 @@ def test_runner_stalled_status_after_idle_turns(parts):
     assert result.turns == 5            # turn 1 read f.txt for the first time (progress); 4 repeats
     assert result.final_message == "no progress in 4 consecutive turns"
     # the nudge went to the model after 2 idle turns (turn 3) and was transcribed
+    # Spec #60 §3: on a tool turn the nudge rides on the turn's last tool result
     fourth = provider.requests[3]
-    assert fourth[-1]["role"] == "user" and fourth[-1]["content"] == STALL_NUDGE.format(n=2)
-    nudges = [e for e in _events(tmp) if e["event"] == "nudge"]
+    assert fourth[-1]["role"] == "tool"
+    assert fourth[-1]["content"].endswith("\n\n" + STALL_NUDGE.format(n=2))
+    events = _events(tmp)
+    nudges = [e for e in events if e["event"] == "nudge"]
     assert len(nudges) == 1 and nudges[0]["kind"] == "stall" and nudges[0]["turn"] == 3
+    assert nudges[0]["via"] == "tool_result"
+    carrier = [e for e in events if e["event"] == "tool_result"][2]     # turn 3's read_file
+    assert carrier["follow_up"] == STALL_NUDGE.format(n=2)
+    assert fourth[-1]["content"] == carrier["result"] + "\n\n" + carrier["follow_up"]
 
 
 def test_runner_empty_replies_count_as_idle_turns(parts):
@@ -1179,6 +1191,8 @@ def test_malformed_entries_on_stall_nudge_turn_send_one_merged_user_message(part
     assert "were malformed" in fourth[-1]["content"]
     assert STALL_NUDGE.format(n=2) in fourth[-1]["content"]
     _no_consecutive_user_messages(provider.requests)
+    kinds = [(e["kind"], e["via"]) for e in _events(tmp) if e["event"] == "nudge"]
+    assert kinds == [("stall", "user"), ("malformed_entry", "user")]
 
 
 def test_malformed_entry_abort_reports_first_threshold(parts):
@@ -1654,13 +1668,15 @@ def test_one_timeout_nudge_per_turn_even_with_two_timeouts(parts):
     assert [n["kind"] for n in nudges] == ["timeout"]
     assert nudges[0]["turn"] == 1
     assert result.extra["timeouts"] == 2        # the COUNT is per call, not per turn
-    # the nudge text reached the model as the next user message
+    # Spec #60 §3: the nudge rides on the turn's LAST tool result (b2), not b1
     second_request = provider.requests[1]
-    assert second_request[-1]["role"] == "user"
-    assert second_request[-1]["content"] == (
-        "A command timed out and did not finish; its result is unknown. Re-run it "
-        "with a larger timeout (up to 600 seconds) or split it into smaller "
-        "commands. Do not report it as passed.")
+    assert second_request[-1]["role"] == "tool" and second_request[-1]["tool_call_id"] == "b2"
+    # both calls got the default 120 s timeout, so both results are the same text;
+    # only the LAST one carries the nudge
+    assert second_request[-1]["content"] == second_request[-2]["content"] + "\n\n" + TIMEOUT_NUDGE
+    events = [e for e in _events(tmp) if e["event"] == "tool_result"]
+    assert "follow_up" not in events[0] and events[1]["follow_up"] == TIMEOUT_NUDGE
+    assert nudges[0]["via"] == "tool_result"
 
 
 def test_timeout_nudge_merges_with_the_stall_nudge(parts):
@@ -1677,7 +1693,11 @@ def test_timeout_nudge_merges_with_the_stall_nudge(parts):
     # runs first, because it may end the run), while the merged MESSAGE leads
     # with the timeout, which is the more actionable of the two.
     assert sorted(kinds) == ["stall", "timeout"]
-    text = provider.requests[1][-1]["content"]
+    last = provider.requests[1][-1]
+    assert last["role"] == "tool"
+    carrier = [e for e in _events(tmp) if e["event"] == "tool_result"][-1]
+    text = carrier["follow_up"]
+    assert last["content"] == carrier["result"] + "\n\n" + text
     assert text.startswith("A command timed out and did not finish;")
     assert "No progress in the last 1 turns" in text
     assert "\n\n" in text                      # merged through _join_nudges
@@ -1740,7 +1760,13 @@ def test_verify_feedback_carries_the_timeout_nudge_from_the_same_turn(parts):
     second_request = provider.requests[1]
     f1 = next(m for m in second_request if m["role"] == "tool" and m["tool_call_id"] == "f1")
     assert f1["content"].startswith("VERIFY FAILED (round 1 of 2)")
-    assert "A command timed out and did not finish" in second_request[-1]["content"]
+    assert second_request[-1]["role"] == "tool"                     # no user message follows
+    assert f1["content"].endswith("\n\n" + TIMEOUT_NUDGE)            # finish is the turn's last call
+    events = _events(tmp)
+    finish_event = next(e for e in events if e["event"] == "tool_result" and e["tool"] == "finish")
+    assert finish_event["result"].startswith("VERIFY FAILED (round 1 of 2)")
+    assert finish_event["follow_up"] == TIMEOUT_NUDGE
+    assert nudges[0]["via"] == "tool_result"
 
 
 def test_a_verify_timeout_is_not_counted(parts):
@@ -2011,3 +2037,213 @@ def test_assistant_event_finish_reason_is_null_for_a_non_string(parts):
     transcript.close()
     assistant = next(e for e in _events(tmp) if e["event"] == "assistant")
     assert assistant["finish_reason"] is None
+
+
+# ---- Spec #60 shared scenarios: (provider, sandbox, runner kwargs). Test 12 iterates them.
+
+def _scenario_verify_feedback_on_finish():
+    provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "first"})]),
+                             _resp(content="ok")])
+    return provider, None, {"verify": "exit 1", "verify_rounds": 1}
+
+
+def _scenario_finish_first_then_timeout():
+    provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "s"}), _bash_call("b1")]),
+                             _resp(content="ok")])
+    return provider, _TimeoutThenFailingVerifySandbox("npm test"), {"verify": "npm test", "verify_rounds": 1}
+
+
+def _scenario_malformed_only_turn():
+    provider = FakeProvider([_resp(tool_calls=[_call("c1", "read_file", {"path": "f.txt"})]),
+                             _resp(tool_calls=[_bad_entry()]),
+                             _resp(content="done")])
+    return provider, None, {}
+
+
+def _scenario_empty_reply_after_tool_turn():
+    provider = FakeProvider([_resp(tool_calls=[_call("c1", "read_file", {"path": "f.txt"})]),
+                             _resp(content="", finish_reason="length"),
+                             _resp(content="done")])
+    return provider, None, {}
+
+
+SCENARIOS = [_scenario_verify_feedback_on_finish, _scenario_finish_first_then_timeout,
+             _scenario_malformed_only_turn, _scenario_empty_reply_after_tool_turn]
+
+
+def _run_scenario(parts, build):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider, box, kwargs = build()
+    r = Runner(provider, registry, box or sandbox, transcript, model="m", **kwargs)
+    result = r.run("s", "t")
+    transcript.close()
+    return provider, result, _events(tmp)
+
+
+def _tool_events(events):
+    return [e for e in events if e["event"] == "tool_result"]
+
+
+def test_mixed_turn_finish_first_then_timeout(parts):
+    # Spec §3 example table row 3: feedback on finish, TIMEOUT_NUDGE on bash.
+    provider, result, events = _run_scenario(parts, _scenario_finish_first_then_timeout)
+    second = provider.requests[1]
+    tools = [m for m in second if m["role"] == "tool"]
+    assert [m["tool_call_id"] for m in tools] == ["f1", "b1"]           # wire order == call order
+    assert tools[0]["content"].startswith("VERIFY FAILED (round 1 of 2)")
+    assert TIMEOUT_NUDGE not in tools[0]["content"]
+    assert tools[1]["content"].endswith("\n\n" + TIMEOUT_NUDGE)
+    f1, b1 = _tool_events(events)
+    assert "follow_up" not in f1 and b1["follow_up"] == TIMEOUT_NUDGE
+    # the verify command fails on the plain-answer round too and no round is left
+    assert result.status == "verify_failed"
+
+
+def test_two_finish_calls_around_a_timeout_put_the_follow_up_on_the_last_call_only(parts):
+    # Spec §9.3: both terminal results resolve to the same string; the follow_up
+    # attaches only to the turn's last addressable call, which is f2 here.
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "a"}), _bash_call("b1"),
+                          _call("f2", "finish", {"summary": "b"})]),
+        _resp(content="ok"),
+    ])
+    r = Runner(provider, registry, _TimeoutThenFailingVerifySandbox("npm test"), transcript,
+               model="m", verify="npm test", verify_rounds=1)
+    r.run("s", "t")
+    transcript.close()
+    f1, b1, f2 = _tool_events(_events(tmp))
+    assert f1["result"] == f2["result"] and f1["result"].startswith("VERIFY FAILED")
+    assert "follow_up" not in f1 and "follow_up" not in b1 and f2["follow_up"] == TIMEOUT_NUDGE
+    tools = [m for m in provider.requests[1] if m["role"] == "tool"]
+    assert tools[2]["content"] == f2["result"] + "\n\n" + TIMEOUT_NUDGE
+
+
+def test_mixed_turn_timeout_finish_timeout_carrier_is_the_last_call(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_bash_call("b1"), _call("f1", "finish", {"summary": "s"}), _bash_call("b2")]),
+        _resp(content="ok"),
+    ])
+    r = Runner(provider, registry, _TimeoutThenFailingVerifySandbox("npm test"), transcript,
+               model="m", verify="npm test", verify_rounds=1)
+    r.run("s", "t")
+    transcript.close()
+    tools = [m for m in provider.requests[1] if m["role"] == "tool"]
+    assert [m["tool_call_id"] for m in tools] == ["b1", "f1", "b2"]
+    assert tools[1]["content"].startswith("VERIFY FAILED") and TIMEOUT_NUDGE not in tools[1]["content"]
+    assert tools[2]["content"].endswith("\n\n" + TIMEOUT_NUDGE) and TIMEOUT_NUDGE not in tools[0]["content"]
+    b1, f1, b2 = _tool_events(_events(tmp))
+    assert "follow_up" not in b1 and "follow_up" not in f1 and b2["follow_up"] == TIMEOUT_NUDGE
+    assert [e["kind"] for e in _events(tmp) if e["event"] == "nudge"] == ["timeout"]
+
+
+class _TimeoutThenPassingVerifySandbox(_TimeoutThenFailingVerifySandbox):
+    """Worker bash calls time out; the --verify command passes."""
+
+    def bash(self, command, timeout=120):
+        if command == self.verify_command:
+            return "exit code: 0\n"
+        return super().bash(command, timeout)
+
+
+def test_mixed_turn_finish_first_then_timeout_with_passing_verify_ends_clean(parts):
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "s"}), _bash_call("b1")])])
+    r = Runner(provider, registry, _TimeoutThenPassingVerifySandbox("npm test"), transcript,
+               model="m", verify="npm test")
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "completed"
+    events = _events(tmp)
+    assert all("follow_up" not in e for e in _tool_events(events))
+    assert _tool_events(events)[0]["result"] == FINISH_DONE
+    assert [e for e in events if e["event"] == "nudge"] == []
+
+
+def test_stall_and_malformed_nudges_share_one_follow_up_on_a_tool_turn(parts):
+    # stall_turns=2 -> stall nudge at idle 1 (turn 2); that turn also carries a
+    # malformed entry alongside an addressable read_file -> one follow_up
+    # holding both texts, in the documented order (malformed, timeout, stall).
+    wt, registry, sandbox, transcript, tmp = parts
+    idle = _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])
+    mixed = _resp(tool_calls=[_bad_entry(), _call("c2", "read_file", {"path": "f.txt"})])
+    provider = FakeProvider([idle, mixed, _resp(content="done")])
+    r = Runner(provider, registry, sandbox, transcript, model="m", stall_turns=2)
+    r.run("s", "t")
+    transcript.close()
+    events = _events(tmp)
+    carrier = [e for e in _tool_events(events) if e["tool"] == "read_file"][-1]
+    assert carrier["follow_up"].startswith("1 of your tool calls were malformed")
+    assert carrier["follow_up"].endswith(STALL_NUDGE.format(n=1))
+    assert "\n\n" in carrier["follow_up"]
+    nudges = [(e["kind"], e["via"]) for e in events if e["event"] == "nudge"]
+    assert sorted(nudges) == [("malformed_entry", "tool_result"), ("stall", "tool_result")]
+    third = provider.requests[2]
+    assert third[-1]["role"] == "tool" and third[-1]["content"] == carrier["result"] + "\n\n" + carrier["follow_up"]
+
+
+def test_last_tool_result_excludes_the_follow_up(parts):
+    provider, result, events = _run_scenario(parts, _scenario_finish_first_then_timeout)
+    last = result.extra["last_tool_result"]
+    assert last["tool"] == "bash" and TIMEOUT_NUDGE not in last["result"]
+
+
+def test_transcript_equals_wire_for_every_tool_and_assistant_message(parts):
+    # Spec §9.10. Results kept under the preview cap except the finish result,
+    # which is recorded in full (a 3000-char verify tail).
+    wt, registry, sandbox, transcript, tmp = parts
+
+    class Box(_TimeoutThenFailingVerifySandbox):
+        def bash(self, command, timeout=120):
+            if command == self.verify_command:
+                return "exit code: 1\n" + "y" * 3000
+            return super().bash(command, timeout)
+
+        def read_file(self, path, offset=0, limit=400):   # turn 1 reads f.txt; keep it under the preview cap
+            return "data\n"
+
+    provider = FakeProvider([
+        _resp(tool_calls=[_bash_call("b1"), _call("c1", "read_file", {"path": "f.txt"})]),
+        _resp(content="", finish_reason="length"),
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "s"})]),
+        _resp(content="ok"),
+    ])
+    r = Runner(provider, registry, Box("npm test"), transcript, model="m",
+               verify="npm test", verify_rounds=1, stall_turns=0)
+    r.run("s", "t")
+    transcript.close()
+    events = _events(tmp)
+    final = provider.requests[-1]
+    wire_tools = [m for m in final if m["role"] == "tool"]
+    for msg, ev in zip(wire_tools, _tool_events(events)):
+        expected = ev["result"] + ("\n\n" + ev["follow_up"] if "follow_up" in ev else "")
+        assert msg["content"] == expected, (msg, ev)
+    wire_assistants = [m for m in final if m["role"] == "assistant"]
+    for msg, ev in zip(wire_assistants, [e for e in events if e["event"] == "assistant"]):
+        assert msg["content"] == ev.get("placeholder", ev["text"])
+    assert len(wire_tools) == 3 and len(wire_assistants) == 3
+    assert len(next(e for e in _tool_events(events) if e["tool"] == "finish")["result"]) > 3000
+
+
+@pytest.mark.parametrize("build", SCENARIOS)
+def test_scenarios_are_legal_for_every_provider(parts, build):
+    # Spec §9.12: the last request of each scenario through both serializers.
+    from dirtywork.providers.anthropic import _to_anthropic_messages
+    from dirtywork.providers.openai_compat import _to_openai_messages
+    from .provider_doubles import assert_strict_template_legal
+    from .test_provider_anthropic import _assert_alternating
+    provider, _result, _events_ = _run_scenario(parts, build)
+    for history in provider.requests:
+        assert_strict_template_legal(history)                       # OpenAI and (same serializer) Ollama
+        assert _to_openai_messages(history)                          # serializes without error
+        _system, messages = _to_anthropic_messages(history)
+        _assert_alternating(messages)
+
+
+def test_anthropic_serializes_a_mixed_turn_with_tool_result_blocks_in_call_order(parts):
+    from dirtywork.providers.anthropic import _to_anthropic_messages
+    provider, _r, _e = _run_scenario(parts, _scenario_finish_first_then_timeout)
+    _system, messages = _to_anthropic_messages(provider.requests[1])
+    last_user = [m for m in messages if m["role"] == "user"][-1]
+    assert [b["tool_use_id"] for b in last_user["content"] if b.get("type") == "tool_result"] == ["f1", "b1"]

@@ -17,7 +17,7 @@ DOC = Path(__file__).parent.parent / "docs" / "transcript-schema.md"
 
 EVENT_NAMES = ["run_start", "assistant", "tool_result", "guardrail_block", "nudge",
                "sandbox_reset", "verify", "run_end"]
-NUDGE_KINDS = ["truncated", "empty", "text_tool_call", "stall", "timeout"]
+NUDGE_KINDS = ["truncated", "empty", "text_tool_call", "stall", "timeout", "malformed_entry"]
 STATUSES = ["completed", "max_turns", "timeout", "context_exhausted", "model_error",
             "interrupted", "stalled", "stuck", "verify_failed", "budget_exceeded",
             "sandbox_error", "export_failed"]

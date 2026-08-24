@@ -32,6 +32,7 @@ class DictProvider:
         raise NotImplementedError
 
     def chat(self, model, history, tools, *, temperature=None, max_tokens=4096, timeout=None):
+        assert_strict_template_legal(history)      # spec #60 §7
         self.calls += 1
         return parse_chat_response(self.reply(model, history, tools))
 

@@ -571,6 +571,27 @@ class Runner:
                 msg["content"] = text
                 record["result"] = text
 
+        def deliver(text, nudge_records) -> None:
+            """Spec #60 §3 (R1): the ONE place harness text enters history. On a
+            turn with addressable tool calls it rides on the LAST tool result of
+            this turn (wire = result + "\\n\\n" + text; the transcript record
+            gets `follow_up`); otherwise it is the next user message, legal
+            because the preceding assistant entry is counted and non-empty (R2).
+            Every nudge record handed in is stamped with the carrier (`via`)."""
+            if not text:
+                return
+            if turn_tool_msgs:
+                msg, record = turn_tool_msgs[-1]
+                msg["content"] = f"{msg['content']}\n\n{text}"
+                record["follow_up"] = text
+                via = "tool_result"
+            else:
+                messages.append({"role": "user", "content": text})
+                via = "user"
+            for record in nudge_records:
+                if record is not None:
+                    record["via"] = via
+
         def note_last_tool_result(tool: str, args: str, result) -> None:
             # spec §2: tracks the SAME values just written to the "tool_result"
             # transcript event, for both a real tool call and a malformed entry
@@ -650,18 +671,18 @@ class Runner:
             return RunResult(status, turns, final, usage, extra=extra)
 
         def check_progress():
-            """(RunResult to end the run with, or None; stall-nudge text to
-            deliver, or None). The caller merges the nudge text into the one
-            user message it is about to append — history must never carry
-            two consecutive user messages (strict chat templates reject
-            non-alternating roles)."""
+            """(RunResult to end the run with, or None; stall-nudge text, or
+            None; the buffered stall-nudge record, or None). The caller hands
+            the text and record to deliver(), which picks the carrier (spec #60
+            §3) -- history never carries a harness message after a tool result
+            nor two consecutive user messages."""
             verdict = progress.end_turn()
             if verdict == "stalled":
-                return finish("stalled", f"no progress in {self.stall_turns} consecutive turns"), None
+                return finish("stalled", f"no progress in {self.stall_turns} consecutive turns"), None, None
             if verdict == "nudge":
-                self.transcript.write("nudge", kind="stall", turn=turns)
-                return None, STALL_NUDGE.format(n=self.stall_turns // 2)
-            return None, None
+                record = self.transcript.write("nudge", kind="stall", turn=turns)
+                return None, STALL_NUDGE.format(n=self.stall_turns // 2), record
+            return None, None, None
 
         def run_verify():
             """One execution of the operator's gate (spec §4.2). Runs through
@@ -791,16 +812,16 @@ class Runner:
                     ended, feedback = check_verify(content, via="user")
                     if ended is not None:
                         return ended
-                    messages.append({"role": "user", "content": feedback})
+                    deliver(feedback, [])
                     return None
-                self.transcript.write("nudge", kind=kind, turn=turns)
+                kind_record = self.transcript.write("nudge", kind=kind, turn=turns)
                 abort_reason = failures.record("empty_reply")
                 if abort_reason is not None:
                     return finish("model_error", abort_reason)
-                stalled, stall_text = check_progress()
+                stalled, stall_text, stall_record = check_progress()
                 if stalled is not None:
                     return stalled
-                messages.append({"role": "user", "content": _join_nudges(NUDGES[kind], stall_text)})
+                deliver(_join_nudges(NUDGES[kind], stall_text), [kind_record, stall_record])
                 return None
 
             abort_reason = None
@@ -906,8 +927,8 @@ class Runner:
                 # The feedback is already the finish result (resolve_finish);
                 # only the timeout nudge still needs delivering.
                 if timed_out_this_turn:
-                    self.transcript.write("nudge", kind="timeout", turn=turns)
-                    messages.append({"role": "user", "content": timeout_text})
+                    timeout_record = self.transcript.write("nudge", kind="timeout", turn=turns)
+                    deliver(timeout_text, [timeout_record])
                 return None
 
             # Same rule as `finish` in a mixed turn: the turn's remaining
@@ -919,21 +940,24 @@ class Runner:
                               f"the same failing command ran {stuck['repeats']} "
                               f"times in a row")
 
-            stalled, stall_text = check_progress()
+            stalled, stall_text, stall_record = check_progress()
             if stalled is not None:
                 return stalled
 
-            malformed_text = None
+            malformed_text = malformed_record = None
             if malformed_count > 0:
                 malformed_text = (f"{malformed_count} of your tool calls were malformed "
                                   "(unaddressable: no usable id/name) and were "
                                   "discarded. Re-issue them as valid tool calls.")
+                # Spec #60 §6.2: delivered since 0.5, transcribed since 1.0.
+                malformed_record = self.transcript.write("nudge", kind="malformed_entry", turn=turns)
+            timeout_record = None
             if timed_out_this_turn:
                 # Once per turn, however many commands timed out in it.
-                self.transcript.write("nudge", kind="timeout", turn=turns)
-            nudge_text = _join_nudges(malformed_text, timeout_text, stall_text)
-            if nudge_text:
-                messages.append({"role": "user", "content": nudge_text})
+                timeout_record = self.transcript.write("nudge", kind="timeout", turn=turns)
+            deliver(_join_nudges(malformed_text, timeout_text, stall_text),
+                    [malformed_record, timeout_record, stall_record])
+            return None
         try:
             while True:
                 with self.transcript.turn():

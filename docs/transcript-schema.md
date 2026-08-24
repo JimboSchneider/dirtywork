@@ -78,6 +78,7 @@ One per tool call executed, plus one per malformed tool-call entry discarded.
 | `args` | ✓ | ✓ | string | the raw JSON argument string, capped at 500 chars; `""` for a discarded malformed entry |
 | `result` | ✓ | ✓ | string | the tool's result, trimmed per the tool's `Caps.transcript` setting. All built-in tools but `finish` declare `preview`, which caps the record at 2000 chars (`finish` declares `full` since 1.0 — its result is harness-authored and bounded); the registry also supports `none`, unused by any shipped tool (`full` is used only by `finish`). Since 0.8 a successful `edit_file`/`write_file`/`insert_before`/`insert_after` result is `<Verb> <path>: +A -D [(removed N non-blank lines)]` followed by a unified diff (capped at 40 lines / 3000 chars, then `[diff truncated: N more lines]`); `write_file` on a new file returns `Wrote N bytes to <path> (new file, M lines)` with no diff. 0.9's `apply_edits` uses the same shape with the verb `Applied N edits to` (`Applied 1 edit to` for a single edit). When either side of the edit exceeds 20000 lines, the diff itself is never computed (it is quadratic-ish on files with popular repeated lines) — the result is just `<Verb> <path>: <N> lines (diff omitted: file too large)`. An in-place tool whose RESULT would exceed the 5 MB write limit returns `ERROR: result is <n> bytes, over the <limit>-byte write limit; nothing was written` on both backends (0.9). 0.10's `append_file` uses the same shape with the verb `Appended to`; it reads `+A -0` only when the file already ended in a newline — when it did not, the final line is a REPLACE and the header reads `+A -1 (removed 1 non-blank line)`, which is the visible consequence of not starting `text` with a newline |
 | `timed_out` | | ✓ | boolean | 0.9: `true` on a `bash` tool result whose command hit its timeout. **Sparse** — the key is absent, not `false`, on every other result, including a `grep` timeout (a different wording and a different meaning: the harness's search, not the worker's command) and the `--verify` command (not a tool call, so it produces no `tool_result` at all; its outcome is in `verify`) |
+| `follow_up` | | ✓ | string | 1.0 (#60): **sparse** — present when this result carried harness text on the wire. The exact text appended after the tool's own result, uncapped (harness-authored and bounded): the model received `result + "\n\n" + follow_up` as this call's result. Only the **last** tool result of a turn can carry one; it merges every nudge of that turn in the order `malformed_entry`, `timeout`, `stall` (or `timeout` alone on a verify-feedback turn) |
 
 A `finish(summary=…)` call is an ordinary tool call: it appears in the
 `assistant` event's `tool_calls` and produces a `tool_result`. Since 1.0 (#60)
@@ -94,15 +95,22 @@ exception left the turn. The summary becomes the run's `final_message`.
 
 ### `nudge`
 
-**v2 only.** One per turn in which the harness injected corrective guidance
-into the next user message. Several nudges in one turn are merged into a
-single user message (the chat history must never carry two consecutive user
-messages), but each is recorded here separately.
+**v2 only.** One per corrective text the harness injected on a turn. Where the
+text lands (since 1.0, #60): on a turn that made at least one addressable tool
+call it is appended to that turn's **last** tool result (`via: "tool_result"`;
+the exact text is in that `tool_result` event's `follow_up`); on a text-only
+turn it is the next `user` message (`via: "user"`). Several nudges on one turn
+are merged into a single follow-up (in the order `malformed_entry`, `timeout`,
+`stall`; `truncated`/`empty`/`text_tool_call` then `stall` on a text turn), but
+each is recorded here separately. The history never carries a `user` message
+directly after a tool result, nor two consecutive `user` messages — the shapes
+strict chat templates (Mistral/Devstral) reject.
 
 | Field | v1 | v2 | Type | Notes |
 |---|---|---|---|---|
-| `kind` | | ✓ | string | `truncated` (the reply hit the token limit), `empty` (no tool call and no answer), `text_tool_call` (a tool call written as prose instead of through the tools API), `stall` (no progress for `--stall-turns // 2` turns), `timeout` (0.9: at least one `bash` command timed out on this turn — exactly one per turn however many timed out, and only on a turn that continues; a timeout is not a `FailureTracker` event) |
+| `kind` | | ✓ | string | `truncated` (the reply hit the token limit), `empty` (no tool call and no answer), `text_tool_call` (a tool call written as prose instead of through the tools API), `stall` (no progress for `--stall-turns // 2` turns), `timeout` (0.9: at least one `bash` command timed out on this turn — exactly one per turn however many timed out, and only on a turn that continues; a timeout is not a `FailureTracker` event), `malformed_entry` (1.0: N tool-call entries had no usable id/name and were discarded — delivered since 0.5, recorded since 1.0) |
 | `turn` | | ✓ | integer | 1-based turn number the nudge was issued on |
+| `via` | | ✓ | string | 1.0: `tool_result` or `user` — the carrier this nudge rode on (see above) |
 
 ### `guardrail_block`
 

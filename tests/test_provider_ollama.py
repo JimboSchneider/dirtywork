@@ -158,3 +158,14 @@ def test_resolve_context_window_prefers_the_server_then_falls_to_default():
     cold = _client(RecordingTransport([_ps_body([])]))
     assert resolve_context_window("gemma4:latest", None, None, cold) == (
         DEFAULT_WINDOW, "default")
+
+
+def test_runner_shaped_history_is_legal_for_strict_templates():
+    from dirtywork.providers import ToolCall, assistant_message, tool_message
+    from .provider_doubles import assert_strict_template_legal
+    tc = ToolCall(id="abc123def", name="finish", arguments={"summary": "s"}, error=None,
+                  raw_arguments='{"summary": "s"}')
+    history = [{"role": "system", "content": "s"}, {"role": "user", "content": "task"},
+               assistant_message("", [tc]),
+               tool_message("abc123def", "VERIFY FAILED (round 1 of 2) ...\n\n" + "timeout nudge")]
+    assert_strict_template_legal(history)
