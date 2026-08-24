@@ -1,14 +1,17 @@
 # Harness follow-ups after tool results — carriers that every chat template accepts (#60)
 
 **Date:** 2026-08-23
-**Status:** Design v2 — approach B (runner-level carriers) chosen by the owner in chat
+**Status:** Design v3 — approach B (runner-level carriers) chosen by the owner in chat
 (2026-08-23 22:14 CDT) with five required additions: transcript/wire equivalence, an explicit
 mixed-turn design, a malformed-only-turn fallback, terminal `finish` results that never read
-`run finished` when the run did not finish, and the full contract update. v2 folds in a
+`run finished` when the run did not finish, and the full contract update. v2 folded in a
 three-lens red-team with adversarial verification (25 agents, 2026-08-23 22:33 CDT): 1 Blocker
 (§4 — the `finish` result was left provisional on four run-ending paths that leave the tool loop
 before verify), 12 Importants and the Minors that survived, each marked *(v2)* where it changed
-the design. Owner review pending.
+the design. v3 folds in a two-agent closure/consistency pass on v2 (22:46 CDT): 1 Blocker (§4/§6.1
+— the `KeyboardInterrupt` handler sits outside the loop, so the turn would flush the provisional
+string before `finish()` resolved it), the true count of delivery/append sites, the `verify.via`
+writer, and five Minors, marked *(v3)*. Owner review pending.
 **Origin:** issue #60, milestone **1.0.0 — contract freeze**. Evidence: `#48` soak rows
 `F4b-round2-dev` (leg A2), `F5-trunc2048-dev-r1` (leg B2), `F3v2-run-dev` (leg B3);
 `docs/superpowers/bench/2026-08-23-v1-soak-sdd-ledger.md`.
@@ -143,12 +146,18 @@ follow-up can never touch a message from an earlier turn. *(v2)* Worked examples
 | `[bash(timeout), finish, bash(timeout)]` | feedback | on the second `bash` only |
 | `[finish, bash(timeout)]`, verify **passes** | `run finished` | none — the run ends; a nudge is emitted only on a turn that continues (unchanged) |
 
-*(v2)* **One delivery function.** Two runner sites deliver follow-ups today (`:830-838`,
-`:853-863`). Both call one closure, `deliver(text, nudge_records)`: it picks the carrier (the
-per-turn list's last tool message, else a new `user` message), sets `follow_up` on the carrier's
-buffered `tool_result` record (§6.1), and stamps `via` on every nudge record it was handed.
-`check_progress` returns its buffered stall-nudge record alongside the text so the caller can
-hand it to `deliver`; nothing else in `run()` touches history content.
+*(v2, v3)* **One delivery function.** Every site that appends harness text to history calls one
+closure, `deliver(text, nudge_records)`: it picks the carrier (the per-turn list's last tool
+message, else a new `user` message), sets `follow_up` on the carrier's buffered `tool_result`
+record (§6.1), and stamps `via` on every nudge record it was handed. There are **four** callers
+*(v3)*: the text-reply nudge path (`:737` — `truncated`/`empty`/`text_tool_call` plus a stall
+record; the per-turn list is empty, so `deliver` picks the `user` carrier and stamps
+`via="user"`), the plain-answer verify feedback (`:728`, `user` carrier), the finish-path timeout
+nudge (`:834-837`, the feedback itself being the `result` per §4), and the ordinary tool-turn
+path (`:853-863`). `check_progress` returns its buffered stall-nudge record alongside the text so
+the caller can hand it to `deliver`; `check_verify` returns the buffered `verify` record so the two
+feedback sites can stamp `verify.via` (`finish_result` / `user`) *(v3)*. Nothing else in `run()`
+appends to or rewrites history content, except `resolve_finish` (§4).
 
 ## 4. The `finish` result
 
@@ -160,8 +169,9 @@ rewritten, and can be a carrier like any other call.
 `finish` is executed by verifying. Its tool message is appended in its original position with the
 **provisional** content `run not finished: verify did not run`, and its buffered `tool_result`
 record holds the same string. One resolver, `resolve_finish(text)`, rewrites *every* terminal
-record and history message of the current turn to `text`; it is called from exactly two places and
-the provisional string can therefore only reach disk when neither runs:
+record and history message of the current turn to `text`; it is called from the three places
+listed under *Where resolution happens* below, and the provisional string can therefore only
+reach disk when none of them runs (an exception the runner does not handle):
 
 | when | resolved `result` (wire and transcript) | run |
 |---|---|---|
@@ -170,7 +180,7 @@ the provisional string can therefore only reach disk when neither runs:
 | verify failed, no fix round remains (`--verify-rounds 0`, or the last round) | `run not finished: verify failed (exit <code>); no fix rounds remain` | ends `verify_failed` |
 | verify raised `BudgetExceeded` / `SandboxError` | `run not finished: verify could not run (<reason>)` | ends `budget_exceeded` / `sandbox_error` |
 | *(v2)* the turn ended before verify ran — a later call raised `BudgetExceeded`/`SandboxError`, a later call's failure tripped the `FailureTracker` abort, or `KeyboardInterrupt` (including inside `run_verify`'s `sandbox.bash`) | `run not finished: <status>` (e.g. `run not finished: interrupted`) | ends with that status |
-| *(v2)* an exception the runner does not handle propagates out of the turn | provisional string stands (`run not finished: verify did not run`) — true, and the only case it is written | no `run_end` (as today) |
+| *(v2)* an exception the runner does not handle propagates out of the turn | provisional string stands (`run not finished: verify did not run`) — true, and the only case it is written | no runner-written `run_end`; `turn()`'s `finally` flushes the turn and the CLI's `_fail_run` (`__main__.py:633-660`) then writes its failure `run_end` immediately, as today *(v3)* |
 
 `<code>` is `verify_state["exit_code"]`, rendered `unknown` when it is `None`. The four terminal
 strings are never sent to a model (the run ends); they exist so the transcript never claims a
@@ -185,6 +195,16 @@ the "no fix rounds remain" / "could not run" strings. (c) The `finish(status, fi
 record of the current turn to `run finished` when `status == "completed"` and to
 `run not finished: <status>` otherwise — so paths that never reached `check_verify` are covered
 without enumerating them. A record is "unresolved" while its content is the provisional string.
+
+*(v3)* **Resolution must precede the flush.** Today's `KeyboardInterrupt` handler wraps the whole
+`while` loop (`:678`, `:864-865`), outside any turn; with `turn()` wrapping each iteration, an
+interrupt would flush the provisional string before `finish("interrupted")` ran. So the runner
+catches `KeyboardInterrupt` **inside** the per-iteration turn block —
+`with transcript.turn(): try: <iteration> except KeyboardInterrupt: return finish("interrupted", "")`
+— and `finish()` therefore resolves and flushes (§6.1) before the block exits. The outer handler
+stays only for an interrupt that lands between iterations, where no terminal record can be
+pending. Residual, stated: an interrupt inside `finalize()` or the `run_end` write propagates as
+today.
 
 **Order of operations in a turn** (unchanged from today, now stated): every addressable call
 executes in order, including calls after `finish` (`tests/test_runner.py:623`); the `finish` tool
@@ -212,9 +232,10 @@ no addressable tool call and its text is empty after `.strip()`. That covers the
 `truncated` nudge). Think-only replies (`<think>…</think>` text) and `text_tool_call` replies have
 text and get no placeholder.
 
-*(v2)* **One append function.** Both assistant-append sites (`:718` tool path, `:729/:741` text
-path) call one closure, `append_assistant(text, tool_calls)`: it applies the placeholder rule,
-writes the `assistant` event (with `placeholder` when applied, §6.2) and appends the history entry.
+*(v2, v3)* **One append function.** All three assistant-append sites (`:718` tool path, `:723`
+answer, `:729` nudged text reply) call one closure, `append_assistant(text, tool_calls)`: it
+applies the placeholder rule, writes the `assistant` event (with `placeholder` when applied, §6.2)
+and appends the history entry.
 
 The placeholder is the entry's `content` in history (so every adapter sends it). The nudge that
 follows it is a `user` message, as today. The placeholder is bracketed harness text a model could
@@ -247,10 +268,12 @@ be written when the turn's wire messages are final.
 
 *(v2)* **Threads.** The docker sandbox's watchdog thread writes `sandbox_reset`
 (`sandbox/docker.py:849-853`, called from `watchdog.py:117-119` every 5 s while a `bash` call is in
-flight). `write()` and `flush()` share one `threading.Lock`; flush swaps the list out under the
-lock (`pending, buffer = buffer, []`) and writes `pending` outside it; a write from any thread while
-a turn is open is buffered (it lands in order with the turn); a write while no turn is open goes
-straight to disk. No record can be lost between the flush loop and the clear.
+flight). `write()` and `flush()` share one `threading.Lock` that covers both the buffer and the
+physical `_fh.write`/`_fh.flush` *(v3: flushes are small and nothing long runs under it, so one
+lock also rules out two threads interleaving partial lines on the file handle — an exposure that
+exists today and would otherwise survive)*. A write from any thread while a turn is open is
+buffered (it lands in order with the turn); a write while no turn is open goes straight to disk
+under the same lock. No record can be lost between the flush loop and the clear.
 
 *(v2)* **`finish()` flushes before the export.** The `finish(status, final)` closure resolves the
 turn's terminal records (§4c), calls `transcript.flush()`, *then* `finalize()` (in docker mode the
@@ -296,7 +319,10 @@ transcripts):
   when `placeholder` is present.
 - Markdown export (`_md_event_lines`, `:354-375`): after a `tool_result`'s `<details>` block,
   `> **harness → model:** <follow_up>` as a blockquote; after an assistant line,
-  `(sent as: <placeholder>)`.
+  `(sent as: <placeholder>)`. *(v3)* A `finish` result is exempt from `_md_trim`'s
+  `MD_RESULT_CHARS` (`:319`, `:366`) for the same reason it is exempt from the transcript preview
+  cap — otherwise the review artifact would reproduce the F4b truncation the transcript no longer
+  has.
 - `_tool_result_outcome` (`:266-282`): a `finish` result other than `run finished` renders
   `[not finished]` instead of `[ok]` in both renderers.
 
@@ -347,8 +373,13 @@ rewritten; nothing is left implying "the next user message" or `run finished` un
   table (+`follow_up`) and `:74` "All built-in tools declare `preview`" → "all but `finish`, which
   declares `full`" *(v2)*; the `finish` paragraph at `:77-80` (the §4 values); the `nudge`
   section at `:82-93` (carrier rule, `via`, `malformed_entry`; the kinds list there already has
-  `timeout`); `verify` table (+`via`); `:263-273` (`runs show` callouts); a short **"Wire shape"**
-  subsection stating R1/R2 and the §6.2 reconstruction rule.
+  `timeout`); `verify` table (+`via`); `:263-273` (`runs show` callouts, and `:269`'s "the same
+  2000-char preview the transcript itself applies" → "the transcript's preview cap; `finish`
+  results are shown in full" *(v3)*); a short **"Wire shape"** subsection stating R1/R2 and the
+  §6.2 reconstruction rule.
+- `dirtywork/runs.py:319` comment (`# the transcript's own preview cap`) *(v3)*.
+- Dated session logs under `docs/` (`2026-08-14-building-localagent.md:70`, `:181` say "flushed
+  per line") are historical record and are left as written *(v3)*.
 - `docs/machine-contract.md`: `:326-327` ("watch a live run with `tail -f`" — one turn at a time)
   *(v2)*; `:339-340` (`nudge` line: kinds gain `timeout` — that list omits it today — and
   `malformed_entry`; `via`); `:356` (the finish `tool_result` is `run finished` only when the run
@@ -409,7 +440,8 @@ provider, sandbox and runner kwargs), so test 12 iterates them instead of copyin
 11. **Turn buffer** — `Transcript.turn()` preserves order across `guardrail_block`/`tool_result`/
     `nudge`/`verify`; a record amended inside the block is written amended; an amendment after
     flush does not reach disk; `ts` is write-time and non-decreasing within a turn; a
-    `KeyboardInterrupt` raised inside the block flushes before propagating; `flush()` mid-turn
+    `KeyboardInterrupt` raised inside the block flushes before propagating; a record resolved
+    inside an `except` handler within the block is written resolved *(v3)*; `flush()` mid-turn
     writes and keeps the turn open; a write from another thread during `turn()` is on disk after
     exit; `write()` outside a turn is immediate; `close()` flushes *(v2)*.
 12. **All three providers** — the shared scenarios of tests 1, 2, 4 and 7 serialized through
@@ -428,12 +460,16 @@ provider, sandbox and runner kwargs), so test 12 iterates them instead of copyin
     asserts the joined `follow_up`; the verify-feedback tests at `:1321` and `:1589` assert the new
     carrier (`:1589` asserts `result == VERIFY_FEEDBACK…` and `follow_up == TIMEOUT_NUDGE` on the
     finish event); `:1345` has no shape assertion and is unchanged.
-14. **`runs show`** — one test per renderer for `follow_up`, `placeholder` and `[not finished]`;
-    old-shape events without the keys still render.
-15. **Schema coverage** *(v2)* — a second `test_transcript_schema` scenario (bash that times out +
-    `finish` + failing verify with `--verify-rounds 1`, reusing `_TimeoutThenFailingVerifySandbox`
-    from `tests/test_runner.py:1574`) so `follow_up`, `verify.via`, `malformed_entry` and
-    `[not finished]` are emitted and doc-token-checked.
+14. **`runs show`** — one test per renderer for `follow_up`, `placeholder` and `[not finished]`,
+    and the Markdown export showing a >2000-char `finish` result untrimmed *(v3)*; old-shape
+    events without the keys still render.
+15. **Schema coverage** *(v2, v3)* — a second `test_transcript_schema` scenario: a turn whose
+    wire body carries a `tool_calls` entry without an `id` (→ `malformed_entry` through
+    `parse_chat_response`), then a bash that times out + `finish` + failing verify with
+    `--verify-rounds 1`, so `follow_up`, `verify.via`, `nudge.via` and `malformed_entry` are all
+    emitted and doc-token-checked (`[not finished]` is a rendering, asserted in test 14). The
+    sandbox double `_TimeoutThenFailingVerifySandbox` (`tests/test_runner.py:1574`) moves to
+    `tests/provider_doubles.py`, the shared-doubles module, so both test files import it.
 16. **Live** — the §7 replay against Devstral.
 
 ## 10. Acceptance evidence (necessary, not sufficient)
