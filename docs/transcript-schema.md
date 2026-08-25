@@ -7,7 +7,7 @@ written by the CLI's own failure path, are flushed immediately), so `tail -f`
 shows a run one turn at a time and a hard kill loses at most the current turn.
 Every line has at least `ts` (UTC ISO-8601, stamped when the event happened,
 not when it was flushed) and `event`
-(one of the eight event names below). `schema_version` marks the overall
+(one of the nine event names below). `schema_version` marks the overall
 version and appears once, on `run_start`, and again in the CLI's stdout JSON
 and in `run.json` — not on every line.
 
@@ -24,7 +24,10 @@ fields keeps working unmodified against v2 output: every v2 addition is a new
 field, a new event, or a new enum value — never a removed or renamed one. That
 is the same compatibility rule the stdout JSON contract follows, for the same
 reason. **0.8 keeps `schema_version` at 2** for exactly that reason: everything
-it adds is additive.
+it adds is additive. The same rule holds within `schema_version` 2 going forward — 1.0 (#61)
+adds an event name (`stray_kill`), two `nudge.kind` values and sparse fields — so a consumer must
+ignore event names, `nudge.kind` values and `sandbox_reset.reason` values it does not recognise
+rather than reject the line.
 
 ## Events
 
@@ -102,15 +105,16 @@ text lands (since 1.0, #60): on a turn that made at least one addressable tool
 call it is appended to that turn's **last** tool result (`via: "tool_result"`;
 the exact text is in that `tool_result` event's `follow_up`); on a text-only
 turn it is the next `user` message (`via: "user"`). Several nudges on one turn
-are merged into a single follow-up (in the order `malformed_entry`, `timeout`,
-`stall`; `truncated`/`empty`/`text_tool_call` then `stall` on a text turn), but
-each is recorded here separately. The history never carries a `user` message
+are merged into a single follow-up (in the order `malformed_entry`, sandbox notices
+(`stray_kill`/`sandbox_reset`, in the order they happened), `timeout`, `stall`;
+`truncated`/`empty`/`text_tool_call`, sandbox notices, then `stall` on a text turn),
+but each is recorded here separately. The history never carries a `user` message
 directly after a tool result, nor two consecutive `user` messages — the shapes
 strict chat templates (Mistral/Devstral) reject.
 
 | Field | v1 | v2 | Type | Notes |
 |---|---|---|---|---|
-| `kind` | | ✓ | string | `truncated` (the reply hit the token limit), `empty` (no tool call and no answer), `text_tool_call` (a tool call written as prose instead of through the tools API), `stall` (no progress for `--stall-turns // 2` turns), `timeout` (0.9: at least one `bash` command timed out on this turn — exactly one per turn however many timed out, and only on a turn that continues; a timeout is not a `FailureTracker` event), `malformed_entry` (1.0: N tool-call entries had no usable id/name and were discarded — delivered since 0.5, recorded since 1.0) |
+| `kind` | | ✓ | string | `truncated` (the reply hit the token limit), `empty` (no tool call and no answer), `text_tool_call` (a tool call written as prose instead of through the tools API), `stall` (no progress for `--stall-turns // 2` turns), `timeout` (0.9: at least one `bash` command timed out on this turn — exactly one per turn however many timed out, and only on a turn that continues; a timeout is not a `FailureTracker` event), `malformed_entry` (1.0: N tool-call entries had no usable id/name and were discarded — delivered since 0.5, recorded since 1.0), `stray_kill` and `sandbox_reset` (1.0, #61: a docker-mode sandbox notice — the container killed stray processes in place, or was reset; the text tells the worker what happened and what it lost; one per `stray_kill`/`sandbox_reset` event; delivered on the turn it was drained, which for a notice the watchdog thread queued after a turn's drain is the following turn; neither is a `FailureTracker` event) |
 | `turn` | | ✓ | integer | 1-based turn number the nudge was issued on |
 | `via` | | ✓ | string | 1.0: `tool_result` or `user` — the carrier this nudge rode on (see above). **Sparse**: absent when the run ended on that same turn before the text was delivered (the third empty-reply strike → `model_error`; a stall verdict on a text turn → `stalled`); the event is still written, as in 0.9, so nudge counts stay comparable |
 
@@ -128,12 +132,34 @@ runner — this moved from `ToolExecutor` in sub-project 3.
 
 ### `sandbox_reset`
 
-**v2 only**, Docker sandbox mode. Emitted when the container is reset (a stuck
-`docker exec`, a stray background process, an out-of-memory kill).
+**v2 only**, Docker sandbox mode. Emitted when the container is reset — since 1.0 (#61) only
+when a stray process could not be killed in place (`stray process after bash`), the container is
+unreachable (`container unreachable after bash`), an out-of-memory kill (`oom`), or the watchdog's
+worktree sample failed twice (`budget sample failed`). A reset re-initializes the worker's git
+metadata in `/gitdir` (index, stashes, local commits and branches); the working tree survives.
+Written inside the bash call that triggered it, before that call's `tool_result`; the worker is
+told through a `nudge` of kind `sandbox_reset` on the same turn.
 
 | Field | v1 | v2 | Type | Notes |
 |---|---|---|---|---|
 | `reason` | | ✓ | string | why the reset happened |
+| `strays` | | ✓ | list of string | 1.0 (#61), **sparse**: the `docker top` CMD of every non-tether process the reaper saw (in `docker top` order, at most 20, each cut to 200 chars with a trailing `…`); present only when the ladder's first `docker top` had stray rows — `reason` `stray process after bash`, or `oom` found right after an in-place kill |
+| `strays_total` | | ✓ | integer | 1.0 (#61), **sparse**: present only when more than 20 rows were seen — then the full count |
+
+### `stray_kill`
+
+**v2 only, 1.0 (#61)**, Docker sandbox mode. Emitted when the reaper found processes that
+outlived a `bash` call and killed them in place — the container, its `/tmp` and the worker's git
+metadata in `/gitdir` are all kept. Written inside the bash call, before that call's
+`tool_result`; the worker is told through a `nudge` of kind `stray_kill` on the same turn (its text
+is that carrier's `follow_up`). Never written on a path that ends in a `sandbox_reset`.
+
+| Field | v1 | v2 | Type | Notes |
+|---|---|---|---|---|
+| `strays` | | ✓ | list of string | the `docker top` CMD of every non-tether row from the first `docker top`, in `docker top` order; at most 20, each cut to 200 chars with a trailing `…`; never empty |
+| `strays_total` | | ✓ | integer | **sparse**: present only when more than 20 rows were seen — then the full count |
+| `locks_removed` | | ✓ | list of string | **sparse**: present only when the post-kill sweep removed at least one stale git lock (`*.lock` or `gc.pid` under `/gitdir`) — absolute paths, `find` order, at most 20 |
+| `locks_removed_total` | | ✓ | integer | **sparse**: present only when more than 20 were removed and the sweep's output was not truncated — then the exact count |
 
 ### `verify`
 
@@ -199,7 +225,7 @@ run-level fields that are known even when the agent loop never started).
 | `worktree_bytes` | | ✓ | integer \| null | sampled worktree size from `budget.measure_worktree` |
 | `worktree_files` | | ✓ | integer \| null | sampled worktree entry count |
 | `escaping_symlinks` | | ✓ | list | symlinks whose target is absolute or escapes the worktree — never followed, always reported |
-| `dropped_git_entries` | | ✓ | list | Docker mode: `.git`-named entries the export refused to add |
+| `dropped_git_entries` | | ✓ | list | Docker mode: `.git`-named entries under the worktree that the export dropped, relative to `/work`, in `find` order (1.0, #61: the root gitfile `/work/.git` is excluded, and an entry at depth ≥ 2 means its parent directory was a nested repository exported as plain files) |
 | `export_status` | | ✓ | string | `"ok"`, `"export_failed: <reason>"`, or `"n/a"` (host mode never exports) |
 | `watchdog_violation` | | ✓ | string \| null | Docker mode: the reason the watchdog killed the container, when that happened after the last tool call returned |
 | `watchdog_violation_kind` | | ✓ | string \| null | `"budget"` (worktree-size or host-disk-floor breach) or `"sandbox_error"` (the watchdog's own sampling exec failed twice); meaningful only alongside `watchdog_violation` |
@@ -292,7 +318,7 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `worktree_bytes` | end (docker), or export | sampled worktree size from `budget.measure_worktree`; absent in host mode until an export is run |
 | `worktree_files` | end (docker), or export | sampled worktree entry count; absent in host mode until an export is run |
 | `escaping_symlinks` | end (docker), or export | symlinks whose target is absolute or escapes the worktree — never followed, always reported |
-| `dropped_git_entries` | end (docker), or export | `.git`-named entries the export refused to add |
+| `dropped_git_entries` | end (docker), or export | `.git`-named entries the export dropped (root gitfile excluded; a nested repository's files are exported as plain files) |
 | `finalize_error` | end | |
 | `watchdog_violation` | end | |
 | `watchdog_violation_kind` | end | |
@@ -329,7 +355,8 @@ preview; `finish` results are shown in full), a `> **harness → model:**`
 callout with the fenced `follow_up` text under a result that carried one,
 `_(sent as: [empty reply])_` under an assistant turn stored with a
 placeholder, `[not finished]` on a `finish` that did not finish the run, and
-its `nudge`/`guardrail_block`/`sandbox_reset` events as blockquote callouts.
+its `nudge`/`guardrail_block`/`sandbox_reset`/`stray_kill` events as blockquote callouts
+(`stray_kill` and a `sandbox_reset` with `strays` list the killed commands as code spans).
 Token counts in the header come from
 `run_end.usage`, and the final message from the `finish` call's `summary`,
 because `run.json` records neither.
