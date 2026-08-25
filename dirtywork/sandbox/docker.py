@@ -47,6 +47,7 @@ from . import export
 from ..workspace import host_read_tree
 from ..resume import stash_dir_for
 from . import strays
+from .strays import sandbox_reset_text, stray_kill_text, parse_tether_pid
 
 # Fixed exec timeouts for tools with no user-facing timeout knob — these
 # operations should complete near-instantly; a hang means the sandbox
@@ -207,6 +208,11 @@ class DockerSandbox:
         # exec-failure path) and from the main thread (_reap() after a bash
         # call) concurrently. _reset_this_call is set/cleared under this lock.
         self._reset_lock = threading.Lock()
+        # State for tether pid and notice queue
+        self._tether_pid = None
+        self._tether_warned = False
+        self._notices = []
+        self._notices_lock = threading.Lock()
 
     @staticmethod
     def check_name_collision(run, slug: str) -> None:
@@ -281,6 +287,7 @@ class DockerSandbox:
 
         self._start_tether()
         self._wait_ready()
+        self._discover_tether()
         self._init(restart=seed_from_worktree)
         if seed_from_worktree:
             self._seed_from_worktree()
@@ -313,6 +320,37 @@ class DockerSandbox:
         """Raise SandboxError with the captured output when a docker step failed."""
         if res.returncode != 0:
             raise SandboxError(f"{what}: {res.output.decode('utf-8', 'replace')[:500]}")
+
+    def _discover_tether(self) -> None:
+        """Discover the tether pid by running a shell script inside the container."""
+        argv = docker_args.exec_argv(
+            self.container, ["/bin/sh", "-c", strays.TETHER_DISCOVERY_SCRIPT]
+        )
+        try:
+            captured = self._run(argv, timeout=docker_cli.T_QUERY)
+        except docker_cli.DockerError:
+            pid = None
+        else:
+            if captured.returncode != 0:
+                pid = None
+            else:
+                pid = parse_tether_pid(captured.output)
+        self._tether_pid = pid
+        if pid is None and not self._tether_warned:
+            print("tether pid unknown; a stray process will reset the container", file=sys.stderr)
+            self._tether_warned = True
+
+    def _queue_notice(self, kind: str, text: str) -> None:
+        """Queue a notice (kind, text) under _notices_lock."""
+        with self._notices_lock:
+            self._notices.append((kind, text))
+
+    def drain_notices(self) -> list[tuple[str, str]]:
+        """Return queued notices and clear them, under _notices_lock."""
+        with self._notices_lock:
+            notices = list(self._notices)
+            self._notices.clear()
+            return notices
 
     def _stop_container(self) -> None:
         if self.watchdog is not None:
@@ -820,7 +858,7 @@ class DockerSandbox:
         lines = [(l[2:] if l.startswith("./") else l) for l in text.splitlines()]
         return _cap("\n".join(lines), note=" — narrow the pattern or path for full results")
 
-    def reset(self, reason: str) -> None:
+    def reset(self, reason: str, *, strays=None, strays_total=None) -> None:
         """Spec §3 "Reset" (used on a stray process, OOM, or a watchdog
         kill): docker kill SIGKILLs PID 1, so the whole container namespace
         dies and its tmpfs is wiped — but the volume and its contents
@@ -846,12 +884,23 @@ class DockerSandbox:
                 lifecycle.close_tether(self._tether)
             self._start_tether()
             self._wait_ready()
+            # A reset starts a new container life, so the warning can happen again
+            self._tether_warned = False
+            self._discover_tether()
             self._init(restart=True)
             if self.transcript is not None:
                 try:
-                    self.transcript.write("sandbox_reset", reason=reason)
+                    # Build kwargs for transcript.write
+                    kwargs = {"reason": reason}
+                    if strays is not None:
+                        kwargs["strays"] = strays
+                    if strays_total is not None:
+                        kwargs["strays_total"] = strays_total
+                    self.transcript.write("sandbox_reset", **kwargs)
                 except Exception:
                     pass
+            # Queue a notice for the sandbox reset
+            self._queue_notice("sandbox_reset", sandbox_reset_text(reason))
             # Mark that a reset happened in this call (for _after_bash to skip budget sample)
             self._reset_this_call = True
 
@@ -881,9 +930,10 @@ class DockerSandbox:
         # Use strays.stray_rows to parse the output
         stray_cmds = strays.stray_rows(top.output)
 
-        # If there are any stray processes, reset
+        # If there are any stray processes, reset with strays info
         if stray_cmds:
-            self.reset("stray process after bash")
+            capped_strays, total = strays.cap_strays(stray_cmds)
+            self.reset("stray process after bash", strays=capped_strays, strays_total=total)
             return True
 
         try:

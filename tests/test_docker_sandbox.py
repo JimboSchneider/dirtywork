@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -11,6 +12,7 @@ from dirtywork.resume import stash_dir_for
 from dirtywork.sandbox import SandboxError
 from dirtywork.sandbox import docker as docker_mod
 from dirtywork.sandbox.docker import DockerSandbox, docker_cli
+from dirtywork.sandbox import strays
 from dirtywork.sandbox.docker_args import DockerConfig
 from tests.docker_fakes import FakeDocker, FakePopen, _fail, _ok, _rc
 
@@ -1043,6 +1045,372 @@ def test_reset_raises_when_container_does_not_come_back(started, monkeypatch):
 
     with pytest.raises(SandboxError):
         sb.reset("x")
+
+
+def test_tether_pid_discovery(tmp_path):
+    # Fix item a: the discovery exec runs after _wait_ready and parses PID 7
+    from dirtywork.transcript import Transcript
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(
+        ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
+         strays.TETHER_DISCOVERY_SCRIPT],
+        _ok(b"7\n")
+    )
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+
+    # Verify tether pid was discovered
+    assert sb._tether_pid == 7
+
+
+def test_tether_discovery_failure(tmp_path, capsys):
+    # Script discovery exec to rc 3 -> None and exactly one stderr line
+    from dirtywork.transcript import Transcript
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(
+        ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
+         strays.TETHER_DISCOVERY_SCRIPT],
+        _rc(3)
+    )
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+
+    assert sb._tether_pid is None
+    captured = capsys.readouterr()
+    assert "tether pid unknown" in captured.err
+    # After reset(), the flag is cleared and discovery can warn again
+    fake.script(
+        ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
+         strays.TETHER_DISCOVERY_SCRIPT],
+        _rc(3)
+    )
+    fake.script(["exec"], _ok())
+    sb.reset("y")
+    captured2 = capsys.readouterr()
+    # The second discovery (after reset) also warns
+    assert "tether pid unknown" in captured2.err
+
+
+def test_tether_discovery_output_none(tmp_path, capsys):
+    # Output b"x\n" -> None (parse_tether_pid returns None)
+    from dirtywork.transcript import Transcript
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(
+        ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
+         strays.TETHER_DISCOVERY_SCRIPT],
+        _ok(b"x\n")
+    )
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+
+    assert sb._tether_pid is None
+    captured = capsys.readouterr()
+    assert "tether pid unknown" in captured.err
+
+
+def test_tether_discovery_callable_raises_dockererror(tmp_path, capsys):
+    # Script callable raising DockerError -> None
+    from dirtywork.transcript import Transcript
+    def fail_run(argv):
+        from dirtywork.sandbox.docker_cli import DockerError
+        raise DockerError("test error")
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(
+        ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
+         strays.TETHER_DISCOVERY_SCRIPT],
+        fail_run
+    )
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+
+    assert sb._tether_pid is None
+    captured = capsys.readouterr()
+    assert "tether pid unknown" in captured.err
+
+
+def test_tether_warned_flag_reset_on_new_container(tmp_path, capsys):
+    # After `sb.reset("x")` the discovery exec ran again and a warned flag is reset
+    from dirtywork.transcript import Transcript
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(
+        ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
+         strays.TETHER_DISCOVERY_SCRIPT],
+        _rc(3)
+    )
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+
+    # First failure - sets warned flag
+    assert sb._tether_warned is True
+    captured1 = capsys.readouterr()
+    assert "tether pid unknown" in captured1.err
+
+    # Reset clears the warned flag (simulates new container life)
+    sb.reset("y")
+    assert sb._tether_warned is True
+    captured2 = capsys.readouterr()
+    assert "tether pid unknown" in captured2.err  # Second container life warns again
+
+
+def test_reset_with_strays_param(tmp_path):
+    # sb.reset("x") direct: the sandbox_reset event has no "strays"/"strays_total" keys
+    from dirtywork.transcript import Transcript
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(["exec"], _ok())  # init
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+    fake.script(["exec"], _ok())  # reset will need an exec call
+
+    sb.reset("manual test reset")
+    transcript.close()
+
+    events = [json.loads(l) for l in (run_dir / "transcript.jsonl").read_text().splitlines()]
+    reset_events = [e for e in events if e["event"] == "sandbox_reset"]
+    assert reset_events
+    assert reset_events[0]["reason"] == "manual test reset"
+    assert "strays" not in reset_events[0]
+    assert "strays_total" not in reset_events[0]
+
+
+def test_reset_with_strays_list(tmp_path):
+    from dirtywork.transcript import Transcript
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(["exec"], _ok())  # init
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+    fake.script(["exec"], _ok())  # reset will need an exec call
+
+    sb.reset("stray process after bash", strays=["sleep 300"], strays_total=None)
+    transcript.close()
+
+    events = [json.loads(l) for l in (run_dir / "transcript.jsonl").read_text().splitlines()]
+    reset_events = [e for e in events if e["event"] == "sandbox_reset"]
+    assert reset_events
+    assert reset_events[0]["reason"] == "stray process after bash"
+    assert reset_events[0].get("strays") == ["sleep 300"]
+    assert "strays_total" not in reset_events[0]
+
+
+def test_reset_with_strays_and_total(tmp_path):
+    from dirtywork.transcript import Transcript
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(["exec"], _ok())  # init
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+    fake.script(["exec"], _ok())  # reset will need an exec call
+
+    sb.reset("stray process after bash", strays=["sleep 300"], strays_total=25)
+    transcript.close()
+
+    events = [json.loads(l) for l in (run_dir / "transcript.jsonl").read_text().splitlines()]
+    reset_events = [e for e in events if e["event"] == "sandbox_reset"]
+    assert reset_events
+    assert reset_events[0]["reason"] == "stray process after bash"
+    assert reset_events[0].get("strays") == ["sleep 300"]
+    assert reset_events[0]["strays_total"] == 25
+
+
+def test_drain_notices(tmp_path):
+    from dirtywork.transcript import Transcript
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(["exec"], _ok())  # init
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+    fake.script(["exec"], _ok())  # reset will need an exec call
+
+    sb.reset("test reset")
+    notices = sb.drain_notices()
+
+    assert len(notices) == 1
+    kind, text = notices[0]
+    assert kind == "sandbox_reset"
+    assert "re-initialized" in text
+
+    # Second drain returns []
+    notices2 = sb.drain_notices()
+    assert notices2 == []
+
+
+def test_host_sandbox_drain_notices(tmp_path):
+    from dirtywork.sandbox.host import HostSandbox
+    sb = HostSandbox(tmp_path / "worktree")
+    assert sb.drain_notices() == []
+
+
+def test_stray_rows_parsing():
+    # Test strays.stray_rows parses docker top output correctly
+    assert strays.stray_rows(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n") == []
+    assert strays.stray_rows(_TOP_HEADER + b"501  42  1  0  10:00  ?  00:00:00  sleep 300\n") == ["sleep 300"]
+
+
+def test_cap_strays():
+    # Test strays.cap_strays caps correctly
+    assert strays.cap_strays([]) == ([], None)
+    assert strays.cap_strays(["sleep 1"]) == (["sleep 1"], None)
+    # When > MAX_STRAYS, return len and capped list
+    many = [f"cmd{i}" for i in range(strays.MAX_STRAYS + 5)]
+    capped, total = strays.cap_strays(many)
+    assert len(capped) == strays.MAX_STRAYS
+    assert total == len(many)
+
+
+def test_sandbox_reset_text():
+    text = strays.sandbox_reset_text("oom")
+    assert "re-initialized" in text
+    assert "oom" in text
+
+
+def test_parse_tether_pid():
+    # Test parse_tether_pid
+    assert strays.parse_tether_pid(b"7\n") == 7
+    assert strays.parse_tether_pid(b"12345\n") == 12345
+    assert strays.parse_tether_pid(b"0\n") is None  # pid must be > 0
+    assert strays.parse_tether_pid(b"abc\n") is None
+    assert strays.parse_tether_pid(b"-1\n") is None
 
 
 def test_start_creates_watchdog_with_configured_caps_but_does_not_start_thread(docker, tmp_path):
