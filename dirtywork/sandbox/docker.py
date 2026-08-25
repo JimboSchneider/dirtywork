@@ -867,7 +867,7 @@ class DockerSandbox:
         lines = [(l[2:] if l.startswith("./") else l) for l in text.splitlines()]
         return _cap("\n".join(lines), note=" — narrow the pattern or path for full results")
 
-    def reset(self, reason: str, *, strays=None, strays_total=None) -> None:
+    def reset(self, reason: str, *, strays=None, strays_total=None) -> bool:
         """Spec §3 "Reset" (used on a stray process, OOM, or a watchdog
         kill): docker kill SIGKILLs PID 1, so the whole container namespace
         dies and its tmpfs is wiped — but the volume and its contents
@@ -877,13 +877,22 @@ class DockerSandbox:
         does not). The whole body runs under `self._reset_lock` so a
         concurrent reset() from the watchdog thread and the main thread
         cannot interleave their docker calls or race `_start_tether`/`_init`
-        (Important #4)."""
+        (Important #4). Returns True when the container was reset, False when
+        the reset was skipped: shutting down, or a watchdog violation is pending
+        (the container is dead or dying by the watchdog's hand; the caller must not sample)."""
         with self._reset_lock:
+            if self.watchdog is not None and self.watchdog.violation is not None:
+                # The watchdog thread recorded a violation -- and killed, or is
+                # about to kill, the container -- between the caller's own check
+                # and this lock. Restarting the container now would be a
+                # spurious reset that can mask that violation; the caller
+                # consumes it in _after_bash instead.
+                return False
             # Mark that a reset will happen in this call (for _after_bash to skip budget sample)
             self._reset_this_call = True
             # If shutting down, don't perform any docker calls or write events
             if self._shutting_down:
-                return
+                return False
             try:
                 self._run(["kill", self.container], timeout=docker_cli.T_LIFECYCLE)
             except docker_cli.DockerError:
@@ -915,6 +924,7 @@ class DockerSandbox:
                     pass
             # Queue a notice for the sandbox reset
             self._queue_notice("sandbox_reset", sandbox_reset_text(reason))
+            return True
 
     def _kill_strays(self) -> bool:
         """Kill stray processes using the STRAY_KILL_SCRIPT.
@@ -987,18 +997,12 @@ class DockerSandbox:
             except docker_cli.DockerError:
                 unreachable = True
             if unreachable:
-                # If watchdog already killed the container, don't sample
-                if self.watchdog is not None and self.watchdog.violation is not None:
-                    return True
                 self.reset("container unreachable after bash")
                 return True
             rows = strays.stray_rows(top.output)
             capped, total = strays.cap_strays(rows) if rows else ([], None)
             if rows:
                 if self._tether_pid is None or not self._kill_strays():
-                    # If watchdog already killed the container, don't sample
-                    if self.watchdog is not None and self.watchdog.violation is not None:
-                        return True
                     self.reset("stray process after bash", strays=capped, strays_total=total)
                     return True
                 for _ in range(3):
@@ -1009,17 +1013,11 @@ class DockerSandbox:
                     except docker_cli.DockerError:
                         unreachable = True
                     if unreachable:
-                        # If watchdog already killed the container, don't sample
-                        if self.watchdog is not None and self.watchdog.violation is not None:
-                            return True
                         self.reset("container unreachable after bash")
                         return True
                     if not strays.stray_rows(top.output):
                         break
                 else:
-                    # If watchdog already killed the container, don't sample
-                    if self.watchdog is not None and self.watchdog.violation is not None:
-                        return True
                     self.reset("stray process after bash", strays=capped, strays_total=total)
                     return True
             try:
@@ -1031,9 +1029,6 @@ class DockerSandbox:
                 # If inspect fails, don't reset - it would be recursive
                 return False
             if oom.returncode == 0 and oom.output.decode("utf-8", errors="replace").strip() == "true":
-                # If watchdog already killed the container, don't sample
-                if self.watchdog is not None and self.watchdog.violation is not None:
-                    return True
                 if rows:
                     self.reset("oom", strays=capped, strays_total=total)
                 else:
@@ -1134,10 +1129,10 @@ class DockerSandbox:
                 # §3.6): the caller consumes the violation; do not reset or raise.
                 return None
             if not self._reset_this_call:
-                # If shutting down, don't reset (no docker calls)
-                if self._shutting_down:
+                if not self.reset("budget sample failed"):
+                    # Shutting down, or the watchdog recorded a violation in
+                    # the gap above: nothing to measure; the caller consumes it.
                     return None
-                self.reset("budget sample failed")
                 result = self._measure_worktree_once()
                 if result is not None:
                     return result

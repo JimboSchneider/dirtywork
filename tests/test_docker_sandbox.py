@@ -962,7 +962,7 @@ def test_reset_can_be_called_directly(started_with_transcript):
     sb, fake, run_dir, transcript = started_with_transcript
     fake.script(["exec"], _ok())
 
-    sb.reset("manual test reset")
+    assert sb.reset("manual test reset") is True
     transcript.close()
 
     events = [json.loads(l) for l in (run_dir / "transcript.jsonl").read_text().splitlines()]
@@ -2893,3 +2893,88 @@ def test_after_bash_consumes_violation_during_reap(started):
     # No kill or reset should have been called
     kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
     assert len(kill_calls) == 0, "No kill call should be made when violation is set during reap"
+
+
+class _FiringLock:
+    """Stand-in for `_reset_lock`: on the first entry the watchdog thread
+    'fires' (records a violation, as `_check_disk` does right before it calls
+    kill) -- after the caller's own violation check, before reset() begins."""
+
+    def __init__(self, lock, fire):
+        self._lock, self._fire, self.fired = lock, fire, 0
+
+    def __enter__(self):
+        self._lock.acquire()
+        if not self.fired:
+            self.fired += 1
+            self._fire()
+        return self
+
+    def __exit__(self, *exc):
+        self._lock.release()
+
+    def acquire(self, blocking=True):
+        return self._lock.acquire(blocking)
+
+    def release(self):
+        self._lock.release()
+
+
+def _fire_disk_violation(sb):
+    sb.watchdog.violation = "host free space below 2048 MB"
+    sb.watchdog.violation_kind = "budget"
+
+
+def test_reset_skips_when_a_watchdog_violation_is_pending(started_with_transcript):
+    sb, fake, run_dir, transcript = started_with_transcript
+    _fire_disk_violation(sb)
+
+    assert sb.reset("budget sample failed") is False
+
+    assert not [c for c in fake.calls if c[0][0] in ("kill", "wait")]
+    assert not [e for e in _events(run_dir, transcript) if e["event"] == "sandbox_reset"]
+    assert sb.drain_notices() == []
+    assert sb.watchdog.violation == "host free space below 2048 MB"  # left for the caller
+    assert sb._reset_this_call is False
+
+
+def test_sample_worktree_reset_rechecks_the_watchdog_under_reset_lock(started_with_transcript):
+    # PR #74 review P1: the watchdog fires between _sample_worktree's own
+    # violation check and reset() taking _reset_lock. The already-killed
+    # container must NOT be restarted (no spurious sandbox_reset that could
+    # mask the violation); the violation is raised instead.
+    from dirtywork.budget import BudgetExceeded
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+    fake.script(["exec"], _ok(b"ok\n"))
+    fake.script(_SAMPLE_ARGV, _fail(b"exec failed: pid saturation"))
+    sb._reset_lock = _FiringLock(sb._reset_lock, lambda: _fire_disk_violation(sb))
+
+    with pytest.raises(BudgetExceeded, match="host free space below"):
+        sb.bash("echo ok")
+
+    assert sb._reset_lock.fired == 1
+    assert not [c for c in fake.calls if c[0][0] in ("kill", "wait")]
+    assert not [e for e in _events(run_dir, transcript) if e["event"] == "sandbox_reset"]
+    assert sb.watchdog.violation is None  # consumed
+    assert sb._reset_this_call is False
+
+
+def test_reap_reset_rechecks_the_watchdog_under_reset_lock(started_with_transcript):
+    # The same gap in _reap: `docker top` fails (the watchdog's kill has
+    # landed) and the violation is recorded just as reset() takes the lock.
+    from dirtywork.budget import BudgetExceeded
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], _rc(1))
+    fake.script(["exec"], _ok(b"ok\n"))
+    sb._reset_lock = _FiringLock(sb._reset_lock, lambda: _fire_disk_violation(sb))
+
+    with pytest.raises(BudgetExceeded, match="host free space below"):
+        sb.bash("echo ok")
+
+    assert sb._reset_lock.fired == 1
+    assert not [c for c in fake.calls if c[0][0] in ("kill", "wait")]
+    assert not [e for e in _events(run_dir, transcript) if e["event"] == "sandbox_reset"]
+    assert sb.watchdog.violation is None
+    assert sb._reset_this_call is False
