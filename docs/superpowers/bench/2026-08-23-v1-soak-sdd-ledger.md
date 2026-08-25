@@ -212,3 +212,18 @@ plan: `docs/superpowers/plans/2026-08-25-issue-61-sandbox-strays.md`. Sampler: `
 | — (Claude finish of W8b: the four live-test edits, then the full live suite with `DIRTYWORK_LIVE_SLOW=1` on the pytest image) | W8b live tests | **18 passed / 3 skipped / 1 failed**: the race loop now ends `max_turns` (40 bash turns + `finish` exceed the default cap) → `max_turns=60` added and the test rerun alone | 319 s | — | — | — | — | — | — | — | — | — | the `.NET` test now skips correctly on the pytest image (#70) |
 | — (Claude, host: `test_docker_live_race_loop_no_resets`, pytest image, `DIRTYWORK_LIVE_SLOW=1`, after `stall_turns=0` + `max_turns=60`) | spec §9 test 17 — the P7 race as a regression test through the real runner | **1 passed**: 40 `sed` calls with 5.2 s idle between turns, **0 `sandbox_reset`, 0 `stray_kill`** (the released 0.10.1 reset 4/40 in the same loop) | 221 s | 41 | 5.4 | — | — | — | 0 | 0 | **0** | bash 40 / finish 1 | — |
 | — (Claude finish after two resumes, per the dogfood rule) | W8b live tests | four test-side edits: `stall_turns=0` + `max_turns=60` on the race test; pid-flood helper requires `strays` only on stray-caused resets; `.NET` test skips when the build cannot run on the image (#70); grep test blocks `rg` on a FIFO instead of exporting a 200 MB file | — | — | — | — | — | — | — | — | — | — | host live on the pytest image: 19 passed / 3 skipped of 22 |
+
+**#61 build metrics (sampler `tools/soak_sampler.sh`, 5 s cadence, per-window stats computed at the end):**
+
+```
+samples 2771  16:28:15→20:26:48 UTC  (5 s cadence)
+window        n   free GB min/med/max   inactive GB min/max   models
+16:00 UTC     369    0.19/ 3.27/11.98      21.58/50.14        2
+17:00 UTC     697    0.03/ 6.60/16.32      19.53/49.14        2
+18:00 UTC     696    0.04/ 7.53/17.07      19.32/49.36        2
+19:00 UTC     697    0.14/ 6.98/16.63      18.98/49.93        2
+20:00 UTC     312    2.63/11.23/14.04      22.72/44.68        2
+overall free GB: min 0.03 | p5 1.97 | median 7.21 | max 17.07; samples with free < 1 GB: 40 (1.4%)
+```
+
+Run totals (29 `dirtywork run`/`resume` invocations of 0.10.1 + qwen3-coder-next, `~/.dirtywork/runs/issue-61-task-*`): 1,245 turns, 113 min of run time, 36.9M prompt tokens, 244k completion tokens, $0. 12 `completed` (verify passed in-sandbox), 17 `max_turns`. Claude finished 8 tasks after failed resumes (W2b, W3, W4b, W5a, W5b, W6, W7, W8b); 4 zero-change `finish`es on feedback resumes (S14); 1 zero-edit run (W7 run 1); 3 sandbox resets hit the build itself (2 class E after plain `grep`/`sed`, 1 that led the worker to wipe its own work — S11 live).
