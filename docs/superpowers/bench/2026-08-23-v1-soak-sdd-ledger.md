@@ -237,3 +237,19 @@ Run totals (29 `dirtywork run`/`resume` invocations of 0.10.1 + qwen3-coder-next
 
 | `issue-61-review-follow-up-w10-0825162618-4a2e7a3a` (after the second review pass on 7803d78) | **W10 — review P1 #2**: first recorded violation wins (`Watchdog.record_violation`/`take_violation` under a leaf `_violation_lock`, all four breach paths; both consumers use `take`); `reset()` marks the call when it skips; five tests | `max_turns` — **work complete and correct** (code byte-identical to the brief, the W9 assertion correctly flipped to `is True`, sandbox tests byte-identical), no `finish`; turns went to the brief's own sloppy grep check (`.` unescaped matched `watchdog_violation =`, Claude's slip) and a stray `CHANGES_SUMMARY.md` | 228 s | 60 | 3.8 | 1,900,643 (≈31.7k/turn) | 9,306 | ≈8.3k | 0 | 0 | 0 | bash 22 / read_file 19 / edit_file 13 / grep 6 | — (no finish) |
 | `issue-61-review-follow-up-w10-0825163155-4d0c3387` (resume 1: delete the stray file, run the suite, finish) | W10 | `completed` — **finish reached, verify PASSED in-sandbox** (1506); host 1505 passed / 1 skipped; but feedback item 1 was **not applied** (the worker re-ran its grep checks and finished; `CHANGES_SUMMARY.md` still in the export — untracked, removed on the host by Claude, never in the commit): S14 family, partial feedback + finish | 75 s | 9 | 8.3 | 85,352 | 1,078 | ≈1.1k | 0 | 0 | 0 | bash 6 / read_file 2 / finish 1 | passed (1 round) |
+
+## #65/#66 — cap-aware truncation, truncation budget, change guard (2026-08-25)
+
+Built by the released dirtywork 0.10.1 (`pipx run --spec`) + qwen3-coder-next (LM Studio, 65k) in
+`dirtywork-worker-pytest:0.10`, chained off `issue-65-66-change-guard` with `--branch-from`; verify
+gate `env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider` (the released
+sandbox still exports `GIT_DIR`). Spec: `docs/superpowers/specs/2026-08-25-cap-aware-truncation-and-change-guard-design.md`
+(v4); plan: `docs/superpowers/plans/2026-08-25-issue-65-66-change-guard.md`. Baseline on the branch
+(3e92fd7 + spec/plan/schema docs): **1505 passed, 1 skipped, 37 deselected**. Sampler:
+`metrics-6566.csv` (scratchpad; per-window stats at the end).
+
+**S14 A/B (feedback resumes under the released runtime, which has no guard):** first completion
+zero-change — counted as they happen: (none yet).
+
+| run (slug) | task | status | wall | turns | s/turn | prompt tok | compl tok | tok/s | nudges | guardrail | resets | tool mix | verify |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
