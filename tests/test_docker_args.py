@@ -112,8 +112,6 @@ def test_worker_create_argv_exact():
         "--tmpfs", "/home/worker:rw,size=256m,mode=0700,uid=501,gid=20",
         "--mount", "type=volume,src=dw-abc123-work,dst=/work",
         "--mount", "type=bind,src=/Users/x/repo/.git/objects,dst=/repo.git/objects,readonly",
-        "-e", "GIT_DIR=/gitdir",
-        "-e", "GIT_WORK_TREE=/work",
         "-e", "HOME=/home/worker",
         "-e", "TMPDIR=/tmp",
         "-e", "LANG=C.UTF-8",
@@ -185,3 +183,24 @@ def test_export_create_argv_exact():
         image_ref,
     ]
     assert "-w" not in argv
+
+def test_base_env_args_has_no_git_dir_or_git_work_tree():
+    """Worker container should not have GIT_DIR or GIT_WORK_TREE in its env."""
+    from dirtywork.sandbox.docker_args import _base_env_args
+    argv = _base_env_args()
+    assert "GIT_DIR=/gitdir" not in argv
+    assert "GIT_WORK_TREE=/work" not in argv
+    # Should have HOME, TMPDIR, LANG, GIT_AUTHOR_*, GIT_COMMITTER_*, PATH
+    assert "HOME=/home/worker" in argv
+    assert "TMPDIR=/tmp" in argv
+    assert "LANG=C.UTF-8" in argv
+    assert "GIT_AUTHOR_NAME=dirtywork" in argv
+    assert "GIT_COMMITTER_NAME=dirtywork" in argv
+    assert f"PATH={PATH_ENV}" in argv
+
+
+def test_git_env_args_returns_exactly_four_elements():
+    """_git_env_args should return exactly [-e, GIT_DIR=..., -e, GIT_WORK_TREE=...]."""
+    from dirtywork.sandbox.docker_args import _git_env_args
+    argv = _git_env_args()
+    assert argv == ["-e", "GIT_DIR=/gitdir", "-e", "GIT_WORK_TREE=/work"]

@@ -117,11 +117,13 @@ def security_args(pids_limit: int) -> list:
     ]
 
 
-def _env_entrypoint_args() -> list:
-    """Return environment and entrypoint arguments for docker create/run."""
+def _base_env_args() -> list:
+    """Return base environment and entrypoint arguments for docker create/run.
+
+    This includes HOME, TMPDIR, LANG, GIT_AUTHOR_*/GIT_COMMITTER_* pairs,
+    and PATH. It does NOT include GIT_DIR or GIT_WORK_TREE.
+    """
     return [
-        "-e", "GIT_DIR=/gitdir",
-        "-e", "GIT_WORK_TREE=/work",
         "-e", "HOME=/home/worker",
         "-e", "TMPDIR=/tmp",
         "-e", "LANG=C.UTF-8",
@@ -132,6 +134,15 @@ def _env_entrypoint_args() -> list:
         "-e", f"PATH={PATH_ENV}",
         "--entrypoint", "/bin/cat",
     ]
+
+
+def _git_env_args() -> list:
+    """Return GIT_DIR and GIT_WORK_TREE environment arguments.
+
+    These are used only for the export container where /work is mounted
+    read-only. The worker container uses gitfile-based discovery instead.
+    """
+    return ["-e", "GIT_DIR=/gitdir", "-e", "GIT_WORK_TREE=/work"]
 
 
 def worker_create_argv(cfg: DockerConfig, slug: str, image_ref: str, uid: int, gid: int,
@@ -156,7 +167,7 @@ def worker_create_argv(cfg: DockerConfig, slug: str, image_ref: str, uid: int, g
         "--tmpfs", f"/home/worker:rw,size={cfg.home_size},mode=0700,uid={uid},gid={gid}",
         "--mount", f"type=volume,src={volume_name(slug)},dst=/work",
         "--mount", f"type=bind,src={objects_dir},dst=/repo.git/objects,readonly",
-        *(_env_entrypoint_args()),
+        *(_base_env_args()),
         image_ref,
     ]
 
@@ -186,6 +197,7 @@ def export_create_argv(cfg: DockerConfig, slug: str, image_ref: str, uid: int, g
         "--tmpfs", f"/home/worker:rw,size=64m,mode=0700,uid={uid},gid={gid}",
         "--mount", f"type=volume,src={volume_name(slug)},dst=/work,readonly",
         "--mount", f"type=bind,src={objects_dir},dst=/repo.git/objects,readonly",
-        *(_env_entrypoint_args()),
+        *(_git_env_args()),
+        *(_base_env_args()),
         image_ref,
     ]

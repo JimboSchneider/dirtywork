@@ -838,6 +838,13 @@ def test_reset_uses_restart_variant_init(started_with_transcript):
                   and not any("du -sk /work" in str(arg) for arg in c[0])]
     assert init_calls
     last_init_script = init_calls[-1][0][-1]
+    # Worker container uses gitfile layout: rm -rf /work/.git and --separate-git-dir=/gitdir
+    assert "rm -rf -- /work/.git" in last_init_script
+    assert "--separate-git-dir=/gitdir" in last_init_script
+    # Check that no init exec has GIT_DIR= or GIT_WORK_TREE= in its env (worker uses gitfile)
+    for c in init_calls:
+        env_values = [c[0][i + 1] for i, a in enumerate(c[0]) if a == "-e"]
+        assert not any(v.startswith("GIT_DIR=") or v.startswith("GIT_WORK_TREE=") for v in env_values)
     assert "git read-tree HEAD" in last_init_script
     assert "read-tree -m -u HEAD" not in last_init_script
 
@@ -1029,11 +1036,11 @@ def test_reset_raises_when_container_does_not_come_back(started, monkeypatch):
     # Make _wait_ready fail fast by monkeypatching the lifecycle timeout
     import dirtywork.sandbox.docker as docker_module
     monkeypatch.setattr(docker_module.docker_cli, "T_LIFECYCLE", 0.2)
-    
+
     sb, fake, run_dir = started
     # Script exec to fail (the ready-wait /bin/true exec)
     fake.script(["exec"], _fail(b""))
-    
+
     with pytest.raises(SandboxError):
         sb.reset("x")
 
@@ -1428,8 +1435,16 @@ def test_start_default_branch_is_dirtywork_slug(docker, tmp_path):
     repo, worktree = _started_worktree(tmp_path)
     sb.start(worktree, repo, "abc123", "deadbeef" * 5)
     script = _init_script(fake)
+    # Worker container uses gitfile layout
     assert "refs/heads/dirtywork/abc123" in script
     assert "read-tree -m -u HEAD" in script
+    assert "--separate-git-dir=/gitdir" in script
+    assert "rm -rf -- /work/.git" in script
+    # Check that no init exec has GIT_DIR= or GIT_WORK_TREE= in its env (worker uses gitfile)
+    inits = [c for c in fake.calls if "/usr/bin/git init" in " ".join(c[0])]
+    for c in inits:
+        env_values = [c[0][i + 1] for i, a in enumerate(c[0]) if a == "-e"]
+        assert not any(v.startswith("GIT_DIR=") or v.startswith("GIT_WORK_TREE=") for v in env_values)
     assert not [p for p in fake.popens if p.argv[:1] == ["tar"]]
 
 
@@ -1439,8 +1454,11 @@ def test_start_seed_from_worktree_uses_restart_init_and_tar_pipeline(docker, tmp
     sb.start(worktree, repo, "new1", "deadbeef" * 5,
              branch="dirtywork/orig", seed_from_worktree=True)
     script = _init_script(fake)
+    # Worker container uses gitfile layout
     assert "refs/heads/dirtywork/orig" in script
     assert "read-tree HEAD" in script and "read-tree -m -u HEAD" not in script
+    assert "--separate-git-dir=/gitdir" in script
+    assert "rm -rf -- /work/.git" in script
     tar_out = [p for p in fake.popens if p.argv[:1] == ["tar"]]
     tar_in = [p for p in fake.popens if p.argv[:2] == ["docker", "exec"] and "-xf" in p.argv]
     assert len(tar_out) == 1

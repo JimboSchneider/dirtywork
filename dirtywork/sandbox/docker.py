@@ -306,7 +306,7 @@ class DockerSandbox:
         lifecycle.wait_ready(self._run, self.container)
 
     def _init(self, *, restart: bool) -> None:
-        lifecycle.init_worker_git(self._run, self.container, branch=self._branch, base_commit=self._base_commit, restart=restart)
+        lifecycle.init_worker_git(self._run, self.container, branch=self._branch, base_commit=self._base_commit, restart=restart, layout="gitfile")
 
     def _check(self, res, what: str) -> None:
         """Raise SandboxError with the captured output when a docker step failed."""
@@ -863,7 +863,7 @@ class DockerSandbox:
         otherwise unreachable — e.g. `docker kill` fired while a `docker
         exec` was in flight) is ALSO a reset trigger: whatever state the
         container is in, a fresh one via reset() is the safe recovery.
-        
+
         Returns True if a reset was performed, False otherwise."""
         # Don't perform multiple resets in one call
         if self._reset_this_call:

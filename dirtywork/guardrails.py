@@ -82,16 +82,16 @@ def resolve_in_worktree(path_str: str, worktree: Path, writing: bool = False) ->
 #     shared refs/config (the git config/remote/update-ref/gc/filter-branch/
 #     reflog/worktree/branch -d|-D|-m|-M/tag -d rules, plus the
 #     rm/mv/chmod/chown/redirect/cd/pushd escape-target rules). In docker
-#     mode the container is its own filesystem with its own throwaway
-#     /gitdir (see lifecycle.init_worker_git) — there is no host filesystem
-#     or shared parent repo for a docker-mode command to reach, so these
-#     rules would just be false positives there. The real boundary in docker
-#     mode is the container itself (--network none, --read-only rootfs,
-#     --cap-drop ALL, no host path mounted in but a read-only object store
-#     copy — see SECURITY.md); check_bash_command(sandboxed=True) scans only
-#     the "always" subset (in this same original order) and skips the
-#     worktree-rewrite step (there is no worktree path for the container's
-#     commands to be rewritten against).
+#     mode the container is its own filesystem with /gitdir discovered through
+#     the gitfile at /work/.git (no GIT_DIR in environment) — there is no host
+#     filesystem or shared parent repo
+#     for a docker-mode command to reach, so these rules would just be false
+#     positives there. The real boundary in docker mode is the container
+#     itself (--network none, --read-only rootfs, --cap-drop ALL, no host
+#     path mounted in but a read-only object store copy — see SECURITY.md);
+#     check_bash_command(sandboxed=True) scans only the "always" subset (in
+#     this same original order) and skips the worktree-rewrite step (there
+#     is no worktree path for the container's commands to be rewritten against).
 _ESCAPE_TARGET = r"(?:\./)*(?:/|~|\.\.)"
 # Toolchain managers that key their install root on $HOME unless told otherwise
 # (see build_env() / _toolchain_homes() below for why these are passed through

@@ -9,6 +9,29 @@ from . import docker_args
 from . import docker_cli
 
 
+# Template for the init script used by the export container (env layout)
+ENV_INIT_SCRIPT = (
+    "set -e; "
+    "/usr/bin/git init -q --template= ; "
+    "echo /repo.git/objects > /gitdir/objects/info/alternates; "
+    "/usr/bin/git symbolic-ref HEAD refs/heads/{branch}; "
+    "/usr/bin/git update-ref refs/heads/{branch} {base_commit}; "
+    "{populate}"
+)
+
+
+# Template for the init script used by the worker container (gitfile layout)
+GITFILE_INIT_SCRIPT = (
+    "set -e; "
+    "rm -rf -- /work/.git; "
+    "/usr/bin/git init -q --template= --separate-git-dir=/gitdir; "
+    "echo /repo.git/objects > /gitdir/objects/info/alternates; "
+    "/usr/bin/git symbolic-ref HEAD refs/heads/{branch}; "
+    "/usr/bin/git update-ref refs/heads/{branch} {base_commit}; "
+    "{populate}"
+)
+
+
 def wait_ready(run, name: str, *, deadline_s: float | None = None, poll_s: float = 0.05) -> None:
     """Poll `docker exec <name> /bin/true` until it exits 0 or deadline_s elapses; raise SandboxError with the last error otherwise."""
     if deadline_s is None:
@@ -33,20 +56,38 @@ def wait_ready(run, name: str, *, deadline_s: float | None = None, poll_s: float
     )
 
 
-def init_worker_git(run, name: str, *, branch: str, base_commit: str, restart: bool) -> None:
-    """Run the in-container git init script (git init -q --template= ; alternates; symbolic-ref; update-ref; read-tree HEAD [-m -u unless restart]) with GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; raise SandboxError('in-container init failed: <output[:500]>') on non-zero exit. `branch` is the full branch name (dirtywork/<slug>) — a resumed run keeps the original run's branch while its container/volume carry the new slug."""
+def init_worker_git(run, name: str, *, branch: str, base_commit: str, restart: bool, layout: str) -> None:
+    """Run the in-container git init script with GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1.
+
+    Two layouts are supported:
+    - "env": for the export container (uses ENV_INIT_SCRIPT); that container has GIT_DIR=/gitdir
+      and GIT_WORK_TREE=/work set at create time because /work is mounted read-only there.
+    - "gitfile": for worker container (uses GITFILE_INIT_SCRIPT). The git repository is stored at
+      /gitdir and /work/.git is a gitfile pointing to it (no GIT_DIR in environment).
+
+    `branch` is the full branch name (dirtywork/<slug>) — a resumed run keeps the original
+    run's branch while its container/volume carry the new slug.
+
+    Raises SandboxError('in-container init failed: <output[:500]>') on non-zero exit.
+    """
+    if layout not in ("env", "gitfile"):
+        raise ValueError(f"layout must be 'env' or 'gitfile', got {layout!r}")
+
     populate = "/usr/bin/git read-tree HEAD" if restart else "/usr/bin/git read-tree -m -u HEAD"
-    script = (
-        "set -e; "
-        "/usr/bin/git init -q --template= ; "
-        "echo /repo.git/objects > /gitdir/objects/info/alternates; "
-        f"/usr/bin/git symbolic-ref HEAD refs/heads/{branch}; "
-        f"/usr/bin/git update-ref refs/heads/{branch} {base_commit}; "
-        f"{populate}"
-    )
+
+    script = {
+        "env": ENV_INIT_SCRIPT,
+        "gitfile": GITFILE_INIT_SCRIPT
+    }[layout].format(branch=branch, base_commit=base_commit, populate=populate)
+
+    # For gitfile layout, the container has no GIT_DIR/GIT_WORK_TREE in its env
+    # (git init --separate-git-dir must not see them). For env layout, the container
+    # has both set at create time (export container is read-only so it needs them).
+    exec_env = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+
     argv = docker_args.exec_argv(
         name, ["/bin/sh", "-c", script],
-        env={"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"},
+        env=exec_env,
     )
     captured = run(argv, timeout=docker_cli.T_LIFECYCLE)
     if captured.returncode != 0:

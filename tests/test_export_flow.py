@@ -91,6 +91,14 @@ def test_export_run_happy_path(tmp_path, empty_worktree):
     assert create_argv[create_argv.index("--network") + 1] == "none"
     assert any(a.startswith("type=volume") and "readonly" in a and "dw-abc123-work" in a
                for a in create_argv)
+    # Export container uses env layout: must have GIT_DIR and GIT_WORK_TREE
+    assert "-e" in create_argv
+    i = create_argv.index("-e")
+    assert create_argv[i:i + 4] == ["-e", "GIT_DIR=/gitdir", "-e", "GIT_WORK_TREE=/work"]
+
+    inits = [c for c in fake.calls if c[0][0] == "exec" and "/bin/sh" in c[0] and "-c" in c[0]]
+    assert inits, "no init exec call found"
+    assert "--separate-git-dir" not in inits[0][0][inits[0][0].index("-c") + 1]
 
 
 def test_export_run_parses_dropped_git_entries(tmp_path, empty_worktree):
@@ -202,12 +210,12 @@ def test_export_run_extract_validation_failure_marks_export_failed(tmp_path, emp
 def test_export_run_docker_error_routes_through_fail(tmp_path, empty_worktree):
     fake = FakeDocker()
     fake.script(["create"], _ok())
-    
+
     def custom_run(argv, *, timeout, stdin=None):
         if "add" in argv and "-A" in argv:
             raise docker_cli.DockerError("timed out")
         return fake.run(argv, timeout=timeout, stdin=stdin)
-    
+
     run_dir = tmp_path / "rundir"
     run_dir.mkdir()
     cfg = DockerConfig()
@@ -294,12 +302,12 @@ def test_export_run_diff_step_oserror_routes_through_fail(tmp_path, empty_worktr
 
 def test_export_run_create_docker_error_no_cleanup_needed(tmp_path, empty_worktree):
     fake = FakeDocker()
-    
+
     def custom_run(argv, *, timeout, stdin=None):
         if argv[0] == "create":
             raise docker_cli.DockerError("timed out")
         return fake.run(argv, timeout=timeout, stdin=stdin)
-    
+
     run_dir = tmp_path / "rundir"
     run_dir.mkdir()
     cfg = DockerConfig()
