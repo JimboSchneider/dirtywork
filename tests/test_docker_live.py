@@ -701,10 +701,12 @@ def _extend_pid_flood_assertions(payload: dict) -> None:
     # At least one of reset or stray_kill should occur
     assert reset_events or stray_kills, "Expected either sandbox_reset or stray_kill event"
 
-    # When there's a sandbox_reset, strays should be non-empty
-    if reset_events:
-        for reset_event in reset_events:
-            assert "strays" in reset_event and len(reset_event["strays"]) > 0, f"sandbox_reset event should have non-empty strays: {reset_event}"
+    # A sandbox_reset carries `strays` only when strays caused it (spec #61 §6.1):
+    # reason "stray process after bash", or "oom" found right after an in-place
+    # kill. "budget sample failed" / "container unreachable after bash" carry none.
+    for reset_event in reset_events:
+        if reset_event.get("reason") in ("stray process after bash", "oom"):
+            assert reset_event.get("strays"), f"a stray-caused sandbox_reset must carry strays: {reset_event}"
 
     # When there's a stray_kill, strays should be non-empty
     if stray_kills:
@@ -730,7 +732,9 @@ def test_docker_live_race_loop_no_resets(tmp_path, monkeypatch, capsys):
     ]
     responses.append(_resp(content="done"))
 
-    _run_docker_main(monkeypatch, tmp_path, repo, responses, client_cls=_SlowClient, **_image_kwargs())
+    # forty identical read-only calls would trip the stall detector; it is not what this test measures
+    # 40 bash turns + finish exceed the default turn cap
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, client_cls=_SlowClient, stall_turns=0, max_turns=60, **_image_kwargs())
     payload = json.loads(capsys.readouterr().out)
     _assert_status(payload, "completed")
 
@@ -781,6 +785,12 @@ def test_docker_live_dotnet_build_leaves_no_stray(tmp_path, monkeypatch, capsys)
     _assert_status(payload, "completed")
 
     events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
+    bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
+    if not bash_results[0].startswith("exit code: 0"):
+        # the :0.10 base ships .NET 8 without DOTNET_EnableWriteXorExecute=0: the SDK
+        # itself dies under the bash tool's ulimit -f (#70), so no daemon ever starts
+        pytest.skip("dotnet build cannot run on this image (#70: .NET 8 under ulimit -f "
+                    "without DOTNET_EnableWriteXorExecute=0)")
 
     # Expect no sandbox_reset either way
     assert not [e for e in events if e["event"] == "sandbox_reset"], f"Expected no sandbox_reset events, but found some"
@@ -800,19 +810,13 @@ def test_docker_live_timed_out_grep_leaves_no_stray(tmp_path, monkeypatch, capsy
     """Test that a timed out grep doesn't leave stray processes."""
     repo = _make_live_repo(tmp_path)
 
-    # Create a large file
+    # rg blocks forever on an explicitly named FIFO (verified in the image), so the
+    # grep tool's 1 s timeout is guaranteed to expire and the abandoned rg is a real
+    # stray for _kill_abandoned_exec -- with nothing large left for the export.
     responses = [
-        _resp(tool_calls=[_call("c1", "bash", {
-            "command": "yes y | head -c 200000000 > big.txt; echo made",
-            "timeout": 120
-        })]),
-        # The grep will time out (pattern never matches, large file)
-        _resp(tool_calls=[_call("c2", "grep", {
-            "pattern": "^zzz",
-            "path": ".",
-            "timeout": 1
-        })]),
-        _resp(tool_calls=[_call("c3", "bash", {"command": "echo ok"})]),
+        _resp(tool_calls=[_call("c1", "bash", {"command": "mkfifo slow.fifo && echo made"})]),
+        _resp(tool_calls=[_call("c2", "grep", {"pattern": "x", "path": "slow.fifo", "timeout": 1})]),
+        _resp(tool_calls=[_call("c3", "bash", {"command": "rm -f slow.fifo; echo ok"})]),
         _resp(content="done"),
     ]
 
