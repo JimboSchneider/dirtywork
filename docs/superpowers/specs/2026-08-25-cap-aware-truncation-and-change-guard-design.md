@@ -1,9 +1,11 @@
 # Cap-aware truncation, the truncation budget, and the change guard (#65, #66)
 
 **Date:** 2026-08-25
-**Status:** Design v3 — approach B (cap-aware nudges + truncation budget + worktree fingerprint)
-chosen by the owner 2026-08-25 ≈17:25 CDT with the four defaults in §0; **owner-ready, awaiting
-the spec review (gate)**. v2 folded a six-lens red-team with two-refuter adversarial verification
+**Status:** Design v4 — approach B (cap-aware nudges + truncation budget + worktree fingerprint)
+chosen by the owner 2026-08-25 ≈17:25 CDT with the four defaults in §0. **Owner review of v3
+(18:31 CDT): architecture sound, none of the six flagged choices vetoed, four items to resolve
+and two clarifications — all folded in v4 (the first row of §0.1); approved for `writing-plans`
+once folded.** v2 folded a six-lens red-team with two-refuter adversarial verification
 (66 agents, 17:35–17:51 CDT): 61 findings (4 Blocker, 30 Important, 27 Minor); 30
 Blocker/Important verified (29 kept, 1 refuted — a claim that no docker-level resume test exists;
 `test_docker_live_resume_seeds_worktree_keeps_branch_and_exports` does), the 4 unverified
@@ -49,7 +51,7 @@ never a removed or renamed one, no new event name, no new `via` value.
 | finding (lens) | fold |
 |---|---|
 | **B** chunk basis measures the visible reply; on LM Studio a cut tool call is dropped and only the prose preamble survives, so the target collapsed to the 200-char floor and §8's F5 recovery could not hold (model-behaviour ×2, acceptance) | §3.1 rewritten: basis = the cap unless the cut call's raw arguments are actually present; per-line ratio only from raw arguments; the text path says how much the harness *received*, never "after about N characters of content"; worked values recomputed |
-| **B** third worked value contradicted the code (200/5, not 1024/17) (model-behaviour) | §3.1: `chunk_target(max_tokens, raw_chars, raw_lines)`; the example now follows from the code |
+| **B** third worked value contradicted the code (200/5, not 1024/17) (model-behaviour) | §3.1: `chunk_target(max_tokens, cut_chars, cut_lines)` (v4 name: the cut call's own arguments); the example now follows from the code |
 | **B** `changes.py` importing `parse_exit_code` from `runner.py` is a circular import (tests-feasibility) | §4.1: `parse_exit_code` moves to `tools.py` beside `is_timeout_result` (its only two callers are in `runner.py`, which imports it from there) |
 | `git add -A` into a scratch *index* still writes every new blob and tree into the real object store — `/gitdir` is a 512 MiB tmpfs in docker; loose objects accumulate on the host (turn-loop, sandbox-exec) | §4.1: scratch object directory (`GIT_OBJECT_DIRECTORY=$tmp/objects`) with the real store as `GIT_ALTERNATE_OBJECT_DIRECTORIES`, resolved per repository *before* the variables are exported; `mktemp -d`; P4 case 2/10 measures the store |
 | an unborn nested repository makes `git add -A` fatal → guard silently off, including for a whole resume (sandbox-exec) | §4.1: no gitlink recursion; every nested `.git` (any depth, file or dir) is enumerated once and each repository is snapshotted separately with its nested children excluded by `:(exclude,literal)` — #61 §4.4's recipe; unborn repositories snapshot fine (`add` + `write-tree` need no `HEAD`); P4 case 5 |
@@ -66,6 +68,7 @@ never a removed or renamed one, no new event name, no new `via` value.
 | `NO_CHANGE_NUDGE` invites `finish` on a tree the guard will reject; the operative wording that moved W7 was "edit first, grep -n, do not re-read whole files" (model-behaviour ×2) | §4.4: two texts keyed on `fp == fp_start`; the operative wording folded in; the nudge declared diagnostic; §8's W7 replay replaced by a deterministic read-only task plus a behavioural criterion for a fresh edit task |
 | F5 pass criterion (`acceptance_passed` is the strict checker; the cited 8192 recovery fails it), `--max-turns` 40 too small at 1024, no repeat rule, #67 confounds; the S14 acceptance ran on 0.10.1 which has no guard; task ordering leaves the gate red (acceptance ×4) | §8 rewritten: recovery = `completed` + `truncations ≥ 1` + 401 lines, `acceptance_passed` reported separately; plan rows `--max-turns 60`; per-cap outcomes and the rerun rule; post-T3 acceptance step **C1** on the branch runtime; the schema-doc rows and test lists move into T1/T3; T4 depends on T1 and T3 |
 | Minors (27): `n` known only after the increment (per-turn `counted` flag); 0-char replies; case (b) counting; two delivery orders; `fp_check` initial value; `timeout` exempt from the finish-time fingerprint; plain-answer wording; export failure on `unchanged`; `runs show` skips a null `changed`; "three in a row also end it"; characters before lines; the guard measures change, not compliance; tail A/B row; §1.1 omitted rows; §1.3 tool-mix precision; `describe_change`'s `diff omitted` head; `_tool_call_arg_chars` reuse; `DEFAULT_NO_CHANGE_TURNS` naming; literal counts in docs/tests; a `S14` feature code in `soak_harvest`; README's abort sentence; bench's docstring | each folded in place (§3.1–§3.3, §4.1–§4.5, §5, §6, §7, §9) |
+| **Owner review of v3 (v4)** — (1) test 10 expected `timeout_result` to carry `exit code: 124`; the canonical text is `ERROR: command timed out after …` with no exit line (`tools.py:980-992`), so the parser treats a result with no `exit code:` head as fail-open with its first line as the reason; (2) `sandbox.bash` caps output at `MAX_BASH_CHARS` (10 000) with `[output truncated at … — bash output capped]` (`tools.py:78-82`, `:1017`), so a capped result must fail open — a partial listing is never a fingerprint; (3) §5.1's rejection-turn order contradicted #60 (§"Order of operations in a turn": the `finish` message keeps its call position, resolution rewrites it in place) — only the text is rewritten; (4) a `BudgetExceeded`/`SandboxError` raised by a measurement must store `changed = None` + `changed_reason` before it ends the run, since `finish()` measures nothing more for those statuses; the `_fail_run` paths seed every field. Clarifications: the target's basis is the **cut call's** own arguments (`call_size(tc)`), not the reply's aggregate; the parser **sorts** the hash lines so the joined fingerprint is order-independent (the `find`-order caveat disappears) | §4.1 (`parse_fingerprint`, Failure, What the lines mean), §4.3 (rule), §5.1, §3.1–§3.2, §2 (6), §7 (2, 4, 10) |
 | **Closure pass (v3, 31 findings, 0 Blocker)**: the `soak_harvest` pattern as described could not match the new generic text; `changed_reason`'s lifecycle after a failed mid-run measurement; "every `null` is explained" vs early-ended runs; the F5 rule let the S2 shape (`empty_reply` abort) count as inconclusive and had no mixed-pair, sink or target-size rule; C1 had no failure consequence, (e) was not a criterion, (d) undefined on an early finish and lacked the resume-gate check; the stderr line's owner; `$tmp` leak on a killed exec, `$TMPDIR` ENOSPC, unreadable files, nested commits invisible, "not adversarially robust"; the lost `watchdog_violation`; the plain-mode `no_change` text ordering an edit on a read-only task; no real-script nested/unborn/non-ASCII test; two `changed` test cases; the docker-mode `test_main` fakes; `trunc` on non-truncated turns; the `record["via"]` guard; the no-tool-path transcript order; test 23 owned by three tasks; rc-0 git warnings; the transcript-schema merge-order lists; `S14` untested; anchors (`_harness_cell`, `_abort_kind`'s docstring, `render_transcript_tail`, `machine-contract.md:365`, `sandbox/` prefixes, `__main__.py:1012`, 17 callers, `:844`, `docker.py:389`) | §5.2 (full pattern); §4.3 (rule); §4.1 (Failure, Known limits, `trap`, `parse_fingerprint`); §8 (F5 rule, C1); §4.4 (`NO_CHANGE_SINCE_START_{REQUIRED,PLAIN}`); §7 (11b, 12, 14, 18, 19, 20, 22, 23a–c, preamble); §5.1; §6; §2 (1), (4); anchors throughout |
 
 ## Purpose
@@ -300,8 +303,11 @@ No change to the script was needed. **P4 is satisfied** (§8).
    none) fingerprints, each one `sandbox.bash` exec bounded by `FINGERPRINT_TIMEOUT` (60 s); a run
    whose start fingerprint fails takes exactly one (§4.1, §4.4).
 6. **Host and docker run the same script through the same seam** (`sandbox.bash`, as `--verify`
-   does), parsed by one function; the hash is content-addressed and equal across modes for the
-   same tree (P1, P4). The modes differ only in what the worktree contains: host mode's `HOME` is
+   does), parsed by one function; every per-repository hash is content-addressed and equal across
+   modes for the same tree (P1, P4), and the parser sorts them, so the joined fingerprint is
+   order-independent — equal across hosts and containers, not merely within one sandbox (every
+   comparison the guard makes is within one sandbox anyway). The modes differ only in what the
+   worktree contains: host mode's `HOME` is
    the worktree, so tool caches written there count as changes (§4.1 Known limits).
 7. **The resume task reads in the right order**: prior task → tail of the earlier run → its status
    → the feedback, marked as not yet applied → the finish instruction; the `unchanged` status
@@ -319,8 +325,9 @@ The cap is the one number that is always true on a `length` stop: the model gene
 tokens whatever the server returned. What the harness *received* varies by adapter — on LM Studio
 a cut tool call is dropped and only the prose preamble arrives (§1.1); on `openai_compat` cases
 a/b the cut call's raw JSON arrives; on the Anthropic error branch `raw_arguments` is `""`. So the
-target's basis is the cap unless the cut call's arguments are actually present, and the
-per-line ratio is measured only from those arguments (prose says nothing about CSV density):
+target's basis is the cap unless **the cut call's own** arguments are actually present, and the
+per-line ratio is measured only from those arguments — the other calls of the same reply, and its
+prose, say nothing about how densely the cut content tokenizes. Two measures, two purposes:
 
 ```python
 MIN_CHUNK_CHARS = 200
@@ -328,34 +335,41 @@ MIN_CHUNK_LINES = 5
 CHUNK_DIVISOR = 4
 DEFAULT_LINE_CHARS = 60
 
-def reply_size(resp) -> tuple[int, int, int]:
-    """(text_chars, raw_chars, raw_lines): the reply's prose, the raw argument
-    strings of every addressable tool call (`_tool_call_arg_chars`), and the
-    approximate line count of those arguments -- newlines inside JSON string
-    arguments arrive escaped (`\\n`), so both forms are counted."""
-    raw = "".join(tc.raw_arguments or "" for tc in resp.tool_calls)
-    raw_chars = sum(_tool_call_arg_chars(tc) for tc in resp.tool_calls)
-    raw_lines = raw.count("\\n") + raw.count("\n") + (1 if raw_chars else 0)
-    return len(resp.text or ""), raw_chars, raw_lines
+def reply_size(resp) -> tuple[int, int]:
+    """(text_chars, raw_chars): what the harness RECEIVED -- the reply's prose
+    and the raw argument strings of every addressable tool call
+    (`_tool_call_arg_chars`). Reported to the model as `received`; never the
+    target's basis."""
+    return (len(resp.text or ""),
+            sum(_tool_call_arg_chars(tc) for tc in resp.tool_calls))
 
-def chunk_target(max_tokens: int, raw_chars: int, raw_lines: int) -> tuple[int, int]:
+def call_size(tc) -> tuple[int, int]:
+    """(chars, lines) of ONE tool call's raw arguments -- the call that was
+    cut (cases a/b). Newlines inside JSON string arguments arrive escaped
+    (`\\n`), so both forms are counted. (0, 0) when the adapter kept nothing
+    (Anthropic's error branch); the text path has no call and passes (0, 0)."""
+    raw = tc.raw_arguments or ""
+    chars = _tool_call_arg_chars(tc)
+    return chars, (raw.count("\\n") + raw.count("\n") + 1) if chars else 0
+
+def chunk_target(max_tokens: int, cut_chars: int, cut_lines: int) -> tuple[int, int]:
     """(characters, lines) a single tool call's content must stay under.
     Basis: the cap's character capacity (max_tokens * CHARS_PER_TOKEN), or the
-    smaller of that and what the cut call actually got out when its raw
-    arguments are present (raw_chars > 0) -- the call's own ratio reflects
+    smaller of that and what the CUT CALL actually got out when its raw
+    arguments are present (cut_chars > 0) -- that call's own ratio reflects
     how densely THIS model tokenizes THIS content. A quarter of the basis
     leaves room for JSON escaping, the call's other fields and any prose
-    around it. Lines come from the arguments' own characters-per-line when
-    they had enough lines to measure, else DEFAULT_LINE_CHARS."""
+    around it. Lines come from the cut call's own characters-per-line when it
+    had enough lines to measure, else DEFAULT_LINE_CHARS."""
     cap_chars = max_tokens * CHARS_PER_TOKEN
-    basis = min(cap_chars, raw_chars) if raw_chars > 0 else cap_chars
+    basis = min(cap_chars, cut_chars) if cut_chars > 0 else cap_chars
     chars = max(MIN_CHUNK_CHARS, basis // CHUNK_DIVISOR)
-    per_line = (raw_chars / raw_lines
-                if raw_chars > 0 and raw_lines >= 3 else DEFAULT_LINE_CHARS)
+    per_line = (cut_chars / cut_lines
+                if cut_chars > 0 and cut_lines >= 3 else DEFAULT_LINE_CHARS)
     return chars, max(MIN_CHUNK_LINES, int(chars / per_line))
 ```
 
-Worked values (`CHARS_PER_TOKEN = 4`): cap 1024, LM Studio text path (`raw_chars == 0`) → basis
+Worked values (`CHARS_PER_TOKEN = 4`): cap 1024, LM Studio text path (`cut_chars == 0`) → basis
 4 096 → **1 024 chars ≈ 17 lines** (the 401-line fixture in ≈ 22–31 `append_file` calls); cap
 2048 → 2 048 chars ≈ 34 lines (≈ 11 calls); cap 4096 → 4 096 ≈ 68 lines (≈ 6); cap 8192 → 8 192
 ≈ 136 lines (≈ 3; the 8192 recoveries used four or five); cap 1024, `openai_compat` case a with a
@@ -366,11 +380,16 @@ The truncation count `truncations` (§3.3) and `self.max_tokens` complete the pa
 `trunc: dict = {}` at the top of `one_turn`; it is filled at the first truncation site the turn
 reaches (a per-turn `counted` flag: `if not counted: truncations += 1; counted = True`, then the
 dict — so `n` is the incremented value) and handed to both sites; on an `empty` /
-`text_tool_call` turn it stays empty and `.format(**{})` is a no-op:
+`text_tool_call` turn it stays empty and `.format(**{})` is a no-op. On the tool path
+`cut_chars, cut_lines = call_size(tc)` of the call being handled at that first site (a second
+cut call in the same turn — case (b) twice — reuses the dict); on the text path `(0, 0)`:
 
 ```python
+text_chars, raw_chars = reply_size(resp)
+tc_chars, tc_lines = chunk_target(self.max_tokens, cut_chars, cut_lines)
 trunc = {"cap": self.max_tokens, "cap_chars": self.max_tokens * CHARS_PER_TOKEN,
-         "received": text_chars + raw_chars, "raw_lines": raw_lines,
+         "received": text_chars + raw_chars,
+         "cut_chars": cut_chars, "cut_lines": cut_lines,
          "target_chars": tc_chars, "target_lines": tc_lines,
          "n": truncations, "max": MAX_TRUNCATED_REPLIES}
 ```
@@ -405,13 +424,13 @@ def truncated_call_result(tool: str, raw_arguments, trunc: dict) -> str:
         path = _recovered_path(raw_arguments)
         if path is not None:
             return (f"ERROR: your write_file for {path!r} was cut off at the --max-tokens cap of "
-                    f"{trunc['cap']} tokens after about {trunc['received']} characters "
-                    f"(~{trunc['raw_lines']} lines) — nothing was written; cut-off reply "
+                    f"{trunc['cap']} tokens after about {trunc['cut_chars']} characters "
+                    f"(~{trunc['cut_lines']} lines) — nothing was written; cut-off reply "
                     f"{trunc['n']} of {trunc['max']}. Write the file in chunks of at most about "
                     f"{trunc['target_chars']} characters (about {trunc['target_lines']} lines): "
                     f"write_file with the first part, then append_file for each following part.")
     return (f"ERROR: your {tool} call was cut off at the --max-tokens cap of {trunc['cap']} tokens "
-            f"after about {trunc['received']} characters (~{trunc['raw_lines']} lines) before it "
+            f"after about {trunc['cut_chars']} characters (~{trunc['cut_lines']} lines) before it "
             f"completed — cut-off reply {trunc['n']} of {trunc['max']}. Keep each tool call under "
             f"about {trunc['target_chars']} characters (about {trunc['target_lines']} lines); for "
             f"a large file, write_file the first part and append_file the rest.")
@@ -491,14 +510,22 @@ git rev-parse HEAD"""
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 
 def parse_fingerprint(result: str) -> tuple[str | None, str | None]:
-    """(fingerprint, reason): the sandbox's bash result (`exit code: N` line
-    first, stdout and stderr merged). Exit 0 -> the fingerprint is the
-    40-hex lines in order (at least two: a tree and HEAD); any other line
-    (an rc-0 `warning:`/`hint:` from git) is ignored -- the script itself
-    exits non-zero on every failure, so rc 0 vouches for every hash. Exit
-    non-zero, or fewer than two hex lines -> (None, reason), `reason` being
-    the first non-empty non-hex line (git's own diagnostic) or the exit
-    line, capped at 200 characters."""
+    """(fingerprint, reason) from the sandbox's bash result (stdout and
+    stderr merged; `exit code: N` first when the command ran to an exit).
+    Exit 0 -> the fingerprint is the SORTED 40-hex lines (at least two: a
+    tree and HEAD); sorting makes it independent of `find`'s order, so the
+    same tree gives the same string on any host or container. Any other
+    line under exit 0 (an rc-0 `warning:`/`hint:` from git) is ignored --
+    the script exits non-zero on every failure, so rc 0 vouches for every
+    hash. Everything else is (None, reason), `reason` capped at 200 chars:
+    a non-zero exit (reason = the first non-empty non-hex line, git's own
+    diagnostic, else the exit line); a result with no `exit code:` head --
+    `timeout_result`'s `ERROR: command timed out after …`, `ERROR: bash
+    failed …`, a `BLOCKED:` -- (reason = its first line); a CAPPED result,
+    whose last line is `[output truncated at 10000 chars — bash output
+    capped]` (`MAX_BASH_CHARS`; about 240 repositories' worth of lines) --
+    (reason = that line): a partial listing must never pass as a
+    fingerprint, whatever its exit code says."""
 
 def fingerprint(sandbox) -> tuple[str | None, str | None]:
     bash = getattr(sandbox, "bash", None)
@@ -523,7 +550,7 @@ def fingerprint(sandbox) -> tuple[str | None, str | None]:
   an **unborn** nested repository (`git init` without a commit — fatal to a plain `git add -A`,
   #61 §1.4) snapshots like any other (`add` + `write-tree` need no `HEAD`). The last line is the
   root's `HEAD`, so a commit with no file change (host mode keeps real commits) counts as a change.
-  The fingerprint is the joined lines; the harness never interprets them beyond equality.
+  The fingerprint is the sorted hash lines; the harness never interprets them beyond equality.
 - **Determinism and config.** `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1` make host and
   container read the same config (host mode's `HOME` is the worktree, so `~/.gitconfig` there is
   worker-writable; the operator's real global config — `core.autocrlf`, filters — is out of the
@@ -563,18 +590,24 @@ def fingerprint(sandbox) -> tuple[str | None, str | None]:
   measurement this turn, which also covers the top-of-turn exits where no model action occurred
   since the last check). So `run_end.changed` is known for `max_turns`, `stalled`, `stuck`,
   `model_error`, `verify_failed` and `context_exhausted` too (W7 would have read `changed: false`).
-- **Failure.** `BudgetExceeded` / `SandboxError` raised by `sandbox.bash`: at run start, on
-  completion paths and in the K check they end the run with `budget_exceeded` / `sandbox_error`
-  exactly as `run_verify`'s are mapped (`:761-767`; the completion paths resolve the finish record
-  to `run not finished: change check could not run (<reason>)`); inside `finish()` they are caught
-  and recorded — `changed = None`, `changed_reason = "budget: <reason>"` / `"sandbox: <error>"` —
-  never swallowed silently: in docker mode the exec's `_after_bash` budget sample *consumes* the
+- **Failure.** `BudgetExceeded` / `SandboxError` raised by `sandbox.bash`: `take_fingerprint()`
+  **first stores `changed = None` and `changed_reason = "budget: <reason>"` /
+  `"sandbox: <error>"`, then re-raises** — so the `run_end` that follows carries the diagnostic
+  although `finish()` measures nothing more for those statuses. At run start, on completion paths
+  and in the K check the exception ends the run with `budget_exceeded` / `sandbox_error` exactly
+  as `run_verify`'s are mapped (`:761-767`; the completion paths resolve the finish record to
+  `run not finished: change check could not run (<reason>)`); inside `finish()` it is caught and
+  the same two fields stand — never swallowed silently: in docker mode the exec's `_after_bash` budget sample *consumes* the
   watchdog violation (`take_violation`) before raising, so after `extra.update(finalize_state
   ["result"])` `finish()` sets `extra["watchdog_violation"] = e.reason` and
   `watchdog_violation_kind = "budget"` when `finalize()` left them unset (never overwriting a value
   it set); a `SandboxError` there is already what `finalize()` will report as the export failure.
-  Any other exception from the exec propagates as today's unhandled-error contract does. A `(None,
-  reason)` fingerprint disables only the comparison it was for: at run start it turns the guard
+  Any other exception from the exec propagates as today's unhandled-error contract does: it
+  escapes `run()` to `__main__._fail_run` (`:683-695`), which writes no runner `run_end`,
+  builds the payload from `_contract_fields(extra={})` — `truncations: 0`, `changed: null`, no
+  `changed_reason`, as `timeouts` is seeded there today — and prints no guard line; the same holds
+  for an `LLMError` escaping `run()`. A `(None, reason)` fingerprint disables only the comparison
+  it was for: at run start it turns the guard
   off for the run (`fp_start = None` ⇒ (2)–(4) are all skipped, `changed: null`, `changed_reason`
   = the reason, no rejection, no `no_change` nudge — **exactly one exec for the whole run**); in a
   K check or a completion check it skips that check, keeps the previous baseline and stores the
@@ -593,7 +626,8 @@ def fingerprint(sandbox) -> tuple[str | None, str | None]:
 - **What the lines mean.** Each line is one repository's working tree; the root line never
   reflects a nested repository (excluded, not a gitlink), a commit inside a nested repository moves
   nothing by itself (its files are unchanged), and only the root's `HEAD` line tracks commits. The
-  order of the nested lines is `find`'s — stable within a sandbox, not topological (P4).
+  script prints the nested lines in `find`'s order (not topological, P4); the parser sorts them,
+  so the fingerprint does not depend on it.
 - **Known limits.** Ignored files never count — a run whose only output is under `.gitignore`
   reads as unchanged, which is also what `files_changed` says of it today. **Host mode:**
   `build_env` redirects `HOME` into the worktree, so `HOME`-keyed caches an install or test run
@@ -651,10 +685,12 @@ on), `changed = None`, `changed_reason = None`, `unchanged_finishes = 0`.
 K check, `finish()` — sets `fp_turn`, `fp_value`, `changed = fp != fp_start` **and
 `changed_reason = None`**; a failed K-check or completion-check measurement stores its reason
 until the next measurement (so a failure at turn 10 followed by a successful `finish()`
-measurement reports `changed` with no reason); a failed or raising measurement in `finish()` sets
-`changed = None` and `changed_reason`; `interrupted`, `timeout`, `budget_exceeded` and
-`sandbox_error` report the newest known value (`null` only if none was taken — a run ending on a
-K-check turn reuses that turn's measurement). `changed` is therefore never a stale verdict from an
+measurement reports `changed` with no reason); a measurement that **raises**
+`BudgetExceeded` / `SandboxError` — anywhere — sets `changed = None` and `changed_reason` before
+the exception ends the run; a failed measurement in `finish()` sets the same two; `interrupted`,
+`timeout`, and a `budget_exceeded` / `sandbox_error` caused by a *tool call* or verify report the
+newest known value (`null` only if none was taken — a run ending on a K-check turn reuses that
+turn's measurement). `changed` is therefore never a stale verdict from an
 earlier completion: `finish()` re-measures unless this turn already did.
 
 `check_verify(final, via)` (`runner.py:746-786`) — the one function both completion paths go
@@ -695,8 +731,11 @@ def check_verify(final, via):
 - **Carriers.** On the finish-tool path the text *is* the finish `tool_result.result` — the
   `VERIFY_FEEDBACK` pattern (`resolve_finish`), so `runs show` already renders it as `not finished`
   (`runs.py:276-278`) and the history never carries a user message after a tool result (#60 §3).
-  The turn's remaining tool calls have already run (finish is checked after the loop, `:958`), and
-  the timeout/sandbox nudges of that turn are delivered as today (`:962-970`). On the plain-answer
+  The turn's remaining tool calls have already run (finish is checked after the loop, `:958`);
+  the finish tool message and its transcript record **keep their call position** — only the
+  `result` text is rewritten in place, as #60 defines for every resolution (§"Order of operations
+  in a turn": wire order equals call order) — and the timeout/sandbox nudges of that turn are
+  delivered as today (`:962-970`). On the plain-answer
   path (`via="user"`, `:843-850`) the text goes out as the user message the caller already
   delivers. The `nudge` event's `via` follows the carrier (`tool_result` / `user`); its text lives
   in the finish `tool_result.result`, not in a `follow_up` (§5.1).
@@ -841,17 +880,21 @@ let the same non-work end `completed`. Every other status is unchanged.
   - `changed` — `true` / `false` / `null`, **always**: whether the newest worktree fingerprint
     differed from the one at run start (§4.3's rule); `null` when the guard could not measure.
   - `changed_reason` — string, **sparse**: present exactly when `changed` is `null` because a
-    fingerprint was attempted and failed (§4.1: the first diagnostic line, ≤ 200 chars, e.g.
-    `error: 'vendor/x/' …`, `exit code: 124`, `budget: …`, `sandbox has no bash`); absent when
-    `changed` is `null` only because the run ended before any measurement after the start one.
+    fingerprint was attempted and failed or raised (§4.1: the first diagnostic line, ≤ 200 chars,
+    e.g. `error: 'vendor/x/' …`, `ERROR: command timed out after 60 s…`, `[output truncated at
+    10000 chars — bash output capped]`, `budget: …`, `sandbox: …`, `sandbox has no bash`); absent
+    when `changed` is `null` only because the run ended before any measurement after the start
+    one, and on the `_fail_run` paths, which seed every field.
 - **`status`** gains **`unchanged`** — "the run required changes (`resume --feedback`) and the
   worker completed twice without changing the worktree; nothing was verified". Exit 1.
 - **`tool_result`** for `finish`: four new documented `result` texts — the two rejection texts,
   `run not finished: nothing changed`, and `run not finished: change check could not run (…)` —
   all `not finished` to `runs show` (`_tool_result_outcome`).
-- **Ordering within a turn.** Rejection turn: `assistant` → the turn's other `tool_result`s → the
-  finish `tool_result` (`result` = rejection text) → `nudge{unchanged_finish}` → the `timeout` /
-  sandbox `nudge`s of that turn (as today). K-check turn, transcript order on a tool turn
+- **Ordering within a turn.** Rejection turn: `assistant` → the turn's `tool_result`s **in call
+  order** — the finish record at its own call position, its `result` rewritten in place to the
+  rejection text by `resolve_finish` (#60: wire and transcript order equal call order; resolution
+  never moves a record) → `nudge{unchanged_finish}` → the `timeout` / sandbox `nudge`s of that
+  turn (as today). K-check turn, transcript order on a tool turn
   (`runner.py:986-1001`): `nudge{stall}?` → `nudge{no_change}` → `nudge{malformed_entry}?` →
   `nudge{timeout}?` → sandbox notices; on the no-tool path (`:851-860`): `nudge{kind}` →
   `nudge{stall}?` → `nudge{no_change}` → sandbox notices. Delivered text order (the
@@ -971,19 +1014,22 @@ Doubles and fixtures (named so no ad-hoc class grows):
   payloads carry `changed: null` with a `changed_reason` (`no output` / fewer than two hex lines)
   and the stderr line; nothing else changes for them.
 
-1. `chunk_target`: cap basis when `raw_chars == 0`; basis = min(cap chars, raw chars) when
+1. `chunk_target`: cap basis when `cut_chars == 0`; basis = min(cap chars, cut chars) when
    present; floors 200 chars / 5 lines; per-line from the arguments (≥ 3 lines) vs
    `DEFAULT_LINE_CHARS`; the worked values of §3.1 (1024 → 1024/17; 2048 → 2048/34; 4096 →
    4096/68; 8192 → 8192/136; case a 3 000/55 → 750/13).
-2. `reply_size`: prose only; escaped `\n` in raw arguments + real newlines; Anthropic's empty
-   `raw_arguments`; two calls summed (`_tool_call_arg_chars`).
+2. `reply_size`: prose only; two calls summed (`_tool_call_arg_chars`). `call_size`: escaped
+   `\n` in raw arguments + real newlines; Anthropic's empty `raw_arguments` → `(0, 0)`; a call
+   with arguments but no newline → `(chars, 1)`.
 3. Text-path nudge: `NUDGES["truncated"].format(**trunc)` is the delivered user message and the
    `follow_up` on a tool turn, with `cap == max_tokens` (a Runner built with `max_tokens=1234`),
    `received == len(text)`, `n == 1`, `max == 6`; a 0-character `length` reply renders "received
    only 0 characters".
-4. Tool-path results: `write_file` with a recovered path and the generic form carry the numbers;
-   case (b) (missing required param) uses the same dict; two cut calls in one turn both get the
-   text with the same `n`.
+4. Tool-path results: `write_file` with a recovered path and the generic form carry the numbers
+   (`cut_chars` / `cut_lines` are the cut call's own, `received` the whole reply's); case (b)
+   (missing required param) uses the same dict; two cut calls in one turn both get the text with
+   the same `n` and a target sized by the first; a reply with one complete call and one cut call
+   sizes the target from the cut one only.
 5. `truncations` counts once per turn with two truncated calls; text and tool paths both count; a
    `length` turn with a complete call does not (the `:537-554` pin stands); the value is on
    `run_end`, `run.json` and the stdout payload; the failure-path seeds are `0`.
@@ -1004,10 +1050,14 @@ Doubles and fixtures (named so no ad-hoc class grows):
 9. `ProgressTracker`: `+0 -0` from a mutating tool is idle (`idle_turns` rises); `+1 -0` and the
    new-file form are progress; a `None` result keeps today's behaviour; a new runner-level test:
    byte-identical `write_file` × `stall_turns` → `stalled`.
-10. `parse_fingerprint`: two hex lines → joined; four (nested) → joined; rc 0 with an extra
-    `warning:` line → the hex lines, the warning ignored; rc ≠ 0 with a git diagnostic →
-    `(None, "error: …")`; empty output; rc 0 with one hex line; a `timeout_result` → `(None,
-    "exit code: 124…")`; the reason is capped at 200 chars.
+10. `parse_fingerprint`: two hex lines → the sorted join; four (nested) in two different orders
+    → the same fingerprint; rc 0 with an extra `warning:` line → the hex lines, the warning
+    ignored; rc ≠ 0 with a git diagnostic → `(None, "error: …")`; empty output; rc 0 with one hex
+    line; `timeout_result(60)` (no `exit code:` head) → `(None, "ERROR: command timed out after
+    …")`; an `ERROR: bash failed …` and a `BLOCKED:` result → `(None, <first line>)`; rc 0 with
+    240 hex lines followed by `_cap`'s `[output truncated at 10000 chars — bash output capped]`
+    → `(None, "[output truncated …")` — the partial listing is refused; the reason is capped at
+    200 chars.
 11. `FINGERPRINT_SCRIPT` passes `check_bash_command` in both modes (host with a worktree,
     sandboxed) and contains `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`,
     `:(exclude,literal)`, `trap`, `git add -A -- .`, `write-tree`, `rev-parse HEAD` (the probed
