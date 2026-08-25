@@ -395,6 +395,7 @@ def harvest_run(label: str, run_dir: Path, driver_row: dict = None) -> dict:
         "features": detect_features(run_json, events),
         "nudges": sum(counts[f"nudge_{k}"] for k in bench.NUDGE_KINDS),
         "guardrail_blocks": counts["guardrail_block"],
+        "stray_kills": counts.get("stray_kill", 0),
         "tool_mix": _tool_mix(events),
         "model_tool": model_tool_time(events),
     }

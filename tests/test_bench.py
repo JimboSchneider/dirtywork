@@ -813,3 +813,52 @@ def test_summarize_reports_timeouts_in_the_failures_cell_and_the_legends(
            "(timeout nudges are also counted in nudges)") in compare_out
     assert "1/0/0/3 -> 1/0/0/3 (0/0/0/0)" in compare_out
 
+
+# --------------------------------------------------------------------------- #61 stray_kill / sandbox notices
+def test_event_counts_counts_stray_kill_events():
+    counts = bench._event_counts(None, events=[
+        {"event": "stray_kill", "strays": ["sleep 300"]},
+        {"event": "sandbox_reset", "reason": "oom"},
+        {"event": "nudge", "kind": "stray_kill"},
+        {"event": "nudge", "kind": "sandbox_reset"},
+    ])
+    assert counts["stray_kill"] == 1 and counts["sandbox_reset"] == 1
+    assert counts["nudge_stray_kill"] == 1 and counts["nudge_sandbox_reset"] == 1
+    assert counts["nudge_other"] == 0
+
+
+def test_sandbox_nudges_are_not_empty_replies():
+    # Spec #61 §6.2: the two sandbox kinds are not FailureTracker events.
+    counts = {f"nudge_{kind}": 0 for kind in bench.NUDGE_KINDS}
+    counts["nudge_stray_kill"] = 2
+    counts["nudge_sandbox_reset"] = 1
+    counts["nudge_other"] = 0
+    failures = bench._harness_failures(counts, "completed", None)
+    assert failures["empty_reply"] == 0
+    assert failures["nudge_stray_kill"] == 2 and failures["nudge_sandbox_reset"] == 1
+
+
+def test_empty_reply_nudge_kinds_match_the_runner():
+    from dirtywork import runner
+    assert bench.EMPTY_REPLY_NUDGE_KINDS == tuple(runner.NUDGES)
+    assert bench.NUDGE_KINDS[-2:] == ("stray_kill", "sandbox_reset")
+    assert len(bench.NUDGE_KINDS) == 8
+
+
+def test_summarize_legend_and_detail_cell_list_eight_kinds(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs")
+    results = tmp_path / "results.jsonl"
+    harness = {f"nudge_{k}": 0 for k in bench.NUDGE_KINDS}
+    harness.update({"nudge_stray_kill": 3, "nudge_other": 0, "empty_reply": 0, "timeouts": 0,
+                    "stalled": 0, "max_turns": 0, "sandbox_error": 0, "abort_kind": None})
+    results.write_text(json.dumps({"model": "m1", "task": "t", "repeat": 1, "slug": "s1",
+                                   "status": "completed", "turns": 3, "wall_s": 1.0,
+                                   "prompt_tokens": 1, "completion_tokens": 1,
+                                   "acceptance": "skipped", "guardrail_blocks": 0,
+                                   "sandbox_resets": 0, "stray_kills": 3, "diff_stat": None,
+                                   "harness": harness, "verdict": None, "review_seconds": None}) + "\n")
+    rc = bench.cmd_summarize(argparse.Namespace(file=str(results)))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "nudges: " + "/".join(bench.NUDGE_KINDS) in out
+    assert "0/0/0/0/0/0/3/0" in out

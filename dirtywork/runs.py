@@ -412,7 +412,7 @@ def _md_event_lines(event: dict) -> list:
         strays = event.get("strays") or []
         if strays:
             stray_str = ", ".join(_md_code(s, MD_ARGS_CHARS) for s in strays)
-            return [f"> **sandbox_reset**: {reason} — strays: {stray_str[:120]}", ""]
+            return [f"> **sandbox_reset**: {reason} — strays: {stray_str}", ""]
         return [f"> **sandbox_reset**: {reason}", ""]
     if name == "stray_kill":
         strays = event.get("strays") or []
@@ -423,7 +423,7 @@ def _md_event_lines(event: dict) -> list:
         if m:
             lock_word = "file" if m == 1 else "files"
             locks_msg = f", {m} lock {lock_word} removed"
-        return [f"> **stray_kill**: {n} process{'' if n == 1 else 'es'} killed — {strays_str[:120]}{locks_msg}", ""]
+        return [f"> **stray_kill**: {n} process{'' if n == 1 else 'es'} killed — {strays_str}{locks_msg}", ""]
     return []
 
 

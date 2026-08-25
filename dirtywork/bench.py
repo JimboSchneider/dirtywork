@@ -46,7 +46,8 @@ BENCH_HOME = rundir.BENCH_HOME
 # Order is the order the NUDGES column prints in; the plain summary's legend
 # line spells it out and must stay in step.
 NUDGE_KINDS = ("stall", "empty", "truncated", "text_tool_call", "timeout", "malformed_entry", "stray_kill", "sandbox_reset")
-# The kinds whose nudge path records a FailureTracker \"empty_reply\" — must equal tuple(runner.NUDGES) (same order).
+# The kinds whose nudge path records a FailureTracker "empty_reply" -- exactly
+# runner.NUDGES's keys, in that order (a test asserts the two stay equal).
 EMPTY_REPLY_NUDGE_KINDS = ("truncated", "empty", "text_tool_call")
 ACCEPTANCE_MEMORY = "2g"
 ACCEPTANCE_CPUS = "2"
@@ -257,8 +258,13 @@ def _harness_failures(counts: dict, status, final_message, timeouts=0) -> dict:
     EXCEPT 0.9's `timeout` nudge, which is not a FailureTracker event at all
     (a timed-out command is not a model mistake), and 1.0's `malformed_entry`
     nudge, which is its own FailureTracker kind, not an empty reply -- both are
-    excluded here and get their own classes. `stray_kill` and `sandbox_reset`
-    nudges are Harness events, not empty replies, so they're excluded too."""
+    excluded here and get their own classes; 1.0's `stray_kill` and
+    `sandbox_reset` nudges (#61) are sandbox events, not model failures, and are
+    excluded the same way -- `empty_reply` sums EMPTY_REPLY_NUDGE_KINDS only.
+
+    `timeouts` is the RUNNER's own count, taken from the payload by the caller
+    and never re-derived from the nudge events: a turn with two timed-out
+    commands emits ONE nudge and counts TWO timeouts."""
     non_stall = sum(counts[f"nudge_{kind}"] for kind in EMPTY_REPLY_NUDGE_KINDS)
     failures = {f"nudge_{kind}": counts[f"nudge_{kind}"] for kind in NUDGE_KINDS}
     failures["nudge_other"] = counts["nudge_other"]

@@ -241,11 +241,11 @@ def test_doc_documents_stray_kill_fields():
     sections = text.split("\n### ")
     stray_kill_section = None
     for section in sections:
-        if section.startswith("stray_kill"):
+        if section.startswith("`stray_kill`"):
             stray_kill_section = section
             break
     assert stray_kill_section is not None, "stray_kill section not found in doc"
-    
+
     # Check required tokens
     required = ["strays", "strays_total", "locks_removed", "locks_removed_total"]
     for token in required:
@@ -259,10 +259,10 @@ def test_doc_documents_sandbox_reset_strays():
     sections = text.split("\n### ")
     sandbox_reset_section = None
     for section in sections:
-        if section.startswith("sandbox_reset"):
+        if section.startswith("`sandbox_reset`"):
             sandbox_reset_section = section
             break
     assert sandbox_reset_section is not None, "sandbox_reset section not found in doc"
-    
+
     # Check for strays
     assert "strays" in sandbox_reset_section, "strays not found in sandbox_reset section"
