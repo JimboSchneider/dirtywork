@@ -227,3 +227,4 @@ overall free GB: min 0.03 | p5 1.97 | median 7.21 | max 17.07; samples with free
 ```
 
 Run totals (29 `dirtywork run`/`resume` invocations of 0.10.1 + qwen3-coder-next, `~/.dirtywork/runs/issue-61-task-*`): 1,245 turns, 113 min of run time, 36.9M prompt tokens, 244k completion tokens, $0. 12 `completed` (verify passed in-sandbox), 17 `max_turns`. Claude finished 8 tasks after failed resumes (W2b, W3, W4b, W5a, W5b, W6, W7, W8b); 4 zero-change `finish`es on feedback resumes (S14); 1 zero-edit run (W7 run 1); 3 sandbox resets hit the build itself (2 class E after plain `grep`/`sed`, 1 that led the worker to wipe its own work — S11 live).
+| — (Claude, host: final `-m docker` suite on `dirtywork-worker-dev:issue61` from the integration branch, all twelve tasks landed) | C9 step 1 | **21 passed / 1 skipped** (the slow race loop, run separately: 0/40) of 22; pytest image: 19 passed / 3 skipped | 111 s | — | — | — | — | — | — | — | — | — | — |
