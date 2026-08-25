@@ -1,14 +1,18 @@
 # Sandbox resets: kill strays in place, keep the worker's git state, tell the worker (#61)
 
 **Date:** 2026-08-25
-**Status:** Design v2 — approach B (stray ladder + gitfile discovery + #60-carrier notices) chosen
+**Status:** Design v3 — approach B (stray ladder + gitfile discovery + #60-carrier notices) chosen
 by the owner (2026-08-25 09:14 CDT) with **nine required revisions**, each resolved in the section
 §0 names. v2 folds a six-lens red-team with two-refuter adversarial verification (42 agents,
 09:26–09:56 CDT): 50 findings (3 Blocker, 32 Important, 15 Minor); 18 Blocker/Important verified
 (17 kept, 1 refuted — a host-side `GIT_DIR` claim outside this spec's scope), the 17 unverified
 ones and the Minors read and folded by the author. The three Blockers were all in §4.4 (nested
-repositories at export) and rewrote it (§4.4). §0.1 maps every fold. Not yet approved for
-plan → execution.
+repositories at export) and rewrote it (§4.4). §0.1 maps every fold. **v3** (10:20 CDT) folds the
+live probe of the rewritten §4.4 (P8: the splice produced the expected tree exactly — 12 of 12
+worker changes under six nested roots; v1's exclusion would have dropped 9 of them) and a
+closure/consistency pass (22 findings: 1 Blocker — the enumeration constant's unescaped
+parentheses — 8 Important, 13 Minor; all applied; red-team coverage table: nothing missing).
+Not yet approved for plan → execution.
 **Origin:** issue #61 (milestone **1.0.0 — contract freeze**), soak finding S11, plus the two
 findings the #64 dogfood carried here: S13 (`GIT_DIR`/`GIT_WORK_TREE` exported into every
 command) and the "stray process" resets that followed plain foreground commands. Evidence:
@@ -22,7 +26,9 @@ init is unchanged), `2026-08-23-harness-followups-after-tool-results-design.md` 
 `2026-08-18-run-evidence-and-review-loop-design.md` (§4 `--verify`).
 Ships in **dirtywork 1.0.0**. Stdlib-only, Python 3.9 floor, `schema_version` stays 2 — every
 change below is a new sparse field, a new event kind, or a new documented value of an existing
-field; never a removed or renamed one, and no new `via` value.
+field; never a removed or renamed one, and no new `via` value. A new event name or enum value
+inside `schema_version` 2 is additive under the schema's forward-compatibility rule (§8: a
+consumer ignores names and values it does not recognise).
 
 ## 0. The owner's nine revisions and where each is resolved
 
@@ -172,6 +178,24 @@ lists the nested entry and not the root gitfile; `kill`, `read`, `[` are dash bu
 redirections left to right, so `read -r c < missing 2>/dev/null` still prints `cannot open` to
 stderr — the order must be `2>/dev/null <`.
 
+P8 — the §4.4 splice, run step by step in an export-shaped container (`/work` read-only from a
+volume, `GIT_DIR=/gitdir GIT_WORK_TREE=/work`, base = this repository's HEAD). Six nested roots —
+an uncommitted repository holding a modified base file, a new file and a deleted base file; a
+committed repository with later uncommitted changes; a two-level nesting; a junk `.git` **file**;
+`weird dir[1]` — plus ordinary top-level changes produced exactly the 12 expected `diff-tree`
+entries, no `.git`-named path, no `160000` entry, every other base blob untouched, the identical
+tree on a second run, 38 execs in 1.29 s. Today's `git add -A` aborts on the first uncommitted
+nested repository; v1's exclusion-only approach exported 3 of the 12 changes and silently reverted
+the other 9 to the base commit. Facts the recipe depends on: `git init` does not create a missing
+parent of a `GIT_DIR` taken from the environment (`fatal: Invalid path '/tmp/nested'`);
+`GIT_OBJECT_DIRECTORY=/gitdir/objects` is load-bearing (without it the nested trees are invisible
+to the main git dir); `-w /work/<R>` is required (a cwd below the nested root gives git a non-empty
+prefix and the child exclusions miss); `git rm -r --cached` accepts a directory holding an embedded
+repository; `read-tree --prefix=<R>/` needs the trailing slash; a nested `add -A` under
+`--template=` and a null global config applies only the nested root's own ignore rules;
+`-prune` keeps `find` out of a matched `.git` directory (a planted `.git/modules/foo/.git` was not
+listed).
+
 ### 1.5 Kill in place (P2, `--pids-limit 64`, image has no `ps`/`pgrep`/`pkill`)
 
 `docker top` reports VM-host PIDs (tether host PID 81196 = in-container PID 7), so the kill must
@@ -307,26 +331,30 @@ flight for the rest of the run.
 
 ### 3.4 Re-check, lock sweep, OOM, escalation
 
-After the kill exec returns 0, `_reap` re-runs `docker top` through the same parser, up to
-**three times 50 ms apart** while stray rows remain (a bounded settle window for a process whose
-parent — tini, or the containerd shim for an abandoned `docker exec` — has not reaped it yet;
-no `<defunct>` string filter anywhere):
+After the kill exec returns 0, `_reap` sleeps 50 ms and re-runs `docker top` through the same
+parser, repeating while stray rows remain — at most **three** `docker top` calls after the kill
+(a bounded settle window for a process whose parent — tini, or the containerd shim for an
+abandoned `docker exec` — has not reaped it yet; no `<defunct>` string filter anywhere). Before
+any `reset()` below, `_reap` re-reads `watchdog.violation` and, when it is set, returns without
+acting (§3.6):
 
 - a `top` fails / rc ≠ 0 → `reset("container unreachable after bash")`.
 - stray rows remain after the third look → `reset("stray process after bash", strays=…)` with the
   **first** top's rows.
-- tether-only → the kill succeeded. Then the **lock sweep** (§3.5): `LOCK_SWEEP_ARGV` =
-  `/usr/bin/find /gitdir ( -name *.lock -o -name gc.pid ) -type f -delete -print0` (argv list, no
-  shell; `-delete` before `-print0`, so a path is printed only after its unlink succeeded;
-  T_QUERY; it may fork — the pid table is free now). The output is split on NUL, the unterminated
-  tail dropped, and only tokens full-matching `^/gitdir/.*(\.lock|/gc\.pid)$` become
-  `locks_removed` (the merged stream can carry `find` diagnostics). rc ≠ 0 → stderr `lock sweep
+- tether-only → the kill succeeded. Next the OOM check (`docker inspect .State.OOMKilled`, as
+  today, now also on this path): `true` → `reset("oom", strays=…)` with the first top's rows (a
+  reset restarts the container, which clears the flag; no latch needed) and the sweep is skipped.
+  Otherwise the **lock sweep** (§3.5): `LOCK_SWEEP_ARGV = ["/usr/bin/find", "/gitdir", "(",
+  "-name", "*.lock", "-o", "-name", "gc.pid", ")", "-type", "f", "-delete", "-print0"]` (an argv
+  list, never a shell; `-delete` before `-print0`, so a path is printed only after its unlink
+  succeeded; T_QUERY; it may fork — the pid table is free now). The output is split on NUL, the
+  unterminated tail dropped, and only tokens full-matching
+  `^/gitdir/(?:.+/)?(?:[^/]+\.lock|gc\.pid)$` become `locks_removed` (the merged stream can
+  carry `find` diagnostics; `gc.pid` sits at the git-dir root). rc ≠ 0 → stderr `lock sweep
   incomplete (rc N)`, the matched paths still count. A `DockerError` on the sweep (timeout or a
-  client failure) → stderr `lock sweep incomplete (<error>)`, `locks_removed` omitted, **no reset**
-  — a slow `find` over a large `/gitdir` must not cost the state the ladder just saved.
-  Then the OOM check (`docker inspect .State.OOMKilled`, as today, now also on this path): `true`
-  → `reset("oom")` (a reset restarts the container, which clears the flag; no latch needed).
-  Otherwise write `stray_kill` (§6.1), queue the `stray_kill` notice (§5), return.
+  client failure) → stderr `lock sweep incomplete (<error>)`, `locks_removed` omitted, **no
+  reset** — a slow `find` over a large `/gitdir` must not cost the state the ladder just saved.
+  Then write `stray_kill` (§6.1), queue the `stray_kill` notice (§5), return.
   `_reset_this_call` stays `False` — nothing was rebuilt, and the budget sample that follows in
   `_after_bash` is meaningful.
 
@@ -367,8 +395,10 @@ New `self._reap_lock = threading.Lock()`, held:
   `check_worktree_budget_once()`): blocking acquire; the lock is free (the same thread just
   released it). Semantics as today: measure → on failure, if no reset happened this call, reset
   once and re-measure → second failure raises `SandboxError`.
-- `wait=False` — the watchdog thread's periodic sample (`Watchdog.run()` passes it; the
-  `sample` callable takes the keyword): `acquire(blocking=False)`; when the lock is held (a ladder
+- `wait=False` — the watchdog thread's periodic sample. `Watchdog.check_worktree_budget_once(*,
+  wait=True)` forwards `sample(wait=wait)` and returns `False` when the sample is `None`;
+  `Watchdog.run()` calls it with `wait=False`, `_after_bash` with the default. The sample does
+  `acquire(blocking=False)`; when the lock is held (a ladder
   or the main thread's sample is in progress) the tick is skipped — `check_worktree_budget_once`
   treats `None` as "no sample" and returns `False` — so **the watchdog thread never waits on a
   ladder and its 0.5 s disk poll is never delayed by one**. On this path a failed measurement
@@ -392,9 +422,14 @@ call. No path acquires `_reap_lock` while holding `_reset_lock`, so no cycle exi
 - `_after_bash` **consumes a recorded violation before it reaps**: its first statement checks
   `watchdog.violation` and, if set, raises `BudgetExceeded`/`SandboxError` exactly as its existing
   end-of-call block does (that block moves into a helper both sites call). Every watchdog kill
-  records `violation` before calling `kill()`, so a container the watchdog killed is never reaped,
-  sampled, or reset — a disk-floor kill landing during a bash exec, mid-ladder, or mid-sample ends
-  the run `budget_exceeded` with the disk-floor reason and no `sandbox_reset` event.
+  records `violation` before calling `kill()`. Because a kill can also land after that first
+  check, `_reap` and `_sample_worktree` re-read `watchdog.violation` immediately before any
+  `reset()` call — and `_sample_worktree` before raising its own `SandboxError` — and, when it is
+  set, return without acting (no docker call, no event, no notice); `_after_bash` re-checks it
+  after the reap and after the sample and raises the recorded kind. So a container the watchdog
+  killed is never reaped, sampled, or reset: a disk-floor kill landing during a bash exec,
+  mid-ladder, or mid-sample ends the run `budget_exceeded` with the disk-floor reason and no
+  `sandbox_reset` event.
 
 **Shutdown.** `_stop_container()` sets `self._shutting_down = True` by plain assignment as its
 first statement (before `watchdog.stop()`/join). `_sample_worktree` returns `None` and `reset()`
@@ -502,8 +537,10 @@ In the export container (`layout="env"`, `/work` read-only, index populated by `
 
 1. **Enumerate.** `EXPORT_GIT_ENTRIES_SCRIPT` (a constant, run as `/bin/sh -c`; the export
    container is never pids-saturated):
-   `exec /usr/bin/find /work -mindepth 1 -iname .git ! ( -path /work/.git -type f ) -prune -print0 2>/dev/null`
-   — every `.git`-named entry of any type (directory, file, symlink; `-iname` keeps today's
+   `exec /usr/bin/find /work -mindepth 1 -iname .git ! \( -path /work/.git -type f \) -prune -print0 2>/dev/null`
+   (the parentheses backslash-escaped — unescaped they are a dash syntax error, and step 1's
+   rc ≠ 0 policy would then silently skip the splice; a unit test parses the constant with
+   `dash -n`) — every `.git`-named entry of any type (directory, file, symlink; `-iname` keeps today's
    case-insensitive match) except the root gitfile itself; `-prune` stops `find` descending into
    a matched directory; stderr is discarded so `find`'s diagnostics cannot land in the parsed
    stream. Parse: split on NUL, drop the unterminated tail, keep only tokens that start with
@@ -514,37 +551,49 @@ In the export container (`layout="env"`, `/work` read-only, index populated by `
 2. **Report.** `dropped_git_entries` = each token relative to `/work`, as today.
 3. **Roots.** `nested_roots` = the parent directory of every token at depth ≥ 2 (`/work/a/.git` →
    `a`), deduplicated. A root `.git` directory or symlink (depth 1) contributes no root — `/work`
-   is the worktree and git skips its `.git` entry itself (§1.4).
-4. **Splice, deepest first.** For each root `R`, in descending depth (component count), with
-   `children(R)` = the roots strictly under `R` that have no other root between them:
+   is the worktree and git skips its `.git` entry itself (§1.4). A `.git`-named entry that is not
+   a repository (a stray file, a linked-worktree gitfile) still makes its parent a root: the only
+   visible difference is that the subtree's ignore rules become the nested root's own (step 4);
+   it can add files, never drop the worker's work.
+4. **Splice, deepest first.** Roots are ordered by descending depth (component count) and
+   numbered `<i>` in that order. For each root `R`, with `children(R)` = the roots strictly under
+   `R` that have no other root between them, **one `docker exec` per command**, each with
+   `-w /work/<R>` and env `GIT_DIR=/tmp/nested-<i> GIT_WORK_TREE=/work/<R>
+   GIT_OBJECT_DIRECTORY=/gitdir/objects GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1`:
    ```
-   env GIT_DIR=/tmp/nested/<i> GIT_WORK_TREE=/work/<R> GIT_OBJECT_DIRECTORY=/gitdir/objects
-       GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1, -w /work/<R>:
    git init -q --template=
    git read-tree --empty
-   git add -A -- . :(exclude,literal)<child-rel>…       # one pathspec per child, own argv element
-   git read-tree --prefix=<child-rel>/ <tree[child]>    # one per child
+   git -c core.excludesFile=/work/.gitignore add -A -- . :(exclude,literal)<child-rel>…   # one pathspec per child, own argv element
+   git read-tree --prefix=<child-rel>/ <tree[child]>                                       # one per child
    tree[R] = git write-tree
    ```
-   `GIT_OBJECT_DIRECTORY` makes every blob land in the export's own object store (`/gitdir`,
-   whose alternates already reach the base objects), so the trees are visible to the main index.
-   The nested worktree's root `.git` entry is skipped by git itself; the nested repository's own
-   ignore rules apply inside it (it is its own worktree root).
+   `/tmp/nested-<i>` is a flat name under the export container's own `/tmp` tmpfs because `git
+   init` does not create a missing parent directory (P8). `GIT_OBJECT_DIRECTORY` makes every blob
+   and tree land in the export's own object store (`/gitdir`, whose alternates already reach the
+   base objects), so the trees are visible to the main index. `-w /work/<R>` is required: git's
+   pathspec prefix must be empty for `.` and the child exclusions to mean what they say (P8). The
+   nested worktree's root `.git` entry is skipped by git itself. Ignore rules inside a nested root
+   are the nested root's own plus, through `core.excludesFile`, the repository's top-level
+   `.gitignore` applied as if it sat at the nested root (unanchored patterns such as
+   `__pycache__/` behave the same; a `/`-anchored pattern anchors at the nested root instead) — a
+   missing `/work/.gitignore` is silently ignored by git.
 5. **Main index.** For each top-level root `R` (no ancestor root):
-   `git rm -r -q --cached --ignore-unmatch -- <R>` (drops the base commit's entries under it —
-   a path the base tracked as a file and the worker turned into a directory included), then
+   `git rm -r -q --cached --ignore-unmatch -- :(literal)<R>` (drops the base commit's entries
+   under it — a path the base tracked as a file and the worker turned into a directory included;
+   `literal` on the removal as on every exclusion, so `*?[` in a root name are inert), then
    `git read-tree --prefix=<R>/ <tree[R]>`. Then `git add -A -- . :(exclude,literal)<R>…` with one
    pathspec per top-level root (each its own argv element: spaces, newlines and a leading `-` are
    inert; `literal` disables glob interpretation; a directory pathspec matches its subtree; the
    spliced entries do not match the pathspec and are left as spliced). Then `write-tree` as today.
    With no roots the argv is exactly today's `git add -A`.
-6. **Safety net.** The index listing the export already reads (`ls-files -s`) must contain no
-   mode `160000` entry; one → `export_failed: nested repository at <path> was not masked` (the
-   enumeration missed a root, or git treated a directory as embedded for a reason this algorithm
-   did not foresee). Fail loud, keep the volume.
+6. **Safety net (new step).** After `write-tree`, `git ls-files -s` (T_EXPORT_STEP; the export
+   today reads the index only through `git diff --cached --name-only`, which cannot show a mode):
+   any line whose mode is `160000` → `export_failed: nested repository at <path> was not masked`
+   (the enumeration missed a root, or git treated a directory as embedded for a reason this
+   algorithm did not foresee). Fail loud, keep the volume.
 
-Effect: the diff shows the worker's edits, additions and deletions under a nested root like
-anywhere else; a committed nested repository never becomes a gitlink; the fatal `does not have a
+Effect (P8, §1.4): the diff shows the worker's edits, additions and deletions under a nested root
+like anywhere else; a committed nested repository never becomes a gitlink; the fatal `does not have a
 commit checked out` cannot occur because `git add -A` never enters an embedded repository. Each
 root is printed to stderr as `nested repository exported as plain files: <root>` and is derivable
 from `dropped_git_entries` (dirname of the entry); no new `run_end` field. Real submodules of the
@@ -584,8 +633,8 @@ A notice raised by the **verify command's own bash** therefore lands as `follow_
 result (or in the feedback user message) when the run continues, and is recorded silently when it
 ends — never a user message after a tool result, never two consecutive user messages (the #60
 carriers are the only writers). A notice raised by a tool call earlier in the same `finish` turn is
-drained by the same call. `drain_sandbox()` is idempotent, so the `finish()` drain after a
-mid-turn drain writes nothing twice. `deliver()` is only called with non-empty text.
+drained by the same call. A second `drain_sandbox()` in the same turn returns `("", [])`, so the
+`finish()` drain after a mid-turn drain writes nothing twice. `deliver()` is only called with non-empty text.
 
 `stray_kill` and `sandbox_reset` are **not** `FailureTracker` kinds and do not feed the
 consecutive-failure abort (like `timeout`).
@@ -597,7 +646,8 @@ consecutive-failure abort (like `timeout`).
   need within one command.` then, only when `locks_removed` is non-empty, ` Stale git lock files
   they left in the repository were removed.` and always ` Run \`git status\` to confirm the
   repository state before continuing.`
-  `{cmds}`: the first three `strays`, each cut to 80 characters, joined by `; `, then `; +N more`.
+  `{cmds}`: the first three `strays`, each cut to 80 characters, joined by `; `, then `; +N more`
+  with `N = (strays_total or len(strays)) − 3`, omitted when `N ≤ 0`.
 - `sandbox_reset`: `The sandbox container was reset after your last command ({reason}). Files in
   the worktree are intact, but git metadata was re-initialized: the index, stashes, local commits
   and branches you created inside the sandbox are gone, and the branch is back at the run's base
@@ -615,10 +665,12 @@ consecutive-failure abort (like `timeout`).
 | `strays` | list of string | the CMD column of every detector row from the **first** `docker top`, in `docker top` order; at most **20** entries; each cut to **200** characters with a trailing `…` when cut; never empty (the detector fired) |
 | `strays_total` | integer | **sparse**: present only when more than 20 rows were seen (then it is the full count) |
 | `locks_removed` | list of string | **sparse**: present only when the sweep removed at least one file; absolute paths under `/gitdir`, in `find` order, at most 20 entries |
+| `locks_removed_total` | integer | **sparse**: present only when more than 20 were removed (then it is the full count) |
 
 **`sandbox_reset`** gains the same `strays` / `strays_total` fields, **sparse**: present only when
-`reason` is `stray process after bash` (rows from the ladder's first `top`, or from the only `top`
-when the in-place rung was disabled). Other reasons carry `reason` alone, as today.
+the ladder's first `top` had stray rows — `reason` `stray process after bash` (rows from the
+first `top`, or from the only `top` when the in-place rung was disabled) and `reason` `oom` found
+right after an in-place kill (§3.4). Other resets carry `reason` alone, as today.
 
 **`nudge`** gains two documented `kind` values, `stray_kill` and `sandbox_reset`, with the
 existing `turn` and `via` (`tool_result` / `user`, unchanged; sparse on run-ending turns, as #60
@@ -635,21 +687,24 @@ holds the whole delivered text when the notice rode there) → … → the `nudg
   the end**; `_event_counts` (:200) counts `stray_kill` events beside `sandbox_reset`;
   `run_one_bench_case`'s result row (:285, :348) gains `stray_kills` beside `sandbox_resets`.
   `_harness_failures` (:250) stops subtracting a hard-coded exclusion tuple: a new constant
-  `EMPTY_REPLY_NUDGE_KINDS = ("empty", "truncated", "text_tool_call")` — exactly the kinds whose
+  `EMPTY_REPLY_NUDGE_KINDS = ("truncated", "empty", "text_tool_call")` — in `runner.NUDGES`'s
+  order, exactly the kinds whose
   nudge path calls `failures.record("empty_reply")` (`runner.NUDGES`'s keys; a test asserts the two
   stay equal) — is what `empty_reply` sums over, so the new kinds (and `timeout`, `stall`,
   `malformed_entry`) can never be reported as model failures. Consequences, stated rather than
   denied: the `summarize` detail `nudges` cell (:431) and its legend (:776) widen from six to
-  eight slash-separated numbers (columns appended); the `--compare` harness cell keeps its four
+  eight slash-separated components (`DETAIL_COLUMNS` at :397 is unchanged — one cell gains two
+  components); the `--compare` harness cell keeps its four
   components and legend, and its `nudges` total (:492) now includes the two kinds, exactly as
   `timeout` and `malformed_entry` were folded in before.
-- `tools/soak_harvest.py` follows `bench.NUDGE_KINDS` and gains `stray kills` next to its reset
-  count.
+- `tools/soak_harvest.py`: its `nudges` total (:396) follows `bench.NUDGE_KINDS` and so gains the
+  two kinds, the same fold `--compare` gets; a `stray kills` column is appended to
+  `PER_RUN_COLUMNS` (:37) and `_per_run_row` (:460), read from `_event_counts`'s `stray_kill` key.
 - `dirtywork/runs.py`: plain `runs show` prints `_timeline_line` (:289) — it gains a `stray_kill`
   branch (`stray_kill: N killed — <cmd>; <cmd>…`) and `sandbox_reset` gains a ` — strays: …`
   suffix; `runs show --markdown`/`runs export` render `_md_event_lines` (:361) — a `stray_kill`
   callout `> **stray_kill**: N process(es) killed — <code>, <code> …` (+ `, M lock file(s)
-  removed` when present) and the same suffix on the `sandbox_reset` callout. Strays render through a
+  removed` when present, `M = locks_removed_total or len(locks_removed)`) and the same suffix on the `sandbox_reset` callout. Strays render through a
   new `_md_code(value, limit)`: `_md_trim` at `MD_ARGS_CHARS`, newlines collapsed to spaces, a
   backtick run longer than any inside the value as delimiter, space-padded per CommonMark, no
   HTML escaping inside the span (there is no inline-code helper today; `_md_inline` HTML-escapes and
@@ -684,14 +739,19 @@ an image that lacks them costs one `stray_kill` notice per build call, not the w
   gate runs without `GIT_*` env, the `dropped_git_entries` row (root gitfile excluded; an entry at
   depth ≥ 2 means its parent was exported as plain files), and the `--image` bullet's condensed
   Dockerfile snippet (gains the four variables, keeping parity with docker/README's fuller one).
-- `docs/transcript-schema.md`: `stray_kill` section; "eight event names" → nine; `sandbox_reset`
-  table gains `strays`, `strays_total`; `nudge.kind` list and the merge-order sentence
+- `docs/transcript-schema.md`: `stray_kill` section; "eight event names" → nine, plus the
+  forward-compatibility sentence (within one `schema_version`, new event names and new
+  `nudge.kind`/`sandbox_reset.reason` values may be added; a consumer must ignore names and values
+  it does not recognise); `sandbox_reset` table gains `strays`, `strays_total`, and `stray_kill`'s
+  `locks_removed_total`; `nudge.kind` list and the merge-order sentence
   (`malformed_entry`, sandbox notices, `timeout`, `stall`; on a text turn the kind's nudge, sandbox
   notices, `stall`); event-order note; `dropped_git_entries` row; `runs show` rendering line.
 - `docs/operating.md`: bash-tool section (processes are killed when the call returns; a reset is
   the fallback and the worker is told; timeouts), a "git inside the sandbox" paragraph (gitfile,
   what survives what, `git stash` is safe across a stray kill and lost across a reset, `/tmp` is
-  not reclaimed by a stray kill), the nested-repository export rule.
+  not reclaimed by a stray kill; the one thing the detector cannot see — a background process
+  whose `docker top` CMD is exactly `cat` is not reported, though it dies with any other stray),
+  the nested-repository export rule.
 - `docs/security.md`: the process-lifetime paragraph names both mechanisms (host `killpg`,
   docker in-place kill + reset); a **new** bullet under "Docker mode" states the worker container's
   environment (no `GIT_DIR`/`GIT_WORK_TREE`) and that the export container keeps them.
@@ -721,19 +781,21 @@ generic `["exec"]` default would silently disable it across the suite.
 1. `_discover_tether`: single integer line → stored; rc 3 / two lines / `cannot open` noise /
    DockerError → `None` + one stderr line; re-run after `reset()`; the script's redirect order.
 2. ladder happy path: top (stray rows) → the kill exec's argv is exactly `STRAY_KILL_SCRIPT, "_",
-   "<pid>"`; second top clean → sweep exec → OOM inspect false → `stray_kill` event with `strays`
+   "<pid>"`; second top clean → OOM inspect false → sweep exec → `stray_kill` event with `strays`
    in order and `locks_removed` from the NUL/full-match-filtered sweep output; notice queued;
    **no** `docker kill`; `_reset_this_call` stays `False`; the post-call budget sample still runs;
    the default fixture takes this path.
 3. escalation: kill rc 3 / rc 1 / DockerError / timeout → `reset("stray process after bash")`
    with `strays`; tops `[dirty, dirty, dirty, dirty]` → same after three re-checks; `[dirty, dirty,
    clean]` → `stray_kill`; a re-check rc ≠ 0 → unreachable reset; sweep DockerError → `stray_kill`
-   without `locks_removed`, no reset; OOM true after a clean kill → `reset("oom")`;
-   `_tether_pid is None` → straight to reset with `strays`.
+   without `locks_removed`, no reset;
+   `_tether_pid is None` → straight to reset with `strays`; OOM true after a clean kill → `reset("oom", strays=…)`, no sweep exec.
 4. limits: 25 stray rows → 20 entries + `strays_total: 25`; a 300-char CMD → 200 + `…`;
    `locks_removed` absent when the sweep printed nothing or only non-matching lines.
-5. the script constants are fork-free (no `$(`, `|`, `` ` ``, `(`); the kill script has three
-   passes; the pid arrives as `$1`.
+5. `STRAY_KILL_SCRIPT` is fork-free (no `$(`, `|`, `` ` ``, `(`); `TETHER_DISCOVERY_SCRIPT`'s
+   `$(( ))` is builtin arithmetic and exempt; `LOCK_SWEEP_ARGV` is an argv list and never reaches
+   a shell; `EXPORT_GIT_ENTRIES_SCRIPT` parses under `dash -n`; the kill script has three passes;
+   the pid arrives as `$1`.
 6. serialization: a blocking `docker top` on the main thread while the watchdog thread's
    `_sample_worktree(wait=False)` runs → it returns `None` without any docker call; the main
    thread's `wait=True` sample after the ladder runs normally; a thread inside `reset()` while the
@@ -750,14 +812,15 @@ generic `["exec"]` default would silently disable it across the suite.
    base env unchanged otherwise.
 9. `init_worker_git(layout="gitfile")` script text (rm → init --separate-git-dir → tail, first
    vs restart); `layout="env"` unchanged byte for byte.
-10. export: the enumeration argv (`/bin/sh -c EXPORT_GIT_ENTRIES_SCRIPT`); parsing with a
+10. export: the enumeration argv (`/bin/sh -c EXPORT_GIT_ENTRIES_SCRIPT`, escaped parentheses); parsing with a
     NUL-terminated name containing a newline and a space, a non-`/work/` token and an unterminated
     tail (dropped); rc ≠ 0 continues, `truncated` fails the export; roots and `children()` for
     `a/.git`, `a/b/.git`, `c/.git`; the exact exec sequence for the splice (env per nested exec,
-    depth order, `read-tree --empty`, `add -A` with the child exclusions, `read-tree --prefix`,
-    `write-tree`, main `rm --cached` + `read-tree --prefix` + `add -A` exclusions); a root `.git`
-    directory listed but no root; no roots → today's argv byte for byte; a `160000` index entry →
-    `export_failed: nested repository at … was not masked`.
+    depth order, `read-tree --empty`, `add -A` with `-c core.excludesFile` and the child
+    exclusions, `read-tree --prefix`, `write-tree`, main `rm --cached -- :(literal)<R>` +
+    `read-tree --prefix` + `add -A` exclusions, then `ls-files -s`); a root `.git` directory listed
+    but no root; no roots → today's argv byte for byte plus the `ls-files -s` step; a `160000`
+    index entry → `export_failed: nested repository at … was not masked`.
 11. runner drain points (a scripted sandbox whose `drain_notices()` returns queued notices, and
     one without the method): ordinary turn → nudge events + `follow_up` = joined text in the
     documented order, `via: tool_result`; `finish` + failing verify → `follow_up` on the finish
@@ -781,14 +844,16 @@ Live (`@pytest.mark.docker`, `tests/test_docker_live.py`, `DIRTYWORK_LIVE_IMAGE`
 13. a `nohup sleep 300 &` stray → `stray_kill` event, no `sandbox_reset`, a `git stash` made
     before the call pops afterwards, the same container ID before and after.
 14. a `cat`-named stray alongside a `sleep` stray → both dead after the call.
-15. a killed git: a command that creates `/gitdir/index.lock` and backgrounds a `sleep` →
-    `locks_removed` names it and the next `git status` succeeds.
+15. a killed git: a command that creates `/gitdir/index.lock` and `/gitdir/gc.pid` and backgrounds
+    a `sleep` → `locks_removed` names both and the next `git status` succeeds.
 16. S13 and export: `cd $(mktemp -d) && git init && git status && git worktree list` inside the
     sandbox stays local; `git -C /work status` works from `/tmp`; a worktree with a nested
     **uncommitted** repository the worker edited (a new file, a modified base-tracked file and a
     deleted one under it) exports those changes as plain files, lists `<root>/.git` in
-    `dropped_git_entries`, and has no gitlink; the same with a committed nested repository and a
-    two-level nesting.
+    `dropped_git_entries`, and has no gitlink; the same with a committed nested repository, a
+    two-level nesting, a base-tracked **file** the worker replaced with a nested-repository
+    directory, and a `__pycache__/` under a nested root that the top-level `.gitignore` ignores
+    (absent from the export).
 17. race loop: 40 × (5.2 s idle + `sed`) with the watchdog started → **0** `sandbox_reset`,
     **0** `stray_kill` (P7's phase A as a regression test; skip-with-reason above 10 min).
 18. escalation: the pids flood (`test_docker_live_process_flood_triggers_reset`) still ends in a
@@ -818,14 +883,17 @@ Live (`@pytest.mark.docker`, `tests/test_docker_live.py`, `DIRTYWORK_LIVE_IMAGE`
   - **T1 — gitfile layout** (§4.1–§4.3): `docker_args.py` env split, `lifecycle.py` two layouts,
     `docker.py` call sites, `guardrails.py` comment; tests 8, 9, 20.
   - **T2 — export** (§4.4): `export.py` enumeration, roots, splice, safety net; test 10, 16.
-  - **T3 — stray ladder** (§3): new `strays.py` (constants, parser, texts), `docker.py`
-    discovery/kill/sweep/OOM/locks/flags/shutdown/`grep` timeout, `watchdog.py` `wait=False`
-    path, `docker_fakes.py` callable responses, fixtures; tests 1–7, 13–15, 17–19, 21.
+  - **T3 — stray ladder** (§3, §5.1's sandbox side): new `strays.py` (constants, parser, texts),
+    `docker.py` discovery/kill/sweep/OOM/locks/flags/shutdown/`grep` timeout, `_notices` +
+    `_notices_lock` + `drain_notices()` and the two queue sites, `watchdog.py`
+    `check_worktree_budget_once(wait=)`, `docker_fakes.py` callable responses, fixtures; tests
+    1–7, 13–15, 17, 18, 21.
   - **T4 — notices and evidence** (§5, §6): `sandbox/__init__.py` Protocol doc, `host.py`,
     `runner.py` drain points, `bench.py`, `runs.py`, `soak_harvest.py`, `builtin_tools.py` text +
     fixture regen, `test_transcript_schema.py`; tests 11, 12.
   - **T5 — image and docs** (§7, §8): Dockerfile, docker/README, the five docs, the 2026-08-15
-    notes, ledger — prose by Claude, Dockerfile + checklist by the worker.
+    notes, ledger — prose by Claude, Dockerfile + checklist by the worker; live test 19 (it needs
+    the image's `ENV`).
 - Soak re-runs: `D3-issue97` (the S11 run: `git stash` survives `dotnet test`) and one
   `run-bash-buildsh` (class A/D) on the built branch, rows in the ledger.
 
