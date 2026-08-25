@@ -93,7 +93,7 @@ class Watchdog(threading.Thread):
         """One worktree-size sample-and-check. Called by this thread's own
         loop (every 5s while a bash call is in flight) AND, synchronously,
         by DockerSandbox right after every bash call returns.
-        
+
         The `wait` parameter controls blocking behavior:
         - wait=True (default): sample blocks if needed and raises on failure.
         - wait=False (run loop): non-blocking; returns False if sample fails."""
