@@ -412,7 +412,7 @@ New `self._reap_lock = threading.Lock()`, held:
   once and re-measures, and a second failure returns `None` too — the main thread's own
   `wait=True` sample after the call is the path that escalates to `SandboxError`.
 
-**Lock order is `_reap_lock` → `_reset_lock` → `_notices_lock`, everywhere.** `reset()` takes
+**Lock order is `_reap_lock` → `_reset_lock` → `_notices_lock`, everywhere** (`_violation_lock` is a second leaf, held only around the record/take of `watchdog.violation`). `reset()` takes
 only `_reset_lock` and is called only from code holding `_reap_lock` (`_reap`, `_sample_worktree`)
 or from nothing (direct calls, tests). `_watchdog_kill` takes only `_reset_lock` (from the
 disk-floor path, never while holding `_reap_lock`); `_after_bash`'s final flag clear takes only
@@ -431,7 +431,9 @@ call. No path acquires `_reap_lock` while holding `_reset_lock`, so no cycle exi
   records `violation` before calling `kill()`. Because a kill can also land after that first
   check, `reset()` itself re-reads `watchdog.violation` as its first statement **under
   `_reset_lock`** and, when it is set, returns `False` without acting (no docker call, no event,
-  no notice, `_reset_this_call` untouched — `_watchdog_kill` sets that itself); a re-read by the
+  no notice) but **marks the call** (`_reset_this_call = True`), so `_after_bash` does not sample
+  the dying container — `_watchdog_kill` sets that flag too, but only once it holds the lock, which
+  can be after the skip (PR #74 review, second P1); a re-read by the
   caller before taking the lock would leave a gap in which the watchdog's kill lands and the
   dead container is restarted anyway (PR #74 review, P1). `reset()` returns `True` only when it
   reset; `_reap` returns "do not sample" either way and `_sample_worktree` returns `None` on
@@ -440,6 +442,16 @@ call. No path acquires `_reap_lock` while holding `_reset_lock`, so no cycle exi
   killed is never reaped, sampled, or reset: a disk-floor kill landing during a bash exec,
   mid-ladder, or mid-sample ends the run `budget_exceeded` with the disk-floor reason and no
   `sandbox_reset` event.
+
+**First recorded violation wins.** Every breach path — disk floor and the failing-stat fallback
+in `_check_disk`, the worktree cap in `check_worktree_budget_once` on either thread, and the run
+loop's own exception handler — records through `Watchdog.record_violation(reason, kind)`: under
+`_violation_lock` (a leaf, never held across `kill()` or `sample()`), it records only when nothing
+is recorded yet and kills only when it recorded. A sample that lands while a violation is pending
+can therefore neither replace its reason nor change its kind, and issues no second kill — the
+worktree-cap overwrite of a disk-floor reason (`top → sample → "worktree exceeds cap"`) is closed
+at the source, with or without a reset in between. Consumption is `take_violation()` → `(reason,
+kind)` cleared atomically; `_raise_violation` and `finalize` both use it.
 
 **Shutdown.** `_stop_container()` sets `self._shutting_down = True` by plain assignment as its
 first statement (before `watchdog.stop()`/join). `_sample_worktree` returns `None` and `reset()`
