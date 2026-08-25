@@ -932,9 +932,9 @@ class DockerSandbox:
 
     def _kill_abandoned_exec(self) -> None:
         """Kill any stray exec process that continued after a timed-out DockerError.
-        
+
         Any tool exec that continues after a timed-out DockerError must call this
-        before the next bash/grep call completes. The in-container process is 
+        before the next bash/grep call completes. The in-container process is
         still running and the next bash call's reap would otherwise blame the
         worker's command for it."""
         if self._tether_pid is None:
@@ -1129,6 +1129,10 @@ class DockerSandbox:
             result = self._measure_worktree_once()
             if result is not None:
                 return result
+            if self.watchdog is not None and self.watchdog.violation is not None:
+                # The watchdog killed the container and recorded why (spec #61
+                # §3.6): the caller consumes the violation; do not reset or raise.
+                return None
             if not self._reset_this_call:
                 # If shutting down, don't reset (no docker calls)
                 if self._shutting_down:
@@ -1137,6 +1141,8 @@ class DockerSandbox:
                 result = self._measure_worktree_once()
                 if result is not None:
                     return result
+                if self.watchdog is not None and self.watchdog.violation is not None:
+                    return None
                 if wait:
                     raise SandboxError("worktree budget sample failed twice in a row")
                 # Non-blocking: return None on second failure (main thread escalates)

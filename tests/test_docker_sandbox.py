@@ -2747,27 +2747,15 @@ def test_watchdog_kill_sets_flag_before_docker_kill(started):
 
 
 def test_after_bash_clears_flag_even_when_reset_raises(started):
-    """Item 4: _reset_this_call should be cleared in finally, even when reset
-    raises an exception."""
+    # Spec #61 §3.6: _after_bash clears _reset_this_call in a `finally`, so a
+    # reset that raised (here: the in-container init fails right after the
+    # fresh container is ready) cannot leave the flag sticky for the next call.
     sb, fake, run_dir = started
-    # Make top fail to trigger a reset, and make reset fail by making start fail
-    fake.script(["top"], _fail(b"exec failed"))
-    # Script exec (used by reset for start) to raise DockerError
-    def fail_start(argv):
-        import docker_cli as dc
-        raise dc.DockerError("container failed to start", exit_code=1)
-
-    fake.script(["exec"], fail_start)
-    fake.script(["kill"], _ok())
-    fake.script(["wait"], _ok())
-
+    fake.script(["top"], _rc(1))  # unreachable -> reset
+    fake.script(["exec", "-w", "/work", "-e", "GIT_CONFIG_GLOBAL=/dev/null"], _rc(1))  # init fails
     with pytest.raises(SandboxError):
         sb.bash("echo ok")
-
-    # Flag should be cleared after exception
     assert sb._reset_this_call is False
-
-
 def test_shutdown_disables_sampling_and_reset(started):
     """Item 5: After _stop_container(), sampling and reset should return
     immediately without any docker calls."""
@@ -2777,7 +2765,7 @@ def test_shutdown_disables_sampling_and_reset(started):
     # Sampling should return None immediately
     result1 = sb._sample_worktree(wait=True)
     assert result1 is None, "_sample_worktree(wait=True) should return None after shutdown"
-    
+
     result2 = sb._sample_worktree(wait=False)
     assert result2 is None, "_sample_worktree(wait=False) should return None after shutdown"
 
@@ -2785,7 +2773,7 @@ def test_shutdown_disables_sampling_and_reset(started):
     n_before = len(fake.calls)
     sb.reset("shutdown test")
     assert len(fake.calls) == n_before, "reset() should not make docker calls after shutdown"
-    
+
     # No sandbox_reset event
     reset_events = [e for e in getattr(sb, 'transcript', None)._events if e.get("kind") == "sandbox_reset"] if sb.transcript else []
     assert len(reset_events) == 0, "No sandbox_reset event should occur after shutdown"
@@ -2796,7 +2784,7 @@ def test_bash_note_bash_end_runs_on_keyboard_interrupt(started, monkeypatch):
     _run raises KeyboardInterrupt."""
     sb, fake, run_dir = started
 
-    def raise_keyboard_interrupt(argv):
+    def raise_keyboard_interrupt(argv, *, timeout, stdin=None, cap=None):
         raise KeyboardInterrupt()
 
     monkeypatch.setattr(sb, "_run", raise_keyboard_interrupt)
@@ -2815,11 +2803,10 @@ def test_grep_timeout_kills_abandoned_exec(started_with_transcript):
 
     # Script the grep probe to succeed
     fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/rg", "--version"], _ok(b"ripgrep 1.0\n"))
-    
+
     # Script the grep exec to raise a timeout error
     def grep_timeout(argv):
-        import docker_cli as dc
-        raise dc.DockerError("timed out", timed_out=True)
+        raise docker_cli.DockerError("timed out", timed_out=True)
 
     fake.script(["exec"], grep_timeout)
 
@@ -2849,11 +2836,10 @@ def test_grep_timeout_with_no_tether_pid(started_with_transcript):
 
     # Script the grep probe to succeed
     fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/rg", "--version"], _ok(b"ripgrep 1.0\n"))
-    
+
     # Script the grep exec to raise a timeout error
     def grep_timeout(argv):
-        import docker_cli as dc
-        raise dc.DockerError("timed out", timed_out=True)
+        raise docker_cli.DockerError("timed out", timed_out=True)
 
     fake.script(["exec"], grep_timeout)
 
@@ -2867,34 +2853,24 @@ def test_grep_timeout_with_no_tether_pid(started_with_transcript):
     assert len(kill_calls) == 0, "Should not call kill when tether_pid is None"
 
 
-def test_bash_timeout_goes_through_the_ladder(started):
-    """Item 7: bash() timeout should go through the ladder - top dirty, clean,
-    then kill stray."""
-    sb, fake, run_dir = started
+def test_bash_timeout_goes_through_the_ladder(started_with_transcript, monkeypatch):
+    # Spec #61 §3.4: a timed-out bash call abandons its in-container process; the
+    # reap that follows finds it as a stray and kills it IN PLACE -- no reset.
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
 
-    # Script bash exec to raise timeout error
     def bash_timeout(argv):
-        import docker_cli as dc
-        raise dc.DockerError("timed out", timed_out=True)
+        raise docker_cli.DockerError("timed out", timed_out=True)
 
-    fake.script(["exec"], bash_timeout)
-    # Script top twice: first dirty (stray), then clean
-    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n" +
-                                 b"501  7  1  0  10:00  ?  00:00:00  sleep 999\n"))
-    fake.script(_KILL_ARGV, _ok(b"1\n"))  # kill succeeds
-    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))  # clean
-    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))  # sample succeeds
-
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/bin/bash"], bash_timeout)
+    fake.script(["top"], [_ok(_TOP_WITH_SLEEP), _ok(_TOP_TETHER_ONLY)])
+    fake.script(_OOM_ARGV, _ok(b"false\n"))
     out = sb.bash("sleep 999")
-
-    # Should return timeout text
     assert "timed out" in out
-
-    # Kill should have been called for the stray
-    kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
-    assert len(kill_calls) > 0, "Should call kill for stray process"
-
-
+    argvs = [c[0] for c in fake.calls]
+    assert _KILL_ARGV in argvs
+    assert not any(a[:1] == ["kill"] for a in argvs)
+    assert [e for e in _events(run_dir, transcript) if e["event"] == "stray_kill"]
 def test_after_bash_consumes_violation_during_reap(started):
     """Verify that a violation recorded during reap causes _reap to return
     True without calling reset."""
