@@ -81,6 +81,11 @@ class FakeDocker:
     prefixed, unlike `run()` which prefixes it internally) to the bytes a
     FakePopen's `.stdout` should yield. Used by Task 11's export-flow tests
     to feed a real in-memory tar into `git archive`'s simulated stdout.
+
+    Response scripts may also be callables that take argv as an argument and
+    return either a Captured or raise (e.g. docker_cli.DockerError). This lets
+    tests script an exec failure, or block on a threading.Event to force an
+    interleaving.
     """
 
     def __init__(self):
@@ -110,9 +115,17 @@ class FakeDocker:
             return self.default
         if isinstance(best_response, list):
             if len(best_response) > 1:
-                return best_response.pop(0)
-            return best_response[0]
-        return best_response
+                response = best_response.pop(0)
+            else:
+                response = best_response[0]
+        else:
+            response = best_response
+
+        # If the response is callable, invoke it with argv
+        if callable(response):
+            return response(argv)
+
+        return response
 
     def popen(self, argv, *, stdin=None, stdout=None, stderr=None, env=None):
         best_prefix = None

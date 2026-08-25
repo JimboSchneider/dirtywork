@@ -46,6 +46,7 @@ from .watchdog import Watchdog
 from . import export
 from ..workspace import host_read_tree
 from ..resume import stash_dir_for
+from . import strays
 
 # Fixed exec timeouts for tools with no user-facing timeout knob — these
 # operations should complete near-instantly; a hang means the sandbox
@@ -876,23 +877,15 @@ class DockerSandbox:
         if unreachable:
             self.reset("container unreachable after bash")
             return True
-        lines = top.output.decode("utf-8", errors="replace").splitlines()
-        if lines:
-            header_cols = lines[0].split()
-            n = max(len(header_cols), 1)
-            for line in lines[1:]:
-                if not line.strip():
-                    continue
-                fields = line.split(None, n - 1)
-                cmd = fields[-1] if fields else ""
-                # --entrypoint /bin/cat means the tether row reads "/bin/cat"
-                # (and tini's row "/sbin/docker-init -- /bin/cat"); a bare
-                # "cat" is what the spec's experiment showed — accept both.
-                if cmd in ("cat", "/bin/cat") or cmd.endswith("docker-init -- cat") \
-                        or cmd.endswith("docker-init -- /bin/cat"):
-                    continue
-                self.reset("stray process after bash")
-                return True
+
+        # Use strays.stray_rows to parse the output
+        stray_cmds = strays.stray_rows(top.output)
+
+        # If there are any stray processes, reset
+        if stray_cmds:
+            self.reset("stray process after bash")
+            return True
+
         try:
             oom = self._run(
                 ["inspect", "--format", "{{.State.OOMKilled}}", self.container],
