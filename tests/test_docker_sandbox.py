@@ -20,6 +20,10 @@ DockerError = docker_cli.DockerError
 
 _TOP_HEADER = b"UID  PID  PPID  C  STIME  TTY  TIME  CMD\n"
 
+_DISCOVERY_ARGV = ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c", strays.TETHER_DISCOVERY_SCRIPT]
+_KILL_ARGV = ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c", strays.STRAY_KILL_SCRIPT, "_", "7"]
+_SWEEP_ARGV = ["exec", "-w", "/work", "dw-abc123"] + strays.LOCK_SWEEP_ARGV
+_OOM_ARGV = ["inspect", "--format", "{{.State.OOMKilled}}"]
 _SAMPLE_ARGV = ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
                 "du -sk /work; find /work | wc -l"]
 
@@ -56,6 +60,12 @@ def docker(tmp_path: Path):
     fake.script(["run"], _ok())   # prep container
     fake.script(["create"], _ok())  # worker create
     fake.script(["exec"], _ok())  # ready-wait /bin/true and init
+    # #61: the in-place stray rung is ACTIVE by default -- discovery answers pid 7,
+    # the kill and the lock sweep succeed; a test that wants the reset path scripts
+    # the kill exec to a nonzero rc.
+    fake.script(_DISCOVERY_ARGV, _ok(b"7\n"))
+    fake.script(_KILL_ARGV, _ok())
+    fake.script(_SWEEP_ARGV, _ok())
     cfg = DockerConfig()
     run_dir = tmp_path / "rundir"
     run_dir.mkdir()
@@ -101,6 +111,9 @@ def started_with_transcript(tmp_path: Path):
     fake.script(["run"], _ok())
     fake.script(["create"], _ok())
     fake.script(["exec"], _ok())
+    fake.script(_DISCOVERY_ARGV, _ok(b"7\n"))
+    fake.script(_KILL_ARGV, _ok())
+    fake.script(_SWEEP_ARGV, _ok())
     fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
     cfg = DockerConfig()
     run_dir = tmp_path / "rundir"
@@ -2352,3 +2365,154 @@ def test_docker_write_file_still_writes_when_the_pre_read_is_not_utf8(started):
     out = sb.write_file("bin.dat", "now text\n")
     assert out == "Wrote 9 bytes to bin.dat (new file, 1 line)"
     assert len([c for c in fake.calls if _is_write_exec(c)]) == 1
+
+
+# --------------------------------------------------------------------------- #61 stray ladder
+_TOP_TETHER_ONLY = (_TOP_HEADER
+                    + b"501  1  0  0  10:00  ?  00:00:00  /sbin/docker-init -- /bin/cat\n"
+                    + b"501  7  1  0  10:00  ?  00:00:00  /bin/cat\n")
+_TOP_WITH_SLEEP = _TOP_TETHER_ONLY + b"501  42  1  0  10:00  ?  00:00:00  sleep 300\n"
+
+
+def _events(run_dir, transcript):
+    transcript.close()
+    return [json.loads(l) for l in (run_dir / "transcript.jsonl").read_text().splitlines()]
+
+
+def _no_settle(monkeypatch):
+    monkeypatch.setattr(docker_mod.time, "sleep", lambda s: None)
+
+
+def test_reap_kills_stray_in_place(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], [_ok(_TOP_WITH_SLEEP), _ok(_TOP_TETHER_ONLY)])
+    fake.script(_OOM_ARGV, _ok(b"false\n"))
+    sb.bash("true")
+    argvs = [c[0] for c in fake.calls]
+    assert not any(a[:1] == ["kill"] for a in argvs)
+    assert argvs.count(_KILL_ARGV) == 1
+    assert _SWEEP_ARGV in argvs
+    assert sum(1 for a in argvs if a[:1] == ["top"]) == 2
+    tops = [i for i, a in enumerate(argvs) if a[:1] == ["top"]]
+    oom = next(i for i, a in enumerate(argvs) if a[:3] == _OOM_ARGV)
+    assert tops[1] < oom < argvs.index(_SWEEP_ARGV)
+    assert _SAMPLE_ARGV in argvs  # the post-call budget sample still ran
+    assert sb._reset_this_call is False
+    kills = [e for e in _events(run_dir, transcript) if e["event"] == "stray_kill"]
+    assert kills[0]["strays"] == ["sleep 300"]
+    assert "strays_total" not in kills[0] and "locks_removed" not in kills[0]
+    notices = sb.drain_notices()
+    assert len(notices) == 1 and notices[0][0] == "stray_kill"
+    assert notices[0][1].startswith("The sandbox killed 1 background process ")
+    assert sb.drain_notices() == []
+
+
+def test_reap_sweep_reports_locks(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], [_ok(_TOP_WITH_SLEEP), _ok(_TOP_TETHER_ONLY)])
+    fake.script(_OOM_ARGV, _ok(b"false\n"))
+    fake.script(_SWEEP_ARGV, _ok(b"/gitdir/index.lock\0/gitdir/gc.pid\0"))
+    sb.bash("true")
+    kill = [e for e in _events(run_dir, transcript) if e["event"] == "stray_kill"][0]
+    assert kill["locks_removed"] == ["/gitdir/index.lock", "/gitdir/gc.pid"]
+    assert "locks_removed_total" not in kill
+    assert "Stale git lock files" in sb.drain_notices()[0][1]
+
+
+def test_reap_sweep_docker_error_keeps_stray_kill(started_with_transcript, monkeypatch, capsys):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], [_ok(_TOP_WITH_SLEEP), _ok(_TOP_TETHER_ONLY)])
+    fake.script(_OOM_ARGV, _ok(b"false\n"))
+
+    def boom(argv):
+        raise docker_cli.DockerError("boom")
+    fake.script(_SWEEP_ARGV, boom)
+    sb.bash("true")
+    events = _events(run_dir, transcript)
+    kill = [e for e in events if e["event"] == "stray_kill"][0]
+    assert "locks_removed" not in kill
+    assert not [e for e in events if e["event"] == "sandbox_reset"]
+    assert not any(c[0][:1] == ["kill"] for c in fake.calls)
+    assert "lock sweep incomplete" in capsys.readouterr().err
+
+
+def test_reap_escalates_when_kill_fails(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], _ok(_TOP_WITH_SLEEP))
+    fake.script(_KILL_ARGV, _rc(3))
+    sb.bash("true")
+    assert any(c[0][:2] == ["kill", "dw-abc123"] for c in fake.calls)
+    events = _events(run_dir, transcript)
+    resets = [e for e in events if e["event"] == "sandbox_reset"]
+    assert resets[0]["reason"] == "stray process after bash" and resets[0]["strays"] == ["sleep 300"]
+    assert not [e for e in events if e["event"] == "stray_kill"]
+
+
+def test_reap_escalates_after_three_dirty_looks(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], [_ok(_TOP_WITH_SLEEP)] * 4)
+    sb.bash("true")
+    assert sum(1 for c in fake.calls if c[0][:1] == ["top"]) == 4
+    events = _events(run_dir, transcript)
+    assert [e for e in events if e["event"] == "sandbox_reset"][0]["strays"] == ["sleep 300"]
+    assert not [e for e in events if e["event"] == "stray_kill"]
+
+
+def test_reap_settles_on_third_look(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], [_ok(_TOP_WITH_SLEEP), _ok(_TOP_WITH_SLEEP), _ok(_TOP_TETHER_ONLY)])
+    fake.script(_OOM_ARGV, _ok(b"false\n"))
+    sb.bash("true")
+    assert sum(1 for c in fake.calls if c[0][:1] == ["top"]) == 3
+    assert [e for e in _events(run_dir, transcript) if e["event"] == "stray_kill"]
+
+
+def test_reap_recheck_unreachable_resets(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], [_ok(_TOP_WITH_SLEEP), _rc(1)])
+    sb.bash("true")
+    resets = [e for e in _events(run_dir, transcript) if e["event"] == "sandbox_reset"]
+    assert resets[0]["reason"] == "container unreachable after bash"
+
+
+def test_reap_no_tether_pid_resets_without_kill(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    sb._tether_pid = None
+    fake.script(["top"], _ok(_TOP_WITH_SLEEP))
+    sb.bash("true")
+    assert _KILL_ARGV not in [c[0] for c in fake.calls]
+    assert [e for e in _events(run_dir, transcript) if e["event"] == "sandbox_reset"][0]["strays"] == ["sleep 300"]
+
+
+def test_reap_oom_after_clean_kill_resets(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], [_ok(_TOP_WITH_SLEEP), _ok(_TOP_TETHER_ONLY)])
+    fake.script(_OOM_ARGV, _ok(b"true\n"))
+    sb.bash("true")
+    assert _SWEEP_ARGV not in [c[0] for c in fake.calls]
+    events = _events(run_dir, transcript)
+    reset = [e for e in events if e["event"] == "sandbox_reset"][0]
+    assert reset["reason"] == "oom" and reset["strays"] == ["sleep 300"]
+    assert not [e for e in events if e["event"] == "stray_kill"]
+
+
+def test_reap_caps_strays(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    rows = b"501  200  1  0  10:00  ?  00:00:00  " + b"x" * 300 + b"\n"
+    rows += b"".join(b"501  %d  1  0  10:00  ?  00:00:00  sleep %d\n" % (100 + i, i) for i in range(24))
+    fake.script(["top"], [_ok(_TOP_TETHER_ONLY + rows), _ok(_TOP_TETHER_ONLY)])
+    fake.script(_OOM_ARGV, _ok(b"false\n"))
+    sb.bash("true")
+    kill = [e for e in _events(run_dir, transcript) if e["event"] == "stray_kill"][0]
+    assert len(kill["strays"]) == 20 and kill["strays_total"] == 25
+    assert len(kill["strays"][0]) == 201 and kill["strays"][0].endswith("\u2026")

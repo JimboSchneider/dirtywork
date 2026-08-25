@@ -66,6 +66,9 @@ LIST_EXEC_TIMEOUT = 30
 # paths. Anchored with fullmatch() below rather than trusted as a substring.
 _SWEEP_PATTERN = re.compile(TMP_FIND_REGEX + r"\Z")
 
+# settle window between the kill and the verifying `docker top` (spec #61 §3.4)
+_SETTLE_SLEEP = 0.05
+
 
 def _rel(path: str, *, writing: bool = False):
     """Host-side path normalization — an accident guard, not the security
@@ -114,10 +117,7 @@ def _oversized(encoded: bytes):
 _PROMOTE = ('{ chmod --reference="$1" "$2" 2>/dev/null || chmod 644 "$2"; } && '
             'mv -fT -- "$2" "$1" || { rm -f -- "$2"; exit 1; }')
 
-# Settle sleep duration for re-check loops
-_SETTLE_SLEEP = 0.05
-
-# Matches a full swept temp-file path, and only that -- `Captured.output`
+# `$1` is the target relpath, `$2` the host-generated temp relpath; worker DATA
 # arrives on stdin and is never inside the script text. `&&`-chained so a
 # failed `cat` can never promote. The writability guard keeps host parity:
 # today an unwritable file refuses EACCES, and without it temp+`mv` would
@@ -909,7 +909,7 @@ class DockerSandbox:
 
     def _kill_strays(self) -> bool:
         """Kill stray processes using the STRAY_KILL_SCRIPT.
-        
+
         Returns True iff rc == 0 (DockerError -> False).
         """
         argv = docker_args.exec_argv(
@@ -921,43 +921,36 @@ class DockerSandbox:
         except docker_cli.DockerError:
             return False
 
-    def _sweep_locks(self) -> tuple[list, int | None]:
-        """Execute lock sweep and return (paths, total if truncated).
-        
-        DockerError -> print(f"lock sweep incomplete ({e})", file=sys.stderr)
-        and return ([], None). Else parse output; if rc != 0, print warnings
-        and cap the results.
-        """
+    def _sweep_locks(self) -> tuple:
+        """The post-kill lock sweep (spec #61 §3.4/§3.5): after a successful
+        in-place kill no process exists, so every `*.lock` / `gc.pid` under
+        /gitdir is stale by definition. Returns (paths, total) from
+        strays.cap_locks; a DockerError never escalates -- the state the kill
+        just saved must not be lost to a slow `find`."""
         argv = docker_args.exec_argv(self.container, strays.LOCK_SWEEP_ARGV)
         try:
             captured = self._run(argv, timeout=docker_cli.T_QUERY)
         except docker_cli.DockerError as e:
             print(f"lock sweep incomplete ({e})", file=sys.stderr)
-            return ([], None)
-        
+            return [], None
         paths = strays.parse_locks(captured.output)
         if captured.returncode != 0:
             print(f"lock sweep incomplete (rc {captured.returncode})", file=sys.stderr)
-            if captured.truncated:
-                print("lock sweep incomplete (output truncated)", file=sys.stderr)
-            return strays.cap_locks(paths, captured.truncated)
-        
-        # Not truncated - check if we need to cap
+        if captured.truncated:
+            print("lock sweep incomplete (output truncated)", file=sys.stderr)
         return strays.cap_locks(paths, captured.truncated)
 
     def _reap(self) -> bool:
-        """After every bash call (spec §6): docker top should show at most
-        the lifetime tether (bare "cat", or "/sbin/docker-init -- cat" while
-        tini is still attached). Any other row means a backgrounded process
-        outlived the call — reset restores the documented contract. A
-        nonzero `docker top` itself (the container is stopped, killed, or
-        otherwise unreachable — e.g. `docker kill` fired while a `docker
-        exec` was in flight) is ALSO a reset trigger: whatever state the
-        container is in, a fresh one via reset() is the safe recovery.
-        
-        This implementation attempts to kill stray processes before resetting,
-        and also sweeps lock files. Returns True if a reset was performed,
-        False otherwise."""
+        """After every bash call (spec §6; the #61 §3.4 ladder): `docker top`
+        should show at most the lifetime tether. Any other row is a stray --
+        killed in place (STRAY_KILL_SCRIPT, then up to three settle re-checks),
+        after which the OOM flag is inspected, stale git locks are swept and a
+        `stray_kill` event plus notice record what happened; only when the kill
+        cannot be performed (no tether pid) or verified does the container
+        reset, as it did before 1.0. A nonzero `docker top` (the container is
+        stopped, killed, or otherwise unreachable) is a reset trigger as before.
+
+        Returns True if a reset was performed, False otherwise."""
         # Don't perform multiple resets in one call
         if self._reset_this_call:
             return False
@@ -969,25 +962,12 @@ class DockerSandbox:
         if unreachable:
             self.reset("container unreachable after bash")
             return True
-
-        # Use strays.stray_rows to parse the output
-        stray_cmds = strays.stray_rows(top.output)
-        
-        # If there are any stray processes, try to kill them
-        if stray_cmds:
-            capped_strays, total = strays.cap_strays(stray_cmds)
-            
-            # If _tether_pid is None, we must reset
-            if self._tether_pid is None:
-                self.reset("stray process after bash", strays=capped_strays, strays_total=total)
+        rows = strays.stray_rows(top.output)
+        capped, total = strays.cap_strays(rows) if rows else ([], None)
+        if rows:
+            if self._tether_pid is None or not self._kill_strays():
+                self.reset("stray process after bash", strays=capped, strays_total=total)
                 return True
-            
-            # Try to kill strays
-            if not self._kill_strays():
-                self.reset("stray process after bash", strays=capped_strays, strays_total=total)
-                return True
-            
-            # Settle re-check (up to 3 times)
             for _ in range(3):
                 time.sleep(_SETTLE_SLEEP)
                 try:
@@ -998,16 +978,11 @@ class DockerSandbox:
                 if unreachable:
                     self.reset("container unreachable after bash")
                     return True
-                
-                # Check if strays are gone
                 if not strays.stray_rows(top.output):
                     break
             else:
-                # After 3 dirty looks, still have strays - reset
-                self.reset("stray process after bash", strays=capped_strays, strays_total=total)
+                self.reset("stray process after bash", strays=capped, strays_total=total)
                 return True
-        
-        # Check OOM - check FIRST before lock sweep
         try:
             oom = self._run(
                 ["inspect", "--format", "{{.State.OOMKilled}}", self.container],
@@ -1017,36 +992,26 @@ class DockerSandbox:
             # If inspect fails, don't reset - it would be recursive
             return False
         if oom.returncode == 0 and oom.output.decode("utf-8", errors="replace").strip() == "true":
-            if stray_cmds:
-                capped_strays, total = strays.cap_strays(stray_cmds)
-                self.reset("oom", strays=capped_strays, strays_total=total)
+            if rows:
+                self.reset("oom", strays=capped, strays_total=total)
             else:
                 self.reset("oom")
             return True
-        
-        # Sweep locks
-        locks, locks_total = self._sweep_locks()
-        
-        # Write stray_kill event if there were strays and we successfully killed them
-        if stray_cmds:
-            capped_strays, total = strays.cap_strays(stray_cmds)
-            fields = {"strays": capped_strays}
+        if rows:
+            locks, locks_total = self._sweep_locks()
+            fields = {"strays": capped}
             if total is not None:
                 fields["strays_total"] = total
             if locks:
                 fields["locks_removed"] = locks
             if locks_total is not None:
                 fields["locks_removed_total"] = locks_total
-            
             if self.transcript is not None:
                 try:
                     self.transcript.write("stray_kill", **fields)
                 except Exception:
                     pass
-            
-            # Queue notice
-            self._queue_notice("stray_kill", stray_kill_text(capped_strays, total, locks))
-        
+            self._queue_notice("stray_kill", stray_kill_text(capped, total, locks))
         return False
 
     def _watchdog_kill(self, reason: str) -> None:
