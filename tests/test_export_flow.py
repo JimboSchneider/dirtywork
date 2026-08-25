@@ -569,3 +569,366 @@ def test_export_truncates_files_changed_and_flags_it(tmp_path, empty_worktree):
     assert len(artifacts.files_changed) == MAX_FILES_CHANGED
     assert artifacts.files_changed_truncated is True
     assert artifacts.files_changed == sorted(artifacts.files_changed)
+
+
+def test_export_run_nested_repos_splice_order(tmp_path, empty_worktree):
+    """Test 5a: entries /work/a/.git\0/work/a/b/.git with correct exec sequence"""
+    from dirtywork.sandbox.export import EXPORT_GIT_ENTRIES_SCRIPT
+    fake = FakeDocker()
+
+    # Scripting for nested repo "a/b" (deepest first, index 0)
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait, init
+    # Find entries
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/bin/sh", "-c", EXPORT_GIT_ENTRIES_SCRIPT],
+                _ok(b"/work/a/.git\0/work/a/b/.git\0"))
+
+    # Nested repo 0 (a/b): init
+    fake.script(["exec", "-w", "/work/a/b",
+                 "-e", "GIT_DIR=/tmp/nested-0", "-e", "GIT_WORK_TREE=/work/a/b",
+                 "-e", "GIT_OBJECT_DIRECTORY=/gitdir/objects",
+                 "-e", "GIT_CONFIG_GLOBAL=/dev/null", "-e", "GIT_CONFIG_NOSYSTEM=1",
+                 "dw-abc123-export", "/usr/bin/git", "init", "-q", "--template="], _ok())
+    # Nested repo 0: read-tree --empty
+    fake.script(["exec", "-w", "/work/a/b",
+                 "-e", "GIT_DIR=/tmp/nested-0", "-e", "GIT_WORK_TREE=/work/a/b",
+                 "-e", "GIT_OBJECT_DIRECTORY=/gitdir/objects",
+                 "-e", "GIT_CONFIG_GLOBAL=/dev/null", "-e", "GIT_CONFIG_NOSYSTEM=1",
+                 "dw-abc123-export", "/usr/bin/git", "read-tree", "--empty"], _ok())
+    # Nested repo 0: add -A (no children to exclude)
+    fake.script(["exec", "-w", "/work/a/b",
+                 "-e", "GIT_DIR=/tmp/nested-0", "-e", "GIT_WORK_TREE=/work/a/b",
+                 "-e", "GIT_OBJECT_DIRECTORY=/gitdir/objects",
+                 "-e", "GIT_CONFIG_GLOBAL=/dev/null", "-e", "GIT_CONFIG_NOSYSTEM=1",
+                 "dw-abc123-export", "/usr/bin/git", "-c", "core.excludesFile=/work/.gitignore", "add", "-A", "--", "."], _ok())
+    # Nested repo 0: write-tree
+    fake.script(["exec", "-w", "/work/a/b",
+                 "-e", "GIT_DIR=/tmp/nested-0", "-e", "GIT_WORK_TREE=/work/a/b",
+                 "-e", "GIT_OBJECT_DIRECTORY=/gitdir/objects",
+                 "-e", "GIT_CONFIG_GLOBAL=/dev/null", "-e", "GIT_CONFIG_NOSYSTEM=1",
+                 "dw-abc123-export", "/usr/bin/git", "write-tree"], _ok(b"tree-a-b-123\n"))
+
+    # Nested repo 1 (a): init
+    fake.script(["exec", "-w", "/work/a",
+                 "-e", "GIT_DIR=/tmp/nested-1", "-e", "GIT_WORK_TREE=/work/a",
+                 "-e", "GIT_OBJECT_DIRECTORY=/gitdir/objects",
+                 "-e", "GIT_CONFIG_GLOBAL=/dev/null", "-e", "GIT_CONFIG_NOSYSTEM=1",
+                 "dw-abc123-export", "/usr/bin/git", "init", "-q", "--template="], _ok())
+    # Nested repo 1: read-tree --empty
+    fake.script(["exec", "-w", "/work/a",
+                 "-e", "GIT_DIR=/tmp/nested-1", "-e", "GIT_WORK_TREE=/work/a",
+                 "-e", "GIT_OBJECT_DIRECTORY=/gitdir/objects",
+                 "-e", "GIT_CONFIG_GLOBAL=/dev/null", "-e", "GIT_CONFIG_NOSYSTEM=1",
+                 "dw-abc123-export", "/usr/bin/git", "read-tree", "--empty"], _ok())
+    # Nested repo 1: add -A with exclusion for "b"
+    fake.script(["exec", "-w", "/work/a",
+                 "-e", "GIT_DIR=/tmp/nested-1", "-e", "GIT_WORK_TREE=/work/a",
+                 "-e", "GIT_OBJECT_DIRECTORY=/gitdir/objects",
+                 "-e", "GIT_CONFIG_GLOBAL=/dev/null", "-e", "GIT_CONFIG_NOSYSTEM=1",
+                 "dw-abc123-export", "/usr/bin/git", "-c", "core.excludesFile=/work/.gitignore", "add", "-A", "--",
+                 ".", ": (exclude,literal)b"], _ok())
+    # Nested repo 1: read-tree --prefix=b/ with tree-a-b-123
+    fake.script(["exec", "-w", "/work/a",
+                 "-e", "GIT_DIR=/tmp/nested-1", "-e", "GIT_WORK_TREE=/work/a",
+                 "-e", "GIT_OBJECT_DIRECTORY=/gitdir/objects",
+                 "-e", "GIT_CONFIG_GLOBAL=/dev/null", "-e", "GIT_CONFIG_NOSYSTEM=1",
+                 "dw-abc123-export", "/usr/bin/git", "read-tree", "--prefix=b/", "tree-a-b-123"], _ok())
+    # Nested repo 1: write-tree
+    fake.script(["exec", "-w", "/work/a",
+                 "-e", "GIT_DIR=/tmp/nested-1", "-e", "GIT_WORK_TREE=/work/a",
+                 "-e", "GIT_OBJECT_DIRECTORY=/gitdir/objects",
+                 "-e", "GIT_CONFIG_GLOBAL=/dev/null", "-e", "GIT_CONFIG_NOSYSTEM=1",
+                 "dw-abc123-export", "/usr/bin/git", "write-tree"], _ok(b"tree-a-456\n"))
+
+    # Main index: rm a
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "rm", "-r", "-q", "--cached", "--ignore-unmatch",
+                 "--", ": (literal)a"], _ok())
+    # Main index: read-tree --prefix=a/ with tree-a-456
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "read-tree", "--prefix=a/", "tree-a-456"], _ok())
+    # Main index: add -A with exclusion for a
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "add", "-A", "--", ".", ": (exclude,literal)a"], _ok())
+    # diff --cached
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "diff", "--cached", "--name-only", "deadbeef" * 5], _ok(b""))
+    # write-tree
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "write-tree"], _ok(b"treehash123\n"))
+    # ls-files
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "ls-files", "-s", "-z"], _ok(b""))
+    # ls-tree
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "ls-tree", "-r", "-z", "deadbeef" * 5], _ok(b""))
+    # diff --stat
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "diff", "--stat", "deadbeef" * 5, "treehash123"], _ok(b""))
+    fake.script_popen_stdout(
+        ["docker", "exec", "-w", "/work", "dw-abc123-export",
+         "/usr/bin/git", "diff", "deadbeef" * 5, "treehash123"], b"")
+    fake.script_popen_stdout(
+        ["docker", "exec", "-w", "/work", "dw-abc123-export",
+         "/usr/bin/git", "archive", "--format=tar", "treehash123"], _make_tar([]))
+
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    cfg = DockerConfig()
+
+    artifacts = export_run(
+        cfg, slug="abc123", base_commit="deadbeef" * 5, worktree=empty_worktree,
+        run_dir=run_dir, objects_dir=Path("/repo/.git/objects"),
+        image_ref="dirtywork/worker@sha256:" + "a" * 64, uid=501, gid=20,
+        repo_label="deadbeef", run=fake.run, popen=fake.popen,
+    )
+
+    assert artifacts.export_status == "ok"
+    # Check stderr has notification
+    # Check dropped_git_entries
+    assert artifacts.dropped_git_entries == ["a/.git", "a/b/.git"]
+
+
+def test_export_run_no_nested_repos(tmp_path, empty_worktree):
+    """Test 5b: no entries -> the add argv is exactly ["/usr/bin/git", "add", "-A"]"""
+    from dirtywork.sandbox.export import EXPORT_GIT_ENTRIES_SCRIPT
+    fake = FakeDocker()
+
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait, init
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/bin/sh", "-c", EXPORT_GIT_ENTRIES_SCRIPT], _ok(b""))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/usr/bin/git", "add", "-A"], _ok())
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "diff", "--cached", "--name-only", "deadbeef" * 5], _ok(b""))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "write-tree"], _ok(b"treehash123\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "ls-files", "-s", "-z"], _ok(b""))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "ls-tree", "-r", "-z", "deadbeef" * 5], _ok(b""))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "diff", "--stat", "deadbeef" * 5, "treehash123"], _ok(b""))
+    fake.script_popen_stdout(
+        ["docker", "exec", "-w", "/work", "dw-abc123-export",
+         "/usr/bin/git", "diff", "deadbeef" * 5, "treehash123"], b"")
+    fake.script_popen_stdout(
+        ["docker", "exec", "-w", "/work", "dw-abc123-export",
+         "/usr/bin/git", "archive", "--format=tar", "treehash123"], _make_tar([{"name": "hello.txt", "content": b"hi"}]))
+
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    cfg = DockerConfig()
+
+    artifacts = export_run(
+        cfg, slug="abc123", base_commit="deadbeef" * 5, worktree=empty_worktree,
+        run_dir=run_dir, objects_dir=Path("/repo/.git/objects"),
+        image_ref="dirtywork/worker@sha256:" + "a" * 64, uid=501, gid=20,
+        repo_label="deadbeef", run=fake.run, popen=fake.popen,
+    )
+
+    assert artifacts.export_status == "ok"
+
+    # Check that add -A was called without "--" or "." in the git args
+    adds = [c[0] for c in fake.calls if c[0][-2:] == ["add", "-A"]]
+    assert len(adds) == 1
+    # The full argv is ["exec", "-w", "/work", "dw-abc123-export", ...git args...]
+    # Check the git command part is correct
+    assert "/usr/bin/git" in adds[0]
+    # The git args should end with just ["add", "-A"] (no "--" or ".")
+    # Find the position of "/usr/bin/git"
+    git_idx = adds[0].index("/usr/bin/git")
+    assert adds[0][git_idx+1:] == ["add", "-A"]
+
+
+def test_export_run_ls_files_verify_gitlink(tmp_path, empty_worktree):
+    """Test 5c: ls-files/ls-tree verification scenarios"""
+    from dirtywork.sandbox.export import EXPORT_GIT_ENTRIES_SCRIPT
+    fake = FakeDocker()
+
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait, init
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/bin/sh", "-c", EXPORT_GIT_ENTRIES_SCRIPT], _ok(b""))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "add", "-A"], _ok())
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "diff", "--cached", "--name-only", "deadbeef" * 5], _ok(b""))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "write-tree"], _ok(b"treehash123\n"))
+
+    # ls-files returns gitlink for vendor/x (mode 160000) but ls-tree lacks it
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "ls-files", "-s", "-z"],
+                _ok(b"160000 " + b"a" * 40 + b" 0\tvendor/x\0" + b"100644 " + b"b" * 40 + b" 0\tREADME.md\0"))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "ls-tree", "-r", "-z", "deadbeef" * 5], _ok(b"100644 blob " + b"c" * 40 + b"\tREADME.md\0"))
+
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "diff", "--stat", "deadbeef" * 5, "treehash123"], _ok(b""))
+    fake.script_popen_stdout(
+        ["docker", "exec", "-w", "/work", "dw-abc123-export",
+         "/usr/bin/git", "diff", "deadbeef" * 5, "treehash123"], b"")
+    fake.script_popen_stdout(
+        ["docker", "exec", "-w", "/work", "dw-abc123-export",
+         "/usr/bin/git", "archive", "--format=tar", "treehash123"], _make_tar([]))
+
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    cfg = DockerConfig()
+
+    artifacts = export_run(
+        cfg, slug="abc123", base_commit="deadbeef" * 5, worktree=empty_worktree,
+        run_dir=run_dir, objects_dir=Path("/repo/.git/objects"),
+        image_ref="dirtywork/worker@sha256:" + "a" * 64, uid=501, gid=20,
+        repo_label="deadbeef", run=fake.run, popen=fake.popen,
+    )
+
+    assert artifacts.export_status.startswith("export_failed: nested repository at vendor/x was not masked")
+
+
+def test_export_run_ls_files_gitlink_masked(tmp_path, empty_worktree):
+    """Test 5c continued: gitlink present in both ls-files and ls-tree -> success"""
+    from dirtywork.sandbox.export import EXPORT_GIT_ENTRIES_SCRIPT
+    fake = FakeDocker()
+
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait, init
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/bin/sh", "-c", EXPORT_GIT_ENTRIES_SCRIPT], _ok(b""))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "add", "-A"], _ok())
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "diff", "--cached", "--name-only", "deadbeef" * 5], _ok(b""))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "write-tree"], _ok(b"treehash123\n"))
+
+    # ls-files returns gitlink for vendor/x (mode 160000)
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "ls-files", "-s", "-z"],
+                _ok(b"160000 " + b"a" * 40 + b" 0\tvendor/x\0" + b"100644 " + b"b" * 40 + b" 0\tREADME.md\0"))
+    # ls-tree ALSO has vendor/x as a commit (gitlink)
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "ls-tree", "-r", "-z", "deadbeef" * 5],
+                _ok(b"160000 commit " + b"c" * 40 + b"\tvendor/x\0" + b"100644 blob " + b"d" * 40 + b"\tREADME.md\0"))
+
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "diff", "--stat", "deadbeef" * 5, "treehash123"], _ok(b""))
+    fake.script_popen_stdout(
+        ["docker", "exec", "-w", "/work", "dw-abc123-export",
+         "/usr/bin/git", "diff", "deadbeef" * 5, "treehash123"], b"")
+    fake.script_popen_stdout(
+        ["docker", "exec", "-w", "/work", "dw-abc123-export",
+         "/usr/bin/git", "archive", "--format=tar", "treehash123"], _make_tar([]))
+
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    cfg = DockerConfig()
+
+    artifacts = export_run(
+        cfg, slug="abc123", base_commit="deadbeef" * 5, worktree=empty_worktree,
+        run_dir=run_dir, objects_dir=Path("/repo/.git/objects"),
+        image_ref="dirtywork/worker@sha256:" + "a" * 64, uid=501, gid=20,
+        repo_label="deadbeef", run=fake.run, popen=fake.popen,
+    )
+
+    assert artifacts.export_status == "ok"
+
+
+def test_export_run_ls_files_rc1(tmp_path, empty_worktree):
+    """Test 5c continued: ls-files rc 1 -> export failed"""
+    from dirtywork.sandbox.export import EXPORT_GIT_ENTRIES_SCRIPT
+    fake = FakeDocker()
+
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait, init
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/bin/sh", "-c", EXPORT_GIT_ENTRIES_SCRIPT], _ok(b""))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "add", "-A"], _ok())
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "diff", "--cached", "--name-only", "deadbeef" * 5], _ok(b""))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "write-tree"], _ok(b"treehash123\n"))
+
+    # ls-files returns rc 1
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "ls-files", "-s", "-z"], _fail(b"error"))
+
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    cfg = DockerConfig()
+
+    artifacts = export_run(
+        cfg, slug="abc123", base_commit="deadbeef" * 5, worktree=empty_worktree,
+        run_dir=run_dir, objects_dir=Path("/repo/.git/objects"),
+        image_ref="dirtywork/worker@sha256:" + "a" * 64, uid=501, gid=20,
+        repo_label="deadbeef", run=fake.run, popen=fake.popen,
+    )
+
+    assert artifacts.export_status == "export_failed: could not verify the export index (ls-files)"
+
+
+def test_export_run_ls_tree_truncated(tmp_path, empty_worktree):
+    """Test 5c continued: ls-tree truncated -> export failed"""
+    from dirtywork.sandbox.export import EXPORT_GIT_ENTRIES_SCRIPT
+    fake = FakeDocker()
+
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait, init
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/bin/sh", "-c", EXPORT_GIT_ENTRIES_SCRIPT], _ok(b""))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "add", "-A"], _ok())
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "diff", "--cached", "--name-only", "deadbeef" * 5], _ok(b""))
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "write-tree"], _ok(b"treehash123\n"))
+
+    # ls-files ok
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "ls-files", "-s", "-z"], Captured(returncode=0, output=b"", truncated=False, timed_out=False))
+    # ls-tree truncated
+    fake.script(["exec", "-w", "/work", "dw-abc123-export",
+                 "/usr/bin/git", "ls-tree", "-r", "-z", "deadbeef" * 5],
+                Captured(returncode=0, output=b"", truncated=True, timed_out=False))
+
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    cfg = DockerConfig()
+
+    artifacts = export_run(
+        cfg, slug="abc123", base_commit="deadbeef" * 5, worktree=empty_worktree,
+        run_dir=run_dir, objects_dir=Path("/repo/.git/objects"),
+        image_ref="dirtywork/worker@sha256:" + "a" * 64, uid=501, gid=20,
+        repo_label="deadbeef", run=fake.run, popen=fake.popen,
+    )
+
+    assert artifacts.export_status == "export_failed: could not verify the export index (ls-tree)"
+
+
+def test_export_run_nested_splice_rc128(tmp_path, empty_worktree):
+    """Test 5d: a nested splice exec returning rc 128 -> export_status starts with 'export_failed: nested repository splice failed at a'"""
+    from dirtywork.sandbox.export import EXPORT_GIT_ENTRIES_SCRIPT
+    fake = FakeDocker()
+
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait, init
+    fake.script(["exec", "-w", "/work", "dw-abc123-export", "/bin/sh", "-c", EXPORT_GIT_ENTRIES_SCRIPT],
+                _ok(b"/work/a/.git\0"))
+
+    # Nested repo 0 (a): init fails with rc 128
+    fake.script(["exec", "-w", "/work/a",
+                 "-e", "GIT_DIR=/tmp/nested-0", "-e", "GIT_WORK_TREE=/work/a",
+                 "-e", "GIT_OBJECT_DIRECTORY=/gitdir/objects",
+                 "-e", "GIT_CONFIG_GLOBAL=/dev/null", "-e", "GIT_CONFIG_NOSYSTEM=1",
+                 "dw-abc123-export", "/usr/bin/git", "init", "-q", "--template="],
+                Captured(returncode=128, output=b"fatal: could not create repository", truncated=False, timed_out=False))
+
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    cfg = DockerConfig()
+
+    artifacts = export_run(
+        cfg, slug="abc123", base_commit="deadbeef" * 5, worktree=empty_worktree,
+        run_dir=run_dir, objects_dir=Path("/repo/.git/objects"),
+        image_ref="dirtywork/worker@sha256:" + "a" * 64, uid=501, gid=20,
+        repo_label="deadbeef", run=fake.run, popen=fake.popen,
+    )
+
+    assert artifacts.export_status.startswith("export_failed: nested repository splice failed at a")
