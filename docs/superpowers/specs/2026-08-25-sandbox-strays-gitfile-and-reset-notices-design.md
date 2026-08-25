@@ -892,8 +892,10 @@ Live (`@pytest.mark.docker`, `tests/test_docker_live.py`, `DIRTYWORK_LIVE_IMAGE`
   `dirtywork-worker-pytest:0.10`, ≥ 60 turns, sampler on, one ledger row per run; Claude writes
   the prose docs and reviews every branch; a Claude implementer only after a failed
   resume-with-feedback, stated in the PR. The verify gate is `env -u GIT_DIR -u GIT_WORK_TREE
-  python3 -m pytest -q -p no:cacheprovider` **until T1 lands**, then the plain command — its
-  passing inside the sandbox is itself the S13 acceptance.
+  python3 -m pytest -q -p no:cacheprovider` for **every** run of this build — the worker executes
+  inside the *released* 0.10.1 sandbox, which still exports `GIT_DIR`; S13's acceptance is one run
+  of the branch's own checkout (`python3 -m dirtywork run …`) whose **plain** gate passes inside
+  the sandbox (plan task C9).
 - **Task boundaries** (each independently testable, each a bounded file set sized for a 65k
   context; the plan step refines them):
   - **T1 — gitfile layout** (§4.1–§4.3): `docker_args.py` env split, `lifecycle.py` two layouts,

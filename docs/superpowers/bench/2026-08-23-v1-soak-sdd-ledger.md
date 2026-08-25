@@ -155,3 +155,16 @@ Sampler (5 s, both models resident throughout): free RAM min/median/max 0.06 / 3
 **S13 (new, dogfood finding): the sandbox exports `GIT_DIR=/gitdir` and `GIT_WORK_TREE=/work` into every command, so a repo whose tests shell out to `git` in temp dirs cannot pass `--verify` inside the sandbox** — dirtywork's own suite falls apart there — resume 1's in-sandbox full run: `98 failed, 1154 passed, 27 deselected, 131 errors` (nearly all of tests/test_workspace.py errors out; the two signatures in the verify tail were `git init` landing in `/gitdir` → `FileNotFoundError …/.git/objects`, and `git worktree list` returning the parent repo's worktrees → `assert 215 == 1`); the worker had quietly worked around it with `-k "not docker and not workspace"`. Reproduced with a plain `docker run` on the pytest image (fails with the two vars exported, passes with `env -u GIT_DIR -u GIT_WORK_TREE`). Workaround used from resume 2 on: `--verify "env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest …"`. Candidate fix for 1.0: pass the two vars only to dirtywork's own git invocations, not to the model's commands / the gate (ties to #61).
 
 **PR #71 review (owner) → two more worker rounds, then Claude.** P1: the wire schema still said `"type": "integer"` while runtime accepted `"60s"`; P2: `canonical_args` did not normalize duration strings for a generic `unit="seconds"` param, so `"2m"` and `120` could dodge the stall detector. Sent as `resume --feedback` twice: resume 5 **called `finish` on turn 1 with no change** — its summary re-declared the original #64 work; the resumed history (27 turns, 6.8k prompt tokens since tool results are stored as previews) ended in `finish → run finished` and the model treated the review as already satisfied. **S14 (harness candidate, #66 family): reject a zero-change `finish` on the first turn of a feedback resume and re-deliver the feedback as a nudge.** Resume 6, with an explicit no-early-finish guard, did the work partially (helper + schema) and hit `max_turns` at 30 in 78 s (19 of 30 calls were `read_file`). Per the owner's rule, Claude finished P1/P2 after the second failed round: `_validate_args` routed through the same `_coerce_param`, fixture regenerated (`"type": ["integer", "string"]`), two tests, the contract sentence. Sampler for run 6: free RAM min/median/max 0.06 / 3.49 / 4.83 GB (n=18).
+
+## #61 — sandbox strays: kill in place, gitfile discovery, reset notices (2026-08-25)
+
+Built by the released dirtywork 0.10.1 (`pipx run --spec`) + qwen3-coder-next (LM Studio, 65k) in
+`dirtywork-worker-pytest:0.10`, chained off `issue-61-sandbox-resets` with `--branch-from`; verify
+gate `env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider` (the released
+sandbox still exports `GIT_DIR`). Spec: `docs/superpowers/specs/2026-08-25-sandbox-strays-gitfile-and-reset-notices-design.md`;
+plan: `docs/superpowers/plans/2026-08-25-issue-61-sandbox-strays.md`. Sampler: `metrics-61.csv`
+(scratchpad; per-window stats at the end).
+
+| run (slug) | task | status | wall | turns | s/turn | prompt tok | compl tok | tok/s | nudges | guardrail | resets | tool mix | verify |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+
