@@ -54,6 +54,9 @@ class Watchdog(threading.Thread):
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._disk_check_failures = 0
+        # Leaf lock around violation/violation_kind: never held across kill()
+        # or sample(). The first recorded violation wins (record_violation).
+        self._violation_lock = threading.Lock()
 
     def note_bash_start(self) -> None:
         with self._lock:
@@ -66,6 +69,32 @@ class Watchdog(threading.Thread):
     def stop(self) -> None:
         self._stop_event.set()
 
+    def record_violation(self, reason: str, kind: str = "budget") -> bool:
+        """Record `reason` and kill the container -- unless a violation is
+        already recorded, in which case the first one wins: it is left
+        untouched and no second kill is issued. Every breach path (disk
+        floor, worktree cap on either thread, the run loop's own failure)
+        goes through here, so a sample that lands while a violation is
+        pending can neither replace its reason nor change its kind.
+        Returns True iff this call recorded the violation."""
+        with self._violation_lock:
+            if self.violation is not None:
+                return False
+            self.violation = reason
+            self.violation_kind = kind
+        self.kill(reason)
+        return True
+
+    def take_violation(self) -> tuple[str, str] | None:
+        """Consume the recorded violation as (reason, kind), or None when
+        there is none. Clears it atomically, kind back to the default."""
+        with self._violation_lock:
+            if self.violation is None:
+                return None
+            taken = (self.violation, self.violation_kind)
+            self.violation, self.violation_kind = None, "budget"
+            return taken
+
     def _check_disk(self) -> bool:
         try:
             free_mb = min(shutil.disk_usage(str(p)).free for p in self.storage_paths) / (1024 * 1024)
@@ -75,17 +104,13 @@ class Watchdog(threading.Thread):
             self._disk_check_failures += 1
             if self._disk_check_failures >= MAX_DISK_CHECK_FAILURES:
                 reason = f"host free-space check failing ({e!s}); refusing to run unmeasured"
-                self.violation = reason
-                self.violation_kind = "budget"
-                self.kill(reason)
+                self.record_violation(reason)
                 return True
             return False
         self._disk_check_failures = 0
         if free_mb < self.min_free_mb:
             reason = f"host free space below {self.min_free_mb} MB"
-            self.violation = reason
-            self.violation_kind = "budget"
-            self.kill(reason)
+            self.record_violation(reason)
             return True
         return False
 
@@ -109,9 +134,7 @@ class Watchdog(threading.Thread):
                 f"worktree exceeds {self.max_worktree_mb} MB or "
                 f"{self.max_worktree_files} files (sampled {mb:.1f} MB, {entries} files)"
             )
-            self.violation = reason
-            self.violation_kind = "budget"
-            self.kill(reason)
+            self.record_violation(reason)
             return True
         return False
 
@@ -135,9 +158,7 @@ class Watchdog(threading.Thread):
             # nothing observable. Fail closed and visible instead — record a
             # violation and kill, same as every other breach path, so
             # DockerSandbox._after_bash surfaces it on the next tool call.
-            self.violation = f"watchdog: {e}"
-            self.violation_kind = "sandbox_error"
             try:
-                self.kill(self.violation)
+                self.record_violation(f"watchdog: {e}", "sandbox_error")
             except Exception:
                 pass

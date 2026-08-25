@@ -2926,6 +2926,9 @@ def _fire_disk_violation(sb):
 
 
 def test_reset_skips_when_a_watchdog_violation_is_pending(started_with_transcript):
+    # PR #74 review, second P1: when a violation is pending, reset() still
+    # marks _reset_this_call so _after_bash knows not to sample the dying
+    # container (the kill may not have happened yet, but it's coming).
     sb, fake, run_dir, transcript = started_with_transcript
     _fire_disk_violation(sb)
 
@@ -2935,7 +2938,7 @@ def test_reset_skips_when_a_watchdog_violation_is_pending(started_with_transcrip
     assert not [e for e in _events(run_dir, transcript) if e["event"] == "sandbox_reset"]
     assert sb.drain_notices() == []
     assert sb.watchdog.violation == "host free space below 2048 MB"  # left for the caller
-    assert sb._reset_this_call is False
+    assert sb._reset_this_call is True  # marked so _after_bash skips sampling
 
 
 def test_sample_worktree_reset_rechecks_the_watchdog_under_reset_lock(started_with_transcript):
@@ -2978,3 +2981,48 @@ def test_reap_reset_rechecks_the_watchdog_under_reset_lock(started_with_transcri
     assert not [e for e in _events(run_dir, transcript) if e["event"] == "sandbox_reset"]
     assert sb.watchdog.violation is None
     assert sb._reset_this_call is False
+
+
+def test_skipped_reset_marks_the_call_so_after_bash_does_not_sample(started_with_transcript):
+    # PR #74 review, second P1: the violation is recorded before _watchdog_kill
+    # takes _reset_lock, so reset() skips without the kill having set
+    # _reset_this_call. _after_bash must not sample the dying container: an
+    # over-cap sample would have replaced the disk-floor reason.
+    from dirtywork.budget import BudgetExceeded
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], _rc(1))
+    fake.script(["exec"], _ok(b"ok\n"))
+    fake.script(_SAMPLE_ARGV, _ok(b"3145728\t/work\n10\n"))  # over the 2048 MB default
+    sb._reset_lock = _FiringLock(sb._reset_lock, lambda: _fire_disk_violation(sb))
+
+    with pytest.raises(BudgetExceeded, match="host free space below"):
+        sb.bash("echo ok")
+
+    assert not [c for c in fake.calls if c[0][:len(_SAMPLE_ARGV)] == _SAMPLE_ARGV]
+    assert not [c for c in fake.calls if c[0][0] in ("kill", "wait")]
+    assert sb.watchdog.violation is None
+    assert sb._reset_this_call is False
+
+
+def test_after_bash_sample_does_not_overwrite_a_violation_recorded_during_it(started_with_transcript):
+    # The same overwrite with no reset at all: the watchdog thread records a
+    # disk-floor violation while _after_bash's own worktree sample is in
+    # flight, and that sample comes back over the cap. First recorded wins;
+    # no second kill.
+    from dirtywork.budget import BudgetExceeded
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+    fake.script(["exec"], _ok(b"ok\n"))
+
+    def over_cap_while_the_disk_floor_fires(argv):
+        _fire_disk_violation(sb)
+        return _ok(b"3145728\t/work\n10\n")
+
+    fake.script(_SAMPLE_ARGV, over_cap_while_the_disk_floor_fires)
+
+    with pytest.raises(BudgetExceeded, match="host free space below"):
+        sb.bash("echo ok")
+
+    assert not [c for c in fake.calls if c[0][0] == "kill"]
+    assert sb.watchdog.violation is None

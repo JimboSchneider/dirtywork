@@ -329,3 +329,47 @@ def test_check_worktree_budget_once_sample_returns_none():
     result = wdg.check_worktree_budget_once(wait=True)
     assert result is False
     assert wdg.violation is None
+
+
+def test_record_violation_first_wins_and_kills_once():
+    kills = []
+    wdg = Watchdog(kill=lambda r: kills.append(r), sample=lambda wait=True: (0, 0),
+                   storage_paths=[], min_free_mb=1, max_worktree_mb=2048,
+                   max_worktree_files=200_000)
+    assert wdg.record_violation("host free space below 2048 MB") is True
+    assert wdg.record_violation("watchdog: boom", "sandbox_error") is False
+    assert (wdg.violation, wdg.violation_kind) == ("host free space below 2048 MB", "budget")
+    assert kills == ["host free space below 2048 MB"]
+    assert wdg.take_violation() == ("host free space below 2048 MB", "budget")
+    assert (wdg.violation, wdg.violation_kind) == (None, "budget")
+    assert wdg.take_violation() is None
+
+
+def test_check_worktree_budget_once_does_not_overwrite_a_recorded_violation():
+    # PR #74 review, second P1: a worktree sample that lands while a disk-floor
+    # violation is pending must not replace its reason (or kind) or kill again.
+    kills = []
+    wdg = Watchdog(kill=lambda r: kills.append(r), sample=lambda wait=True: (3 * 1024 * 1024, 10),
+                   storage_paths=[], min_free_mb=1, max_worktree_mb=2048,
+                   max_worktree_files=200_000)
+    assert wdg.record_violation("host free space below 2048 MB") is True
+    assert wdg.check_worktree_budget_once() is True  # a breach was seen; the loop still stops
+    assert (wdg.violation, wdg.violation_kind) == ("host free space below 2048 MB", "budget")
+    assert kills == ["host free space below 2048 MB"]
+
+
+def test_disk_floor_does_not_overwrite_a_recorded_violation(tmp_path, monkeypatch):
+    import dirtywork.sandbox.watchdog as wd
+
+    class FakeUsage:
+        free = 0
+
+    monkeypatch.setattr(wd.shutil, "disk_usage", lambda path: FakeUsage())
+    kills = []
+    wdg = wd.Watchdog(kill=lambda r: kills.append(r), sample=lambda wait=True: (0, 0),
+                      storage_paths=[tmp_path], min_free_mb=2048, max_worktree_mb=2048,
+                      max_worktree_files=200_000)
+    assert wdg.record_violation("watchdog: sample exploded", "sandbox_error") is True
+    assert wdg._check_disk() is True
+    assert (wdg.violation, wdg.violation_kind) == ("watchdog: sample exploded", "sandbox_error")
+    assert kills == ["watchdog: sample exploded"]

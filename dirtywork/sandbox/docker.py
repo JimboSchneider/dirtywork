@@ -440,15 +440,11 @@ class DockerSandbox:
             if sweep_captured.returncode != 0:
                 print(f"sweep incomplete (rc {sweep_captured.returncode})", file=sys.stderr)
         self._stop_container()
-        watchdog_violation = self.watchdog.violation if self.watchdog is not None else None
+        taken = self.watchdog.take_violation() if self.watchdog is not None else None
+        watchdog_violation = taken[0] if taken else None
         # D1: only meaningful when watchdog_violation itself is set -- see
         # RunArtifacts.watchdog_violation_kind.
-        watchdog_violation_kind = (
-            self.watchdog.violation_kind if self.watchdog is not None and watchdog_violation else None
-        )
-        if self.watchdog is not None:
-            self.watchdog.violation = None
-            self.watchdog.violation_kind = "budget"
+        watchdog_violation_kind = taken[1] if taken else None
         label = docker_args.repo_label(self._repo)
         aside = self._stash_prior_worktree() if self._seeded else None
         try:
@@ -886,7 +882,10 @@ class DockerSandbox:
                 # about to kill, the container -- between the caller's own check
                 # and this lock. Restarting the container now would be a
                 # spurious reset that can mask that violation; the caller
-                # consumes it in _after_bash instead.
+                # consumes it in _after_bash instead. Mark the call as one whose
+                # container was killed, so _after_bash does not sample the dying
+                # container either (_watchdog_kill may not have set this yet).
+                self._reset_this_call = True
                 return False
             # Mark that a reset will happen in this call (for _after_bash to skip budget sample)
             self._reset_this_call = True
@@ -1151,11 +1150,11 @@ class DockerSandbox:
                 self._reap_lock.release()
 
     def _raise_violation(self) -> None:
-        """Consume and raise a watchdog violation."""
-        violation = self.watchdog.violation
-        kind = self.watchdog.violation_kind
-        self.watchdog.violation = None
-        self.watchdog.violation_kind = "budget"
+        """Consume and raise the recorded watchdog violation (no-op if none)."""
+        taken = self.watchdog.take_violation()
+        if taken is None:
+            return
+        violation, kind = taken
         if kind == "sandbox_error":
             # D1: a watchdog-thread sample() failure (spec §6's
             # "second failure -> sandbox_error") is a sandbox
