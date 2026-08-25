@@ -75,13 +75,8 @@ def exec_argv(name: str, argv: list, *, workdir: str = "/work", stdin: bool = Fa
     if stdin:
         out.append("-i")
     if env:
-        # Handle both dict and list of tuples (for deterministic order)
-        if isinstance(env, list):
-            for k, v in env:
-                out += ["-e", f"{k}={v}"]
-        else:
-            for k, v in env.items():
-                out += ["-e", f"{k}={v}"]
+        for k, v in env.items():
+            out += ["-e", f"{k}={v}"]
     out.append(name)
     out += list(argv)
     return out

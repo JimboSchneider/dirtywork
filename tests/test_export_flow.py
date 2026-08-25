@@ -219,7 +219,7 @@ def test_export_run_find_truncated_output(tmp_path, empty_worktree):
     fake.script(["exec"], _ok())
     # Captured.truncated is True
     fake.script(["exec", "-w", "/work", "dw-abc123-export", "/bin/sh", "-c", EXPORT_GIT_ENTRIES_SCRIPT],
-                Captured(b"", 0, timed_out=False, truncated=True))
+                Captured(returncode=0, output=b"", truncated=True, timed_out=False))
     run_dir = tmp_path / "rundir"
     run_dir.mkdir()
     cfg = DockerConfig()
