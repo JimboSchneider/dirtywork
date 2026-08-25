@@ -429,10 +429,14 @@ call. No path acquires `_reap_lock` while holding `_reset_lock`, so no cycle exi
   `watchdog.violation` and, if set, raises `BudgetExceeded`/`SandboxError` exactly as its existing
   end-of-call block does (that block moves into a helper both sites call). Every watchdog kill
   records `violation` before calling `kill()`. Because a kill can also land after that first
-  check, `_reap` and `_sample_worktree` re-read `watchdog.violation` immediately before any
-  `reset()` call — and `_sample_worktree` before raising its own `SandboxError` — and, when it is
-  set, return without acting (no docker call, no event, no notice); `_after_bash` checks it
-  before the reap and again after the sample and raises the recorded kind. So a container the watchdog
+  check, `reset()` itself re-reads `watchdog.violation` as its first statement **under
+  `_reset_lock`** and, when it is set, returns `False` without acting (no docker call, no event,
+  no notice, `_reset_this_call` untouched — `_watchdog_kill` sets that itself); a re-read by the
+  caller before taking the lock would leave a gap in which the watchdog's kill lands and the
+  dead container is restarted anyway (PR #74 review, P1). `reset()` returns `True` only when it
+  reset; `_reap` returns "do not sample" either way and `_sample_worktree` returns `None` on
+  `False`. `_sample_worktree` also re-reads the violation before raising its own `SandboxError`;
+  `_after_bash` checks it before the reap and again after the sample and raises the recorded kind. So a container the watchdog
   killed is never reaped, sampled, or reset: a disk-floor kill landing during a bash exec,
   mid-ladder, or mid-sample ends the run `budget_exceeded` with the disk-floor reason and no
   `sandbox_reset` event.
