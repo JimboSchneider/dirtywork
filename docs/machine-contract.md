@@ -105,7 +105,9 @@ the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
   FROM ghcr.io/jimboschneider/dirtywork-worker:0.10
   USER root
   ENV DOTNET_EnableWriteXorExecute=0
-  # until the 1.0 base image bakes this in — see the 0.10 defect note below
+  # until the 1.0 base image bakes these in — see the 0.10 defect note below;
+  # the four below stop the build daemons a stray-process kill would otherwise chase (#61)
+  ENV DOTNET_CLI_USE_MSBUILD_SERVER=0 MSBUILDDISABLENODEREUSE=1 UseSharedCompilation=false DOTNET_NOLOGO=1
   ENV NUGET_PACKAGES=/opt/nuget
   RUN dotnet restore <project> --packages /opt/nuget && chmod -R a+rwX /opt/nuget
   USER worker
@@ -123,7 +125,10 @@ the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
 
 - `--tmp-size` / `--gitdir-size` / `--home-size` (docker mode; default `1g` /
   `512m` / `256m`) — caps on the three tmpfs mounts the **worker** container
-  gets: `/tmp` (exec), `/gitdir` (the run's git dir) and `/home/worker`.
+  gets: `/tmp` (exec), `/gitdir` (the run's git dir — reached through the
+  gitfile `/work/.git` since 1.0 (#61): the worker's commands inherit no
+  `GIT_DIR`/`GIT_WORK_TREE`, so a `git init` elsewhere creates a repository
+  there; only the export container keeps those variables) and `/home/worker`.
   The separate, short-lived export container (`docker_args.py`'s
   `export_create_argv`, spec §7) is unaffected by these flags — it always
   gets fixed sizes (`/tmp` 256m, `/gitdir` 2g, `/home/worker` 64m), sized for
@@ -164,7 +169,10 @@ the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
   cannot see, since every `edit_file` counts as progress. No nudge is sent:
   the point is to stop paying for turns. `0` disables.
 - `--verify CMD` / `--verify-rounds N` / `--verify-timeout S` — see
-  [Verifying a run](operating.md#verifying-a-run). `--verify-rounds` counts **fix rounds
+  [Verifying a run](operating.md#verifying-a-run). In docker mode the gate runs
+  like a worker `bash` call — without `GIT_DIR`/`GIT_WORK_TREE` in its
+  environment since 1.0 (#61), so a suite that shells out to git in temp dirs
+  can pass. `--verify-rounds` counts **fix rounds
   after a failed verify** — the command may run N+1 times; `0` verifies once and
   ends the run either way. `dirtywork resume` inherits all three — the command,
   the rounds, and the timeout — from the run it continues (recorded in `run.json`
@@ -269,7 +277,16 @@ not configurable; a run's tool surface is the same in host and docker mode.
   hits its timeout returns
   `ERROR: command timed out after <n>s — it did not finish and its result is
   unknown. …` with **no partial output**, the `tool_result` event carries
-  `timed_out: true`, and the run's `timeouts` counter rises.
+  `timed_out: true`, and the run's `timeouts` counter rises. Backgrounded
+  processes are killed when the command returns — host mode kills the process
+  group; docker mode, since 1.0 (#61), kills every process but the container's
+  tether **in place**: a `stray_kill` transcript event names them and the worker
+  is told on the same turn. Only if that kill cannot be performed or verified, or
+  the container ran out of memory, is the container reset instead
+  (`sandbox_reset`): the working tree survives, the worker's git metadata in
+  `/gitdir` (index, stashes, local commits, branches) does not, and the worker is
+  told that too. Stale git lock files a killed `git` left behind are swept
+  (`locks_removed`).
 - `finish(summary)` — ends the run.
 
 The four in-place tools (`edit_file`, `apply_edits`, `insert_before`,
@@ -421,12 +438,15 @@ config, `schema_version: 2`, plus provenance: `worktree`, `base_commit`,
 `assistant` (text + tool calls — text capped at 64 000 chars in the
 transcript only, the full text is still sent to the model), `tool_result`
 (truncated), `guardrail_block`, `nudge` (`{"event": "nudge", "kind":
-"truncated|empty|text_tool_call|stall|timeout|malformed_entry", "turn": N,
+"truncated|empty|text_tool_call|stall|timeout|malformed_entry|stray_kill|sandbox_reset", "turn": N,
 "via": "tool_result|user"}` — since 1.0 a nudge on a tool-call turn rides on
 the turn's last `tool_result` (its `follow_up` field) and never as a user
 message after a tool result; the history never carries two consecutive user
 messages), `sandbox_reset`
-(docker mode: the container was reset — reason), and `run_end` (status, turns,
+(docker mode: the container was reset — `reason`, plus `strays` when stray
+processes caused it), `stray_kill` (docker mode, 1.0: processes that outlived a
+`bash` call were killed in place — `strays`, and `locks_removed` when stale git
+locks were swept), and `run_end` (status, turns,
 duration, cumulative
 usage, plus the run's artifacts: in host mode `diff_stat` — `git diff
 --stat` against the base commit, tracked changes only — and `untracked` —
@@ -434,7 +454,9 @@ usage, plus the run's artifacts: in host mode `diff_stat` — `git diff
 docker mode `diff_stat` (which already includes new files, since the
 export stages everything first), `untracked` (always `""`), `patch_path`,
 `worktree_bytes`, `worktree_files`, `escaping_symlinks`,
-`dropped_git_entries`, `export_status`, `watchdog_violation` (docker mode;
+`dropped_git_entries` (docker mode: `.git`-named entries the export dropped, the
+root gitfile excluded; since 1.0 a nested repository's files are exported as
+plain files, so an entry at depth ≥ 2 names one), `export_status`, `watchdog_violation` (docker mode;
 null unless the watchdog killed the container), `watchdog_violation_kind`
 (set alongside `watchdog_violation`: `"budget"` for a worktree-size or
 host-disk-floor breach, `"sandbox_error"` for the watchdog's own

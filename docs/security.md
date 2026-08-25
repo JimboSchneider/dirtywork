@@ -110,7 +110,10 @@ also gates *what a run could do to your host while producing it*.
 kernel-enforced memory/CPU/process/per-file-size limits, no host path
 mounted in except a read-only bind mount of the parent repository's git
 object store. The worktree reaches the host only through the validated
-tar export. See "Security & trust" above for what this does and does not
+tar export. The worker container's environment carries no
+`GIT_DIR`/`GIT_WORK_TREE` (1.0, #61): git inside it is found through the
+gitfile `/work/.git` → `/gitdir`; only the short-lived export container, whose
+`/work` is mounted read-only, keeps those variables. See "Security & trust" above for what this does and does not
 cover.
 `bash` in docker mode only enforces the mode-independent policy rules (no
 `git push`, `sudo`, piping a download into a shell, or system-control
@@ -143,7 +146,9 @@ the container has no host filesystem or shared parent repo to escape into.
   the check and the promote gets **replaced as a link** — `rename(2)` does not
   follow its destination, so nothing is ever written through it. That is a
   robustness change, not a security change: host tool calls are serial, every
-  `bash` call SIGKILLs its process group when it returns, and the realistic
+  `bash` call SIGKILLs its process group when it returns (docker mode, since
+  1.0: every process but the tether is SIGKILLed in place, and the container is
+  reset only when that cannot be verified), and the realistic
   adversary here is a confused or prompt-injected model, not a racing process.
   The same delta holds in docker mode, where the promote (`mv -fT --`) replaces
   the path itself: a symlink target is replaced by a regular file rather than

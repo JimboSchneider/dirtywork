@@ -124,6 +124,30 @@ failure (a killed container, an exec that could not start) returns
 `ERROR: bash failed: …` instead, so an ordinary failure is never read as "it
 might still be running".
 
+**Background processes, and git inside the sandbox.** A process cannot outlive
+the `bash` call that started it. Host mode SIGKILLs the command's process group;
+docker mode (since 1.0, #61) kills every process but the container's tether in
+place — a timed-out command's abandoned process included — records them in a
+`stray_kill` transcript event, sweeps any stale git lock they left, and tells the
+worker on the same turn (`The sandbox killed N background process(es) …`). The
+container, its `/tmp` and the worker's git metadata in `/gitdir` all survive a
+kill — a `git stash` made before the call pops afterwards — but `/tmp` is not
+reclaimed either: a stray that filled it leaves it full until the worker cleans
+it or a reset happens. Only when the kill cannot be performed or verified (a
+process flood at the pids limit, an unreachable container) or the container ran
+out of memory is the container **reset**: the working tree survives, the index,
+stashes, local commits and branches are re-initialized from the base commit,
+and the worker is told exactly that. The one thing the reaper cannot see is a
+background process whose `docker top` command is exactly `cat`; it is not
+reported, though it dies with any other stray. Git inside the sandbox behaves
+like git anywhere: the worktree is found through the gitfile `/work/.git` →
+`/gitdir`, nothing the worker runs inherits `GIT_DIR`/`GIT_WORK_TREE`, and a
+`git init` in a temp dir stays there. A nested repository the worker creates
+under the worktree (`cargo new`, a fixture, a `git init` in a sub-project) is
+exported as plain files — its `.git` entry is dropped and listed in
+`dropped_git_entries`, its files (with its own ignore rules plus the top-level
+`.gitignore`) come out like any others.
+
 ### Resuming a run
 
 A run that ended early (`max_turns`, `stalled`, `timeout`, `interrupted`, a
@@ -183,7 +207,7 @@ of whether the run is still going:
   run as a Markdown report instead (header block whose `task` field is a
   one-line preview, a `## Task` section with the full task text, one
   `### Turn N` section per assistant turn, collapsible `<details>` tool
-  results, blockquote callouts for nudges/guardrail blocks/sandbox resets,
+  results, blockquote callouts for nudges/guardrail blocks/sandbox resets/stray kills,
   the harness text a tool result carried to the model (1.0: a fenced
   "harness → model" block), `(sent as: [empty reply])` on a turn the harness
   had to pad, a `## Result` section, and with `--diff` the patch in a fenced
