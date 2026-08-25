@@ -1440,3 +1440,86 @@ def test_runs_show_tolerates_old_transcripts_without_the_new_keys(tmp_path, monk
     assert runs.cmd_show(argparse.Namespace(slug="md1", diff=False, markdown=True, out=None)) == 0
     out = capsys.readouterr().out
     assert "harness → model" not in out and "sent as" not in out and "[not finished]" not in out
+
+
+def test_md_code_plain():
+    """_md_code("plain", 200) == "`plain`"."""
+    assert runs._md_code("plain", 200) == "`plain`"
+
+
+def test_md_code_with_backtick():
+    """_md_code handles backticks by using double-backtick fences."""
+    # "a`b" contains one backtick, so fence length should be 2
+    result = runs._md_code("a`b", 200)
+    assert "`` a`b ``" in result
+    # Should not contain HTML entities
+    assert "&lt;" not in result
+    assert "&amp;" not in result
+
+
+def test_md_event_lines_stray_kill():
+    """_md_event_lines renders stray_kill events with code spans for strays."""
+    event = {
+        "event": "stray_kill",
+        "strays_total": 2,
+        "strays": ["a`b", "c|d *e*"],
+        "locks_removed_total": 1,
+        "locks_removed": ["/gitdir/lock"]
+    }
+    lines = runs._md_event_lines(event)
+    # Check the output has proper structure
+    assert any("> **stray_kill**:" in line for line in lines)
+    # Check code span with backtick survives
+    assert "`` a`b ``" in "\n".join(lines)
+    # Check no HTML entities
+    output = "\n".join(lines)
+    assert "&lt;" not in output
+    assert "&amp;" not in output
+    # Check lock file message
+    assert "1 lock file removed" in "\n".join(lines)
+
+
+def test_md_event_lines_sandbox_reset_with_strays():
+    """_md_event_lines renders sandbox_reset events with strays."""
+    event = {
+        "event": "sandbox_reset",
+        "reason": "oom",
+        "strays": ["a`b", "c|d *e*"]
+    }
+    lines = runs._md_event_lines(event)
+    # Check the output has strays section
+    output = "\n".join(lines)
+    assert "> **sandbox_reset**:" in output
+    # Check code span with backtick survives
+    assert "`` a`b ``" in output
+    # Check no HTML entities
+    assert "&lt;" not in output
+    assert "&amp;" not in output
+    # Check strays are present
+    assert "strays:" in output
+
+
+def test_timeline_line_stray_kill():
+    """_timeline_line renders stray_kill events."""
+    event = {
+        "ts": "2026-01-01T00:00:00+00:00",
+        "event": "stray_kill",
+        "strays_total": 2,
+        "strays": ["echo hello", "sleep 10"]
+    }
+    line = runs._timeline_line(event)
+    assert "stray_kill" in line
+    assert "2 killed" in line
+
+
+def test_timeline_line_sandbox_reset_with_strays():
+    """_timeline_line renders sandbox_reset events with strays."""
+    event = {
+        "ts": "2026-01-01T00:00:00+00:00",
+        "event": "sandbox_reset",
+        "reason": "oom",
+        "strays": ["echo hello", "sleep 10"]
+    }
+    line = runs._timeline_line(event)
+    assert "sandbox_reset" in line
+    assert "strays:" in line

@@ -46,6 +46,8 @@ from .watchdog import Watchdog
 from . import export
 from ..workspace import host_read_tree
 from ..resume import stash_dir_for
+from . import strays
+from .strays import sandbox_reset_text, stray_kill_text, parse_tether_pid
 
 # Fixed exec timeouts for tools with no user-facing timeout knob — these
 # operations should complete near-instantly; a hang means the sandbox
@@ -63,6 +65,9 @@ LIST_EXEC_TIMEOUT = 30
 # or other daemon chatter sits in the same output as the real `-print`ed
 # paths. Anchored with fullmatch() below rather than trusted as a substring.
 _SWEEP_PATTERN = re.compile(TMP_FIND_REGEX + r"\Z")
+
+# settle window between the kill and the verifying `docker top` (spec #61 §3.4)
+_SETTLE_SLEEP = 0.05
 
 
 def _rel(path: str, *, writing: bool = False):
@@ -200,12 +205,20 @@ class DockerSandbox:
         self._objects_dir = None
         self._export_failed = False
         self._reset_this_call = False  # Track if reset happened in current bash call
+        self._shutting_down = False
+        # Lock order: _reap_lock -> _reset_lock -> _notices_lock
+        self._reap_lock = threading.Lock()
         # Serializes reset()'s whole body (kill -> wait -> new tether -> init)
         # and the watchdog thread's own kill path against each other: reset()
         # can be invoked from the watchdog thread (_sample_worktree's
         # exec-failure path) and from the main thread (_reap() after a bash
         # call) concurrently. _reset_this_call is set/cleared under this lock.
         self._reset_lock = threading.Lock()
+        # State for tether pid and notice queue
+        self._tether_pid = None
+        self._tether_warned = False
+        self._notices = []
+        self._notices_lock = threading.Lock()
 
     @staticmethod
     def check_name_collision(run, slug: str) -> None:
@@ -280,6 +293,7 @@ class DockerSandbox:
 
         self._start_tether()
         self._wait_ready()
+        self._discover_tether()
         self._init(restart=seed_from_worktree)
         if seed_from_worktree:
             self._seed_from_worktree()
@@ -306,14 +320,46 @@ class DockerSandbox:
         lifecycle.wait_ready(self._run, self.container)
 
     def _init(self, *, restart: bool) -> None:
-        lifecycle.init_worker_git(self._run, self.container, branch=self._branch, base_commit=self._base_commit, restart=restart)
+        lifecycle.init_worker_git(self._run, self.container, branch=self._branch, base_commit=self._base_commit, restart=restart, layout="gitfile")
 
     def _check(self, res, what: str) -> None:
         """Raise SandboxError with the captured output when a docker step failed."""
         if res.returncode != 0:
             raise SandboxError(f"{what}: {res.output.decode('utf-8', 'replace')[:500]}")
 
+    def _discover_tether(self) -> None:
+        """Discover the tether pid by running a shell script inside the container."""
+        argv = docker_args.exec_argv(
+            self.container, ["/bin/sh", "-c", strays.TETHER_DISCOVERY_SCRIPT]
+        )
+        try:
+            captured = self._run(argv, timeout=docker_cli.T_QUERY)
+        except docker_cli.DockerError:
+            pid = None
+        else:
+            if captured.returncode != 0:
+                pid = None
+            else:
+                pid = parse_tether_pid(captured.output)
+        self._tether_pid = pid
+        if pid is None and not self._tether_warned:
+            print("tether pid unknown; a stray process will reset the container", file=sys.stderr)
+            self._tether_warned = True
+
+    def _queue_notice(self, kind: str, text: str) -> None:
+        """Queue a notice (kind, text) under _notices_lock."""
+        with self._notices_lock:
+            self._notices.append((kind, text))
+
+    def drain_notices(self) -> list[tuple[str, str]]:
+        """Return queued notices and clear them, under _notices_lock."""
+        with self._notices_lock:
+            notices = list(self._notices)
+            self._notices.clear()
+            return notices
+
     def _stop_container(self) -> None:
+        self._shutting_down = True
         if self.watchdog is not None:
             self.watchdog.stop()
             if self.watchdog.is_alive():
@@ -394,15 +440,11 @@ class DockerSandbox:
             if sweep_captured.returncode != 0:
                 print(f"sweep incomplete (rc {sweep_captured.returncode})", file=sys.stderr)
         self._stop_container()
-        watchdog_violation = self.watchdog.violation if self.watchdog is not None else None
+        taken = self.watchdog.take_violation() if self.watchdog is not None else None
+        watchdog_violation = taken[0] if taken else None
         # D1: only meaningful when watchdog_violation itself is set -- see
         # RunArtifacts.watchdog_violation_kind.
-        watchdog_violation_kind = (
-            self.watchdog.violation_kind if self.watchdog is not None and watchdog_violation else None
-        )
-        if self.watchdog is not None:
-            self.watchdog.violation = None
-            self.watchdog.violation_kind = "budget"
+        watchdog_violation_kind = taken[1] if taken else None
         label = docker_args.repo_label(self._repo)
         aside = self._stash_prior_worktree() if self._seeded else None
         try:
@@ -808,6 +850,8 @@ class DockerSandbox:
             # `timeouts` or the `timeout` nudge -- those are about commands the
             # WORKER ran, and grep is the harness searching on its behalf.
             if e.timed_out:
+                # Kill any stray process that continued after the timeout
+                self._kill_abandoned_exec()
                 return grep_timeout_result(timeout)
             return f"ERROR: grep failed: {e}"
         if captured.returncode not in (0, 1):
@@ -819,7 +863,7 @@ class DockerSandbox:
         lines = [(l[2:] if l.startswith("./") else l) for l in text.splitlines()]
         return _cap("\n".join(lines), note=" — narrow the pattern or path for full results")
 
-    def reset(self, reason: str) -> None:
+    def reset(self, reason: str, *, strays=None, strays_total=None) -> bool:
         """Spec §3 "Reset" (used on a stray process, OOM, or a watchdog
         kill): docker kill SIGKILLs PID 1, so the whole container namespace
         dies and its tmpfs is wiped — but the volume and its contents
@@ -829,8 +873,25 @@ class DockerSandbox:
         does not). The whole body runs under `self._reset_lock` so a
         concurrent reset() from the watchdog thread and the main thread
         cannot interleave their docker calls or race `_start_tether`/`_init`
-        (Important #4)."""
+        (Important #4). Returns True when the container was reset, False when
+        the reset was skipped: shutting down, or a watchdog violation is pending
+        (the container is dead or dying by the watchdog's hand; the caller must not sample)."""
         with self._reset_lock:
+            if self.watchdog is not None and self.watchdog.violation is not None:
+                # The watchdog thread recorded a violation -- and killed, or is
+                # about to kill, the container -- between the caller's own check
+                # and this lock. Restarting the container now would be a
+                # spurious reset that can mask that violation; the caller
+                # consumes it in _after_bash instead. Mark the call as one whose
+                # container was killed, so _after_bash does not sample the dying
+                # container either (_watchdog_kill may not have set this yet).
+                self._reset_this_call = True
+                return False
+            # Mark that a reset will happen in this call (for _after_bash to skip budget sample)
+            self._reset_this_call = True
+            # If shutting down, don't perform any docker calls or write events
+            if self._shutting_down:
+                return False
             try:
                 self._run(["kill", self.container], timeout=docker_cli.T_LIFECYCLE)
             except docker_cli.DockerError:
@@ -845,72 +906,157 @@ class DockerSandbox:
                 lifecycle.close_tether(self._tether)
             self._start_tether()
             self._wait_ready()
+            # A reset starts a new container life, so the warning can happen again
+            self._tether_warned = False
+            self._discover_tether()
             self._init(restart=True)
             if self.transcript is not None:
                 try:
-                    self.transcript.write("sandbox_reset", reason=reason)
+                    # Build kwargs for transcript.write
+                    kwargs = {"reason": reason}
+                    if strays is not None:
+                        kwargs["strays"] = strays
+                    if strays_total is not None:
+                        kwargs["strays_total"] = strays_total
+                    self.transcript.write("sandbox_reset", **kwargs)
                 except Exception:
                     pass
-            # Mark that a reset happened in this call (for _after_bash to skip budget sample)
-            self._reset_this_call = True
+            # Queue a notice for the sandbox reset
+            self._queue_notice("sandbox_reset", sandbox_reset_text(reason))
+            return True
+
+    def _kill_strays(self) -> bool:
+        """Kill stray processes using the STRAY_KILL_SCRIPT.
+
+        Returns True iff rc == 0 (DockerError -> False).
+        """
+        argv = docker_args.exec_argv(
+            self.container, ["/bin/sh", "-c", strays.STRAY_KILL_SCRIPT, "_", str(self._tether_pid)]
+        )
+        try:
+            result = self._run(argv, timeout=docker_cli.T_QUERY)
+            return result.returncode == 0
+        except docker_cli.DockerError:
+            return False
+
+    def _kill_abandoned_exec(self) -> None:
+        """Kill any stray exec process that continued after a timed-out DockerError.
+
+        Any tool exec that continues after a timed-out DockerError must call this
+        before the next bash/grep call completes. The in-container process is
+        still running and the next bash call's reap would otherwise blame the
+        worker's command for it."""
+        if self._tether_pid is None:
+            return
+        with self._reap_lock:
+            self._kill_strays()
+
+    def _sweep_locks(self) -> tuple:
+        """The post-kill lock sweep (spec #61 §3.4/§3.5): after a successful
+        in-place kill no process exists, so every `*.lock` / `gc.pid` under
+        /gitdir is stale by definition. Returns (paths, total) from
+        strays.cap_locks; a DockerError never escalates -- the state the kill
+        just saved must not be lost to a slow `find`."""
+        argv = docker_args.exec_argv(self.container, strays.LOCK_SWEEP_ARGV)
+        try:
+            captured = self._run(argv, timeout=docker_cli.T_QUERY)
+        except docker_cli.DockerError as e:
+            print(f"lock sweep incomplete ({e})", file=sys.stderr)
+            return [], None
+        paths = strays.parse_locks(captured.output)
+        if captured.returncode != 0:
+            print(f"lock sweep incomplete (rc {captured.returncode})", file=sys.stderr)
+        if captured.truncated:
+            print("lock sweep incomplete (output truncated)", file=sys.stderr)
+        return strays.cap_locks(paths, captured.truncated)
 
     def _reap(self) -> bool:
-        """After every bash call (spec §6): docker top should show at most
-        the lifetime tether (bare "cat", or "/sbin/docker-init -- cat" while
-        tini is still attached). Any other row means a backgrounded process
-        outlived the call — reset restores the documented contract. A
-        nonzero `docker top` itself (the container is stopped, killed, or
-        otherwise unreachable — e.g. `docker kill` fired while a `docker
-        exec` was in flight) is ALSO a reset trigger: whatever state the
-        container is in, a fresh one via reset() is the safe recovery.
-        
-        Returns True if a reset was performed, False otherwise."""
+        """After every bash call (spec §6; the #61 §3.4 ladder): `docker top`
+        should show at most the lifetime tether. Any other row is a stray --
+        killed in place (STRAY_KILL_SCRIPT, then up to three settle re-checks),
+        after which the OOM flag is inspected, stale git locks are swept and a
+        `stray_kill` event plus notice record what happened; only when the kill
+        cannot be performed (no tether pid) or verified does the container
+        reset, as it did before 1.0. A nonzero `docker top` (the container is
+        stopped, killed, or otherwise unreachable) is a reset trigger as before.
+
+        Returns True if a reset was performed OR the container is already dead
+        by a watchdog kill (do not sample), False otherwise."""
         # Don't perform multiple resets in one call
         if self._reset_this_call:
             return False
-        try:
-            top = self._run(["top", self.container], timeout=docker_cli.T_QUERY)
-            unreachable = top.returncode != 0
-        except docker_cli.DockerError:
-            unreachable = True
-        if unreachable:
-            self.reset("container unreachable after bash")
-            return True
-        lines = top.output.decode("utf-8", errors="replace").splitlines()
-        if lines:
-            header_cols = lines[0].split()
-            n = max(len(header_cols), 1)
-            for line in lines[1:]:
-                if not line.strip():
-                    continue
-                fields = line.split(None, n - 1)
-                cmd = fields[-1] if fields else ""
-                # --entrypoint /bin/cat means the tether row reads "/bin/cat"
-                # (and tini's row "/sbin/docker-init -- /bin/cat"); a bare
-                # "cat" is what the spec's experiment showed — accept both.
-                if cmd in ("cat", "/bin/cat") or cmd.endswith("docker-init -- cat") \
-                        or cmd.endswith("docker-init -- /bin/cat"):
-                    continue
-                self.reset("stray process after bash")
+        # Use _reap_lock to serialize with _sample_worktree's non-blocking sample;
+        # ALL work after the guard (top, kill, settle re-checks, OOM inspect,
+        # sweep, event/notice, and any reset) runs inside the lock to prevent
+        # watchdog sampling from capturing partial state.
+        with self._reap_lock:
+            try:
+                top = self._run(["top", self.container], timeout=docker_cli.T_QUERY)
+                unreachable = top.returncode != 0
+            except docker_cli.DockerError:
+                unreachable = True
+            if unreachable:
+                self.reset("container unreachable after bash")
                 return True
-        try:
-            oom = self._run(
-                ["inspect", "--format", "{{.State.OOMKilled}}", self.container],
-                timeout=docker_cli.T_QUERY,
-            )
-        except docker_cli.DockerError:
-            # If inspect fails, don't reset - it would be recursive
+            rows = strays.stray_rows(top.output)
+            capped, total = strays.cap_strays(rows) if rows else ([], None)
+            if rows:
+                if self._tether_pid is None or not self._kill_strays():
+                    self.reset("stray process after bash", strays=capped, strays_total=total)
+                    return True
+                for _ in range(3):
+                    time.sleep(_SETTLE_SLEEP)
+                    try:
+                        top = self._run(["top", self.container], timeout=docker_cli.T_QUERY)
+                        unreachable = top.returncode != 0
+                    except docker_cli.DockerError:
+                        unreachable = True
+                    if unreachable:
+                        self.reset("container unreachable after bash")
+                        return True
+                    if not strays.stray_rows(top.output):
+                        break
+                else:
+                    self.reset("stray process after bash", strays=capped, strays_total=total)
+                    return True
+            try:
+                oom = self._run(
+                    ["inspect", "--format", "{{.State.OOMKilled}}", self.container],
+                    timeout=docker_cli.T_QUERY,
+                )
+            except docker_cli.DockerError:
+                # If inspect fails, don't reset - it would be recursive
+                return False
+            if oom.returncode == 0 and oom.output.decode("utf-8", errors="replace").strip() == "true":
+                if rows:
+                    self.reset("oom", strays=capped, strays_total=total)
+                else:
+                    self.reset("oom")
+                return True
+            if rows:
+                locks, locks_total = self._sweep_locks()
+                fields = {"strays": capped}
+                if total is not None:
+                    fields["strays_total"] = total
+                if locks:
+                    fields["locks_removed"] = locks
+                if locks_total is not None:
+                    fields["locks_removed_total"] = locks_total
+                if self.transcript is not None:
+                    try:
+                        self.transcript.write("stray_kill", **fields)
+                    except Exception:
+                        pass
+                self._queue_notice("stray_kill", stray_kill_text(capped, total, locks))
             return False
-        if oom.returncode == 0 and oom.output.decode("utf-8", errors="replace").strip() == "true":
-            self.reset("oom")
-            return True
-        return False
 
     def _watchdog_kill(self, reason: str) -> None:
         # Goes through the same lock as reset() (Important #4): without it, a
         # watchdog-thread kill fired while the main thread is mid-reset()
         # could land between reset()'s own kill/wait/start calls.
         with self._reset_lock:
+            # Mark that a reset will happen in this call (for _after_bash to skip budget sample)
+            self._reset_this_call = True
             try:
                 self._run(["kill", self.container], timeout=docker_cli.T_LIFECYCLE)
             except docker_cli.DockerError:
@@ -938,7 +1084,7 @@ class DockerSandbox:
             return None
         return kbytes, entries
 
-    def _sample_worktree(self) -> tuple:
+    def _sample_worktree(self, *, wait=True) -> tuple | None:
         """(kbytes, entries) for /work, sampled inside the container. On
         exec failure, resets once and retries; a second failure raises
         SandboxError (spec §6: "If the exec itself fails ... → reset, then
@@ -955,47 +1101,89 @@ class DockerSandbox:
         sufficient -- raise immediately rather than retrying blind against
         a container another thread may still be resetting.
 
-        Returns (kbytes, entries) on success or raises SandboxError. If a
-        reset was performed during sampling, the caller should skip budget
-        checks for this call (container was rebuilt)."""
-        result = self._measure_worktree_once()
-        if result is not None:
-            return result
-        if not self._reset_this_call:
-            self.reset("budget sample failed")
+        The `wait` parameter controls blocking behavior:
+        - wait=True (default): today's behaviour exactly. On second failure,
+          raises SandboxError.
+        - wait=False (watchdog thread): non-blocking. Acquires _reap_lock
+          with blocking=wait; if lock is busy, returns None immediately.
+          On second failure, returns None (no exception) -- the main
+        thread's sample after this call escalates.
+
+        Returns (kbytes, entries) on success. With wait=True, raises
+        SandboxError on failure. With wait=False, returns None on failure."""
+        # If shutting down, return None immediately (no docker calls)
+        if self._shutting_down:
+            return None
+        # Try to acquire _reap_lock with blocking control
+        acquired = self._reap_lock.acquire(blocking=wait)
+        try:
+            if not acquired:
+                # Non-blocking mode and lock is busy - return None immediately
+                return None
             result = self._measure_worktree_once()
             if result is not None:
                 return result
-            raise SandboxError("worktree budget sample failed twice in a row")
-        raise SandboxError("worktree budget sample failed after an earlier reset this call")
+            if self.watchdog is not None and self.watchdog.violation is not None:
+                # The watchdog killed the container and recorded why (spec #61
+                # §3.6): the caller consumes the violation; do not reset or raise.
+                return None
+            if not self._reset_this_call:
+                if not self.reset("budget sample failed"):
+                    # Shutting down, or the watchdog recorded a violation in
+                    # the gap above: nothing to measure; the caller consumes it.
+                    return None
+                result = self._measure_worktree_once()
+                if result is not None:
+                    return result
+                if self.watchdog is not None and self.watchdog.violation is not None:
+                    return None
+                if wait:
+                    raise SandboxError("worktree budget sample failed twice in a row")
+                # Non-blocking: return None on second failure (main thread escalates)
+                return None
+            if wait:
+                raise SandboxError("worktree budget sample failed after an earlier reset this call")
+            # Non-blocking: return None if already reset (main thread escalates)
+            return None
+        finally:
+            if acquired:
+                self._reap_lock.release()
+
+    def _raise_violation(self) -> None:
+        """Consume and raise the recorded watchdog violation (no-op if none)."""
+        taken = self.watchdog.take_violation()
+        if taken is None:
+            return
+        violation, kind = taken
+        if kind == "sandbox_error":
+            # D1: a watchdog-thread sample() failure (spec §6's
+            # "second failure -> sandbox_error") is a sandbox
+            # failure, not a budget breach -- raise the same
+            # exception type the main-thread _sample_worktree path
+            # already raises for the identical condition.
+            raise SandboxError(violation)
+        raise BudgetExceeded(violation)
 
     def _after_bash(self) -> None:
-        self._reap()
-        if self.watchdog is not None:
-            # Skip only the re-SAMPLING when a reset happened this call (the
-            # container was just rebuilt, so there is nothing meaningful to
-            # measure yet) -- but ALWAYS consume a violation the watchdog
-            # thread may already have recorded (Important #3). Swallowing it
-            # here would let a run continue past a budget breach until the
-            # next bash call or export self-corrects it.
-            if not self._reset_this_call:
-                self.watchdog.check_worktree_budget_once()
-            if self.watchdog.violation is not None:
-                violation = self.watchdog.violation
-                kind = self.watchdog.violation_kind
-                self.watchdog.violation = None
-                self.watchdog.violation_kind = "budget"
-                if kind == "sandbox_error":
-                    # D1: a watchdog-thread sample() failure (spec §6's
-                    # "second failure -> sandbox_error") is a sandbox
-                    # failure, not a budget breach -- raise the same
-                    # exception type the main-thread _sample_worktree path
-                    # already raises for the identical condition.
-                    raise SandboxError(violation)
-                raise BudgetExceeded(violation)
-        # Reset the flag after each bash call completes
-        with self._reset_lock:
-            self._reset_this_call = False
+        try:
+            if self.watchdog is not None and self.watchdog.violation is not None:
+                self._raise_violation()
+            self._reap()
+            if self.watchdog is not None:
+                # Skip only the re-SAMPLING when a reset happened this call (the
+                # container was just rebuilt, so there is nothing meaningful to
+                # measure yet) -- but ALWAYS consume a violation the watchdog
+                # thread may already have recorded (Important #3). Swallowing it
+                # here would let a run continue past a budget breach until the
+                # next bash call or export self-corrects it.
+                if not self._reset_this_call:
+                    # Synchronous sample after bash: wait=True for blocking behavior
+                    self.watchdog.check_worktree_budget_once(wait=True)
+                if self.watchdog.violation is not None:
+                    self._raise_violation()
+        finally:
+            with self._reset_lock:
+                self._reset_this_call = False
 
     def bash(self, command: str, timeout: int = 120) -> str:
         reason = check_bash_command(command, sandboxed=True)
@@ -1008,27 +1196,29 @@ class DockerSandbox:
         )
         if self.watchdog is not None:
             self.watchdog.note_bash_start()
+        err = None
+        captured = None
         try:
             captured = self._run(argv, timeout=timeout + 10)
-        except docker_cli.DockerError as e:
+        except docker_cli.DockerError as exc:
+            err = exc
+        finally:
             if self.watchdog is not None:
                 self.watchdog.note_bash_end()
-            # Spec §4.2: only a REAL expired timeout renders as the canonical
-            # timeout text. Any other DockerError (a killed container, an exec
-            # that could not start) gets the host's own non-timeout wording, so
-            # an ordinary failure is never read as "it might still be running"
-            # -- and never counts as a timeout downstream.
-            result = (timeout_result(timeout) if e.timed_out
-                      else f"ERROR: bash failed: {e}")
-            self._after_bash()
-            return result
-        if self.watchdog is not None:
-            self.watchdog.note_bash_end()
-        out = captured.output.decode("utf-8", errors="replace").strip()
-        note = " — bash output capped" if captured.truncated else ""
-        final_text = f"exit code: {captured.returncode}\n{out}"
-        if captured.truncated:
-            final_text += "\n[output capped]"
-        result = _cap(final_text, cap=MAX_BASH_CHARS, note=note)
+        # Spec §4.2: only a REAL expired timeout renders as the canonical
+        # timeout text. Any other DockerError (a killed container, an exec
+        # that could not start) gets the host's own non-timeout wording, so
+        # an ordinary failure is never read as "it might still be running"
+        # -- and never counts as a timeout downstream.
+        if err is not None:
+            result = (timeout_result(timeout) if err.timed_out
+                      else f"ERROR: bash failed: {err}")
+        else:
+            out = captured.output.decode("utf-8", errors="replace").strip()
+            note = " — bash output capped" if captured.truncated else ""
+            final_text = f"exit code: {captured.returncode}\n{out}"
+            if captured.truncated:
+                final_text += "\n[output capped]"
+            result = _cap(final_text, cap=MAX_BASH_CHARS, note=note)
         self._after_bash()
         return result

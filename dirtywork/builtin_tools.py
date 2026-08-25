@@ -228,13 +228,12 @@ BASH_SPEC = ToolSpec(
     description="Run a shell command in the worktree (cwd is the worktree "
                 "root). Use for builds/tests/git-status, NEVER for editing "
                 "files. 120s default timeout, 600s max. Backgrounded "
-                "processes are terminated when the command returns. In "
-                "docker mode, a stray background process or an "
-                "out-of-memory container triggers an automatic reset: the "
-                "working tree survives, but any git state you created "
-                "inside the sandbox (index changes, stashes, local "
-                "commits) does not — write_file/edit_file changes and "
-                "anything already written to disk are unaffected.",
+                "processes are killed when the command returns. In docker mode "
+                "you are told which; if they cannot be killed, or the container "
+                "runs out of memory, it is reset: the working tree survives, but "
+                "git state you created inside the sandbox (index changes, "
+                "stashes, local commits) does not, and you are told when that "
+                "happens.",
     params={
         "command": ParamSpec(type="string"),
         # This description is also the bad_args error's accepted-form text (#64):

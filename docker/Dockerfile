@@ -51,10 +51,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends libicu72 libssl
 # and net10.0 apps all pass under the limit. W^X is runtime-level hardening
 # that adds little inside a read-only, cap-dropped, no-new-privileges
 # container.
+# no build daemon may outlive a bash call (#61)
 ENV DOTNET_ROOT=/usr/share/dotnet \
     DOTNET_CLI_TELEMETRY_OPTOUT=1 \
     DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 \
-    DOTNET_EnableWriteXorExecute=0
+    DOTNET_EnableWriteXorExecute=0 \
+    DOTNET_CLI_USE_MSBUILD_SERVER=0 \
+    MSBUILDDISABLENODEREUSE=1 \
+    UseSharedCompilation=false \
+    DOTNET_NOLOGO=1
 
 RUN useradd -u 1000 -m worker
 

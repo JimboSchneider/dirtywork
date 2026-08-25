@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,7 @@ from dirtywork.resume import stash_dir_for
 from dirtywork.sandbox import SandboxError
 from dirtywork.sandbox import docker as docker_mod
 from dirtywork.sandbox.docker import DockerSandbox, docker_cli
+from dirtywork.sandbox import strays
 from dirtywork.sandbox.docker_args import DockerConfig
 from tests.docker_fakes import FakeDocker, FakePopen, _fail, _ok, _rc
 
@@ -18,6 +21,10 @@ DockerError = docker_cli.DockerError
 
 _TOP_HEADER = b"UID  PID  PPID  C  STIME  TTY  TIME  CMD\n"
 
+_DISCOVERY_ARGV = ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c", strays.TETHER_DISCOVERY_SCRIPT]
+_KILL_ARGV = ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c", strays.STRAY_KILL_SCRIPT, "_", "7"]
+_SWEEP_ARGV = ["exec", "-w", "/work", "dw-abc123"] + strays.LOCK_SWEEP_ARGV
+_OOM_ARGV = ["inspect", "--format", "{{.State.OOMKilled}}"]
 _SAMPLE_ARGV = ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
                 "du -sk /work; find /work | wc -l"]
 
@@ -54,6 +61,12 @@ def docker(tmp_path: Path):
     fake.script(["run"], _ok())   # prep container
     fake.script(["create"], _ok())  # worker create
     fake.script(["exec"], _ok())  # ready-wait /bin/true and init
+    # #61: the in-place stray rung is ACTIVE by default -- discovery answers pid 7,
+    # the kill and the lock sweep succeed; a test that wants the reset path scripts
+    # the kill exec to a nonzero rc.
+    fake.script(_DISCOVERY_ARGV, _ok(b"7\n"))
+    fake.script(_KILL_ARGV, _ok())
+    fake.script(_SWEEP_ARGV, _ok())
     cfg = DockerConfig()
     run_dir = tmp_path / "rundir"
     run_dir.mkdir()
@@ -99,6 +112,9 @@ def started_with_transcript(tmp_path: Path):
     fake.script(["run"], _ok())
     fake.script(["create"], _ok())
     fake.script(["exec"], _ok())
+    fake.script(_DISCOVERY_ARGV, _ok(b"7\n"))
+    fake.script(_KILL_ARGV, _ok())
+    fake.script(_SWEEP_ARGV, _ok())
     fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
     cfg = DockerConfig()
     run_dir = tmp_path / "rundir"
@@ -838,6 +854,13 @@ def test_reset_uses_restart_variant_init(started_with_transcript):
                   and not any("du -sk /work" in str(arg) for arg in c[0])]
     assert init_calls
     last_init_script = init_calls[-1][0][-1]
+    # Worker container uses gitfile layout: rm -rf /work/.git and --separate-git-dir=/gitdir
+    assert "rm -rf -- /work/.git" in last_init_script
+    assert "--separate-git-dir=/gitdir" in last_init_script
+    # Check that no init exec has GIT_DIR= or GIT_WORK_TREE= in its env (worker uses gitfile)
+    for c in init_calls:
+        env_values = [c[0][i + 1] for i, a in enumerate(c[0]) if a == "-e"]
+        assert not any(v.startswith("GIT_DIR=") or v.startswith("GIT_WORK_TREE=") for v in env_values)
     assert "git read-tree HEAD" in last_init_script
     assert "read-tree -m -u HEAD" not in last_init_script
 
@@ -939,7 +962,7 @@ def test_reset_can_be_called_directly(started_with_transcript):
     sb, fake, run_dir, transcript = started_with_transcript
     fake.script(["exec"], _ok())
 
-    sb.reset("manual test reset")
+    assert sb.reset("manual test reset") is True
     transcript.close()
 
     events = [json.loads(l) for l in (run_dir / "transcript.jsonl").read_text().splitlines()]
@@ -982,24 +1005,30 @@ def test_after_bash_skips_budget_sample_when_reap_already_reset(started_with_tra
     assert not any("du -sk /work" in str(arg) for c in fake.calls for arg in c[0])
 
 
-def test_after_bash_raises_budget_exceeded_even_when_reap_reset_this_call(started_with_transcript):
-    # Fix item 3: a violation the watchdog thread already recorded must
-    # always be consumed and raised in _after_bash, even when _reap() reset
-    # the container during this same call. Only the re-SAMPLING is skipped
-    # after a reset, never the consumption of an already-recorded violation.
+def test_after_bash_consumes_a_recorded_violation_before_the_reap(started_with_transcript):
+    # Item 2: a violation recorded BEFORE the bash call is now consumed
+    # BEFORE the reap (the watchdog killed the container and recorded why —
+    # nothing to reap, sample or reset). Assert BudgetExceeded is raised,
+    # with ZERO ["kill", ...] calls, NO ["top", ...] call and no sandbox_reset event.
     from dirtywork.budget import BudgetExceeded
     sb, fake, run_dir, transcript = started_with_transcript
-    fake.script(["top"], _fail(b"Error: No such container: dw-abc123"))  # forces a reap-reset
+    # Script a normal top and exec (but they won't run because violation is consumed first)
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
     fake.script(["exec"], _ok(b"ok\n"))
+    # Set a violation BEFORE the bash call
     sb.watchdog.violation = "watchdog: worktree exceeds cap"
+    sb.watchdog.violation_kind = "budget"
 
     with pytest.raises(BudgetExceeded, match="watchdog: worktree exceeds cap"):
         sb.bash("echo ok")
 
-    # the reap-triggered reset still happened; no re-sample was attempted
+    # The violation was consumed BEFORE the reap (no top, no kill, no reset)
+    assert not any(c[0][0] == "top" for c in fake.calls), "No top call should be made"
     kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
-    assert len(kill_calls) == 1
-    assert not any("du -sk /work" in str(arg) for c in fake.calls for arg in c[0])
+    assert len(kill_calls) == 0, "No kill call should be made"
+    reset_events = [e for e in getattr(transcript, '_events', []) if e.get("kind") == "sandbox_reset"]
+    assert len(reset_events) == 0, "No sandbox_reset event should occur"
+
 
 
 def test_reap_allows_bare_cat_tether(started):
@@ -1029,13 +1058,379 @@ def test_reset_raises_when_container_does_not_come_back(started, monkeypatch):
     # Make _wait_ready fail fast by monkeypatching the lifecycle timeout
     import dirtywork.sandbox.docker as docker_module
     monkeypatch.setattr(docker_module.docker_cli, "T_LIFECYCLE", 0.2)
-    
+
     sb, fake, run_dir = started
     # Script exec to fail (the ready-wait /bin/true exec)
     fake.script(["exec"], _fail(b""))
-    
+
     with pytest.raises(SandboxError):
         sb.reset("x")
+
+
+def test_tether_pid_discovery(tmp_path):
+    # Fix item a: the discovery exec runs after _wait_ready and parses PID 7
+    from dirtywork.transcript import Transcript
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(
+        ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
+         strays.TETHER_DISCOVERY_SCRIPT],
+        _ok(b"7\n")
+    )
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+
+    # Verify tether pid was discovered
+    assert sb._tether_pid == 7
+
+
+def test_tether_discovery_failure(tmp_path, capsys):
+    # Script discovery exec to rc 3 -> None and exactly one stderr line
+    from dirtywork.transcript import Transcript
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(
+        ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
+         strays.TETHER_DISCOVERY_SCRIPT],
+        _rc(3)
+    )
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+
+    assert sb._tether_pid is None
+    captured = capsys.readouterr()
+    assert "tether pid unknown" in captured.err
+    # After reset(), the flag is cleared and discovery can warn again
+    fake.script(
+        ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
+         strays.TETHER_DISCOVERY_SCRIPT],
+        _rc(3)
+    )
+    fake.script(["exec"], _ok())
+    sb.reset("y")
+    captured2 = capsys.readouterr()
+    # The second discovery (after reset) also warns
+    assert "tether pid unknown" in captured2.err
+
+
+def test_tether_discovery_output_none(tmp_path, capsys):
+    # Output b"x\n" -> None (parse_tether_pid returns None)
+    from dirtywork.transcript import Transcript
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(
+        ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
+         strays.TETHER_DISCOVERY_SCRIPT],
+        _ok(b"x\n")
+    )
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+
+    assert sb._tether_pid is None
+    captured = capsys.readouterr()
+    assert "tether pid unknown" in captured.err
+
+
+def test_tether_discovery_callable_raises_dockererror(tmp_path, capsys):
+    # Script callable raising DockerError -> None
+    from dirtywork.transcript import Transcript
+    def fail_run(argv):
+        from dirtywork.sandbox.docker_cli import DockerError
+        raise DockerError("test error")
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(
+        ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
+         strays.TETHER_DISCOVERY_SCRIPT],
+        fail_run
+    )
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+
+    assert sb._tether_pid is None
+    captured = capsys.readouterr()
+    assert "tether pid unknown" in captured.err
+
+
+def test_tether_warned_flag_reset_on_new_container(tmp_path, capsys):
+    # After `sb.reset("x")` the discovery exec ran again and a warned flag is reset
+    from dirtywork.transcript import Transcript
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(
+        ["exec", "-w", "/work", "dw-abc123", "/bin/sh", "-c",
+         strays.TETHER_DISCOVERY_SCRIPT],
+        _rc(3)
+    )
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+
+    # First failure - sets warned flag
+    assert sb._tether_warned is True
+    captured1 = capsys.readouterr()
+    assert "tether pid unknown" in captured1.err
+
+    # Reset clears the warned flag (simulates new container life)
+    sb.reset("y")
+    assert sb._tether_warned is True
+    captured2 = capsys.readouterr()
+    assert "tether pid unknown" in captured2.err  # Second container life warns again
+
+
+def test_reset_with_strays_param(tmp_path):
+    # sb.reset("x") direct: the sandbox_reset event has no "strays"/"strays_total" keys
+    from dirtywork.transcript import Transcript
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(["exec"], _ok())  # init
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+    fake.script(["exec"], _ok())  # reset will need an exec call
+
+    sb.reset("manual test reset")
+    transcript.close()
+
+    events = [json.loads(l) for l in (run_dir / "transcript.jsonl").read_text().splitlines()]
+    reset_events = [e for e in events if e["event"] == "sandbox_reset"]
+    assert reset_events
+    assert reset_events[0]["reason"] == "manual test reset"
+    assert "strays" not in reset_events[0]
+    assert "strays_total" not in reset_events[0]
+
+
+def test_reset_with_strays_list(tmp_path):
+    from dirtywork.transcript import Transcript
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(["exec"], _ok())  # init
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+    fake.script(["exec"], _ok())  # reset will need an exec call
+
+    sb.reset("stray process after bash", strays=["sleep 300"], strays_total=None)
+    transcript.close()
+
+    events = [json.loads(l) for l in (run_dir / "transcript.jsonl").read_text().splitlines()]
+    reset_events = [e for e in events if e["event"] == "sandbox_reset"]
+    assert reset_events
+    assert reset_events[0]["reason"] == "stray process after bash"
+    assert reset_events[0].get("strays") == ["sleep 300"]
+    assert "strays_total" not in reset_events[0]
+
+
+def test_reset_with_strays_and_total(tmp_path):
+    from dirtywork.transcript import Transcript
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(["exec"], _ok())  # init
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+    fake.script(["exec"], _ok())  # reset will need an exec call
+
+    sb.reset("stray process after bash", strays=["sleep 300"], strays_total=25)
+    transcript.close()
+
+    events = [json.loads(l) for l in (run_dir / "transcript.jsonl").read_text().splitlines()]
+    reset_events = [e for e in events if e["event"] == "sandbox_reset"]
+    assert reset_events
+    assert reset_events[0]["reason"] == "stray process after bash"
+    assert reset_events[0].get("strays") == ["sleep 300"]
+    assert reset_events[0]["strays_total"] == 25
+
+
+def test_drain_notices(tmp_path):
+    from dirtywork.transcript import Transcript
+    fake = FakeDocker()
+    fake.script(["container", "inspect"], _fail())
+    fake.script(["volume", "inspect"], _fail())
+    fake.script(["image", "inspect", "--format", "{{.Id}}"],
+                _ok(b"sha256:" + b"a" * 64))
+    fake.script(["volume", "create"], _ok())
+    fake.script(["run"], _ok())
+    fake.script(["create"], _ok())
+    fake.script(["exec"], _ok())  # ready-wait
+    fake.script(["exec"], _ok())  # init
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))
+    cfg = DockerConfig()
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    transcript = Transcript(run_dir / "transcript.jsonl")
+    sb = DockerSandbox(cfg, run_dir=run_dir, transcript=transcript, run=fake.run, popen=fake.popen)
+    repo = _fake_repo(tmp_path)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    sb.start(worktree, repo, "abc123", "deadbeef" * 5)
+    fake.script(["exec"], _ok())  # reset will need an exec call
+
+    sb.reset("test reset")
+    notices = sb.drain_notices()
+
+    assert len(notices) == 1
+    kind, text = notices[0]
+    assert kind == "sandbox_reset"
+    assert "re-initialized" in text
+
+    # Second drain returns []
+    notices2 = sb.drain_notices()
+    assert notices2 == []
+
+
+def test_host_sandbox_drain_notices(tmp_path):
+    from dirtywork.sandbox.host import HostSandbox
+    sb = HostSandbox(tmp_path / "worktree")
+    assert sb.drain_notices() == []
+
+
+def test_stray_rows_parsing():
+    # Test strays.stray_rows parses docker top output correctly
+    assert strays.stray_rows(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n") == []
+    assert strays.stray_rows(_TOP_HEADER + b"501  42  1  0  10:00  ?  00:00:00  sleep 300\n") == ["sleep 300"]
+
+
+def test_cap_strays():
+    # Test strays.cap_strays caps correctly
+    assert strays.cap_strays([]) == ([], None)
+    assert strays.cap_strays(["sleep 1"]) == (["sleep 1"], None)
+    # When > MAX_STRAYS, return len and capped list
+    many = [f"cmd{i}" for i in range(strays.MAX_STRAYS + 5)]
+    capped, total = strays.cap_strays(many)
+    assert len(capped) == strays.MAX_STRAYS
+    assert total == len(many)
+
+
+def test_sandbox_reset_text():
+    text = strays.sandbox_reset_text("oom")
+    assert "re-initialized" in text
+    assert "oom" in text
+
+
+def test_parse_tether_pid():
+    # Test parse_tether_pid
+    assert strays.parse_tether_pid(b"7\n") == 7
+    assert strays.parse_tether_pid(b"12345\n") == 12345
+    assert strays.parse_tether_pid(b"0\n") is None  # pid must be > 0
+    assert strays.parse_tether_pid(b"abc\n") is None
+    assert strays.parse_tether_pid(b"-1\n") is None
 
 
 def test_start_creates_watchdog_with_configured_caps_but_does_not_start_thread(docker, tmp_path):
@@ -1428,8 +1823,16 @@ def test_start_default_branch_is_dirtywork_slug(docker, tmp_path):
     repo, worktree = _started_worktree(tmp_path)
     sb.start(worktree, repo, "abc123", "deadbeef" * 5)
     script = _init_script(fake)
+    # Worker container uses gitfile layout
     assert "refs/heads/dirtywork/abc123" in script
     assert "read-tree -m -u HEAD" in script
+    assert "--separate-git-dir=/gitdir" in script
+    assert "rm -rf -- /work/.git" in script
+    # Check that no init exec has GIT_DIR= or GIT_WORK_TREE= in its env (worker uses gitfile)
+    inits = [c for c in fake.calls if "/usr/bin/git init" in " ".join(c[0])]
+    for c in inits:
+        env_values = [c[0][i + 1] for i, a in enumerate(c[0]) if a == "-e"]
+        assert not any(v.startswith("GIT_DIR=") or v.startswith("GIT_WORK_TREE=") for v in env_values)
     assert not [p for p in fake.popens if p.argv[:1] == ["tar"]]
 
 
@@ -1439,8 +1842,11 @@ def test_start_seed_from_worktree_uses_restart_init_and_tar_pipeline(docker, tmp
     sb.start(worktree, repo, "new1", "deadbeef" * 5,
              branch="dirtywork/orig", seed_from_worktree=True)
     script = _init_script(fake)
+    # Worker container uses gitfile layout
     assert "refs/heads/dirtywork/orig" in script
     assert "read-tree HEAD" in script and "read-tree -m -u HEAD" not in script
+    assert "--separate-git-dir=/gitdir" in script
+    assert "rm -rf -- /work/.git" in script
     tar_out = [p for p in fake.popens if p.argv[:1] == ["tar"]]
     tar_in = [p for p in fake.popens if p.argv[:2] == ["docker", "exec"] and "-xf" in p.argv]
     assert len(tar_out) == 1
@@ -1966,3 +2372,657 @@ def test_docker_write_file_still_writes_when_the_pre_read_is_not_utf8(started):
     out = sb.write_file("bin.dat", "now text\n")
     assert out == "Wrote 9 bytes to bin.dat (new file, 1 line)"
     assert len([c for c in fake.calls if _is_write_exec(c)]) == 1
+
+
+# --------------------------------------------------------------------------- #61 stray ladder
+_TOP_TETHER_ONLY = (_TOP_HEADER
+                    + b"501  1  0  0  10:00  ?  00:00:00  /sbin/docker-init -- /bin/cat\n"
+                    + b"501  7  1  0  10:00  ?  00:00:00  /bin/cat\n")
+_TOP_WITH_SLEEP = _TOP_TETHER_ONLY + b"501  42  1  0  10:00  ?  00:00:00  sleep 300\n"
+
+
+def _events(run_dir, transcript):
+    transcript.close()
+    return [json.loads(l) for l in (run_dir / "transcript.jsonl").read_text().splitlines()]
+
+
+def _no_settle(monkeypatch):
+    monkeypatch.setattr(docker_mod.time, "sleep", lambda s: None)
+
+
+def test_reap_kills_stray_in_place(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], [_ok(_TOP_WITH_SLEEP), _ok(_TOP_TETHER_ONLY)])
+    fake.script(_OOM_ARGV, _ok(b"false\n"))
+    sb.bash("true")
+    argvs = [c[0] for c in fake.calls]
+    assert not any(a[:1] == ["kill"] for a in argvs)
+    assert argvs.count(_KILL_ARGV) == 1
+    assert _SWEEP_ARGV in argvs
+    assert sum(1 for a in argvs if a[:1] == ["top"]) == 2
+    tops = [i for i, a in enumerate(argvs) if a[:1] == ["top"]]
+    oom = next(i for i, a in enumerate(argvs) if a[:3] == _OOM_ARGV)
+    assert tops[1] < oom < argvs.index(_SWEEP_ARGV)
+    assert _SAMPLE_ARGV in argvs  # the post-call budget sample still ran
+    assert sb._reset_this_call is False
+    kills = [e for e in _events(run_dir, transcript) if e["event"] == "stray_kill"]
+    assert kills[0]["strays"] == ["sleep 300"]
+    assert "strays_total" not in kills[0] and "locks_removed" not in kills[0]
+    notices = sb.drain_notices()
+    assert len(notices) == 1 and notices[0][0] == "stray_kill"
+    assert notices[0][1].startswith("The sandbox killed 1 background process ")
+    assert sb.drain_notices() == []
+
+
+def test_reap_sweep_reports_locks(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], [_ok(_TOP_WITH_SLEEP), _ok(_TOP_TETHER_ONLY)])
+    fake.script(_OOM_ARGV, _ok(b"false\n"))
+    fake.script(_SWEEP_ARGV, _ok(b"/gitdir/index.lock\0/gitdir/gc.pid\0"))
+    sb.bash("true")
+    kill = [e for e in _events(run_dir, transcript) if e["event"] == "stray_kill"][0]
+    assert kill["locks_removed"] == ["/gitdir/index.lock", "/gitdir/gc.pid"]
+    assert "locks_removed_total" not in kill
+    assert "Stale git lock files" in sb.drain_notices()[0][1]
+
+
+def test_reap_sweep_docker_error_keeps_stray_kill(started_with_transcript, monkeypatch, capsys):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], [_ok(_TOP_WITH_SLEEP), _ok(_TOP_TETHER_ONLY)])
+    fake.script(_OOM_ARGV, _ok(b"false\n"))
+
+    def boom(argv):
+        raise docker_cli.DockerError("boom")
+    fake.script(_SWEEP_ARGV, boom)
+    sb.bash("true")
+    events = _events(run_dir, transcript)
+    kill = [e for e in events if e["event"] == "stray_kill"][0]
+    assert "locks_removed" not in kill
+    assert not [e for e in events if e["event"] == "sandbox_reset"]
+    assert not any(c[0][:1] == ["kill"] for c in fake.calls)
+    assert "lock sweep incomplete" in capsys.readouterr().err
+
+
+def test_reap_escalates_when_kill_fails(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], _ok(_TOP_WITH_SLEEP))
+    fake.script(_KILL_ARGV, _rc(3))
+    sb.bash("true")
+    assert any(c[0][:2] == ["kill", "dw-abc123"] for c in fake.calls)
+    events = _events(run_dir, transcript)
+    resets = [e for e in events if e["event"] == "sandbox_reset"]
+    assert resets[0]["reason"] == "stray process after bash" and resets[0]["strays"] == ["sleep 300"]
+    assert not [e for e in events if e["event"] == "stray_kill"]
+
+
+def test_reap_escalates_after_three_dirty_looks(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], [_ok(_TOP_WITH_SLEEP)] * 4)
+    sb.bash("true")
+    assert sum(1 for c in fake.calls if c[0][:1] == ["top"]) == 4
+    events = _events(run_dir, transcript)
+    assert [e for e in events if e["event"] == "sandbox_reset"][0]["strays"] == ["sleep 300"]
+    assert not [e for e in events if e["event"] == "stray_kill"]
+
+
+def test_reap_settles_on_third_look(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], [_ok(_TOP_WITH_SLEEP), _ok(_TOP_WITH_SLEEP), _ok(_TOP_TETHER_ONLY)])
+    fake.script(_OOM_ARGV, _ok(b"false\n"))
+    sb.bash("true")
+    assert sum(1 for c in fake.calls if c[0][:1] == ["top"]) == 3
+    assert [e for e in _events(run_dir, transcript) if e["event"] == "stray_kill"]
+
+
+def test_reap_recheck_unreachable_resets(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], [_ok(_TOP_WITH_SLEEP), _rc(1)])
+    sb.bash("true")
+    resets = [e for e in _events(run_dir, transcript) if e["event"] == "sandbox_reset"]
+    assert resets[0]["reason"] == "container unreachable after bash"
+
+
+def test_reap_no_tether_pid_resets_without_kill(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    sb._tether_pid = None
+    fake.script(["top"], _ok(_TOP_WITH_SLEEP))
+    sb.bash("true")
+    assert _KILL_ARGV not in [c[0] for c in fake.calls]
+    assert [e for e in _events(run_dir, transcript) if e["event"] == "sandbox_reset"][0]["strays"] == ["sleep 300"]
+
+
+def test_reap_oom_after_clean_kill_resets(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], [_ok(_TOP_WITH_SLEEP), _ok(_TOP_TETHER_ONLY)])
+    fake.script(_OOM_ARGV, _ok(b"true\n"))
+    sb.bash("true")
+    assert _SWEEP_ARGV not in [c[0] for c in fake.calls]
+    events = _events(run_dir, transcript)
+    reset = [e for e in events if e["event"] == "sandbox_reset"][0]
+    assert reset["reason"] == "oom" and reset["strays"] == ["sleep 300"]
+    assert not [e for e in events if e["event"] == "stray_kill"]
+
+
+def test_reap_caps_strays(started_with_transcript, monkeypatch):
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+    rows = b"501  200  1  0  10:00  ?  00:00:00  " + b"x" * 300 + b"\n"
+    rows += b"".join(b"501  %d  1  0  10:00  ?  00:00:00  sleep %d\n" % (100 + i, i) for i in range(24))
+    fake.script(["top"], [_ok(_TOP_TETHER_ONLY + rows), _ok(_TOP_TETHER_ONLY)])
+    fake.script(_OOM_ARGV, _ok(b"false\n"))
+    sb.bash("true")
+    kill = [e for e in _events(run_dir, transcript) if e["event"] == "stray_kill"][0]
+    assert len(kill["strays"]) == 20 and kill["strays_total"] == 25
+    assert len(kill["strays"][0]) == 201 and kill["strays"][0].endswith("\u2026")
+
+import threading
+
+def test_reap_holds_lock_during_worktree_sampling(started, monkeypatch):
+    # Test that _reap holds _reap_lock during its entire body, preventing
+    # concurrent non-blocking samples from running docker calls
+    sb, fake, run_dir = started
+
+    # Track when the top command starts and finishes
+    entered_event = threading.Event()
+    release_event = threading.Event()
+
+    # Script top to set an event when entered, then wait for release
+    def script_top(argv):
+        entered_event.set()
+        # Wait for release, but timeout after 5 seconds
+        if not release_event.wait(timeout=5):
+            raise RuntimeError("release_event timeout")
+        return _ok(_TOP_TETHER_ONLY)
+
+    fake.script(["top"], script_top)
+    fake.script(_OOM_ARGV, _ok(b"false\n"))
+
+    # Record the number of calls before we start
+    calls_before = len(fake.calls)
+
+    # Run sb.bash on a thread (this will call _reap which holds the lock)
+    bash_result = [None]
+    bash_error = [None]
+
+    def run_bash():
+        try:
+            bash_result[0] = sb.bash("true")
+        except Exception as e:
+            bash_error[0] = e
+
+    bash_thread = threading.Thread(target=run_bash)
+    bash_thread.start()
+
+    # Wait for _reap's top command to be entered
+    assert entered_event.wait(timeout=5), "top didn't start within timeout"
+
+    # Now try a non-blocking sample - should return None immediately without making docker calls
+    result = sb._sample_worktree(wait=False)
+    assert result is None, "Non-blocking sample should return None when lock is held"
+
+    # Verify no docker calls were made for sampling
+    sample_calls_after = [c for c in fake.calls if list(c[0]) == _SAMPLE_ARGV]
+    assert len(sample_calls_after) == 0, "No sample calls should be made while lock is held"
+
+    # Release the lock by setting release_event
+    release_event.set()
+
+    # Wait for bash thread to complete (with timeout)
+    bash_thread.join(timeout=5)
+    assert not bash_thread.is_alive(), "Bash thread did not complete within timeout"
+
+    # Verify the sample call happened after we released
+    sample_calls_after = [c for c in fake.calls if list(c[0]) == _SAMPLE_ARGV]
+    assert len(sample_calls_after) >= 1, "Sample call should be made after lock is released"
+
+    # Now a blocking sample should work
+    result = sb._sample_worktree(wait=True)
+    assert result == (1024, 5), "Blocking sample should succeed after lock is released"
+
+
+def test_sample_worktree_wait_false_with_reset(started, monkeypatch):
+    # Test wait=False with failing measure and _reset_this_call False
+    sb, fake, run_dir = started
+    # Script sample to fail first, then succeed (after reset)
+    fake.script(_SAMPLE_ARGV, [_fail(b"exec failed"), _ok(b"1024\t/work\n5\n")])
+
+    # First call with wait=False should reset once and return success
+    result = sb._sample_worktree(wait=False)
+
+    # Verify exactly one reset was called
+    kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
+    assert len(kill_calls) == 1, "Should have exactly one reset"
+
+    # Result should be successful
+    assert result == (1024, 5), "Should return success after one reset"
+
+    # Second call with _reset_this_call True should NOT reset
+    sb._reset_this_call = True
+    fake.script(_SAMPLE_ARGV, _fail(b"exec failed again"))  # will fail but no reset
+    result = sb._sample_worktree(wait=False)
+    assert result is None, "Should return None with _reset_this_call True"
+
+
+def test_sample_worktree_wait_false_failing_twice(started, monkeypatch):
+    # Test wait=False with sample failing twice - should return None without exception
+    sb, fake, run_dir = started
+    # Script sample to always fail
+    fake.script(_SAMPLE_ARGV, _fail(b"exec failed"))
+
+    # First call with wait=False should reset once and return None on second failure
+    result = sb._sample_worktree(wait=False)
+
+    # Verify exactly one reset was called
+    kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
+    assert len(kill_calls) == 1, "Should have exactly one reset"
+
+    # Result should be None (no exception)
+    assert result is None, "Should return None on second failure with wait=False"
+
+
+def test_sample_worktree_wait_false_with_reset_already_happened(started):
+    # Test wait=False when _reset_this_call is already True
+    sb, fake, run_dir = started
+    sb._reset_this_call = True
+
+    # Script sample to fail
+    fake.script(_SAMPLE_ARGV, _fail(b"exec failed"))
+
+    # Should return None without trying to reset
+    result = sb._sample_worktree(wait=False)
+
+    # Verify no reset was called
+    kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
+    assert len(kill_calls) == 0, "Should not reset when _reset_this_call is True"
+
+    assert result is None, "Should return None"
+
+
+def test_reap_dont_deadlock_with_concurrent_reset(started, monkeypatch):
+    # Lock order is _reap_lock -> _reset_lock (spec #61 §3.6). A reset() running on
+    # another thread holds _reset_lock; _reap on this side runs its top / kill /
+    # re-checks under _reap_lock meanwhile, and only its OWN reset (the escalation
+    # rung) waits for the other reset to finish. Neither side can deadlock, and the
+    # two resets are serialized by _reset_lock.
+    # With item 4 (_reset_this_call set at START of reset()), a concurrent _reap
+    # will see _reset_this_call=True and return False immediately (at most one
+    # reset per bash call).
+    _no_settle(monkeypatch)
+    sb, fake, run_dir = started
+    call_order = []
+    release = threading.Event()
+
+    def blocking_kill(argv):
+        call_order.append("kill-start")
+        assert release.wait(timeout=5), "reset kill never released"
+        call_order.append("kill-end")
+        return _ok()
+
+    fake.script(["kill"], blocking_kill)
+    fake.script(["wait"], lambda argv: _ok())
+    fake.script(["top"], _ok(_TOP_WITH_SLEEP))  # a stray row on every look
+    fake.script(_KILL_ARGV, _rc(3))             # the in-place kill fails -> _reap escalates
+    t_reset = threading.Thread(target=lambda: sb.reset("concurrent test"))
+    t_reap = threading.Thread(target=sb._reap)
+    t_reset.start()
+    time.sleep(0.2)
+    t_reap.start()
+    time.sleep(0.2)
+    release.set()
+    t_reset.join(timeout=5)
+    t_reap.join(timeout=5)
+    assert not t_reset.is_alive() and not t_reap.is_alive(), "deadlock"
+    kills = [c for c in call_order if c.startswith("kill")]
+    assert kills == ["kill-start", "kill-end"], call_order  # only one reset
+
+
+def test_after_bash_violation_during_reap_skips_reset(started_with_transcript):
+    """Item 3: a violation recorded DURING the reap (e.g. by ["top"]) should
+    cause _reap to return True without calling reset()."""
+    from dirtywork.budget import BudgetExceeded
+    sb, fake, run_dir, transcript = started_with_transcript
+
+    # Script top to set a violation and then return dirty (stray) output
+    def top_with_violation(argv):
+        sb.watchdog.violation = "host free space below 2048 MB"
+        sb.watchdog.violation_kind = "budget"
+        return _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n" +
+                   b"501  7  1  0  10:00  ?  00:00:00  sleep 999\n")
+
+    fake.script(["top"], top_with_violation)
+    # Don't script kill or reset - if they're called, the test fails
+    fake.script(["exec"], _ok(b"ok\n"))
+
+    with pytest.raises(BudgetExceeded, match="host free space below"):
+        sb.bash("echo ok")
+
+    # The violation was consumed without calling reset
+    kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
+    assert len(kill_calls) == 0, "No kill call should be made when violation is set during reap"
+    reset_events = [e for e in getattr(transcript, '_events', []) if e.get("kind") == "sandbox_reset"]
+    assert len(reset_events) == 0, "No sandbox_reset event should occur when violation is set during reap"
+
+
+def test_reset_sets_flag_before_docker_kill(started):
+    """Item 4: _reset_this_call should be set at the START of reset(), before
+    any docker calls."""
+    sb, fake, run_dir = started
+    recorded_flags = []
+
+    def record_reset_flag(argv):
+        recorded_flags.append(sb._reset_this_call)
+        return _ok()
+
+    fake.script(["kill"], record_reset_flag)
+
+    sb.reset("test")
+
+    assert recorded_flags == [True], "Flag should be True at the start of reset()"
+
+
+def test_watchdog_kill_sets_flag_before_docker_kill(started):
+    """Item 4: _reset_this_call should be set at the START of _watchdog_kill,
+    before any docker calls."""
+    sb, fake, run_dir = started
+    recorded_flags = []
+
+    def record_reset_flag(argv):
+        recorded_flags.append(sb._reset_this_call)
+        return _ok()
+
+    fake.script(["kill"], record_reset_flag)
+
+    sb._watchdog_kill("disk space")
+
+    assert recorded_flags == [True], "Flag should be True at the start of _watchdog_kill"
+
+
+def test_after_bash_clears_flag_even_when_reset_raises(started):
+    # Spec #61 §3.6: _after_bash clears _reset_this_call in a `finally`, so a
+    # reset that raised (here: the in-container init fails right after the
+    # fresh container is ready) cannot leave the flag sticky for the next call.
+    sb, fake, run_dir = started
+    fake.script(["top"], _rc(1))  # unreachable -> reset
+    fake.script(["exec", "-w", "/work", "-e", "GIT_CONFIG_GLOBAL=/dev/null"], _rc(1))  # init fails
+    with pytest.raises(SandboxError):
+        sb.bash("echo ok")
+    assert sb._reset_this_call is False
+def test_shutdown_disables_sampling_and_reset(started):
+    """Item 5: After _stop_container(), sampling and reset should return
+    immediately without any docker calls."""
+    sb, fake, run_dir = started
+    sb._stop_container()
+
+    # Sampling should return None immediately
+    result1 = sb._sample_worktree(wait=True)
+    assert result1 is None, "_sample_worktree(wait=True) should return None after shutdown"
+
+    result2 = sb._sample_worktree(wait=False)
+    assert result2 is None, "_sample_worktree(wait=False) should return None after shutdown"
+
+    # Reset should not make any docker calls
+    n_before = len(fake.calls)
+    sb.reset("shutdown test")
+    assert len(fake.calls) == n_before, "reset() should not make docker calls after shutdown"
+
+    # No sandbox_reset event
+    reset_events = [e for e in getattr(sb, 'transcript', None)._events if e.get("kind") == "sandbox_reset"] if sb.transcript else []
+    assert len(reset_events) == 0, "No sandbox_reset event should occur after shutdown"
+
+
+def test_bash_note_bash_end_runs_on_keyboard_interrupt(started, monkeypatch):
+    """Item 6: watchdog.note_bash_end() should be called in finally, even when
+    _run raises KeyboardInterrupt."""
+    sb, fake, run_dir = started
+
+    def raise_keyboard_interrupt(argv, *, timeout, stdin=None, cap=None):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(sb, "_run", raise_keyboard_interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        sb.bash("echo ok")
+
+    # Flag should be False after the KeyboardInterrupt
+    assert sb.watchdog._bash_in_flight is False
+
+
+def test_grep_timeout_kills_abandoned_exec(started_with_transcript):
+    """Item 7: grep() should call _kill_abandoned_exec() when a timeout occurs,
+    killing any stray process that continued after the timed-out DockerError."""
+    sb, fake, run_dir, transcript = started_with_transcript
+
+    # Script the grep probe to succeed
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/rg", "--version"], _ok(b"ripgrep 1.0\n"))
+
+    # Script the grep exec to raise a timeout error
+    def grep_timeout(argv):
+        raise docker_cli.DockerError("timed out", timed_out=True)
+
+    fake.script(["exec"], grep_timeout)
+
+    out = sb.grep("pattern")
+
+    # Should return timeout text
+    assert "timed out" in out
+
+    # Kill exec should be called once (STRAY_KILL_SCRIPT)
+    kill_calls = [c for c in fake.calls if c[0] == _KILL_ARGV]
+    assert len(kill_calls) == 1, "Should call kill once for abandoned exec"
+
+    # No top or sweep calls
+    assert not any(c[0][0] == "top" for c in fake.calls), "No top call"
+    sweep_calls = [c for c in fake.calls if c[0][0] == "exec" and any("gc.pid" in str(arg) for arg in c[0])]
+    assert len(sweep_calls) == 0, "No sweep call"
+
+    # No stray_kill event
+    notices = sb.drain_notices()
+    assert notices == [], "No notices after grep timeout"
+
+
+def test_grep_timeout_with_no_tether_pid(started_with_transcript):
+    """Item 7: grep() timeout should not call kill if tether_pid is None."""
+    sb, fake, run_dir, transcript = started_with_transcript
+    sb._tether_pid = None
+
+    # Script the grep probe to succeed
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/rg", "--version"], _ok(b"ripgrep 1.0\n"))
+
+    # Script the grep exec to raise a timeout error
+    def grep_timeout(argv):
+        raise docker_cli.DockerError("timed out", timed_out=True)
+
+    fake.script(["exec"], grep_timeout)
+
+    out = sb.grep("pattern")
+
+    # Should return timeout text
+    assert "timed out" in out
+
+    # Kill exec should NOT be called when tether_pid is None
+    kill_calls = [c for c in fake.calls if c[0] == _KILL_ARGV]
+    assert len(kill_calls) == 0, "Should not call kill when tether_pid is None"
+
+
+def test_bash_timeout_goes_through_the_ladder(started_with_transcript, monkeypatch):
+    # Spec #61 §3.4: a timed-out bash call abandons its in-container process; the
+    # reap that follows finds it as a stray and kills it IN PLACE -- no reset.
+    _no_settle(monkeypatch)
+    sb, fake, run_dir, transcript = started_with_transcript
+
+    def bash_timeout(argv):
+        raise docker_cli.DockerError("timed out", timed_out=True)
+
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/bin/bash"], bash_timeout)
+    fake.script(["top"], [_ok(_TOP_WITH_SLEEP), _ok(_TOP_TETHER_ONLY)])
+    fake.script(_OOM_ARGV, _ok(b"false\n"))
+    out = sb.bash("sleep 999")
+    assert "timed out" in out
+    argvs = [c[0] for c in fake.calls]
+    assert _KILL_ARGV in argvs
+    assert not any(a[:1] == ["kill"] for a in argvs)
+    assert [e for e in _events(run_dir, transcript) if e["event"] == "stray_kill"]
+def test_after_bash_consumes_violation_during_reap(started):
+    """Verify that a violation recorded during reap causes _reap to return
+    True without calling reset."""
+    sb, fake, run_dir = started
+
+    # Script top to set a violation and return dirty output
+    def top_with_violation(argv):
+        sb.watchdog.violation = "host free space below 2048 MB"
+        sb.watchdog.violation_kind = "budget"
+        return _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n" +
+                   b"501  7  1  0  10:00  ?  00:00:00  sleep 999\n")
+
+    fake.script(["top"], top_with_violation)
+
+    result = sb._reap()
+
+    # _reap should return True (container already dead by watchdog kill)
+    assert result is True, "_reap should return True when violation is set during reap"
+
+    # No kill or reset should have been called
+    kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
+    assert len(kill_calls) == 0, "No kill call should be made when violation is set during reap"
+
+
+class _FiringLock:
+    """Stand-in for `_reset_lock`: on the first entry the watchdog thread
+    'fires' (records a violation, as `_check_disk` does right before it calls
+    kill) -- after the caller's own violation check, before reset() begins."""
+
+    def __init__(self, lock, fire):
+        self._lock, self._fire, self.fired = lock, fire, 0
+
+    def __enter__(self):
+        self._lock.acquire()
+        if not self.fired:
+            self.fired += 1
+            self._fire()
+        return self
+
+    def __exit__(self, *exc):
+        self._lock.release()
+
+    def acquire(self, blocking=True):
+        return self._lock.acquire(blocking)
+
+    def release(self):
+        self._lock.release()
+
+
+def _fire_disk_violation(sb):
+    sb.watchdog.violation = "host free space below 2048 MB"
+    sb.watchdog.violation_kind = "budget"
+
+
+def test_reset_skips_when_a_watchdog_violation_is_pending(started_with_transcript):
+    # PR #74 review, second P1: when a violation is pending, reset() still
+    # marks _reset_this_call so _after_bash knows not to sample the dying
+    # container (the kill may not have happened yet, but it's coming).
+    sb, fake, run_dir, transcript = started_with_transcript
+    _fire_disk_violation(sb)
+
+    assert sb.reset("budget sample failed") is False
+
+    assert not [c for c in fake.calls if c[0][0] in ("kill", "wait")]
+    assert not [e for e in _events(run_dir, transcript) if e["event"] == "sandbox_reset"]
+    assert sb.drain_notices() == []
+    assert sb.watchdog.violation == "host free space below 2048 MB"  # left for the caller
+    assert sb._reset_this_call is True  # marked so _after_bash skips sampling
+
+
+def test_sample_worktree_reset_rechecks_the_watchdog_under_reset_lock(started_with_transcript):
+    # PR #74 review P1: the watchdog fires between _sample_worktree's own
+    # violation check and reset() taking _reset_lock. The already-killed
+    # container must NOT be restarted (no spurious sandbox_reset that could
+    # mask the violation); the violation is raised instead.
+    from dirtywork.budget import BudgetExceeded
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+    fake.script(["exec"], _ok(b"ok\n"))
+    fake.script(_SAMPLE_ARGV, _fail(b"exec failed: pid saturation"))
+    sb._reset_lock = _FiringLock(sb._reset_lock, lambda: _fire_disk_violation(sb))
+
+    with pytest.raises(BudgetExceeded, match="host free space below"):
+        sb.bash("echo ok")
+
+    assert sb._reset_lock.fired == 1
+    assert not [c for c in fake.calls if c[0][0] in ("kill", "wait")]
+    assert not [e for e in _events(run_dir, transcript) if e["event"] == "sandbox_reset"]
+    assert sb.watchdog.violation is None  # consumed
+    assert sb._reset_this_call is False
+
+
+def test_reap_reset_rechecks_the_watchdog_under_reset_lock(started_with_transcript):
+    # The same gap in _reap: `docker top` fails (the watchdog's kill has
+    # landed) and the violation is recorded just as reset() takes the lock.
+    from dirtywork.budget import BudgetExceeded
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], _rc(1))
+    fake.script(["exec"], _ok(b"ok\n"))
+    sb._reset_lock = _FiringLock(sb._reset_lock, lambda: _fire_disk_violation(sb))
+
+    with pytest.raises(BudgetExceeded, match="host free space below"):
+        sb.bash("echo ok")
+
+    assert sb._reset_lock.fired == 1
+    assert not [c for c in fake.calls if c[0][0] in ("kill", "wait")]
+    assert not [e for e in _events(run_dir, transcript) if e["event"] == "sandbox_reset"]
+    assert sb.watchdog.violation is None
+    assert sb._reset_this_call is False
+
+
+def test_skipped_reset_marks_the_call_so_after_bash_does_not_sample(started_with_transcript):
+    # PR #74 review, second P1: the violation is recorded before _watchdog_kill
+    # takes _reset_lock, so reset() skips without the kill having set
+    # _reset_this_call. _after_bash must not sample the dying container: an
+    # over-cap sample would have replaced the disk-floor reason.
+    from dirtywork.budget import BudgetExceeded
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], _rc(1))
+    fake.script(["exec"], _ok(b"ok\n"))
+    fake.script(_SAMPLE_ARGV, _ok(b"3145728\t/work\n10\n"))  # over the 2048 MB default
+    sb._reset_lock = _FiringLock(sb._reset_lock, lambda: _fire_disk_violation(sb))
+
+    with pytest.raises(BudgetExceeded, match="host free space below"):
+        sb.bash("echo ok")
+
+    assert not [c for c in fake.calls if c[0][:len(_SAMPLE_ARGV)] == _SAMPLE_ARGV]
+    assert not [c for c in fake.calls if c[0][0] in ("kill", "wait")]
+    assert sb.watchdog.violation is None
+    assert sb._reset_this_call is False
+
+
+def test_after_bash_sample_does_not_overwrite_a_violation_recorded_during_it(started_with_transcript):
+    # The same overwrite with no reset at all: the watchdog thread records a
+    # disk-floor violation while _after_bash's own worktree sample is in
+    # flight, and that sample comes back over the cap. First recorded wins;
+    # no second kill.
+    from dirtywork.budget import BudgetExceeded
+    sb, fake, run_dir, transcript = started_with_transcript
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
+    fake.script(["inspect", "--format", "{{.State.OOMKilled}}"], _ok(b"false\n"))
+    fake.script(["exec"], _ok(b"ok\n"))
+
+    def over_cap_while_the_disk_floor_fires(argv):
+        _fire_disk_violation(sb)
+        return _ok(b"3145728\t/work\n10\n")
+
+    fake.script(_SAMPLE_ARGV, over_cap_while_the_disk_floor_fires)
+
+    with pytest.raises(BudgetExceeded, match="host free space below"):
+        sb.bash("echo ok")
+
+    assert not [c for c in fake.calls if c[0][0] == "kill"]
+    assert sb.watchdog.violation is None

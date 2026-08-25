@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from dirtywork.sandbox.docker_args import DEFAULT_IMAGE
-from tests.docker_live_helpers import _call, _make_live_repo, _resp
+from tests.docker_live_helpers import _call, _events, _make_live_repo, _of, _resp
 from tests.provider_doubles import DictProvider, patch_provider
 
 # issue #63: override the image used by the live docker tests below (both
@@ -79,6 +79,17 @@ class ScriptedClient(DictProvider):
         return self.responses.pop(0)
 
 
+class _SlowClient(ScriptedClient):
+    """Subclass of ScriptedClient that sleeps 5.2 seconds before replying.
+    Used to test that the watchdog's 5 second worktree sample comes due
+    at the start of a short call and still be in flight when it returns."""
+
+    def reply(self, model, messages, tools):
+        import time
+        time.sleep(5.2)
+        return super().reply(model, messages, tools)
+
+
 def _config_bytes(repo: Path) -> bytes:
     return (repo / ".git" / "config").read_bytes()
 
@@ -117,15 +128,15 @@ def _assert_status(payload: dict, expected) -> None:
     )
 
 
-def _run_main(monkeypatch, tmp_path, responses, argv):
+def _run_main(monkeypatch, tmp_path, responses, argv, client_cls=ScriptedClient):
     import dirtywork.__main__ as m
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
-    client = ScriptedClient(responses)
+    client = client_cls(responses)
     patch_provider(monkeypatch, m, lambda base_url=None: client)
     return m.main(argv)
 
 
-def _run_docker_main(monkeypatch, tmp_path, repo, responses, **extra_args):
+def _run_docker_main(monkeypatch, tmp_path, repo, responses, client_cls=ScriptedClient, **extra_args):
     argv = ["run", "--repo", str(repo), "--sandbox", "docker"]
     for k, v in extra_args.items():
         flag = "--" + k.replace("_", "-")
@@ -134,7 +145,7 @@ def _run_docker_main(monkeypatch, tmp_path, repo, responses, **extra_args):
         elif v is not False:
             argv += [flag, str(v)]
     argv.append("do the task")
-    return _run_main(monkeypatch, tmp_path, responses, argv)
+    return _run_main(monkeypatch, tmp_path, responses, argv, client_cls=client_cls)
 
 
 @pytest.mark.docker
@@ -163,7 +174,7 @@ def test_docker_live_full_run_host_sentinels_and_isolation(tmp_path, monkeypatch
         _resp(content="done"),
     ]
 
-    _run_docker_main(monkeypatch, tmp_path, repo, responses)
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, **_image_kwargs())
     payload = json.loads(capsys.readouterr().out)
 
     _assert_status(payload, "completed")
@@ -193,7 +204,7 @@ def test_docker_live_timeout_kills_command_and_run_continues(tmp_path, monkeypat
         _resp(tool_calls=[_call("c2", "bash", {"command": "echo still-alive"})]),
         _resp(content="done"),
     ]
-    _run_docker_main(monkeypatch, tmp_path, repo, responses)
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, **_image_kwargs())
     payload = json.loads(capsys.readouterr().out)
     _assert_status(payload, "completed")
     events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
@@ -212,7 +223,7 @@ def test_docker_live_backgrounded_process_is_dead_after_reap(tmp_path, monkeypat
               {"command": "sleep 4; test -f /tmp/dw_bg_marker && echo FOUND || echo GONE"})]),
         _resp(content="done"),
     ]
-    _run_docker_main(monkeypatch, tmp_path, repo, responses)
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, **_image_kwargs())
     payload = json.loads(capsys.readouterr().out)
     _assert_status(payload, "completed")
     events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
@@ -221,35 +232,37 @@ def test_docker_live_backgrounded_process_is_dead_after_reap(tmp_path, monkeypat
 
 
 @pytest.mark.docker
-def test_docker_live_process_flood_triggers_reset(tmp_path, monkeypatch, capsys):
+def test_docker_live_process_flood_is_killed_in_place(tmp_path, monkeypatch, capsys):
     # 40 stray background processes is plenty for _reap()'s "docker top shows
     # more than the tether" check (docker top runs on the HOST via /proc, so
     # detection doesn't depend on process count) while staying well under the
-    # container's --pids-limit 512 default. Fix items 2+3 made the watchdog
-    # thread's own periodic worktree sample correctly fail closed
-    # (BudgetExceeded) when its own `du`/`find` exec fails twice in a row --
-    # spawning close to 512 processes (as this test originally did with 600)
-    # can starve THAT exec too and race it against _reap()'s recovery, which
-    # is a real but different failure mode from the one this test targets
-    # (plain stray-process detection-and-recovery). Keeping the flood well
-    # below the pids cap isolates the mechanism this test is actually about.
+    # container's --pids-limit 512 default. Since 1.0 (#61) the strays are
+    # killed IN PLACE -- one fork-free exec, a settle re-check -- and the
+    # container, its /tmp and /gitdir survive: the transcript records a
+    # `stray_kill` naming them (capped at 20, the full count in
+    # `strays_total`) and no `sandbox_reset`. The reset is the ladder's last
+    # rung, reached only when the kill cannot be performed or verified (the
+    # pids-saturation case is test_docker_live_pid_flood_past_limit_recovers_or_fails_closed).
     repo = _make_live_repo(tmp_path)
     responses = [
         _resp(tool_calls=[_call("c1", "bash", {
             "command": "for i in $(seq 1 40); do sleep 30 & done; echo spawned",
             "timeout": 30,
         })]),
-        _resp(tool_calls=[_call("c2", "bash", {"command": "echo alive-after-reset"})]),
+        _resp(tool_calls=[_call("c2", "bash", {"command": "echo alive-after-kill"})]),
         _resp(content="done"),
     ]
-    _run_docker_main(monkeypatch, tmp_path, repo, responses)
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, **_image_kwargs())
     payload = json.loads(capsys.readouterr().out)
     _assert_status(payload, "completed")
     events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
-    reset_events = [e for e in events if e["event"] == "sandbox_reset"]
-    assert reset_events
-    bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
-    assert "alive-after-reset" in bash_results[1]
+    assert not [e for e in events if e["event"] == "sandbox_reset"]
+    kills = [e for e in events if e["event"] == "stray_kill"]
+    assert len(kills) == 1
+    assert len(kills[0]["strays"]) == 20 and kills[0]["strays_total"] >= 40
+    assert all("sleep 30" in s for s in kills[0]["strays"])
+    bash_results = [e for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
+    assert "alive-after-kill" in bash_results[1]["result"]
 
 
 @pytest.mark.docker
@@ -278,12 +291,15 @@ def test_docker_live_pid_flood_past_limit_recovers_or_fails_closed(tmp_path, mon
         _resp(content="done"),
     ]
     start = time.monotonic()
-    _run_docker_main(monkeypatch, tmp_path, repo, responses, timeout=60)
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, timeout=60, **_image_kwargs())
     elapsed = time.monotonic() - start
     payload = json.loads(capsys.readouterr().out)
 
     assert elapsed < 90, f"run took {elapsed:.1f}s -- must reach a terminal state, not hang"
     _assert_status(payload, ("completed", "sandbox_error", "budget_exceeded"))
+
+    # Extended assertions about strays in events
+    _extend_pid_flood_assertions(payload)
 
     slug = Path(payload["worktree"]).name
     assert slug.startswith("dw-")
@@ -297,7 +313,7 @@ def test_docker_live_pid_flood_past_limit_recovers_or_fails_closed(tmp_path, mon
     if payload["status"] == "completed":
         events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
         reset_events = [e for e in events if e["event"] == "sandbox_reset"]
-        assert reset_events  # reap/reset recovered from the flood
+        assert reset_events or [e for e in events if e["event"] == "stray_kill"]  # either rung recovers from the flood (#61)
         bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
         assert len(bash_results) >= 2
         assert "alive" in bash_results[1]  # the follow-up bash call still ran
@@ -313,7 +329,7 @@ def test_docker_live_export_reports_nested_git_and_escaping_symlink_and_skips_ig
         })]),
         _resp(content="done"),
     ]
-    _run_docker_main(monkeypatch, tmp_path, repo, responses)
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, **_image_kwargs())
     payload = json.loads(capsys.readouterr().out)
     _assert_status(payload, "completed")
     worktree = Path(payload["worktree"])
@@ -334,7 +350,7 @@ def test_docker_live_over_budget_write_ends_run_with_budget_exceeded(tmp_path, m
         _resp(tool_calls=[_call("c1", "bash",
               {"command": "dd if=/dev/zero of=big.bin bs=1M count=5 2>/dev/null; echo done"})]),
     ]
-    rc = _run_docker_main(monkeypatch, tmp_path, repo, responses, max_worktree_mb=1)
+    rc = _run_docker_main(monkeypatch, tmp_path, repo, responses, max_worktree_mb=1, **_image_kwargs())
     payload = json.loads(capsys.readouterr().out)
     # Fix item 4: budget_exceeded is the actual cause of the run ending, so
     # it must survive even though finalize()'s export also fails (the same
@@ -388,7 +404,7 @@ def test_docker_live_resume_seeds_worktree_keeps_branch_and_exports(tmp_path, mo
         _resp(tool_calls=[_call("c2", "bash", {"command": "rm README.md"})]),
         _resp(content="done"),
     ]
-    _run_docker_main(monkeypatch, tmp_path, repo, first_responses)
+    _run_docker_main(monkeypatch, tmp_path, repo, first_responses, **_image_kwargs())
     first = json.loads(capsys.readouterr().out)
     _assert_status(first, "completed")
     worktree = Path(first["worktree"])
@@ -467,6 +483,173 @@ def test_docker_live_home_size_flag_caps_home_tmpfs(tmp_path, monkeypatch, capsy
 
 
 @pytest.mark.docker
+def test_docker_live_stray_is_killed_in_place_and_stash_survives(tmp_path, monkeypatch, capsys):
+    repo = _make_live_repo(tmp_path)
+    responses = [
+        _resp(tool_calls=[_call("c1", "bash",
+              {"command": 'echo x >> README.md && git stash && (nohup sleep 300 >/dev/null 2>&1 &) && echo started'})]),
+        _resp(tool_calls=[_call("c2", "bash",
+              {"command": 'git stash pop && git diff --stat'})]),
+        _resp(content="done"),
+    ]
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, **_image_kwargs())
+    payload = json.loads(capsys.readouterr().out)
+    _assert_status(payload, "completed")
+    events = _events(payload)
+    bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
+    assert "README.md" in bash_results[1]
+    stray_kills = _of(events, "stray_kill")
+    assert len(stray_kills) == 1
+    assert any("sleep 300" in s for s in stray_kills[0].get("strays", []))
+    assert not [e for e in events if e["event"] == "sandbox_reset"]
+    tool_results = [e for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
+    assert any("The sandbox killed" in str(r.get("follow_up", "")) for r in tool_results)
+
+
+@pytest.mark.docker
+def test_docker_live_cat_named_stray_dies_with_the_others(tmp_path, monkeypatch, capsys):
+    repo = _make_live_repo(tmp_path)
+    responses = [
+        _resp(tool_calls=[_call("c1", "bash",
+              {"command": 'mkfifo /tmp/f; (setsid cat 0<>/tmp/f >/dev/null 2>&1 &); (sleep 300 >/dev/null 2>&1 &); echo ok'})]),
+        _resp(tool_calls=[_call("c2", "bash",
+              {"command": 'ls /proc | grep -c "^\\([0-9]\\)$"'})]),
+        _resp(content="done"),
+    ]
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, **_image_kwargs())
+    payload = json.loads(capsys.readouterr().out)
+    _assert_status(payload, "completed")
+    events = _events(payload)
+    bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
+    proc_count = int(bash_results[1].strip().splitlines()[-1])
+    assert proc_count <= 5
+    stray_kills = _of(events, "stray_kill")
+    assert len(stray_kills) == 1
+    assert not [e for e in events if e["event"] == "sandbox_reset"]
+
+
+@pytest.mark.docker
+def test_docker_live_killed_git_locks_are_swept(tmp_path, monkeypatch, capsys):
+    repo = _make_live_repo(tmp_path)
+    responses = [
+        _resp(tool_calls=[_call("c1", "bash",
+              {"command": 'touch /gitdir/index.lock /gitdir/gc.pid; (sleep 300 >/dev/null 2>&1 &); echo ok'})]),
+        _resp(tool_calls=[_call("c2", "bash",
+              {"command": 'git status --short; echo rc=$?'})]),
+        _resp(content="done"),
+    ]
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, **_image_kwargs())
+    payload = json.loads(capsys.readouterr().out)
+    _assert_status(payload, "completed")
+    events = _events(payload)
+    bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
+    assert "rc=0" in bash_results[1]
+    stray_kills = _of(events, "stray_kill")
+    assert len(stray_kills) == 1
+    assert "/gitdir/index.lock" in stray_kills[0].get("locks_removed", [])
+    assert "/gitdir/gc.pid" in stray_kills[0].get("locks_removed", [])
+    bash_events = [e for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
+    assert "Stale git lock files" in bash_events[0]["follow_up"]
+
+
+@pytest.mark.docker
+def test_docker_live_git_init_in_tmp_stays_local(tmp_path, monkeypatch, capsys):
+    repo = _make_live_repo(tmp_path)
+    responses = [
+        _resp(tool_calls=[_call("c1", "bash",
+              {"command": 'd=$(mktemp -d) && cd $d && git init -q && git status --short && git worktree list && git rev-parse --git-dir'})]),
+        _resp(tool_calls=[_call("c2", "bash",
+              {"command": 'cd /tmp && git -C /work status --short; echo rc=$?'})]),
+        _resp(content="done"),
+    ]
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, **_image_kwargs())
+    payload = json.loads(capsys.readouterr().out)
+    _assert_status(payload, "completed")
+    events = _events(payload)
+    bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
+    result1 = bash_results[0]
+    assert any("/tmp/" in line for line in result1.splitlines())
+    worktree_lines = [l for l in result1.splitlines() if "git worktree list" in l or (l.strip().startswith("/tmp/") and ".git/worktrees" not in l)]
+    assert any(".git" == line.strip() for line in result1.splitlines())
+    assert "rc=0" in bash_results[1]
+    assert not [e for e in events if e["event"] == "sandbox_reset"]
+    assert not [e for e in events if e["event"] == "stray_kill"]
+
+
+@pytest.mark.docker
+def test_docker_live_nested_repos_export_as_plain_files(tmp_path, monkeypatch, capsys):
+    repo = _make_live_repo(tmp_path)
+    responses = [
+        _resp(tool_calls=[_call("c1", "bash",
+              {"command": 'printf \'__pycache__/\\n\' > .gitignore && mkdir -p sub && cd sub && git init -q && echo new > NEW.txt && echo mod >> ../README.md && mkdir -p deep/inner && cd deep/inner && git init -q && echo d > D.txt && mkdir -p /work/sub/__pycache__ && echo x > /work/sub/__pycache__/a.pyc'})]),
+        _resp(content="done"),
+    ]
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, **_image_kwargs())
+    payload = json.loads(capsys.readouterr().out)
+    _assert_status(payload, "completed")
+    events = _events(payload)
+    run_end = next(e for e in events if e["event"] == "run_end")
+    dropped = run_end.get("dropped_git_entries", [])
+    assert sorted(dropped) == ["sub/.git", "sub/deep/inner/.git"]
+    worktree = Path(payload["worktree"])
+    assert (worktree / "sub" / "NEW.txt").read_text() == "new\n"
+    assert (worktree / "sub" / "deep" / "inner" / "D.txt").read_text() == "d\n"
+    assert (worktree / "README.md").read_text().endswith("mod\n")
+    assert not (worktree / "sub" / "__pycache__" / "a.pyc").exists()
+    ls_files = subprocess.run(
+        ["git", "-C", str(worktree), "ls-files", "-s"],
+        capture_output=True, text=True
+    ).stdout
+    assert not any(line.startswith("160000") for line in ls_files.splitlines())
+
+
+@pytest.mark.docker
+def test_docker_live_root_gitfile_tampering_20a(tmp_path, monkeypatch, capsys):
+    repo = _make_live_repo(tmp_path)
+    responses = [
+        _resp(tool_calls=[_call("c1", "bash",
+              {"command": 'rm .git; git status >/dev/null 2>&1; echo rc=$?'})]),
+        # Force a sandbox reset by killing the tether from inside the container.
+        # The fork bomb ':(){ :|:& };:' is now killed IN PLACE (the fork-free
+        # kill survives pid saturation), so it never forces a reset. Kill the
+        # tether instead; the container dies, next docker top fails, and the
+        # harness resets as "container unreachable after bash".
+        _resp(tool_calls=[_call("c2", "bash",
+              {"command": 'for p in /proc/[0-9]*; do read -r c 2>/dev/null < "$p/comm" || continue; [ "$c" = cat ] && kill -9 "${p#/proc/}"; done; echo killed'})]),
+        _resp(tool_calls=[_call("c3", "bash",
+              {"command": 'cat .git'})]),
+        _resp(content="done"),
+    ]
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, **_image_kwargs())
+    payload = json.loads(capsys.readouterr().out)
+    _assert_status(payload, "completed")
+    events = _events(payload)
+    bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
+    assert "rc=128" in bash_results[0]
+    reset_events = _of(events, "sandbox_reset")
+    assert reset_events and reset_events[0]["reason"] == "container unreachable after bash"
+    assert "gitdir: /gitdir" in bash_results[2]
+
+
+@pytest.mark.docker
+def test_docker_live_root_gitfile_tampering_20b(tmp_path, monkeypatch, capsys):
+    repo = _make_live_repo(tmp_path)
+    responses = [
+        _resp(tool_calls=[_call("c1", "bash",
+              {"command": 'rm .git && git init -q && echo t > T.txt'})]),
+        _resp(content="done"),
+    ]
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, **_image_kwargs())
+    payload = json.loads(capsys.readouterr().out)
+    _assert_status(payload, "completed")
+    events = _events(payload)
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end.get("dropped_git_entries", []) == [".git"]
+    worktree = Path(payload["worktree"])
+    assert (worktree / "T.txt").read_text() == "t\n"
+
+
+@pytest.mark.docker
 @pytest.mark.parametrize("tfm", ["net8.0", "net10.0"])
 def test_docker_live_dotnet_builds_and_runs_offline(tmp_path, monkeypatch, capsys, tfm):
     # issue #63 / #59: docker/Dockerfile installs .NET SDK 8.0 and 10.0 and
@@ -503,3 +686,154 @@ def test_docker_live_dotnet_builds_and_runs_offline(tmp_path, monkeypatch, capsy
     assert len(bash_results) == 1
     assert f"BUILD_OK_{tfm}" in bash_results[0], bash_results[0]
     assert f"RUN_OK_{tfm}" in bash_results[0], bash_results[0]
+
+
+def _extend_pid_flood_assertions(payload: dict) -> None:
+    """Extended assertions for pid flood tests.
+    When the transcript has a sandbox_reset event it carries a non-empty
+    strays list of strings; when it has a stray_kill instead, that event's
+    strays is non-empty."""
+    events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
+
+    reset_events = [e for e in events if e["event"] == "sandbox_reset"]
+    stray_kills = [e for e in events if e["event"] == "stray_kill"]
+
+    # At least one of reset or stray_kill should occur
+    assert reset_events or stray_kills, "Expected either sandbox_reset or stray_kill event"
+
+    # A sandbox_reset carries `strays` only when strays caused it (spec #61 §6.1):
+    # reason "stray process after bash", or "oom" found right after an in-place
+    # kill. "budget sample failed" / "container unreachable after bash" carry none.
+    for reset_event in reset_events:
+        if reset_event.get("reason") in ("stray process after bash", "oom"):
+            assert reset_event.get("strays"), f"a stray-caused sandbox_reset must carry strays: {reset_event}"
+
+    # When there's a stray_kill, strays should be non-empty
+    if stray_kills:
+        for kill_event in stray_kills:
+            assert "strays" in kill_event and len(kill_event["strays"]) > 0, f"stray_kill event should have non-empty strays: {kill_event}"
+
+
+@pytest.mark.docker
+def test_docker_live_race_loop_no_resets(tmp_path, monkeypatch, capsys):
+    """Test that a 5.2 second sleep BETWEEN turns doesn't trigger sandbox_reset.
+    The 5.2 s idle must be BETWEEN turns, not inside the command — that is what
+    makes the watchdog's 5 s worktree sample come due at the start of a short
+    call and still be in flight when it returns."""
+    import os
+    if not os.environ.get("DIRTYWORK_LIVE_SLOW"):
+        pytest.skip("Skipping slow test; set DIRTYWORK_LIVE_SLOW=1 to run")
+
+    repo = _make_live_repo(tmp_path)
+    # 40 bash calls with sleep between each
+    responses = [
+        _resp(tool_calls=[_call(f"c{i}", "bash", {"command": f"sed -n 1,3p README.md"})])
+        for i in range(40)
+    ]
+    responses.append(_resp(content="done"))
+
+    # forty identical read-only calls would trip the stall detector; it is not what this test measures
+    # 40 bash turns + finish exceed the default turn cap
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, client_cls=_SlowClient, stall_turns=0, max_turns=60, **_image_kwargs())
+    payload = json.loads(capsys.readouterr().out)
+    _assert_status(payload, "completed")
+
+    events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
+    # Expect zero sandbox_reset events
+    assert not [e for e in events if e["event"] == "sandbox_reset"], f"Expected zero sandbox_reset events, but found some"
+    # Expect zero stray_kill events
+    assert not [e for e in events if e["event"] == "stray_kill"], f"Expected zero stray_kill events, but found some"
+
+
+@pytest.mark.docker
+def test_docker_live_dotnet_build_leaves_no_stray(tmp_path, monkeypatch, capsys):
+    """Test that dotnet build doesn't leave stray processes."""
+    image = LIVE_IMAGE or DEFAULT_IMAGE
+
+    # Check if the image has .NET SDK
+    try:
+        sdks = _dotnet_list_sdks(image)
+    except Exception as e:
+        pytest.skip(f"Image {image} does not have .NET SDK: {e}")
+
+    if "8.0." not in sdks and "10.0." not in sdks:
+        pytest.skip(f"Image {image} does not have .NET SDK 8.0 or 10.0")
+
+    # Read the image's env to check for daemons_off
+    env_result = subprocess.run(
+        ["docker", "run", "--rm", "--entrypoint", "/usr/bin/env", image],
+        capture_output=True, text=True, timeout=60
+    )
+    if env_result.returncode != 0:
+        pytest.skip(f"Could not read environment from image {image}: {env_result.stderr}")
+
+    env_out = env_result.stdout
+    daemons_off = "UseSharedCompilation=false" in env_out
+
+    repo = _make_live_repo(tmp_path)
+    build_cmd = (
+        "dotnet new console --framework net8.0 -o app && dotnet build app"
+    )
+    responses = [
+        _resp(tool_calls=[_call("c1", "bash", {"command": build_cmd, "timeout": 300})]),
+        _resp(tool_calls=[_call("c2", "bash", {"command": "echo ok"})]),
+        _resp(content="done"),
+    ]
+
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, **_image_kwargs())
+    payload = json.loads(capsys.readouterr().out)
+    _assert_status(payload, "completed")
+
+    events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
+    bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
+    if not bash_results[0].startswith("exit code: 0"):
+        # the :0.10 base ships .NET 8 without DOTNET_EnableWriteXorExecute=0: the SDK
+        # itself dies under the bash tool's ulimit -f (#70), so no daemon ever starts
+        pytest.skip("dotnet build cannot run on this image (#70: .NET 8 under ulimit -f "
+                    "without DOTNET_EnableWriteXorExecute=0)")
+
+    # Expect no sandbox_reset either way
+    assert not [e for e in events if e["event"] == "sandbox_reset"], f"Expected no sandbox_reset events, but found some"
+
+    if daemons_off:
+        # When daemons_off: no stray_kill event
+        assert not [e for e in events if e["event"] == "stray_kill"], f"Expected no stray_kill events when daemons_off, but found some"
+    else:
+        # Otherwise: exactly one stray_kill whose strays contain an entry containing "VBCSCompiler"
+        stray_kills = [e for e in events if e["event"] == "stray_kill"]
+        assert len(stray_kills) == 1, f"Expected exactly one stray_kill event, got {len(stray_kills)}"
+        assert any("VBCSCompiler" in s for s in stray_kills[0].get("strays", [])), f"Expected stray_kill to contain VBCSCompiler in strays: {stray_kills[0]}"
+
+
+@pytest.mark.docker
+def test_docker_live_timed_out_grep_leaves_no_stray(tmp_path, monkeypatch, capsys):
+    """Test that a timed out grep doesn't leave stray processes."""
+    repo = _make_live_repo(tmp_path)
+
+    # rg blocks forever on an explicitly named FIFO (verified in the image), so the
+    # grep tool's 1 s timeout is guaranteed to expire and the abandoned rg is a real
+    # stray for _kill_abandoned_exec -- with nothing large left for the export.
+    responses = [
+        _resp(tool_calls=[_call("c1", "bash", {"command": "mkfifo slow.fifo && echo made"})]),
+        _resp(tool_calls=[_call("c2", "grep", {"pattern": "x", "path": "slow.fifo", "timeout": 1})]),
+        _resp(tool_calls=[_call("c3", "bash", {"command": "rm -f slow.fifo; echo ok"})]),
+        _resp(content="done"),
+    ]
+
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, **_image_kwargs())
+    payload = json.loads(capsys.readouterr().out)
+    _assert_status(payload, "completed")
+
+    events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
+
+    # Find the grep tool_result
+    grep_results = [e for e in events if e["event"] == "tool_result" and e["tool"] == "grep"]
+    assert len(grep_results) >= 1, "Expected at least one grep tool_result"
+
+    # The grep should have timed out
+    grep_result_text = grep_results[0]["result"]
+    assert "timed out" in grep_result_text.lower(), f"Expected grep to time out, got: {grep_result_text}"
+
+    # No stray_kill and no sandbox_reset events
+    assert not [e for e in events if e["event"] == "stray_kill"], f"Expected no stray_kill events, but found some"
+    assert not [e for e in events if e["event"] == "sandbox_reset"], f"Expected no sandbox_reset events, but found some"

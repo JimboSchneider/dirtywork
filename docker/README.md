@@ -168,7 +168,10 @@ unsupported — the **host's** uid there, not the image's `worker` uid 1000 —
 and the run volume is chowned to that uid), and every later `docker exec`
 inherits that user, so `USER
 worker` here is defence in depth for anyone who runs the image by hand, not
-something dirtywork itself relies on. A custom `--image` is **never** checked against
+something dirtywork itself relies on. Never bake `ENV GIT_DIR` or
+`ENV GIT_WORK_TREE`: since 1.0 the worker container finds its repository
+through the gitfile `/work/.git` (#61), and an image-level `GIT_DIR` would
+re-create the bug that fix removed. A custom `--image` is **never** checked against
 `PINNED_DIGEST`; that pin protects the maintained default image only, so a
 derived image's provenance is yours to manage.
 
@@ -192,7 +195,10 @@ result up to the host uid):
 FROM ghcr.io/jimboschneider/dirtywork-worker:0.10
 USER root
 ENV DOTNET_EnableWriteXorExecute=0
-# until the 1.0 base image bakes this in — see the 0.10 defect note above
+# until the 1.0 base image bakes these in — see the 0.10 defect note above;
+# the four below stop the MSBuild/Roslyn build daemons that would otherwise
+# outlive every `dotnet build` and be killed as strays (#61)
+ENV DOTNET_CLI_USE_MSBUILD_SERVER=0 MSBUILDDISABLENODEREUSE=1 UseSharedCompilation=false DOTNET_NOLOGO=1
 ENV NUGET_PACKAGES=/opt/nuget
 COPY MyProject.csproj /tmp/restore/MyProject.csproj
 RUN dotnet restore /tmp/restore/MyProject.csproj --packages /opt/nuget \
@@ -257,5 +263,5 @@ tag. In order:
 5. Close #59.
 6. Drop the "a derived image based on `:0.10` must set the `ENV` line
    itself" caveats from both docs — the 1.0 base image bakes
-   `DOTNET_EnableWriteXorExecute=0` in, so a derived `FROM :1.0` no longer
-   needs to repeat it.
+   `DOTNET_EnableWriteXorExecute=0` and the four .NET stray-process variables,
+   so a derived `FROM :1.0` no longer needs to repeat them.

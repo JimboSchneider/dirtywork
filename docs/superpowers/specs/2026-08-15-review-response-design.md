@@ -220,6 +220,8 @@ change.
 
 ### 3. Worker container: creation, mounts, limits, lifetime
 
+> *Superseded for docker mode by `2026-08-25-sandbox-strays-gitfile-and-reset-notices-design.md` (#61, 1.0): the **Reset** bullet — strays are killed in place first; the worker container no longer receives `GIT_DIR`/`GIT_WORK_TREE`.*
+
 ```
 docker create -i --init --name dw-<slug> \
   --label dirtywork.run=<slug> --label dirtywork.repo=<sha256(resolved repo path)> \
@@ -309,6 +311,8 @@ docker create -i --init --name dw-<slug> \
 
 ### 4. In-container git init (idempotent; first start and after every reset)
 
+> *Superseded for docker mode by `2026-08-25-sandbox-strays-gitfile-and-reset-notices-design.md` (#61, 1.0): the **worker** container's init writes a gitfile (`git init --separate-git-dir=/gitdir` from `/work`); the export container's env-driven init below is unchanged.*
+
 All commands run with `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1`
 so a hostile checked-out `.gitconfig` cannot influence init (verified that
 `HOME`-relative config was otherwise honored):
@@ -357,6 +361,8 @@ boundary) and used relative to `/work`.
 
 ### 6. Reaping and budgets
 
+> *Superseded for docker mode by `2026-08-25-sandbox-strays-gitfile-and-reset-notices-design.md` (#61, 1.0): the whole reaping rule — kill in place, settle re-check, lock sweep, reset only as the last rung; the watchdog's sample and the reaper are serialized.*
+
 - **After every `bash` call** (normal return or timeout): `docker top
   dw-<slug>` (works even when the container is pid-saturated or an
   in-container process is killing incoming shells — verified; output is a
@@ -386,6 +392,8 @@ boundary) and used relative to `/work`.
   reap/reset.
 
 ### 7. Export: worker tree → host worktree
+
+> *Superseded for docker mode by `2026-08-25-sandbox-strays-gitfile-and-reset-notices-design.md` (#61, 1.0): step 2's `.git`-entry handling — NUL-safe enumeration, nested repositories exported as plain files, a base-aware gitlink safety net.*
 
 Runs after the worker container is gone, in a **fresh** container created
 like §3 but **always `--network none`** (regardless of `--allow-network`;

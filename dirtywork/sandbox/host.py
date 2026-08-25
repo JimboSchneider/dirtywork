@@ -101,6 +101,10 @@ class HostSandbox:
         self._check_budget()
         return result
 
+    def drain_notices(self) -> list[tuple[str, str]]:
+        """Host mode has no notices to drain."""
+        return []
+
     def finalize(self) -> RunArtifacts:
         if self.base_commit is None:
             raise SandboxError("finalize() called before start()")

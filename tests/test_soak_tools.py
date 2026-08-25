@@ -974,3 +974,12 @@ def test_f5_ignores_a_write_file_that_comes_after_the_append():
     write_before = [a(finish_reason="tool_calls"),
                     r("write_file", "Wrote 12 bytes to out.csv (new file, 1 line)", "out.csv")] + common
     assert "F5" in detect_features({}, write_before)
+
+
+def test_per_run_row_reports_stray_kills(harvest):
+    row = harvest._per_run_row({"label": "r", "status": "completed", "turns": 2, "wall_s": 4.0,
+                                "prompt_tok": 100, "compl_tok": 10, "nudges": 1,
+                                "guardrail_blocks": 0, "stray_kills": 3, "tool_mix": "bash 2"})
+    assert row["stray kills"] == 3
+    assert "stray kills" in harvest.PER_RUN_COLUMNS
+    assert harvest._per_run_row({"label": "r"})["stray kills"] == 0

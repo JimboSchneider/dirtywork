@@ -306,7 +306,15 @@ def _timeline_line(event: dict) -> str:
     if name == "guardrail_block":
         return f"{ts}  {name:<15} {event.get('tool', '')}: {str(event.get('reason', ''))[:120]}"
     if name == "sandbox_reset":
-        return f"{ts}  {name:<15} {str(event.get('reason', ''))[:120]}"
+        reason = str(event.get('reason', ''))
+        strays = event.get("strays") or []
+        if strays:
+            return f"{ts}  {name:<15} {reason[:120]} — strays: {'; '.join(strays)[:120]}"
+        return f"{ts}  {name:<15} {reason[:120]}"
+    if name == "stray_kill":
+        strays = event.get("strays") or []
+        n = event.get("strays_total") or len(strays)
+        return f"{ts}  {name:<15} {n} killed — " + "; ".join(strays)[:120]
     if name == "run_end":
         return f"{ts}  {name:<15} status={event.get('status', '')} turns={event.get('turns', '')}"
     return f"{ts}  {name}"
@@ -329,6 +337,19 @@ MD_RESULT_CHARS = 2000   # the transcript's preview cap for model/tool-authored 
 def _md_trim(value, limit: int) -> str:
     text = str(value)
     return text if len(text) <= limit else text[:limit] + " ... [truncated]"
+
+
+def _md_code(value, limit: int) -> str:
+    """CommonMark code span; `_md_inline` would HTML-escape and break on a backtick."""
+    text = _md_trim(value, limit).replace("\r\n", " ").replace("\n", " ")
+    # Determine fence length needed (longest backtick run + 1)
+    longest = max([len(m) for m in re.findall(r"`+", text)] or [0])
+    delim = "`" * (longest + 1)
+    # Use spaced delimiters when len(delim) > 1 or text starts/ends with backtick
+    if len(delim) > 1 or text.startswith("`") or text.endswith("`"):
+        return f"{delim} {text} {delim}"
+    else:
+        return f"{delim}{text}{delim}"
 
 
 def _md_fence(text: str) -> str:
@@ -387,7 +408,22 @@ def _md_event_lines(event: dict) -> list:
         return [f"> **guardrail_block** `{event.get('tool', '')}`: "
                 f"{_md_inline(event.get('reason', ''), MD_ARGS_CHARS)}", ""]
     if name == "sandbox_reset":
-        return [f"> **sandbox_reset**: {_md_inline(event.get('reason', ''), MD_ARGS_CHARS)}", ""]
+        reason = _md_inline(event.get('reason', ''), MD_ARGS_CHARS)
+        strays = event.get("strays") or []
+        if strays:
+            stray_str = ", ".join(_md_code(s, MD_ARGS_CHARS) for s in strays)
+            return [f"> **sandbox_reset**: {reason} — strays: {stray_str}", ""]
+        return [f"> **sandbox_reset**: {reason}", ""]
+    if name == "stray_kill":
+        strays = event.get("strays") or []
+        n = event.get("strays_total") or len(strays)
+        strays_str = ", ".join(_md_code(s, MD_ARGS_CHARS) for s in strays)
+        m = event.get("locks_removed_total") or len(event.get("locks_removed") or [])
+        locks_msg = ""
+        if m:
+            lock_word = "file" if m == 1 else "files"
+            locks_msg = f", {m} lock {lock_word} removed"
+        return [f"> **stray_kill**: {n} process{'' if n == 1 else 'es'} killed — {strays_str}{locks_msg}", ""]
     return []
 
 

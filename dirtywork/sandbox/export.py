@@ -23,6 +23,128 @@ class ExportError(SandboxError):
 
 _PAX_GLOBAL_MSG = "export archive contains a PAX global header"
 
+# NUL-safe enumeration of .git entries under /work, excluding the new root
+# gitfile (which would be at /work/.git and is type f). Uses -prune to avoid
+# descending into .git directories themselves.
+EXPORT_GIT_ENTRIES_SCRIPT = r"exec /usr/bin/find /work -mindepth 1 -iname .git ! \( -path /work/.git -type f \) -prune -print0 2>/dev/null"
+
+
+def parse_git_entries(output: bytes) -> list[str]:
+    """Parse NUL-separated git entries from find's output.
+
+    Splits on b'\0', drops the last chunk (it is unterminated), decodes each
+    with errors='replace', and keeps only tokens that start with '/work/' and
+    whose last path component (case-insensitive) == '.git'. Order is preserved.
+    """
+    if not output:
+        return []
+    chunks = output.split(b"\0")
+    # drops the last chunk (the text after the final NUL is never a complete record)
+    chunks = chunks[:-1]
+    entries = []
+    for chunk in chunks:
+        token = chunk.decode("utf-8", errors="replace")
+        if token.startswith("/work/"):
+            last_component = token.rsplit("/", 1)[-1]
+            if last_component.lower() == ".git":
+                entries.append(token)
+    return entries
+
+
+def nested_roots(entries: list[str]) -> list[str]:
+    """Extract parent directories from entries with at least two components.
+
+    For every entry with at least two "/"-separated components, take the parent
+    directory. Deduplicate and sort by (descending number of components, then name).
+
+    Examples:
+        ["a/.git", "a/b/.git", "c/.git", ".git"] -> ["a/b", "a", "c"]
+    """
+    roots = []
+    seen = set()
+    for entry in entries:
+        # Entry looks like "path/to/.git" - need at least two components
+        parts = entry.split("/")
+        if len(parts) >= 2:
+            # Remove ".git" suffix and get parent path
+            parent = "/".join(parts[:-1])  # everything except the last component (.git)
+            if parent:  # only include non-empty parents
+                if parent not in seen:
+                    roots.append(parent)
+                    seen.add(parent)
+
+    # Sort by (descending number of components, then name)
+    def sort_key(root: str) -> tuple:
+        components = root.count("/")
+        return (-components, root)
+
+    roots.sort(key=sort_key)
+    return roots
+
+
+def children(root: str, roots: list[str]) -> list[str]:
+    """Return immediate nested roots relative to root.
+
+    Every R2 in roots with R2.startswith(root + "/") for which NO other R3
+    in roots satisfies both R3.startswith(root + "/") and R2.startswith(R3 + "/").
+    Returned relative to root (strip root + "/"), in roots list's order.
+    """
+    prefix = root + "/"
+    # Filter roots that start with root + "/"
+    candidates = [r for r in roots if r.startswith(prefix)]
+
+    # For each candidate, check if it has an ancestor in roots
+    result = []
+    for candidate in candidates:
+        # Check if there's any R3 that makes this an intermediate node
+        has_ancestor = False
+        for r3 in roots:
+            if r3.startswith(prefix) and r3 != candidate:
+                # Check if R2 starts with R3 + "/"
+                if candidate.startswith(r3 + "/"):
+                    has_ancestor = True
+                    break
+        if not has_ancestor:
+            # Return relative to root
+            result.append(candidate[len(prefix):])
+
+    return result
+
+
+def top_level_roots(roots: list[str]) -> list[str]:
+    """Return roots with no ancestor in the set, in roots list's order."""
+    root_set = set(roots)
+    result = []
+    for root in roots:
+        # Check if this root has an ancestor in the set
+        has_ancestor = False
+        parts = root.split("/")
+        # Check all possible ancestors (parent, grandparent, etc.)
+        for i in range(1, len(parts)):
+            ancestor = "/".join(parts[:i])
+            if ancestor in root_set:
+                has_ancestor = True
+                break
+        if not has_ancestor:
+            result.append(root)
+    return result
+
+
+def parse_z_records(output: bytes) -> list[tuple[str, str]]:
+    """(mode, path) for every NUL-terminated record of `git ls-files -s -z` or
+    `git ls-tree -r -z`: the mode is the first whitespace-separated field before
+    the tab, the path everything after it. The text after the final NUL is never
+    a complete record and is dropped."""
+    records = []
+    for chunk in output.split(b"\0")[:-1]:
+        head, sep, path = chunk.partition(b"\t")
+        if not sep:
+            continue
+        fields = head.decode("utf-8", errors="replace").split()
+        if fields:
+            records.append((fields[0], path.decode("utf-8", errors="replace")))
+    return records
+
 
 @dataclass
 class ExportReport:
@@ -242,20 +364,97 @@ def export_run(cfg, *, slug, base_commit, worktree: Path, run_dir: Path, objects
     try:
         lifecycle.wait_ready(run, name)
 
-        lifecycle.init_worker_git(run, name, branch=f"dirtywork/{slug}", base_commit=base_commit, restart=True)
+        lifecycle.init_worker_git(run, name, branch=f"dirtywork/{slug}", base_commit=base_commit, restart=True, layout="env")
 
         find_argv = docker_args.exec_argv(
-            name, ["/usr/bin/find", "/work", "-mindepth", "1", "-iname", ".git"]
+            name, ["/bin/sh", "-c", EXPORT_GIT_ENTRIES_SCRIPT]
         )
         find_captured = run(find_argv, timeout=docker_cli.T_EXPORT_STEP)
-        if find_captured.returncode == 0:
-            for line in find_captured.output.decode("utf-8", errors="replace").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                dropped_git_entries.append(line[len("/work/"):] if line.startswith("/work/") else line)
 
-        add_argv = docker_args.exec_argv(name, ["/usr/bin/git", "add", "-A"])
+        # Parse the NUL-separated entries
+        if find_captured.truncated:
+            return _fail("could not enumerate .git entries")
+
+        parsed_entries = parse_git_entries(find_captured.output)
+
+        if find_captured.returncode != 0:
+            print(f"export: .git enumeration incomplete (rc {find_captured.returncode})", file=sys.stderr)
+
+        # dropped_git_entries = each token with the "/work/" prefix removed, in find order
+        dropped_git_entries = [e[len("/work/"):] for e in parsed_entries if e.startswith("/work/")]
+
+        roots = nested_roots(dropped_git_entries)
+
+        # Splice nested repositories (deepest first) to convert .git entries to plain files
+        nested_tree: dict[str, str] = {}
+        for i, root in enumerate(roots):
+            # Build argv for the nested git repository
+            env = {"GIT_DIR": f"/tmp/nested-{i}", "GIT_WORK_TREE": "/work/" + root, "GIT_OBJECT_DIRECTORY": "/gitdir/objects", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+
+            # a. init
+            init_argv = docker_args.exec_argv(name, ["/usr/bin/git", "init", "-q", "--template="],
+                                               workdir="/work/" + root, env=env)
+            init_captured = run(init_argv, timeout=docker_cli.T_EXPORT_STEP)
+            if init_captured.returncode != 0:
+                return _fail(f"nested repository splice failed at {root}: {init_captured.output.decode('utf-8', 'replace')[:500]}")
+
+            # b. read-tree --empty
+            empty_argv = docker_args.exec_argv(name, ["/usr/bin/git", "read-tree", "--empty"],
+                                               workdir="/work/" + root, env=env)
+            empty_captured = run(empty_argv, timeout=docker_cli.T_EXPORT_STEP)
+            if empty_captured.returncode != 0:
+                return _fail(f"nested repository splice failed at {root}: {empty_captured.output.decode('utf-8', 'replace')[:500]}")
+
+            # c. add -A with exclusions for children
+            child_names = children(root, roots)
+            exclusion_args = [f":(exclude,literal){c}" for c in child_names]
+            add_argv = docker_args.exec_argv(name, ["/usr/bin/git", "-c", "core.excludesFile=/work/.gitignore",
+                                                     "add", "-A", "--", "."] + exclusion_args,
+                                             workdir="/work/" + root, env=env)
+            add_captured = run(add_argv, timeout=docker_cli.T_EXPORT_STEP)
+            if add_captured.returncode != 0:
+                return _fail(f"nested repository splice failed at {root}: {add_captured.output.decode('utf-8', 'replace')[:500]}")
+
+            # d. read-tree for each child (in same order as children())
+            for c in child_names:
+                read_tree_argv = docker_args.exec_argv(name, ["/usr/bin/git", "read-tree",
+                                                               f"--prefix={c}/", nested_tree[f"{root}/{c}"]],
+                                                       workdir="/work/" + root, env=env)
+                read_tree_captured = run(read_tree_argv, timeout=docker_cli.T_EXPORT_STEP)
+                if read_tree_captured.returncode != 0:
+                    return _fail(f"nested repository splice failed at {root}: {read_tree_captured.output.decode('utf-8', 'replace')[:500]}")
+
+            # e. write-tree
+            wt_argv = docker_args.exec_argv(name, ["/usr/bin/git", "write-tree"],
+                                            workdir="/work/" + root, env=env)
+            wt_captured = run(wt_argv, timeout=docker_cli.T_EXPORT_STEP)
+            if wt_captured.returncode != 0:
+                return _fail(f"nested repository splice failed at {root}: {wt_captured.output.decode('utf-8', 'replace')[:500]}")
+            nested_tree[root] = wt_captured.output.decode("utf-8", errors="replace").strip()
+
+        # Main index: remove nested roots and read their trees
+        for R in top_level_roots(roots):
+            rm_argv = docker_args.exec_argv(name, ["/usr/bin/git", "rm", "-r", "-q", "--cached", "--ignore-unmatch",
+                                                    "--", f":(literal){R}"])
+            rm_captured = run(rm_argv, timeout=docker_cli.T_EXPORT_STEP)
+            if rm_captured.returncode != 0:
+                return _fail(f"nested repository splice failed at {R}: {rm_captured.output.decode('utf-8', 'replace')[:500]}")
+
+            read_tree_argv = docker_args.exec_argv(name, ["/usr/bin/git", "read-tree", f"--prefix={R}/", nested_tree[R]])
+            read_tree_captured = run(read_tree_argv, timeout=docker_cli.T_EXPORT_STEP)
+            if read_tree_captured.returncode != 0:
+                return _fail(f"nested repository splice failed at {R}: {read_tree_captured.output.decode('utf-8', 'replace')[:500]}")
+
+        # Print notification for each top-level root
+        for R in top_level_roots(roots):
+            print(f"nested repository exported as plain files: {R}", file=sys.stderr)
+
+        # Build add argv - if no roots, use the original form
+        if roots:
+            exclusion_args = [f":(exclude,literal){R}" for R in top_level_roots(roots)]
+            add_argv = docker_args.exec_argv(name, ["/usr/bin/git", "add", "-A", "--", ".",] + exclusion_args)
+        else:
+            add_argv = docker_args.exec_argv(name, ["/usr/bin/git", "add", "-A"])
         add_captured = run(add_argv, timeout=docker_cli.T_EXPORT_STEP)
         if add_captured.returncode != 0:
             return _fail(f"git add -A failed: {add_captured.output.decode('utf-8', 'replace')[:500]}")
@@ -281,6 +480,31 @@ def export_run(cfg, *, slug, base_commit, worktree: Path, run_dir: Path, objects
         if wt_captured.returncode != 0:
             return _fail(f"git write-tree failed: {wt_captured.output.decode('utf-8', 'replace')[:500]}")
         tree = wt_captured.output.decode("utf-8", errors="replace").strip()
+
+        # Safety net: verify the export index
+        ls_files_argv = docker_args.exec_argv(name, ["/usr/bin/git", "ls-files", "-s", "-z"])
+        ls_files_captured = run(ls_files_argv, timeout=docker_cli.T_EXPORT_STEP)
+        if ls_files_captured.returncode != 0:
+            return _fail("could not verify the export index (ls-files)")
+        if ls_files_captured.truncated:
+            return _fail("could not verify the export index (ls-files)")
+
+        ls_tree_argv = docker_args.exec_argv(name, ["/usr/bin/git", "ls-tree", "-r", "-z", base_commit])
+        ls_tree_captured = run(ls_tree_argv, timeout=docker_cli.T_EXPORT_STEP)
+        if ls_tree_captured.returncode != 0:
+            return _fail("could not verify the export index (ls-tree)")
+        if ls_tree_captured.truncated:
+            return _fail("could not verify the export index (ls-tree)")
+
+        index_entries = parse_z_records(ls_files_captured.output)
+        base_modes = {path: mode for mode, path in parse_z_records(ls_tree_captured.output)}
+
+        # Find gitlinks that shouldn't be there
+        for mode, path in index_entries:
+            if mode == "160000" and base_modes.get(path) != "160000":
+                # a gitlink the base commit does not have: a nested repository the
+                # splice missed (a real submodule of the target repository is exempt)
+                return _fail(f"nested repository at {path} was not masked")
 
         stat_argv = docker_args.exec_argv(name, ["/usr/bin/git", "diff", "--stat", base_commit, tree])
         stat_captured = run(stat_argv, timeout=docker_cli.T_EXPORT_STEP)
