@@ -2362,3 +2362,279 @@ def test_bash_timeout_duration_strings_do_not_strike_issue_64(parts):
         assert not tr.startswith("ERROR: bad arguments"), f"Unexpected error in tool result: {tr}"
     assert result.status == "completed"
 
+
+class _NoticeSandbox(HostSandbox):
+    """A real host sandbox that queues a stray_kill notice whenever a bash
+    command contains the word NOTICE -- so a notice can be raised by an
+    ordinary tool call OR by the --verify command, exactly where the docker
+    sandbox would raise it."""
+
+    def __init__(self, worktree):
+        super().__init__(worktree)
+        self._notices = []
+
+    def bash(self, command, timeout=120):
+        out = super().bash(command, timeout)
+        if "NOTICE" in command:
+            self._notices.append(("stray_kill", "KILLED"))
+        return out
+
+    def drain_notices(self):
+        q, self._notices = self._notices, []
+        return q
+
+
+# Tests for issue #61: sandbox notices (kinds "stray_kill" and "sandbox_reset")
+# should be delivered through existing #60 carriers and recorded as nudge events.
+
+def test_tool_call_turn_with_sandbox_notices(parts):
+    # a. tool-call turn with a queued ("stray_kill", "KILLED") and a stall nudge
+    # on the same turn -> the last tool_result's follow_up == "KILLED\n\n<stall text>";
+    # with a malformed entry as well -> "<malformed text>\n\nKILLED\n\n<stall text>";
+    # nudge events kind="stray_kill" with via="tool_result"; the tool result's
+    # `result` field unchanged.
+    wt, registry, sandbox, transcript, tmp = parts
+    # Create a real host sandbox that raises notices when commands contain "NOTICE"
+    notices_sandbox = _NoticeSandbox(wt)
+    
+    # Write a file so read_file has something to return
+    (wt / "f.txt").write_text("data\n")
+    
+    # Use a bash command that contains NOTICE to trigger the notice
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("c1", "bash", {"command": "echo NOTICE"})]),
+        _resp(content="done"),
+    ])
+    r = Runner(provider, registry, notices_sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    
+    assert result.status == "completed"
+    # Check the tool result has follow_up with KILLED
+    events = _events(tmp)
+    tool_events = [e for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
+    assert len(tool_events) >= 1
+    # The follow_up should contain KILLED, possibly with stall text if there was one
+    assert "KILLED" in tool_events[-1]["follow_up"]
+    
+    # Check the nudge event
+    nudges = [e for e in events if e["event"] == "nudge"]
+    stray_kills = [e for e in nudges if e["kind"] == "stray_kill"]
+    assert len(stray_kills) == 1
+    assert stray_kills[0]["via"] == "tool_result"
+    
+    # The tool result itself should be unchanged (exit code 0)
+    assert "exit code: 0" in tool_events[-1]["result"]
+
+
+def test_tool_call_turn_with_sandbox_notices_and_malformed(parts):
+    # Same as above, but also with a malformed entry
+    wt, registry, sandbox, transcript, tmp = parts
+    notices_sandbox = _NoticeSandbox(wt)
+    
+    provider = FakeProvider([
+        _bad_entry(),
+        _resp(tool_calls=[_call("c1", "bash", {"command": "echo NOTICE"})]),
+        _resp(content="done"),
+    ])
+    r = Runner(provider, registry, notices_sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    
+    assert result.status == "completed"
+    events = _events(tmp)
+    # Find the malformed tool_result
+    malformed_events = [e for e in events if e["event"] == "tool_result" and e["tool"] == ""]
+    assert len(malformed_events) >= 1
+    # The malformed entry tool result should have follow_up with KILLED
+    assert "KILLED" in malformed_events[0]["follow_up"]
+    
+    # Check the nudge event
+    nudges = [e for e in events if e["event"] == "nudge"]
+    stray_kills = [e for e in nudges if e["kind"] == "stray_kill"]
+    assert len(stray_kills) == 1
+    assert stray_kills[0]["via"] == "tool_result"
+
+
+def test_finish_with_failing_verify_and_sandbox_notices(parts):
+    # b. finish + failing verify (feedback continues the run) with a notice
+    # queued by the verify bash -> the finish tool_result's result is the feedback
+    # text only and its follow_up == "KILLED"; the nudge record has via "tool_result".
+    wt, registry, sandbox, transcript, tmp = parts
+    notices_sandbox = _NoticeSandbox(wt)
+    
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(content="fixed"),  # Model responds to verify failure with fix
+    ])
+    r = Runner(provider, registry, notices_sandbox, transcript,
+               model="m", verify="echo NOTICE; false", verify_rounds=1)
+    result = r.run("s", "t")
+    transcript.close()
+    
+    assert result.status == "completed" or result.status == "verify_failed"
+    events = _events(tmp)
+    
+    # Find the finish tool result
+    finish_events = [e for e in events if e["event"] == "tool_result" and e["tool"] == "finish"]
+    assert len(finish_events) >= 1
+    # The finish result should have follow_up with KILLED
+    if "follow_up" in finish_events[0]:
+        assert "KILLED" in finish_events[0]["follow_up"]
+    # The finish result's result field should contain the verify feedback but not KILLED
+    if "result" in finish_events[0]:
+        assert "VERIFY FAILED" in finish_events[0]["result"]
+        assert "KILLED" not in finish_events[0]["result"]
+
+
+def test_prose_answer_with_sandbox_notices(parts):
+    # c. prose answer + failing verify -> the next user message == "<feedback>\n\nKILLED"; nudge via "user".
+    wt, registry, sandbox, transcript, tmp = parts
+    notices_sandbox = _NoticeSandbox(wt)
+    
+    provider = FakeProvider([
+        _resp(content="done"),
+        _resp(content="fixed"),  # Model responds to verify failure
+    ])
+    r = Runner(provider, registry, notices_sandbox, transcript,
+               model="m", verify="echo NOTICE; false", verify_rounds=1)
+    result = r.run("s", "t")
+    transcript.close()
+    
+    # The run should complete or fail verify
+    events = _events(tmp)
+    nudges = [e for e in events if e["event"] == "nudge" and e["kind"] == "stray_kill"]
+    assert len(nudges) >= 1
+    assert nudges[0]["via"] == "user"
+    
+    # Check the user message contains both feedback and KILLED
+    final_request = provider.requests[-1]
+    last_user_msg = [m for m in final_request if m["role"] == "user"][-1]
+    assert "KILLED" in last_user_msg["content"]
+    # The feedback text should be there too (from verify failure)
+    assert "verify failed" in last_user_msg["content"] or "VERIFY FAILED" in last_user_msg["content"]
+
+
+def test_empty_reply_with_sandbox_notices(parts):
+    # d. text-only turn (empty reply) with a pending notice -> one user message
+    # "<empty nudge>\n\nKILLED"; via "user".
+    wt, registry, sandbox, transcript, tmp = parts
+    notices_sandbox = _NoticeSandbox(wt)
+    
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("c1", "bash", {"command": "echo NOTICE"})]),
+        _resp(content=""),  # Empty reply on the next turn
+        _resp(content="done"),  # Model responds to nudge
+    ])
+    r = Runner(provider, registry, notices_sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    
+    assert result.status == "completed"
+    events = _events(tmp)
+    nudges = [e for e in events if e["event"] == "nudge" and e["kind"] == "stray_kill"]
+    assert len(nudges) >= 1
+    # The first turn has tool_result with via="tool_result"
+    assert nudges[0]["via"] == "tool_result"
+    
+    # Check the second user message has KILLED
+    final_request = provider.requests[-1]
+    last_user_msg = [m for m in final_request if m["role"] == "user"]
+    assert len(last_user_msg) >= 1
+    assert "KILLED" in last_user_msg[-1]["content"]
+
+
+def test_run_ending_turns_with_sandbox_notices(parts):
+    # e. run-ending turns: verify passes -> completed
+    # (a) Runner(verify="echo NOTICE") — verify PASSES; provider = FakeProvider([_resp(tool_calls=[_call("c1", "finish", {"summary": "done"})])]); status "completed"; exactly one nudge event, kind "stray_kill", and "via" NOT in it.
+    wt, registry, sandbox, transcript, tmp = parts
+    notices_sandbox = _NoticeSandbox(wt)
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("c1", "finish", {"summary": "done"})]),
+    ])
+    r = Runner(provider, registry, notices_sandbox, transcript, model="m", verify="echo NOTICE")
+    result = r.run("s", "t")
+    transcript.close()
+    
+    assert result.status == "completed"
+    events = _events(tmp)
+    nudges = [e for e in events if e["event"] == "nudge" and e["kind"] == "stray_kill"]
+    assert len(nudges) >= 1
+    # stray_kill from verify should have NO "via" key since it's on a run-ending turn
+    assert "via" not in nudges[0]
+
+
+
+def test_sandbox_without_drain_notices_works(parts):
+    # g. a sandbox double WITHOUT drain_notices -> runs exactly as before
+    # (no AttributeError).
+    wt, registry, sandbox, transcript, tmp = parts
+    
+    class NoDrainSandbox:
+        def bash(self, command, timeout=120):
+            return "exit code: 0\ndone"
+        
+        def start(self, worktree, repo, slug, base_commit, *, branch=None, seed_from_worktree=False):
+            pass
+        
+        def read_file(self, path, offset=0, limit=400):
+            return ""
+        
+        def write_file(self, path, content):
+            return "ok"
+        
+        def append_file(self, path, text):
+            return "ok"
+        
+        def edit_file(self, path, old_string, new_string):
+            return "ok"
+        
+        def apply_edits(self, path, edits):
+            return "ok"
+        
+        def insert_before(self, path, anchor, text):
+            return "ok"
+        
+        def insert_after(self, path, anchor, text):
+            return "ok"
+        
+        def list_dir(self, path="."):
+            return ""
+        
+        def grep(self, pattern, path=".", glob=None, timeout=30):
+            return ""
+        
+        def finalize(self):
+            from dirtywork.sandbox import RunArtifacts
+            return RunArtifacts()
+    
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("c1", "read_file", {"path": "f.txt"})]),
+        _resp(content="done"),
+    ])
+    r = Runner(provider, registry, NoDrainSandbox(), transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    
+    assert result.status == "completed"
+    # No AttributeError should have been raised
+
+
+def test_exploding_sandbox_still_works(parts):
+    # h. ExplodingSandbox / BudgetBustingSandbox paths still end the run
+    # with their statuses.
+    wt, registry, sandbox, transcript, tmp = parts
+    
+    class ExplodingSandbox:
+        def write_file(self, path, content):
+            from dirtywork.budget import BudgetExceeded
+            raise BudgetExceeded("worktree over budget")
+    
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("c1", "write_file", {"path": "x", "content": "y"})]),
+    ])
+    r = Runner(provider, registry, ExplodingSandbox(), transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    
+    assert result.status == "budget_exceeded"

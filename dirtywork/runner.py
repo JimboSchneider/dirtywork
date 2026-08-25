@@ -595,6 +595,13 @@ class Runner:
                 if record is not None:
                     record["via"] = via
 
+        def drain_sandbox():
+            """(joined text, nudge records) for every notice the sandbox queued since the last drain; ("", []) when none or when the sandbox has no drain_notices (host mode, test doubles)."""
+            drain = getattr(self.sandbox, "drain_notices", None)
+            notices = drain() if drain is not None else []
+            records = [self.transcript.write("nudge", kind=kind, turn=turns) for kind, _text in notices]
+            return _join_nudges(*(text for _kind, text in notices)), records
+
         def note_last_tool_result(tool: str, args: str, result) -> None:
             # spec §2: tracks the SAME values just written to the "tool_result"
             # transcript event, for both a real tool call and a malformed entry
@@ -667,6 +674,7 @@ class Runner:
             # the verify path never reached (a later call raised, the failure
             # tracker aborted, Ctrl-C) -- then flushes the turn so its evidence
             # is on disk BEFORE finalize() (docker export) runs (§6.1).
+            drain_sandbox()
             if any(record.get("result") == FINISH_PROVISIONAL for _, record in turn_terminal):
                 resolve_finish(FINISH_DONE if status == "completed"
                                else f"run not finished: {status}")
@@ -837,7 +845,8 @@ class Runner:
                     ended, feedback = check_verify(content, via="user")
                     if ended is not None:
                         return ended
-                    deliver(feedback, [])
+                    sandbox_text, sandbox_records = drain_sandbox()
+                    deliver(_join_nudges(feedback, sandbox_text), sandbox_records)
                     return None
                 kind_record = self.transcript.write("nudge", kind=kind, turn=turns)
                 abort_reason = failures.record("empty_reply")
@@ -846,7 +855,8 @@ class Runner:
                 stalled, stall_text, stall_record = check_progress()
                 if stalled is not None:
                     return stalled
-                deliver(_join_nudges(NUDGES[kind], stall_text), [kind_record, stall_record])
+                sandbox_text, sandbox_records = drain_sandbox()
+                deliver(_join_nudges(NUDGES[kind], sandbox_text, stall_text), [kind_record, *sandbox_records, stall_record])
                 return None
 
             abort_reason = None
@@ -951,9 +961,17 @@ class Runner:
                     return ended
                 # The feedback is already the finish result (resolve_finish);
                 # only the timeout nudge still needs delivering.
+                sandbox_text, sandbox_records = drain_sandbox()
                 if timed_out_this_turn:
                     timeout_record = self.transcript.write("nudge", kind="timeout", turn=turns)
-                    deliver(timeout_text, [timeout_record])
+                    text = _join_nudges(sandbox_text, timeout_text)
+                    if text:
+                        deliver(text, [*sandbox_records, timeout_record])
+                else:
+                    # no timeout but there may be sandbox notices
+                    text = _join_nudges(sandbox_text)
+                    if text:
+                        deliver(text, sandbox_records)
                 return None
 
             # Same rule as `finish` in a mixed turn: the turn's remaining
@@ -980,8 +998,9 @@ class Runner:
             if timed_out_this_turn:
                 # Once per turn, however many commands timed out in it.
                 timeout_record = self.transcript.write("nudge", kind="timeout", turn=turns)
-            deliver(_join_nudges(malformed_text, timeout_text, stall_text),
-                    [malformed_record, timeout_record, stall_record])
+            sandbox_text, sandbox_records = drain_sandbox()
+            deliver(_join_nudges(malformed_text, sandbox_text, timeout_text, stall_text),
+                    [malformed_record, *sandbox_records, timeout_record, stall_record])
             return None
         try:
             while True:
