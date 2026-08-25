@@ -89,11 +89,20 @@ class Watchdog(threading.Thread):
             return True
         return False
 
-    def check_worktree_budget_once(self) -> bool:
+    def check_worktree_budget_once(self, *, wait=True) -> bool:
         """One worktree-size sample-and-check. Called by this thread's own
         loop (every 5s while a bash call is in flight) AND, synchronously,
-        by DockerSandbox right after every bash call returns."""
-        kbytes, entries = self.sample()
+        by DockerSandbox right after every bash call returns.
+        
+        The `wait` parameter controls blocking behavior:
+        - wait=True (default): sample blocks if needed and raises on failure.
+        - wait=False (run loop): non-blocking; returns False if sample fails."""
+        result = self.sample(wait=wait)
+        # If sample returns None (non-blocking mode and lock busy or failed twice),
+        # return False without touching violation/kill
+        if result is None:
+            return False
+        kbytes, entries = result
         mb = kbytes / 1024
         if mb > self.max_worktree_mb or entries > self.max_worktree_files:
             reason = (
@@ -116,7 +125,7 @@ class Watchdog(threading.Thread):
                     in_flight = self._bash_in_flight
                 if in_flight and self.clock() - last_worktree_check >= self.WORKTREE_POLL_INTERVAL:
                     last_worktree_check = self.clock()
-                    if self.check_worktree_budget_once():
+                    if self.check_worktree_budget_once(wait=False):
                         return
                 self.sleep(self.DISK_POLL_INTERVAL)
         except Exception as e:

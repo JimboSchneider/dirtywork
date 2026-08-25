@@ -7,7 +7,7 @@ from dirtywork.sandbox.watchdog import Watchdog
 
 
 def test_note_bash_start_and_end_toggle_in_flight():
-    wdg = Watchdog(kill=lambda r: None, sample=lambda: (0, 0), storage_paths=[],
+    wdg = Watchdog(kill=lambda r: None, sample=lambda wait=True: (0, 0), storage_paths=[],
                     min_free_mb=1, max_worktree_mb=1, max_worktree_files=1)
     assert wdg._bash_in_flight is False
     wdg.note_bash_start()
@@ -18,7 +18,7 @@ def test_note_bash_start_and_end_toggle_in_flight():
 
 def test_check_worktree_budget_once_under_caps_no_kill():
     kills = []
-    wdg = Watchdog(kill=lambda r: kills.append(r), sample=lambda: (1024, 5),
+    wdg = Watchdog(kill=lambda r: kills.append(r), sample=lambda wait=True: (1024, 5),
                     storage_paths=[], min_free_mb=1, max_worktree_mb=2048,
                     max_worktree_files=200_000)
     result = wdg.check_worktree_budget_once()
@@ -29,7 +29,7 @@ def test_check_worktree_budget_once_under_caps_no_kill():
 
 def test_check_worktree_budget_once_over_mb_cap_kills():
     kills = []
-    wdg = Watchdog(kill=lambda r: kills.append(r), sample=lambda: (3 * 1024 * 1024, 10),
+    wdg = Watchdog(kill=lambda r: kills.append(r), sample=lambda wait=True: (3 * 1024 * 1024, 10),
                     storage_paths=[], min_free_mb=1, max_worktree_mb=2048,
                     max_worktree_files=200_000)
     result = wdg.check_worktree_budget_once()
@@ -40,7 +40,7 @@ def test_check_worktree_budget_once_over_mb_cap_kills():
 
 def test_check_worktree_budget_once_over_file_cap_kills():
     kills = []
-    wdg = Watchdog(kill=lambda r: kills.append(r), sample=lambda: (10, 500_000),
+    wdg = Watchdog(kill=lambda r: kills.append(r), sample=lambda wait=True: (10, 500_000),
                     storage_paths=[], min_free_mb=1, max_worktree_mb=2048,
                     max_worktree_files=200_000)
     result = wdg.check_worktree_budget_once()
@@ -58,7 +58,7 @@ def test_run_loop_kills_on_disk_floor_breach(tmp_path, monkeypatch):
 
     kills = []
     wdg = wd.Watchdog(
-        kill=lambda reason: kills.append(reason), sample=lambda: (0, 0),
+        kill=lambda reason: kills.append(reason), sample=lambda wait=True: (0, 0),
         storage_paths=[tmp_path], min_free_mb=2048, max_worktree_mb=2048,
         max_worktree_files=200_000, clock=lambda: 0.0, sleep=lambda s: None,
     )
@@ -81,7 +81,7 @@ def test_run_loop_kills_on_worktree_over_cap_while_bash_in_flight(tmp_path, monk
     clock = {"t": 0.0}
     wdg = wd.Watchdog(
         kill=lambda reason: kills.append(reason),
-        sample=lambda: (3 * 1024 * 1024, 10),  # 3 GB, over the 2048 MB cap
+        sample=lambda wait=True: (3 * 1024 * 1024, 10),  # 3 GB, over the 2048 MB cap
         storage_paths=[tmp_path], min_free_mb=2048, max_worktree_mb=2048,
         max_worktree_files=200_000,
         clock=lambda: clock["t"], sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
@@ -104,7 +104,7 @@ def test_run_loop_does_not_sample_worktree_when_no_bash_in_flight(tmp_path, monk
     sample_calls = []
     clock = {"t": 0.0}
 
-    def fake_sample():
+    def fake_sample(wait=True):
         sample_calls.append(1)
         return (3 * 1024 * 1024, 10)  # would violate if ever sampled
 
@@ -135,7 +135,7 @@ def test_stop_sets_stop_event_and_thread_exits(tmp_path, monkeypatch):
         free = 10 * 1024 * 1024 * 1024
 
     monkeypatch.setattr(wd.shutil, "disk_usage", lambda path: FakeUsage())
-    wdg = wd.Watchdog(kill=lambda r: None, sample=lambda: (0, 0), storage_paths=[tmp_path],
+    wdg = wd.Watchdog(kill=lambda r: None, sample=lambda wait=True: (0, 0), storage_paths=[tmp_path],
                        min_free_mb=1, max_worktree_mb=1, max_worktree_files=1,
                        sleep=lambda s: time.sleep(0.01))
 
@@ -159,7 +159,7 @@ def test_disk_check_fails_closed_after_repeated_stat_errors(tmp_path, monkeypatc
 
     kills = []
     wdg = wd.Watchdog(
-        kill=lambda reason: kills.append(reason), sample=lambda: (0, 0),
+        kill=lambda reason: kills.append(reason), sample=lambda wait=True: (0, 0),
         storage_paths=[tmp_path], min_free_mb=2048, max_worktree_mb=2048,
         max_worktree_files=200_000, clock=lambda: 0.0, sleep=lambda s: None,
     )
@@ -193,7 +193,7 @@ def test_run_loop_does_not_die_silently_when_sample_raises(tmp_path, monkeypatch
 
     monkeypatch.setattr(wd.shutil, "disk_usage", lambda path: FakeUsage())
 
-    def raising_sample():
+    def raising_sample(wait=True):
         raise RuntimeError("exec failed twice")
 
     kills = []
@@ -222,7 +222,7 @@ def test_violation_kind_defaults_to_budget_on_worktree_breach():
     # _after_bash/finalize raise BudgetExceeded / report budget_exceeded,
     # exactly as before D1.
     kills = []
-    wdg = Watchdog(kill=lambda r: kills.append(r), sample=lambda: (3 * 1024 * 1024, 10),
+    wdg = Watchdog(kill=lambda r: kills.append(r), sample=lambda wait=True: (3 * 1024 * 1024, 10),
                     storage_paths=[], min_free_mb=1, max_worktree_mb=2048,
                     max_worktree_files=200_000)
     wdg.check_worktree_budget_once()
@@ -239,7 +239,7 @@ def test_violation_kind_defaults_to_budget_on_disk_floor_breach(tmp_path, monkey
     monkeypatch.setattr(wd.shutil, "disk_usage", lambda path: FakeUsage())
     kills = []
     wdg = wd.Watchdog(
-        kill=lambda reason: kills.append(reason), sample=lambda: (0, 0),
+        kill=lambda reason: kills.append(reason), sample=lambda wait=True: (0, 0),
         storage_paths=[tmp_path], min_free_mb=2048, max_worktree_mb=2048,
         max_worktree_files=200_000, clock=lambda: 0.0, sleep=lambda s: None,
     )
@@ -257,7 +257,7 @@ def test_check_worktree_budget_once_explicitly_resets_stale_sandbox_error_kind()
     # records a genuine budget breach, the kind must still read "budget",
     # not the stale "sandbox_error" left over from the thread's death.
     kills = []
-    wdg = Watchdog(kill=lambda r: kills.append(r), sample=lambda: (3 * 1024 * 1024, 10),
+    wdg = Watchdog(kill=lambda r: kills.append(r), sample=lambda wait=True: (3 * 1024 * 1024, 10),
                     storage_paths=[], min_free_mb=1, max_worktree_mb=2048,
                     max_worktree_files=200_000)
     wdg.violation_kind = "sandbox_error"  # simulate a stale kind from a prior thread death
@@ -275,7 +275,7 @@ def test_check_disk_explicitly_resets_stale_sandbox_error_kind(tmp_path, monkeyp
 
     monkeypatch.setattr(wd.shutil, "disk_usage", lambda path: FakeUsage())
     wdg = wd.Watchdog(
-        kill=lambda reason: None, sample=lambda: (0, 0),
+        kill=lambda reason: None, sample=lambda wait=True: (0, 0),
         storage_paths=[tmp_path], min_free_mb=2048, max_worktree_mb=2048,
         max_worktree_files=200_000, clock=lambda: 0.0, sleep=lambda s: None,
     )
@@ -298,7 +298,7 @@ def test_disk_check_failure_counter_resets_on_success(tmp_path, monkeypatch):
 
     kills = []
     wdg = wd.Watchdog(
-        kill=lambda reason: kills.append(reason), sample=lambda: (0, 0),
+        kill=lambda reason: kills.append(reason), sample=lambda wait=True: (0, 0),
         storage_paths=[tmp_path], min_free_mb=2048, max_worktree_mb=2048,
         max_worktree_files=200_000, clock=lambda: 0.0, sleep=lambda s: None,
     )
@@ -319,3 +319,13 @@ def test_disk_check_failure_counter_resets_on_success(tmp_path, monkeypatch):
     result3 = wdg._check_disk()
     assert result3 is False  # free space is plenty
     assert wdg._disk_check_failures == 0
+
+
+def test_check_worktree_budget_once_sample_returns_none():
+    # When sample returns None (non-blocking mode or failed twice),
+    # check_worktree_budget_once should return False without touching violation
+    wdg = Watchdog(kill=lambda r: None, sample=lambda wait=True: None,
+                    storage_paths=[], min_free_mb=1, max_worktree_mb=1, max_worktree_files=1)
+    result = wdg.check_worktree_budget_once(wait=True)
+    assert result is False
+    assert wdg.violation is None

@@ -2516,3 +2516,196 @@ def test_reap_caps_strays(started_with_transcript, monkeypatch):
     kill = [e for e in _events(run_dir, transcript) if e["event"] == "stray_kill"][0]
     assert len(kill["strays"]) == 20 and kill["strays_total"] == 25
     assert len(kill["strays"][0]) == 201 and kill["strays"][0].endswith("\u2026")
+
+import threading
+
+def test_reap_holds_lock_during_worktree_sampling(started, monkeypatch):
+    # Test that _reap holds _reap_lock during its entire body, preventing
+    # concurrent non-blocking samples from running docker calls
+    sb, fake, run_dir = started
+    
+    # Track when the top command starts and finishes
+    entered_event = threading.Event()
+    release_event = threading.Event()
+    
+    # Script top to set an event when entered, then wait for release
+    def script_top(argv):
+        entered_event.set()
+        # Wait for release, but timeout after 5 seconds
+        if not release_event.wait(timeout=5):
+            raise RuntimeError("release_event timeout")
+        return _ok(_TOP_TETHER_ONLY)
+    
+    fake.script(["top"], script_top)
+    fake.script(_OOM_ARGV, _ok(b"false\n"))
+    
+    # Record the number of calls before we start
+    calls_before = len(fake.calls)
+    
+    # Run sb.bash on a thread (this will call _reap which holds the lock)
+    bash_result = [None]
+    bash_error = [None]
+    
+    def run_bash():
+        try:
+            bash_result[0] = sb.bash("true")
+        except Exception as e:
+            bash_error[0] = e
+    
+    bash_thread = threading.Thread(target=run_bash)
+    bash_thread.start()
+    
+    # Wait for _reap's top command to be entered
+    assert entered_event.wait(timeout=5), "top didn't start within timeout"
+    
+    # Now try a non-blocking sample - should return None immediately without making docker calls
+    result = sb._sample_worktree(wait=False)
+    assert result is None, "Non-blocking sample should return None when lock is held"
+    
+    # Verify no docker calls were made for sampling
+    sample_calls_after = [c for c in fake.calls if list(c[0]) == _SAMPLE_ARGV]
+    assert len(sample_calls_after) == 0, "No sample calls should be made while lock is held"
+    
+    # Release the lock by setting release_event
+    release_event.set()
+    
+    # Wait for bash thread to complete (with timeout)
+    bash_thread.join(timeout=5)
+    assert not bash_thread.is_alive(), "Bash thread did not complete within timeout"
+    
+    # Verify the sample call happened after we released
+    sample_calls_after = [c for c in fake.calls if list(c[0]) == _SAMPLE_ARGV]
+    assert len(sample_calls_after) >= 1, "Sample call should be made after lock is released"
+    
+    # Now a blocking sample should work
+    result = sb._sample_worktree(wait=True)
+    assert result == (1024, 5), "Blocking sample should succeed after lock is released"
+
+
+def test_sample_worktree_wait_false_with_reset(started, monkeypatch):
+    # Test wait=False with failing measure and _reset_this_call False
+    sb, fake, run_dir = started
+    # Script sample to fail first, then succeed (after reset)
+    fake.script(_SAMPLE_ARGV, [_fail(b"exec failed"), _ok(b"1024\t/work\n5\n")])
+    
+    # First call with wait=False should reset once and return success
+    result = sb._sample_worktree(wait=False)
+    
+    # Verify exactly one reset was called
+    kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
+    assert len(kill_calls) == 1, "Should have exactly one reset"
+    
+    # Result should be successful
+    assert result == (1024, 5), "Should return success after one reset"
+    
+    # Second call with _reset_this_call True should NOT reset
+    sb._reset_this_call = True
+    fake.script(_SAMPLE_ARGV, _fail(b"exec failed again"))  # will fail but no reset
+    result = sb._sample_worktree(wait=False)
+    assert result is None, "Should return None with _reset_this_call True"
+
+
+def test_sample_worktree_wait_false_failing_twice(started, monkeypatch):
+    # Test wait=False with sample failing twice - should return None without exception
+    sb, fake, run_dir = started
+    # Script sample to always fail
+    fake.script(_SAMPLE_ARGV, _fail(b"exec failed"))
+    
+    # First call with wait=False should reset once and return None on second failure
+    result = sb._sample_worktree(wait=False)
+    
+    # Verify exactly one reset was called
+    kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
+    assert len(kill_calls) == 1, "Should have exactly one reset"
+    
+    # Result should be None (no exception)
+    assert result is None, "Should return None on second failure with wait=False"
+
+
+def test_sample_worktree_wait_false_with_reset_already_happened(started):
+    # Test wait=False when _reset_this_call is already True
+    sb, fake, run_dir = started
+    sb._reset_this_call = True
+    
+    # Script sample to fail
+    fake.script(_SAMPLE_ARGV, _fail(b"exec failed"))
+    
+    # Should return None without trying to reset
+    result = sb._sample_worktree(wait=False)
+    
+    # Verify no reset was called
+    kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
+    assert len(kill_calls) == 0, "Should not reset when _reset_this_call is True"
+    
+    assert result is None, "Should return None"
+
+
+def test_reap_dont_deadlock_with_concurrent_reset(started):
+    # Test that _reap doesn't deadlock when reset() is called concurrently
+    sb, fake, run_dir = started
+    
+    # Track call order to verify reset completes before _reap's docker calls
+    call_order = []
+    
+    def track_call(argv):
+        call_order.append(str(list(argv)))
+        return _ok(_TOP_TETHER_ONLY)
+    
+    # Script top to track calls
+    fake.script(["top"], track_call)
+    fake.script(_OOM_ARGV, _ok(b"false\n"))
+    
+    # Script reset's kill to wait on an event
+    reset_event = threading.Event()
+    
+    def script_reset_kill(argv):
+        call_order.append("reset:kill-start")
+        # Wait for reset_event to be set
+        if not reset_event.wait(timeout=5):
+            raise RuntimeError("reset timeout")
+        call_order.append("reset:kill-end")
+        return _ok()
+    
+    fake.script(["kill"], script_reset_kill)
+    fake.script(["wait"], lambda argv: _ok())
+    
+    # Start reset on a separate thread
+    reset_done = threading.Event()
+    
+    def run_reset():
+        sb.reset("concurrent test")
+        reset_done.set()
+    
+    reset_thread = threading.Thread(target=run_reset)
+    reset_thread.start()
+    
+    # Wait a bit to ensure reset has started and is waiting
+    import time
+    time.sleep(0.2)
+    
+    # Now call _reap (should not deadlock)
+    result = sb._reap()
+    
+    # Release the reset kill
+    reset_event.set()
+    
+    # Wait for both threads to complete
+    reset_thread.join(timeout=5)
+    assert not reset_thread.is_alive(), "Reset thread did not complete"
+    
+    # Verify no deadlock occurred
+    assert reset_done.is_set(), "Reset should have completed"
+    
+    # Verify call order: reset kill should start before _reap's top
+    # (this ensures _reap waited for the reset to complete)
+    kill_idx = None
+    top_idx = None
+    for i, call in enumerate(call_order):
+        if "reset:kill" in call:
+            kill_idx = i
+        elif "top" in call and "reset" not in call:
+            top_idx = i
+    
+    # Top should come after reset kill completes
+    if kill_idx is not None and top_idx is not None:
+        assert top_idx > kill_idx, "top should come after reset kill completes"

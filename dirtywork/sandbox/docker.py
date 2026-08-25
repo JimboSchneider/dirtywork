@@ -205,6 +205,8 @@ class DockerSandbox:
         self._objects_dir = None
         self._export_failed = False
         self._reset_this_call = False  # Track if reset happened in current bash call
+        # Lock order: _reap_lock -> _reset_lock -> _notices_lock
+        self._reap_lock = threading.Lock()
         # Serializes reset()'s whole body (kill -> wait -> new tether -> init)
         # and the watchdog thread's own kill path against each other: reset()
         # can be invoked from the watchdog thread (_sample_worktree's
@@ -954,65 +956,70 @@ class DockerSandbox:
         # Don't perform multiple resets in one call
         if self._reset_this_call:
             return False
-        try:
-            top = self._run(["top", self.container], timeout=docker_cli.T_QUERY)
-            unreachable = top.returncode != 0
-        except docker_cli.DockerError:
-            unreachable = True
-        if unreachable:
-            self.reset("container unreachable after bash")
-            return True
-        rows = strays.stray_rows(top.output)
-        capped, total = strays.cap_strays(rows) if rows else ([], None)
-        if rows:
-            if self._tether_pid is None or not self._kill_strays():
-                self.reset("stray process after bash", strays=capped, strays_total=total)
+        # Use _reap_lock to serialize with _sample_worktree's non-blocking sample;
+        # ALL work after the guard (top, kill, settle re-checks, OOM inspect,
+        # sweep, event/notice, and any reset) runs inside the lock to prevent
+        # watchdog sampling from capturing partial state.
+        with self._reap_lock:
+            try:
+                top = self._run(["top", self.container], timeout=docker_cli.T_QUERY)
+                unreachable = top.returncode != 0
+            except docker_cli.DockerError:
+                unreachable = True
+            if unreachable:
+                self.reset("container unreachable after bash")
                 return True
-            for _ in range(3):
-                time.sleep(_SETTLE_SLEEP)
-                try:
-                    top = self._run(["top", self.container], timeout=docker_cli.T_QUERY)
-                    unreachable = top.returncode != 0
-                except docker_cli.DockerError:
-                    unreachable = True
-                if unreachable:
-                    self.reset("container unreachable after bash")
-                    return True
-                if not strays.stray_rows(top.output):
-                    break
-            else:
-                self.reset("stray process after bash", strays=capped, strays_total=total)
-                return True
-        try:
-            oom = self._run(
-                ["inspect", "--format", "{{.State.OOMKilled}}", self.container],
-                timeout=docker_cli.T_QUERY,
-            )
-        except docker_cli.DockerError:
-            # If inspect fails, don't reset - it would be recursive
-            return False
-        if oom.returncode == 0 and oom.output.decode("utf-8", errors="replace").strip() == "true":
+            rows = strays.stray_rows(top.output)
+            capped, total = strays.cap_strays(rows) if rows else ([], None)
             if rows:
-                self.reset("oom", strays=capped, strays_total=total)
-            else:
-                self.reset("oom")
-            return True
-        if rows:
-            locks, locks_total = self._sweep_locks()
-            fields = {"strays": capped}
-            if total is not None:
-                fields["strays_total"] = total
-            if locks:
-                fields["locks_removed"] = locks
-            if locks_total is not None:
-                fields["locks_removed_total"] = locks_total
-            if self.transcript is not None:
-                try:
-                    self.transcript.write("stray_kill", **fields)
-                except Exception:
-                    pass
-            self._queue_notice("stray_kill", stray_kill_text(capped, total, locks))
-        return False
+                if self._tether_pid is None or not self._kill_strays():
+                    self.reset("stray process after bash", strays=capped, strays_total=total)
+                    return True
+                for _ in range(3):
+                    time.sleep(_SETTLE_SLEEP)
+                    try:
+                        top = self._run(["top", self.container], timeout=docker_cli.T_QUERY)
+                        unreachable = top.returncode != 0
+                    except docker_cli.DockerError:
+                        unreachable = True
+                    if unreachable:
+                        self.reset("container unreachable after bash")
+                        return True
+                    if not strays.stray_rows(top.output):
+                        break
+                else:
+                    self.reset("stray process after bash", strays=capped, strays_total=total)
+                    return True
+            try:
+                oom = self._run(
+                    ["inspect", "--format", "{{.State.OOMKilled}}", self.container],
+                    timeout=docker_cli.T_QUERY,
+                )
+            except docker_cli.DockerError:
+                # If inspect fails, don't reset - it would be recursive
+                return False
+            if oom.returncode == 0 and oom.output.decode("utf-8", errors="replace").strip() == "true":
+                if rows:
+                    self.reset("oom", strays=capped, strays_total=total)
+                else:
+                    self.reset("oom")
+                return True
+            if rows:
+                locks, locks_total = self._sweep_locks()
+                fields = {"strays": capped}
+                if total is not None:
+                    fields["strays_total"] = total
+                if locks:
+                    fields["locks_removed"] = locks
+                if locks_total is not None:
+                    fields["locks_removed_total"] = locks_total
+                if self.transcript is not None:
+                    try:
+                        self.transcript.write("stray_kill", **fields)
+                    except Exception:
+                        pass
+                self._queue_notice("stray_kill", stray_kill_text(capped, total, locks))
+            return False
 
     def _watchdog_kill(self, reason: str) -> None:
         # Goes through the same lock as reset() (Important #4): without it, a
@@ -1046,7 +1053,7 @@ class DockerSandbox:
             return None
         return kbytes, entries
 
-    def _sample_worktree(self) -> tuple:
+    def _sample_worktree(self, *, wait=True) -> tuple | None:
         """(kbytes, entries) for /work, sampled inside the container. On
         exec failure, resets once and retries; a second failure raises
         SandboxError (spec §6: "If the exec itself fails ... → reset, then
@@ -1063,19 +1070,41 @@ class DockerSandbox:
         sufficient -- raise immediately rather than retrying blind against
         a container another thread may still be resetting.
 
-        Returns (kbytes, entries) on success or raises SandboxError. If a
-        reset was performed during sampling, the caller should skip budget
-        checks for this call (container was rebuilt)."""
-        result = self._measure_worktree_once()
-        if result is not None:
-            return result
-        if not self._reset_this_call:
-            self.reset("budget sample failed")
+        The `wait` parameter controls blocking behavior:
+        - wait=True (default): today's behaviour exactly. On second failure,
+          raises SandboxError.
+        - wait=False (watchdog thread): non-blocking. Acquires _reap_lock
+          with blocking=wait; if lock is busy, returns None immediately.
+          On second failure, returns None (no exception) -- the main
+          thread's sample after this call escalates.
+
+        Returns (kbytes, entries) on success. With wait=True, raises
+        SandboxError on failure. With wait=False, returns None on failure."""
+        # Try to acquire _reap_lock with blocking control
+        acquired = self._reap_lock.acquire(blocking=wait)
+        try:
+            if not acquired:
+                # Non-blocking mode and lock is busy - return None immediately
+                return None
             result = self._measure_worktree_once()
             if result is not None:
                 return result
-            raise SandboxError("worktree budget sample failed twice in a row")
-        raise SandboxError("worktree budget sample failed after an earlier reset this call")
+            if not self._reset_this_call:
+                self.reset("budget sample failed")
+                result = self._measure_worktree_once()
+                if result is not None:
+                    return result
+                if wait:
+                    raise SandboxError("worktree budget sample failed twice in a row")
+                # Non-blocking: return None on second failure (main thread escalates)
+                return None
+            if wait:
+                raise SandboxError("worktree budget sample failed after an earlier reset this call")
+            # Non-blocking: return None if already reset (main thread escalates)
+            return None
+        finally:
+            if acquired:
+                self._reap_lock.release()
 
     def _after_bash(self) -> None:
         self._reap()
@@ -1087,7 +1116,8 @@ class DockerSandbox:
             # here would let a run continue past a budget breach until the
             # next bash call or export self-corrects it.
             if not self._reset_this_call:
-                self.watchdog.check_worktree_budget_once()
+                # Synchronous sample after bash: wait=True for blocking behavior
+                self.watchdog.check_worktree_budget_once(wait=True)
             if self.watchdog.violation is not None:
                 violation = self.watchdog.violation
                 kind = self.watchdog.violation_kind
