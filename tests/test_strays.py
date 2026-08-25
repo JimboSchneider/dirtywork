@@ -136,7 +136,8 @@ def test_parse_tether_pid_invalid() -> None:
     assert strays.parse_tether_pid(b"7\n8\n") is None
     assert strays.parse_tether_pid(b"-1\n") is None
     assert strays.parse_tether_pid(b"abc\n") is None
-    assert strays.parse_tether_pid(b"  7  \n") is None  # No leading/trailing spaces
+    assert strays.parse_tether_pid(b"  7  \n") == 7  # the merged output is stripped
+    assert strays.parse_tether_pid(b"7\n\n") == 7
 
 
 def test_parse_tether_pid_with_errors() -> None:
@@ -236,8 +237,8 @@ def test_cap_locks_over_limit_no_truncation() -> None:
     paths = [f"/gitdir/lock{i}.lock" for i in range(25)]
     capped, total = strays.cap_locks(paths, truncated=False)
     assert len(capped) == 20
-    # total should be None when truncated=False even if over limit
-    assert total is None
+    # the exact count is known when the sweep output was not truncated
+    assert total == 25
 
 
 def test_cap_locks_over_limit_with_truncation() -> None:
@@ -245,8 +246,8 @@ def test_cap_locks_over_limit_with_truncation() -> None:
     paths = [f"/gitdir/lock{i}.lock" for i in range(25)]
     capped, total = strays.cap_locks(paths, truncated=True)
     assert len(capped) == 20
-    # total should be provided when truncated=True
-    assert total == 25
+    # a capped capture cannot support an exact count (spec §3.4 v4): no total
+    assert total is None
 
 
 def test_cap_locks_under_limit_with_truncation() -> None:
