@@ -315,7 +315,7 @@ exit 0
 - Every word is a `dash` builtin (`read`, `[`, `kill`, `for`, `exit`); no `$( )`, pipe, subshell
   or external binary — the property that makes it run inside a pids-saturated container (§1.5).
   A code comment states the property; a unit test asserts the constant contains none of `$(`,
-  `|`, `` ` ``, `(`.
+  `` ` ``, `(`, and that `|` occurs only as the `||` of the two guards (never a pipe).
 - `/proc/[0-9]*` is expanded once per `for`, string-sorted (`/proc/1001` before `/proc/999`), so a
   supervisor's child may die before the supervisor forks again; passes 2 and 3 re-expand and catch
   what was forked in between. `kill` on an already-dead PID just fails into `2>/dev/null`.
@@ -407,9 +407,10 @@ New `self._reap_lock = threading.Lock()`, held:
   or the main thread's sample is in progress) the tick is skipped — `check_worktree_budget_once`
   treats `None` as "no sample" and returns `False` — so **the watchdog thread never waits on a
   ladder and its 0.5 s disk poll is never delayed by one**. On this path a failed measurement
-  never resets: if `_reset_this_call` is already set (the container was killed or reset during
-  this call by whoever recorded why) it returns `None`; otherwise it resets once and re-measures as
-  today, and a second failure raises (the thread's handler then fails closed as today).
+  resets at most once and never raises: if `_reset_this_call` is already set (the container was
+  killed or reset during this call by whoever recorded why) it returns `None`; otherwise it resets
+  once and re-measures, and a second failure returns `None` too — the main thread's own
+  `wait=True` sample after the call is the path that escalates to `SandboxError`.
 
 **Lock order is `_reap_lock` → `_reset_lock` → `_notices_lock`, everywhere.** `reset()` takes
 only `_reset_lock` and is called only from code holding `_reap_lock` (`_reap`, `_sample_worktree`)
@@ -430,8 +431,8 @@ call. No path acquires `_reap_lock` while holding `_reset_lock`, so no cycle exi
   records `violation` before calling `kill()`. Because a kill can also land after that first
   check, `_reap` and `_sample_worktree` re-read `watchdog.violation` immediately before any
   `reset()` call — and `_sample_worktree` before raising its own `SandboxError` — and, when it is
-  set, return without acting (no docker call, no event, no notice); `_after_bash` re-checks it
-  after the reap and after the sample and raises the recorded kind. So a container the watchdog
+  set, return without acting (no docker call, no event, no notice); `_after_bash` checks it
+  before the reap and again after the sample and raises the recorded kind. So a container the watchdog
   killed is never reaped, sampled, or reset: a disk-floor kill landing during a bash exec,
   mid-ladder, or mid-sample ends the run `budget_exceeded` with the disk-floor reason and no
   `sandbox_reset` event.
@@ -803,7 +804,7 @@ generic `["exec"]` default would silently disable it across the suite.
    `_tether_pid is None` → straight to reset with `strays`; OOM true after a clean kill → `reset("oom", strays=…)`, no sweep exec.
 4. limits: 25 stray rows → 20 entries + `strays_total: 25`; a 300-char CMD → 200 + `…`;
    `locks_removed` absent when the sweep printed nothing or only non-matching lines.
-5. `STRAY_KILL_SCRIPT` is fork-free (no `$(`, `|`, `` ` ``, `(`); `TETHER_DISCOVERY_SCRIPT`'s
+5. `STRAY_KILL_SCRIPT` is fork-free (no `$(`, `` ` ``, `(`; `|` only inside `||`); `TETHER_DISCOVERY_SCRIPT`'s
    `$(( ))` is builtin arithmetic and exempt; `LOCK_SWEEP_ARGV` is an argv list and never reaches
    a shell; `EXPORT_GIT_ENTRIES_SCRIPT` parses under `dash -n`; the kill script has three passes;
    the pid arrives as `$1`.
