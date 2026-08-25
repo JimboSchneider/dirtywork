@@ -16,8 +16,9 @@ from .provider_doubles import DictProvider, patch_provider, text_body, tool_call
 DOC = Path(__file__).parent.parent / "docs" / "transcript-schema.md"
 
 EVENT_NAMES = ["run_start", "assistant", "tool_result", "guardrail_block", "nudge",
-               "sandbox_reset", "verify", "run_end"]
-NUDGE_KINDS = ["truncated", "empty", "text_tool_call", "stall", "timeout", "malformed_entry"]
+               "stray_kill", "sandbox_reset", "verify", "run_end"]
+NUDGE_KINDS = ["truncated", "empty", "text_tool_call", "stall", "timeout", "malformed_entry",
+               "stray_kill", "sandbox_reset"]
 STATUSES = ["completed", "max_turns", "timeout", "context_exhausted", "model_error",
             "interrupted", "stalled", "stuck", "verify_failed", "budget_exceeded",
             "sandbox_error", "export_failed"]
@@ -231,3 +232,37 @@ def test_a_verify_run_emits_the_documented_follow_up_fields(tmp_path):
     text = DOC.read_text(encoding="utf-8")
     for phrase in ("run not finished", "Wire shape", "malformed_entry", "finish_result"):
         assert phrase in text
+
+
+def test_doc_documents_stray_kill_fields():
+    """Test that stray_kill section documents strays, strays_total, locks_removed, locks_removed_total."""
+    text = DOC.read_text(encoding="utf-8")
+    # Split on section headers
+    sections = text.split("\n### ")
+    stray_kill_section = None
+    for section in sections:
+        if section.startswith("stray_kill"):
+            stray_kill_section = section
+            break
+    assert stray_kill_section is not None, "stray_kill section not found in doc"
+    
+    # Check required tokens
+    required = ["strays", "strays_total", "locks_removed", "locks_removed_total"]
+    for token in required:
+        assert token in stray_kill_section, f"{token} not found in stray_kill section"
+
+
+def test_doc_documents_sandbox_reset_strays():
+    """Test that sandbox_reset section documents strays."""
+    text = DOC.read_text(encoding="utf-8")
+    # Split on section headers
+    sections = text.split("\n### ")
+    sandbox_reset_section = None
+    for section in sections:
+        if section.startswith("sandbox_reset"):
+            sandbox_reset_section = section
+            break
+    assert sandbox_reset_section is not None, "sandbox_reset section not found in doc"
+    
+    # Check for strays
+    assert "strays" in sandbox_reset_section, "strays not found in sandbox_reset section"

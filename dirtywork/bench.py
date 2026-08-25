@@ -45,7 +45,9 @@ BENCH_REPOS = Path(__file__).resolve().parent.parent / "bench" / "repos"
 BENCH_HOME = rundir.BENCH_HOME
 # Order is the order the NUDGES column prints in; the plain summary's legend
 # line spells it out and must stay in step.
-NUDGE_KINDS = ("stall", "empty", "truncated", "text_tool_call", "timeout", "malformed_entry")
+NUDGE_KINDS = ("stall", "empty", "truncated", "text_tool_call", "timeout", "malformed_entry", "stray_kill", "sandbox_reset")
+# The kinds whose nudge path records a FailureTracker \"empty_reply\" — must equal tuple(runner.NUDGES) (same order).
+EMPTY_REPLY_NUDGE_KINDS = ("truncated", "empty", "text_tool_call")
 ACCEPTANCE_MEMORY = "2g"
 ACCEPTANCE_CPUS = "2"
 ACCEPTANCE_PIDS = 256
@@ -207,7 +209,7 @@ def _event_counts(run_dir, *, events=None) -> dict:
     transcript.jsonl from disk -- a second parse of the same file per run
     harvested (2026-08-23 soak review, item 5/10). When `events` is given,
     `run_dir` is ignored entirely (not even used for the None-check below)."""
-    counts = {"guardrail_block": 0, "sandbox_reset": 0, "nudge_other": 0}
+    counts = {"guardrail_block": 0, "sandbox_reset": 0, "stray_kill": 0, "nudge_other": 0}
     counts.update({f"nudge_{kind}": 0 for kind in NUDGE_KINDS})
     if events is None:
         if run_dir is None:
@@ -227,6 +229,8 @@ def _event_counts(run_dir, *, events=None) -> dict:
         name = event.get("event")
         if name in ("guardrail_block", "sandbox_reset"):
             counts[name] += 1
+        elif name == "stray_kill":
+            counts["stray_kill"] += 1
         elif name == "nudge":
             key = f"nudge_{event.get('kind')}"
             counts[key if key in counts else "nudge_other"] += 1
@@ -253,13 +257,9 @@ def _harness_failures(counts: dict, status, final_message, timeouts=0) -> dict:
     EXCEPT 0.9's `timeout` nudge, which is not a FailureTracker event at all
     (a timed-out command is not a model mistake), and 1.0's `malformed_entry`
     nudge, which is its own FailureTracker kind, not an empty reply -- both are
-    excluded here and get their own classes.
-
-    `timeouts` is the RUNNER's own count, taken from the payload by the caller
-    and never re-derived from the nudge events: a turn with two timed-out
-    commands emits ONE nudge and counts TWO timeouts."""
-    non_stall = sum(counts[f"nudge_{kind}"] for kind in NUDGE_KINDS
-                    if kind not in ("stall", "timeout", "malformed_entry"))
+    excluded here and get their own classes. `stray_kill` and `sandbox_reset`
+    nudges are Harness events, not empty replies, so they're excluded too."""
+    non_stall = sum(counts[f"nudge_{kind}"] for kind in EMPTY_REPLY_NUDGE_KINDS)
     failures = {f"nudge_{kind}": counts[f"nudge_{kind}"] for kind in NUDGE_KINDS}
     failures["nudge_other"] = counts["nudge_other"]
     failures["empty_reply"] = non_stall
@@ -283,7 +283,7 @@ def run_one_bench_case(model: str, task: str, repeat: int, *, provider, base_url
                 "prompt_tokens": None, "completion_tokens": None,
                 "wall_s": round(time.monotonic() - wall_start, 1),
                 "acceptance": "skipped", "guardrail_blocks": 0, "sandbox_resets": 0,
-                "diff_stat": None, "harness": {}, "verdict": None, "review_seconds": None}
+                "stray_kills": 0, "diff_stat": None, "harness": {}, "verdict": None, "review_seconds": None}
 
     repo_dir = None
     try:
@@ -346,6 +346,7 @@ def run_one_bench_case(model: str, task: str, repeat: int, *, provider, base_url
         "acceptance": acceptance,
         "guardrail_blocks": counts["guardrail_block"],
         "sandbox_resets": counts["sandbox_reset"],
+        "stray_kills": counts["stray_kill"],
         "diff_stat": run_json.get("diff_stat"),
         "harness": _harness_failures(counts, status, payload.get("final_message"),
                                      payload.get("timeouts", 0)),

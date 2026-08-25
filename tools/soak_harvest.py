@@ -34,7 +34,7 @@ from dirtywork.runner import _recovered_path  # noqa: E402  (same regex scan run
 MAIN_COLUMNS = ("Run", "Model", "Status", "Turns", "Wall", "Prompt tok", "Compl tok",
                 "Harness failures", "Review verdict", "Notes", "Feature fired")
 PER_RUN_COLUMNS = ("Run", "Status", "Turns", "Wall", "s/turn", "Prompt tok", "Compl tok",
-                   "prompt tok/s", "compl tok/s", "nudges", "guardrail blocks", "tool mix")
+                   "prompt tok/s", "compl tok/s", "nudges", "guardrail blocks", "stray kills", "tool mix")
 MODEL_TOOL_COLUMNS = ("Run", "Status", "Turns", "Wall", "Model time", "Tool time",
                       "model s/turn", "tool s/turn", "prompt tok/s (model time)",
                       "compl tok/s (model time)", "slowest tool call")
@@ -458,7 +458,7 @@ def _per_run_row(h: dict) -> dict:
         "prompt tok/s": _fmt_rate(h.get("prompt_tok"), wall_s),
         "compl tok/s": _fmt_rate(h.get("compl_tok"), wall_s),
         "nudges": h.get("nudges", 0), "guardrail blocks": h.get("guardrail_blocks", 0),
-        "tool mix": h.get("tool_mix") or "-",
+        "stray kills": h.get("stray_kills", 0), "tool mix": h.get("tool_mix") or "-",
     }
 
 
