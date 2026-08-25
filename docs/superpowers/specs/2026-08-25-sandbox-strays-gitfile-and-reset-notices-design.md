@@ -1,7 +1,7 @@
 # Sandbox resets: kill strays in place, keep the worker's git state, tell the worker (#61)
 
 **Date:** 2026-08-25
-**Status:** Design v3 — approach B (stray ladder + gitfile discovery + #60-carrier notices) chosen
+**Status:** Design v4 — **approved by the owner 2026-08-25 11:17 CDT for plan → dogfood execution** with two amendments folded and marked *(v4)*: the export safety net compares gitlinks against the base tree and fails closed (§4.4 step 6); the lock sweep defines its truncation rule (§3.4, §6.1). Test 20 split across T1/T2 (§9, §10). The four items offered for veto were all approved (`DOTNET_NOLOGO=1`, `core.excludesFile`, the bench cell widening, `strays.py`). Approach B (stray ladder + gitfile discovery + #60-carrier notices) chosen
 by the owner (2026-08-25 09:14 CDT) with **nine required revisions**, each resolved in the section
 §0 names. v2 folds a six-lens red-team with two-refuter adversarial verification (42 agents,
 09:26–09:56 CDT): 50 findings (3 Blocker, 32 Important, 15 Minor); 18 Blocker/Important verified
@@ -12,7 +12,6 @@ live probe of the rewritten §4.4 (P8: the splice produced the expected tree exa
 worker changes under six nested roots; v1's exclusion would have dropped 9 of them) and a
 closure/consistency pass (22 findings: 1 Blocker — the enumeration constant's unescaped
 parentheses — 8 Important, 13 Minor; all applied; red-team coverage table: nothing missing).
-Not yet approved for plan → execution.
 **Origin:** issue #61 (milestone **1.0.0 — contract freeze**), soak finding S11, plus the two
 findings the #64 dogfood carried here: S13 (`GIT_DIR`/`GIT_WORK_TREE` exported into every
 command) and the "stray process" resets that followed plain foreground commands. Evidence:
@@ -351,7 +350,13 @@ acting (§3.6):
   unterminated tail dropped, and only tokens full-matching
   `^/gitdir/(?:.+/)?(?:[^/]+\.lock|gc\.pid)$` become `locks_removed` (the merged stream can
   carry `find` diagnostics; `gc.pid` sits at the git-dir root). rc ≠ 0 → stderr `lock sweep
-  incomplete (rc N)`, the matched paths still count. A `DockerError` on the sweep (timeout or a
+  incomplete (rc N)`, the matched paths still count. *(v4)* `locks_removed_total` is the exact
+  count of matched tokens and is written only when that count exceeds 20 **and** the capture is
+  not truncated; a truncated `Captured` (`procs.MAX_CAPTURE_BYTES`, 1 MiB — thousands of lock
+  files) keeps the first 20 parsed paths as `locks_removed`, omits the total, and prints `lock
+  sweep incomplete (output truncated)` to stderr — an exact count is not obtainable from a capped
+  stream and is not claimed. (`strays_total` has no such rule: a `docker top` listing cannot reach
+  the cap under `--pids-limit`.) A `DockerError` on the sweep (timeout or a
   client failure) → stderr `lock sweep incomplete (<error>)`, `locks_removed` omitted, **no
   reset** — a slow `find` over a large `/gitdir` must not cost the state the ladder just saved.
   Then write `stray_kill` (§6.1), queue the `stray_kill` notice (§5), return.
@@ -586,11 +591,17 @@ In the export container (`layout="env"`, `/work` read-only, index populated by `
    inert; `literal` disables glob interpretation; a directory pathspec matches its subtree; the
    spliced entries do not match the pathspec and are left as spliced). Then `write-tree` as today.
    With no roots the argv is exactly today's `git add -A`.
-6. **Safety net (new step).** After `write-tree`, `git ls-files -s` (T_EXPORT_STEP; the export
-   today reads the index only through `git diff --cached --name-only`, which cannot show a mode):
-   any line whose mode is `160000` → `export_failed: nested repository at <path> was not masked`
-   (the enumeration missed a root, or git treated a directory as embedded for a reason this
-   algorithm did not foresee). Fail loud, keep the volume.
+6. **Safety net (new step; *(v4)* base-aware and fail-closed).** After `write-tree`:
+   `git ls-files -s -z` (T_EXPORT_STEP; the export today reads the index only through `git diff
+   --cached --name-only`, which cannot show a mode) and `git ls-tree -r -z <base_commit>`, each
+   parsed on NUL. Either exec with rc ≠ 0, a `DockerError`, or `Captured.truncated` →
+   `export_failed: could not verify the export index (<which>)` — the net must fail closed, never
+   pass on a partial listing. Otherwise `new_gitlinks` = paths with mode `160000` in the index
+   that are **not** mode `160000` at the same path in the base tree; any → `export_failed: nested
+   repository at <path> was not masked` (the enumeration missed a root, or git treated a directory
+   as embedded for a reason this algorithm did not foresee). A gitlink the base commit already
+   carries — a real submodule of the target repository, checked out as an empty directory — is
+   exempt and passes through as today. Fail loud, keep the volume.
 
 Effect (P8, §1.4): the diff shows the worker's edits, additions and deletions under a nested root
 like anywhere else; a committed nested repository never becomes a gitlink; the fatal `does not have a
@@ -665,7 +676,7 @@ consecutive-failure abort (like `timeout`).
 | `strays` | list of string | the CMD column of every detector row from the **first** `docker top`, in `docker top` order; at most **20** entries; each cut to **200** characters with a trailing `…` when cut; never empty (the detector fired) |
 | `strays_total` | integer | **sparse**: present only when more than 20 rows were seen (then it is the full count) |
 | `locks_removed` | list of string | **sparse**: present only when the sweep removed at least one file; absolute paths under `/gitdir`, in `find` order, at most 20 entries |
-| `locks_removed_total` | integer | **sparse**: present only when more than 20 were removed (then it is the full count) |
+| `locks_removed_total` | integer | **sparse**: present only when more than 20 were removed and the sweep output was not truncated (then it is the exact count; §3.4 *(v4)*) |
 
 **`sandbox_reset`** gains the same `strays` / `strays_total` fields, **sparse**: present only when
 the ladder's first `top` had stray rows — `reason` `stray process after bash` (rows from the
@@ -819,8 +830,10 @@ generic `["exec"]` default would silently disable it across the suite.
     depth order, `read-tree --empty`, `add -A` with `-c core.excludesFile` and the child
     exclusions, `read-tree --prefix`, `write-tree`, main `rm --cached -- :(literal)<R>` +
     `read-tree --prefix` + `add -A` exclusions, then `ls-files -s`); a root `.git` directory listed
-    but no root; no roots → today's argv byte for byte plus the `ls-files -s` step; a `160000`
-    index entry → `export_failed: nested repository at … was not masked`.
+    but no root; no roots → today's argv byte for byte plus the `ls-files -s -z` / `ls-tree -r -z`
+    steps; a `160000` index entry absent from the base tree → `export_failed: nested repository
+    at … was not masked`; a `160000` entry the base tree also has at that path → passes; either
+    listing rc ≠ 0 / truncated → `export_failed: could not verify the export index`.
 11. runner drain points (a scripted sandbox whose `drain_notices()` returns queued notices, and
     one without the method): ordinary turn → nudge events + `follow_up` = joined text in the
     documented order, `via: tool_result`; `finish` + failing verify → `follow_up` on the finish
@@ -861,9 +874,12 @@ Live (`@pytest.mark.docker`, `tests/test_docker_live.py`, `DIRTYWORK_LIVE_IMAGE`
 19. `.NET` (skip-with-reason unless the image has the SDK): `dotnet new console` + `dotnet build`
     → no `stray_kill`, no `sandbox_reset` on the 1.0/dev image; the same on a `:0.10`-style image
     without the variables → exactly one `stray_kill` naming `VBCSCompiler`.
-20. root `.git` tampering: `rm .git` → next `git status` in the sandbox fails, export still
-    succeeds; `rm .git && git init` (directory) → export succeeds and lists `.git` in
-    `dropped_git_entries`; after a forced reset both are back to the gitfile.
+20a. (T1) root `.git` tampering, worker side: `rm .git` → the next `git status` in the sandbox
+    fails; after a forced reset the gitfile is back; `rm .git && git init` (directory) → after a
+    forced reset the gitfile is back.
+20b. (T2) root `.git` tampering, export side: a run whose worker removed `.git` exports
+    successfully; one whose worker replaced it with a directory exports successfully and lists
+    `.git` in `dropped_git_entries`.
 21. a timed-out `grep` (a fixture file the pattern matches slowly, `timeout=1`) leaves no row in
     `docker top` and the next bash call produces no `stray_kill`.
 
@@ -881,8 +897,8 @@ Live (`@pytest.mark.docker`, `tests/test_docker_live.py`, `DIRTYWORK_LIVE_IMAGE`
 - **Task boundaries** (each independently testable, each a bounded file set sized for a 65k
   context; the plan step refines them):
   - **T1 — gitfile layout** (§4.1–§4.3): `docker_args.py` env split, `lifecycle.py` two layouts,
-    `docker.py` call sites, `guardrails.py` comment; tests 8, 9, 20.
-  - **T2 — export** (§4.4): `export.py` enumeration, roots, splice, safety net; test 10, 16.
+    `docker.py` call sites, `guardrails.py` comment; tests 8, 9, 20a.
+  - **T2 — export** (§4.4): `export.py` enumeration, roots, splice, safety net; tests 10, 16, 20b.
   - **T3 — stray ladder** (§3, §5.1's sandbox side): new `strays.py` (constants, parser, texts),
     `docker.py` discovery/kill/sweep/OOM/locks/flags/shutdown/`grep` timeout, `_notices` +
     `_notices_lock` + `drain_notices()` and the two queue sites, `watchdog.py`
