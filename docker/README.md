@@ -263,5 +263,5 @@ tag. In order:
 5. Close #59.
 6. Drop the "a derived image based on `:0.10` must set the `ENV` line
    itself" caveats from both docs — the 1.0 base image bakes
-   `DOTNET_EnableWriteXorExecute=0` in, so a derived `FROM :1.0` no longer
-   needs to repeat it.
+   `DOTNET_EnableWriteXorExecute=0` and the four .NET stray-process variables,
+   so a derived `FROM :1.0` no longer needs to repeat them.

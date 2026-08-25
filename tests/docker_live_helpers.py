@@ -21,6 +21,16 @@ def _call(call_id, name, args: dict):
             "function": {"name": name, "arguments": json.dumps(args)}}
 
 
+def _events(payload: dict) -> list:
+    """Return the parsed list of transcript events from a payload."""
+    return [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
+
+
+def _of(events: list, name: str) -> list:
+    """Filter events by event name."""
+    return [e for e in events if e["event"] == name]
+
+
 def _make_live_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
