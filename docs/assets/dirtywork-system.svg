@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="950" viewBox="0 0 1600 950" role="img" aria-labelledby="title desc">
+  <title id="title">dirtywork’s division of labor</title>
+  <desc id="desc">A frontier model architects a task, the dirtywork harness defines an isolated boundary, and a local model performs bounded work. Verification and a reviewable evidence packet come before a frontier model accepts, revises, or escalates the change.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#7A867F"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#1B221D" flood-opacity=".10"/>
+    </filter>
+  </defs>
+
+  <rect width="1600" height="950" fill="#F7F8F6"/>
+  <text x="100" y="82" fill="#1B221D" font-family="Arial, Helvetica, sans-serif" font-size="38" font-weight="700">dirtywork’s division of labor</text>
+  <text x="100" y="126" fill="#4A544D" font-family="Arial, Helvetica, sans-serif" font-size="22">Frontier judgment. Local execution. Evidence before merge.</text>
+
+  <!-- Top flow -->
+  <g filter="url(#shadow)">
+    <rect x="100" y="205" width="420" height="250" rx="18" fill="#FFF9F1" stroke="#A66A1E" stroke-width="2"/>
+    <rect x="590" y="205" width="420" height="250" rx="18" fill="#F1F3FC" stroke="#596BA8" stroke-width="2"/>
+    <rect x="1080" y="205" width="420" height="250" rx="18" fill="#EFF8F1" stroke="#0E7A4E" stroke-width="2"/>
+  </g>
+
+  <text x="132" y="250" fill="#A66A1E" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="700" letter-spacing="2">FRONTIER MODEL</text>
+  <text x="132" y="296" fill="#1B221D" font-family="Arial, Helvetica, sans-serif" font-size="29" font-weight="700">Architects</text>
+  <text x="132" y="339" fill="#4A544D" font-family="Arial, Helvetica, sans-serif" font-size="19">Understands the larger problem, writes</text>
+  <text x="132" y="368" fill="#4A544D" font-family="Arial, Helvetica, sans-serif" font-size="19">the brief, sets constraints, and chooses</text>
+  <text x="132" y="397" fill="#4A544D" font-family="Arial, Helvetica, sans-serif" font-size="19">what deserves attention.</text>
+
+  <text x="622" y="250" fill="#596BA8" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="700" letter-spacing="2">DIRTYWORK HARNESS</text>
+  <text x="622" y="296" fill="#1B221D" font-family="Arial, Helvetica, sans-serif" font-size="29" font-weight="700">Defines the boundary</text>
+  <text x="622" y="339" fill="#4A544D" font-family="Arial, Helvetica, sans-serif" font-size="19">Creates a worktree, exposes safe tools,</text>
+  <text x="622" y="368" fill="#4A544D" font-family="Arial, Helvetica, sans-serif" font-size="19">and keeps the worker away from the</text>
+  <text x="622" y="397" fill="#4A544D" font-family="Arial, Helvetica, sans-serif" font-size="19">real checkout.</text>
+
+  <text x="1112" y="250" fill="#0E7A4E" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="700" letter-spacing="2">LOCAL MODEL</text>
+  <text x="1112" y="296" fill="#1B221D" font-family="Arial, Helvetica, sans-serif" font-size="29" font-weight="700">Does the dirty work</text>
+  <text x="1112" y="339" fill="#4A544D" font-family="Arial, Helvetica, sans-serif" font-size="19">Reads files, edits code, runs commands,</text>
+  <text x="1112" y="368" fill="#4A544D" font-family="Arial, Helvetica, sans-serif" font-size="19">and handles the bounded implementation</text>
+  <text x="1112" y="397" fill="#4A544D" font-family="Arial, Helvetica, sans-serif" font-size="19">task on local hardware.</text>
+
+  <line x1="530" y1="330" x2="578" y2="330" stroke="#7A867F" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="1020" y1="330" x2="1068" y2="330" stroke="#7A867F" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="800" y1="470" x2="800" y2="532" stroke="#7A867F" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <!-- Review boundary -->
+  <rect x="100" y="540" width="1400" height="260" rx="20" fill="#FFFFFF" stroke="#89968F" stroke-width="2" stroke-dasharray="9 8"/>
+  <text x="130" y="584" fill="#4A544D" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="700" letter-spacing="2">THE REVIEW BOUNDARY</text>
+
+  <g filter="url(#shadow)">
+    <rect x="140" y="620" width="390" height="135" rx="16" fill="#F1F3FC" stroke="#596BA8" stroke-width="2"/>
+    <rect x="605" y="620" width="390" height="135" rx="16" fill="#F5F0F8" stroke="#765A8D" stroke-width="2"/>
+    <rect x="1070" y="620" width="390" height="135" rx="16" fill="#FFF9F1" stroke="#A66A1E" stroke-width="2"/>
+  </g>
+
+  <text x="168" y="656" fill="#596BA8" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" letter-spacing="2">VERIFICATION</text>
+  <text x="168" y="692" fill="#1B221D" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700">Tests are the judge</text>
+  <text x="168" y="725" fill="#4A544D" font-family="Arial, Helvetica, sans-serif" font-size="17">Run the requested gate before export.</text>
+
+  <text x="633" y="656" fill="#765A8D" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" letter-spacing="2">RUN EVIDENCE</text>
+  <text x="633" y="692" fill="#1B221D" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700">Receipts, not vibes</text>
+  <text x="633" y="725" fill="#4A544D" font-family="Arial, Helvetica, sans-serif" font-size="17">Diff, transcript, failures, and status.</text>
+
+  <text x="1098" y="656" fill="#A66A1E" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" letter-spacing="2">FRONTIER REVIEW</text>
+  <text x="1098" y="692" fill="#1B221D" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700">Accept, revise, or escalate</text>
+  <text x="1098" y="725" fill="#4A544D" font-family="Arial, Helvetica, sans-serif" font-size="17">Nothing merges because a worker said so.</text>
+
+  <line x1="540" y1="688" x2="593" y2="688" stroke="#7A867F" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="1005" y1="688" x2="1058" y2="688" stroke="#7A867F" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <text x="800" y="862" fill="#A66A1E" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700" text-anchor="middle">Use the strongest model when intelligence matters.</text>
+  <text x="800" y="897" fill="#0E7A4E" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700" text-anchor="middle">Use the smallest capable model for everything else.</text>
+</svg>
