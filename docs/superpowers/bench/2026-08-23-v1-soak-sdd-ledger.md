@@ -167,4 +167,5 @@ plan: `docs/superpowers/plans/2026-08-25-issue-61-sandbox-strays.md`. Sampler: `
 
 | run (slug) | task | status | wall | turns | s/turn | prompt tok | compl tok | tok/s | nudges | guardrail | resets | tool mix | verify |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `issue-61-task-w1-of-0825114114-a761a566` | W1 gitfile layout (run 1) | `max_turns` (work complete, no `finish`) | 220 s | 60 | 3.7 | 1,754,692 (≈29.2k/turn) | 12,697 | ≈8.0k | 0 | 0 | 0 | read_file 27 / edit_file 17 / bash 6 / list_dir 4 / append_file 2 / grep 2 / write_file 1 | not reached — host: 1388 passed, 2 failed (2 test-side bugs: `PATH=` prefix, `-e` index) |
 
