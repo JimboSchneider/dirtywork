@@ -114,7 +114,10 @@ def _oversized(encoded: bytes):
 _PROMOTE = ('{ chmod --reference="$1" "$2" 2>/dev/null || chmod 644 "$2"; } && '
             'mv -fT -- "$2" "$1" || { rm -f -- "$2"; exit 1; }')
 
-# `$1` is the target relpath, `$2` the host-generated temp relpath; worker DATA
+# Settle sleep duration for re-check loops
+_SETTLE_SLEEP = 0.05
+
+# Matches a full swept temp-file path, and only that -- `Captured.output`
 # arrives on stdin and is never inside the script text. `&&`-chained so a
 # failed `cat` can never promote. The writability guard keeps host parity:
 # today an unwritable file refuses EACCES, and without it temp+`mv` would
@@ -904,6 +907,44 @@ class DockerSandbox:
             # Mark that a reset happened in this call (for _after_bash to skip budget sample)
             self._reset_this_call = True
 
+    def _kill_strays(self) -> bool:
+        """Kill stray processes using the STRAY_KILL_SCRIPT.
+        
+        Returns True iff rc == 0 (DockerError -> False).
+        """
+        argv = docker_args.exec_argv(
+            self.container, ["/bin/sh", "-c", strays.STRAY_KILL_SCRIPT, "_", str(self._tether_pid)]
+        )
+        try:
+            result = self._run(argv, timeout=docker_cli.T_QUERY)
+            return result.returncode == 0
+        except docker_cli.DockerError:
+            return False
+
+    def _sweep_locks(self) -> tuple[list, int | None]:
+        """Execute lock sweep and return (paths, total if truncated).
+        
+        DockerError -> print(f"lock sweep incomplete ({e})", file=sys.stderr)
+        and return ([], None). Else parse output; if rc != 0, print warnings
+        and cap the results.
+        """
+        argv = docker_args.exec_argv(self.container, strays.LOCK_SWEEP_ARGV)
+        try:
+            captured = self._run(argv, timeout=docker_cli.T_QUERY)
+        except docker_cli.DockerError as e:
+            print(f"lock sweep incomplete ({e})", file=sys.stderr)
+            return ([], None)
+        
+        paths = strays.parse_locks(captured.output)
+        if captured.returncode != 0:
+            print(f"lock sweep incomplete (rc {captured.returncode})", file=sys.stderr)
+            if captured.truncated:
+                print("lock sweep incomplete (output truncated)", file=sys.stderr)
+            return strays.cap_locks(paths, captured.truncated)
+        
+        # Not truncated - check if we need to cap
+        return strays.cap_locks(paths, captured.truncated)
+
     def _reap(self) -> bool:
         """After every bash call (spec §6): docker top should show at most
         the lifetime tether (bare "cat", or "/sbin/docker-init -- cat" while
@@ -913,8 +954,10 @@ class DockerSandbox:
         otherwise unreachable — e.g. `docker kill` fired while a `docker
         exec` was in flight) is ALSO a reset trigger: whatever state the
         container is in, a fresh one via reset() is the safe recovery.
-
-        Returns True if a reset was performed, False otherwise."""
+        
+        This implementation attempts to kill stray processes before resetting,
+        and also sweeps lock files. Returns True if a reset was performed,
+        False otherwise."""
         # Don't perform multiple resets in one call
         if self._reset_this_call:
             return False
@@ -929,13 +972,42 @@ class DockerSandbox:
 
         # Use strays.stray_rows to parse the output
         stray_cmds = strays.stray_rows(top.output)
-
-        # If there are any stray processes, reset with strays info
+        
+        # If there are any stray processes, try to kill them
         if stray_cmds:
             capped_strays, total = strays.cap_strays(stray_cmds)
-            self.reset("stray process after bash", strays=capped_strays, strays_total=total)
-            return True
-
+            
+            # If _tether_pid is None, we must reset
+            if self._tether_pid is None:
+                self.reset("stray process after bash", strays=capped_strays, strays_total=total)
+                return True
+            
+            # Try to kill strays
+            if not self._kill_strays():
+                self.reset("stray process after bash", strays=capped_strays, strays_total=total)
+                return True
+            
+            # Settle re-check (up to 3 times)
+            for _ in range(3):
+                time.sleep(_SETTLE_SLEEP)
+                try:
+                    top = self._run(["top", self.container], timeout=docker_cli.T_QUERY)
+                    unreachable = top.returncode != 0
+                except docker_cli.DockerError:
+                    unreachable = True
+                if unreachable:
+                    self.reset("container unreachable after bash")
+                    return True
+                
+                # Check if strays are gone
+                if not strays.stray_rows(top.output):
+                    break
+            else:
+                # After 3 dirty looks, still have strays - reset
+                self.reset("stray process after bash", strays=capped_strays, strays_total=total)
+                return True
+        
+        # Check OOM - check FIRST before lock sweep
         try:
             oom = self._run(
                 ["inspect", "--format", "{{.State.OOMKilled}}", self.container],
@@ -945,8 +1017,36 @@ class DockerSandbox:
             # If inspect fails, don't reset - it would be recursive
             return False
         if oom.returncode == 0 and oom.output.decode("utf-8", errors="replace").strip() == "true":
-            self.reset("oom")
+            if stray_cmds:
+                capped_strays, total = strays.cap_strays(stray_cmds)
+                self.reset("oom", strays=capped_strays, strays_total=total)
+            else:
+                self.reset("oom")
             return True
+        
+        # Sweep locks
+        locks, locks_total = self._sweep_locks()
+        
+        # Write stray_kill event if there were strays and we successfully killed them
+        if stray_cmds:
+            capped_strays, total = strays.cap_strays(stray_cmds)
+            fields = {"strays": capped_strays}
+            if total is not None:
+                fields["strays_total"] = total
+            if locks:
+                fields["locks_removed"] = locks
+            if locks_total is not None:
+                fields["locks_removed_total"] = locks_total
+            
+            if self.transcript is not None:
+                try:
+                    self.transcript.write("stray_kill", **fields)
+                except Exception:
+                    pass
+            
+            # Queue notice
+            self._queue_notice("stray_kill", stray_kill_text(capped_strays, total, locks))
+        
         return False
 
     def _watchdog_kill(self, reason: str) -> None:
