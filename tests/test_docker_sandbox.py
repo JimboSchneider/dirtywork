@@ -1005,24 +1005,30 @@ def test_after_bash_skips_budget_sample_when_reap_already_reset(started_with_tra
     assert not any("du -sk /work" in str(arg) for c in fake.calls for arg in c[0])
 
 
-def test_after_bash_raises_budget_exceeded_even_when_reap_reset_this_call(started_with_transcript):
-    # Fix item 3: a violation the watchdog thread already recorded must
-    # always be consumed and raised in _after_bash, even when _reap() reset
-    # the container during this same call. Only the re-SAMPLING is skipped
-    # after a reset, never the consumption of an already-recorded violation.
+def test_after_bash_consumes_a_recorded_violation_before_the_reap(started_with_transcript):
+    # Item 2: a violation recorded BEFORE the bash call is now consumed
+    # BEFORE the reap (the watchdog killed the container and recorded why —
+    # nothing to reap, sample or reset). Assert BudgetExceeded is raised,
+    # with ZERO ["kill", ...] calls, NO ["top", ...] call and no sandbox_reset event.
     from dirtywork.budget import BudgetExceeded
     sb, fake, run_dir, transcript = started_with_transcript
-    fake.script(["top"], _fail(b"Error: No such container: dw-abc123"))  # forces a reap-reset
+    # Script a normal top and exec (but they won't run because violation is consumed first)
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))
     fake.script(["exec"], _ok(b"ok\n"))
+    # Set a violation BEFORE the bash call
     sb.watchdog.violation = "watchdog: worktree exceeds cap"
+    sb.watchdog.violation_kind = "budget"
 
     with pytest.raises(BudgetExceeded, match="watchdog: worktree exceeds cap"):
         sb.bash("echo ok")
 
-    # the reap-triggered reset still happened; no re-sample was attempted
+    # The violation was consumed BEFORE the reap (no top, no kill, no reset)
+    assert not any(c[0][0] == "top" for c in fake.calls), "No top call should be made"
     kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
-    assert len(kill_calls) == 1
-    assert not any("du -sk /work" in str(arg) for c in fake.calls for arg in c[0])
+    assert len(kill_calls) == 0, "No kill call should be made"
+    reset_events = [e for e in getattr(transcript, '_events', []) if e.get("kind") == "sandbox_reset"]
+    assert len(reset_events) == 0, "No sandbox_reset event should occur"
+
 
 
 def test_reap_allows_bare_cat_tether(started):
@@ -2647,6 +2653,9 @@ def test_reap_dont_deadlock_with_concurrent_reset(started, monkeypatch):
     # re-checks under _reap_lock meanwhile, and only its OWN reset (the escalation
     # rung) waits for the other reset to finish. Neither side can deadlock, and the
     # two resets are serialized by _reset_lock.
+    # With item 4 (_reset_this_call set at START of reset()), a concurrent _reap
+    # will see _reset_this_call=True and return False immediately (at most one
+    # reset per bash call).
     _no_settle(monkeypatch)
     sb, fake, run_dir = started
     call_order = []
@@ -2673,4 +2682,238 @@ def test_reap_dont_deadlock_with_concurrent_reset(started, monkeypatch):
     t_reap.join(timeout=5)
     assert not t_reset.is_alive() and not t_reap.is_alive(), "deadlock"
     kills = [c for c in call_order if c.startswith("kill")]
-    assert kills == ["kill-start", "kill-end", "kill-start", "kill-end"], call_order
+    assert kills == ["kill-start", "kill-end"], call_order  # only one reset
+
+
+def test_after_bash_violation_during_reap_skips_reset(started_with_transcript):
+    """Item 3: a violation recorded DURING the reap (e.g. by ["top"]) should
+    cause _reap to return True without calling reset()."""
+    from dirtywork.budget import BudgetExceeded
+    sb, fake, run_dir, transcript = started_with_transcript
+
+    # Script top to set a violation and then return dirty (stray) output
+    def top_with_violation(argv):
+        sb.watchdog.violation = "host free space below 2048 MB"
+        sb.watchdog.violation_kind = "budget"
+        return _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n" +
+                   b"501  7  1  0  10:00  ?  00:00:00  sleep 999\n")
+
+    fake.script(["top"], top_with_violation)
+    # Don't script kill or reset - if they're called, the test fails
+    fake.script(["exec"], _ok(b"ok\n"))
+
+    with pytest.raises(BudgetExceeded, match="host free space below"):
+        sb.bash("echo ok")
+
+    # The violation was consumed without calling reset
+    kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
+    assert len(kill_calls) == 0, "No kill call should be made when violation is set during reap"
+    reset_events = [e for e in getattr(transcript, '_events', []) if e.get("kind") == "sandbox_reset"]
+    assert len(reset_events) == 0, "No sandbox_reset event should occur when violation is set during reap"
+
+
+def test_reset_sets_flag_before_docker_kill(started):
+    """Item 4: _reset_this_call should be set at the START of reset(), before
+    any docker calls."""
+    sb, fake, run_dir = started
+    recorded_flags = []
+
+    def record_reset_flag(argv):
+        recorded_flags.append(sb._reset_this_call)
+        return _ok()
+
+    fake.script(["kill"], record_reset_flag)
+
+    sb.reset("test")
+
+    assert recorded_flags == [True], "Flag should be True at the start of reset()"
+
+
+def test_watchdog_kill_sets_flag_before_docker_kill(started):
+    """Item 4: _reset_this_call should be set at the START of _watchdog_kill,
+    before any docker calls."""
+    sb, fake, run_dir = started
+    recorded_flags = []
+
+    def record_reset_flag(argv):
+        recorded_flags.append(sb._reset_this_call)
+        return _ok()
+
+    fake.script(["kill"], record_reset_flag)
+
+    sb._watchdog_kill("disk space")
+
+    assert recorded_flags == [True], "Flag should be True at the start of _watchdog_kill"
+
+
+def test_after_bash_clears_flag_even_when_reset_raises(started):
+    """Item 4: _reset_this_call should be cleared in finally, even when reset
+    raises an exception."""
+    sb, fake, run_dir = started
+    # Make top fail to trigger a reset, and make reset fail by making start fail
+    fake.script(["top"], _fail(b"exec failed"))
+    # Script exec (used by reset for start) to raise DockerError
+    def fail_start(argv):
+        import docker_cli as dc
+        raise dc.DockerError("container failed to start", exit_code=1)
+
+    fake.script(["exec"], fail_start)
+    fake.script(["kill"], _ok())
+    fake.script(["wait"], _ok())
+
+    with pytest.raises(SandboxError):
+        sb.bash("echo ok")
+
+    # Flag should be cleared after exception
+    assert sb._reset_this_call is False
+
+
+def test_shutdown_disables_sampling_and_reset(started):
+    """Item 5: After _stop_container(), sampling and reset should return
+    immediately without any docker calls."""
+    sb, fake, run_dir = started
+    sb._stop_container()
+
+    # Sampling should return None immediately
+    result1 = sb._sample_worktree(wait=True)
+    assert result1 is None, "_sample_worktree(wait=True) should return None after shutdown"
+    
+    result2 = sb._sample_worktree(wait=False)
+    assert result2 is None, "_sample_worktree(wait=False) should return None after shutdown"
+
+    # Reset should not make any docker calls
+    n_before = len(fake.calls)
+    sb.reset("shutdown test")
+    assert len(fake.calls) == n_before, "reset() should not make docker calls after shutdown"
+    
+    # No sandbox_reset event
+    reset_events = [e for e in getattr(sb, 'transcript', None)._events if e.get("kind") == "sandbox_reset"] if sb.transcript else []
+    assert len(reset_events) == 0, "No sandbox_reset event should occur after shutdown"
+
+
+def test_bash_note_bash_end_runs_on_keyboard_interrupt(started, monkeypatch):
+    """Item 6: watchdog.note_bash_end() should be called in finally, even when
+    _run raises KeyboardInterrupt."""
+    sb, fake, run_dir = started
+
+    def raise_keyboard_interrupt(argv):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(sb, "_run", raise_keyboard_interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        sb.bash("echo ok")
+
+    # Flag should be False after the KeyboardInterrupt
+    assert sb.watchdog._bash_in_flight is False
+
+
+def test_grep_timeout_kills_abandoned_exec(started_with_transcript):
+    """Item 7: grep() should call _kill_abandoned_exec() when a timeout occurs,
+    killing any stray process that continued after the timed-out DockerError."""
+    sb, fake, run_dir, transcript = started_with_transcript
+
+    # Script the grep probe to succeed
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/rg", "--version"], _ok(b"ripgrep 1.0\n"))
+    
+    # Script the grep exec to raise a timeout error
+    def grep_timeout(argv):
+        import docker_cli as dc
+        raise dc.DockerError("timed out", timed_out=True)
+
+    fake.script(["exec"], grep_timeout)
+
+    out = sb.grep("pattern")
+
+    # Should return timeout text
+    assert "timed out" in out
+
+    # Kill exec should be called once (STRAY_KILL_SCRIPT)
+    kill_calls = [c for c in fake.calls if c[0] == _KILL_ARGV]
+    assert len(kill_calls) == 1, "Should call kill once for abandoned exec"
+
+    # No top or sweep calls
+    assert not any(c[0][0] == "top" for c in fake.calls), "No top call"
+    sweep_calls = [c for c in fake.calls if c[0][0] == "exec" and any("gc.pid" in str(arg) for arg in c[0])]
+    assert len(sweep_calls) == 0, "No sweep call"
+
+    # No stray_kill event
+    notices = sb.drain_notices()
+    assert notices == [], "No notices after grep timeout"
+
+
+def test_grep_timeout_with_no_tether_pid(started_with_transcript):
+    """Item 7: grep() timeout should not call kill if tether_pid is None."""
+    sb, fake, run_dir, transcript = started_with_transcript
+    sb._tether_pid = None
+
+    # Script the grep probe to succeed
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/rg", "--version"], _ok(b"ripgrep 1.0\n"))
+    
+    # Script the grep exec to raise a timeout error
+    def grep_timeout(argv):
+        import docker_cli as dc
+        raise dc.DockerError("timed out", timed_out=True)
+
+    fake.script(["exec"], grep_timeout)
+
+    out = sb.grep("pattern")
+
+    # Should return timeout text
+    assert "timed out" in out
+
+    # Kill exec should NOT be called when tether_pid is None
+    kill_calls = [c for c in fake.calls if c[0] == _KILL_ARGV]
+    assert len(kill_calls) == 0, "Should not call kill when tether_pid is None"
+
+
+def test_bash_timeout_goes_through_the_ladder(started):
+    """Item 7: bash() timeout should go through the ladder - top dirty, clean,
+    then kill stray."""
+    sb, fake, run_dir = started
+
+    # Script bash exec to raise timeout error
+    def bash_timeout(argv):
+        import docker_cli as dc
+        raise dc.DockerError("timed out", timed_out=True)
+
+    fake.script(["exec"], bash_timeout)
+    # Script top twice: first dirty (stray), then clean
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n" +
+                                 b"501  7  1  0  10:00  ?  00:00:00  sleep 999\n"))
+    fake.script(_KILL_ARGV, _ok(b"1\n"))  # kill succeeds
+    fake.script(["top"], _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n"))  # clean
+    fake.script(_SAMPLE_ARGV, _ok(b"1024\t/work\n5\n"))  # sample succeeds
+
+    out = sb.bash("sleep 999")
+
+    # Should return timeout text
+    assert "timed out" in out
+
+    # Kill should have been called for the stray
+    kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
+    assert len(kill_calls) > 0, "Should call kill for stray process"
+
+
+def test_after_bash_consumes_violation_during_reap(started):
+    """Verify that a violation recorded during reap causes _reap to return
+    True without calling reset."""
+    sb, fake, run_dir = started
+
+    # Script top to set a violation and return dirty output
+    def top_with_violation(argv):
+        sb.watchdog.violation = "host free space below 2048 MB"
+        sb.watchdog.violation_kind = "budget"
+        return _ok(_TOP_HEADER + b"501  1  0  0  10:00  ?  00:00:00  cat\n" +
+                   b"501  7  1  0  10:00  ?  00:00:00  sleep 999\n")
+
+    fake.script(["top"], top_with_violation)
+
+    result = sb._reap()
+
+    # _reap should return True (container already dead by watchdog kill)
+    assert result is True, "_reap should return True when violation is set during reap"
+
+    # No kill or reset should have been called
+    kill_calls = [c for c in fake.calls if c[0][0] == "kill"]
+    assert len(kill_calls) == 0, "No kill call should be made when violation is set during reap"
