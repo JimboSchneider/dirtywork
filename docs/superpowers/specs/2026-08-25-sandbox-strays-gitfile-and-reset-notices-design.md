@@ -870,8 +870,12 @@ Live (`@pytest.mark.docker`, `tests/test_docker_live.py`, `DIRTYWORK_LIVE_IMAGE`
     (absent from the export).
 17. race loop: 40 × (5.2 s idle + `sed`) with the watchdog started → **0** `sandbox_reset`,
     **0** `stray_kill` (P7's phase A as a regression test; skip-with-reason above 10 min).
-18. escalation: the pids flood (`test_docker_live_process_flood_triggers_reset`) still ends in a
-    `sandbox_reset` with `strays` and the run continues.
+18. the 40-process flood (`test_docker_live_process_flood_is_killed_in_place`, formerly
+    `…_triggers_reset`) ends in one `stray_kill` with 20 `strays` and `strays_total ≥ 40`, no
+    `sandbox_reset`, and the run continues; the pids-saturation flood
+    (`test_docker_live_pid_flood_past_limit_recovers_or_fails_closed`) ends in **either** a
+    `stray_kill` (the fork-free kill survives saturation, §1.5) or a `sandbox_reset` carrying
+    `strays`, and the run continues or fails closed as today.
 19. `.NET` (skip-with-reason unless the image has the SDK): `dotnet new console` + `dotnet build`
     → no `stray_kill`, no `sandbox_reset` on the 1.0/dev image; the same on a `:0.10`-style image
     without the variables → exactly one `stray_kill` naming `VBCSCompiler`.
