@@ -67,7 +67,7 @@ def test_host_sandbox_finalize_reports_untracked(wt: Path):
     subprocess.run(["git", "add", "."], cwd=wt, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "initial"], cwd=wt, check=True, capture_output=True)
     base_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt, check=True, capture_output=True, text=True).stdout.strip()
-
+    
     sb = HostSandbox(wt)
     sb.start(wt, wt, "slug", base_commit)
     (wt / "brand_new.txt").write_text("new file\n")

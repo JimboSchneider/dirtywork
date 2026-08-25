@@ -657,7 +657,7 @@ def test_execute_coerces_duration_string_for_timeout_param():
 
     # Test with "60s" - should be converted to 60
     mock_sandbox = _MockSandbox()
-    result = r.execute("bash", {"command": "echo test", "timeout": "60s"},
+    result = r.execute("bash", {"command": "echo test", "timeout": "60s"}, 
                        sandbox=mock_sandbox, deadline=None)
     assert result.kind == "ok"
     # Verify the timeout was coerced to int
@@ -672,7 +672,7 @@ def test_execute_timeout_clamps_duration_strings():
 
     # Test with "20m" - should be clamped to max (600)
     mock_sandbox = _MockSandbox()
-    result = r.execute("bash", {"command": "echo test", "timeout": "20m"},
+    result = r.execute("bash", {"command": "echo test", "timeout": "20m"}, 
                        sandbox=mock_sandbox, deadline=None)
     assert result.kind == "ok"
     # The timeout should be clamped to 600
@@ -685,7 +685,7 @@ def test_execute_duration_string_invalid_format_returns_bad_args():
     r = ToolRegistry()
     r.register(BASH_SPEC)
 
-    result = r.execute("bash", {"command": "echo test", "timeout": "60x"},
+    result = r.execute("bash", {"command": "echo test", "timeout": "60x"}, 
                        sandbox=None, deadline=None)
     assert result.kind == "error"
     assert result.failure == "bad_args"
@@ -700,7 +700,7 @@ def test_read_file_limit_still_requires_integer():
     r.register(READ_FILE_SPEC)
 
     mock_sandbox = _MockSandbox()
-    result = r.execute("read_file", {"path": "test.txt", "limit": "60s"},
+    result = r.execute("read_file", {"path": "test.txt", "limit": "60s"}, 
                        sandbox=mock_sandbox, deadline=None)
     assert result.kind == "error"
     assert result.failure == "bad_args"
