@@ -79,6 +79,17 @@ class ScriptedClient(DictProvider):
         return self.responses.pop(0)
 
 
+class _SlowClient(ScriptedClient):
+    """Subclass of ScriptedClient that sleeps 5.2 seconds before replying.
+    Used to test that the watchdog's 5 second worktree sample comes due
+    at the start of a short call and still be in flight when it returns."""
+
+    def reply(self, model, messages, tools):
+        import time
+        time.sleep(5.2)
+        return super().reply(model, messages, tools)
+
+
 def _config_bytes(repo: Path) -> bytes:
     return (repo / ".git" / "config").read_bytes()
 
@@ -117,15 +128,15 @@ def _assert_status(payload: dict, expected) -> None:
     )
 
 
-def _run_main(monkeypatch, tmp_path, responses, argv):
+def _run_main(monkeypatch, tmp_path, responses, argv, client_cls=ScriptedClient):
     import dirtywork.__main__ as m
     monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
-    client = ScriptedClient(responses)
+    client = client_cls(responses)
     patch_provider(monkeypatch, m, lambda base_url=None: client)
     return m.main(argv)
 
 
-def _run_docker_main(monkeypatch, tmp_path, repo, responses, **extra_args):
+def _run_docker_main(monkeypatch, tmp_path, repo, responses, client_cls=ScriptedClient, **extra_args):
     argv = ["run", "--repo", str(repo), "--sandbox", "docker"]
     for k, v in extra_args.items():
         flag = "--" + k.replace("_", "-")
@@ -134,7 +145,7 @@ def _run_docker_main(monkeypatch, tmp_path, repo, responses, **extra_args):
         elif v is not False:
             argv += [flag, str(v)]
     argv.append("do the task")
-    return _run_main(monkeypatch, tmp_path, responses, argv)
+    return _run_main(monkeypatch, tmp_path, responses, argv, client_cls=client_cls)
 
 
 @pytest.mark.docker
@@ -287,6 +298,9 @@ def test_docker_live_pid_flood_past_limit_recovers_or_fails_closed(tmp_path, mon
     assert elapsed < 90, f"run took {elapsed:.1f}s -- must reach a terminal state, not hang"
     _assert_status(payload, ("completed", "sandbox_error", "budget_exceeded"))
 
+    # Extended assertions about strays in events
+    _extend_pid_flood_assertions(payload)
+
     slug = Path(payload["worktree"]).name
     assert slug.startswith("dw-")
     slug = slug[len("dw-"):]
@@ -299,7 +313,7 @@ def test_docker_live_pid_flood_past_limit_recovers_or_fails_closed(tmp_path, mon
     if payload["status"] == "completed":
         events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
         reset_events = [e for e in events if e["event"] == "sandbox_reset"]
-        assert reset_events  # reap/reset recovered from the flood
+        assert reset_events or [e for e in events if e["event"] == "stray_kill"]  # either rung recovers from the flood (#61)
         bash_results = [e["result"] for e in events if e["event"] == "tool_result" and e["tool"] == "bash"]
         assert len(bash_results) >= 2
         assert "alive" in bash_results[1]  # the follow-up bash call still ran
@@ -672,3 +686,150 @@ def test_docker_live_dotnet_builds_and_runs_offline(tmp_path, monkeypatch, capsy
     assert len(bash_results) == 1
     assert f"BUILD_OK_{tfm}" in bash_results[0], bash_results[0]
     assert f"RUN_OK_{tfm}" in bash_results[0], bash_results[0]
+
+
+def _extend_pid_flood_assertions(payload: dict) -> None:
+    """Extended assertions for pid flood tests.
+    When the transcript has a sandbox_reset event it carries a non-empty
+    strays list of strings; when it has a stray_kill instead, that event's
+    strays is non-empty."""
+    events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
+
+    reset_events = [e for e in events if e["event"] == "sandbox_reset"]
+    stray_kills = [e for e in events if e["event"] == "stray_kill"]
+
+    # At least one of reset or stray_kill should occur
+    assert reset_events or stray_kills, "Expected either sandbox_reset or stray_kill event"
+
+    # When there's a sandbox_reset, strays should be non-empty
+    if reset_events:
+        for reset_event in reset_events:
+            assert "strays" in reset_event and len(reset_event["strays"]) > 0, f"sandbox_reset event should have non-empty strays: {reset_event}"
+
+    # When there's a stray_kill, strays should be non-empty
+    if stray_kills:
+        for kill_event in stray_kills:
+            assert "strays" in kill_event and len(kill_event["strays"]) > 0, f"stray_kill event should have non-empty strays: {kill_event}"
+
+
+@pytest.mark.docker
+def test_docker_live_race_loop_no_resets(tmp_path, monkeypatch, capsys):
+    """Test that a 5.2 second sleep BETWEEN turns doesn't trigger sandbox_reset.
+    The 5.2 s idle must be BETWEEN turns, not inside the command — that is what
+    makes the watchdog's 5 s worktree sample come due at the start of a short
+    call and still be in flight when it returns."""
+    import os
+    if not os.environ.get("DIRTYWORK_LIVE_SLOW"):
+        pytest.skip("Skipping slow test; set DIRTYWORK_LIVE_SLOW=1 to run")
+
+    repo = _make_live_repo(tmp_path)
+    # 40 bash calls with sleep between each
+    responses = [
+        _resp(tool_calls=[_call(f"c{i}", "bash", {"command": f"sed -n 1,3p README.md"})])
+        for i in range(40)
+    ]
+    responses.append(_resp(content="done"))
+
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, client_cls=_SlowClient, **_image_kwargs())
+    payload = json.loads(capsys.readouterr().out)
+    _assert_status(payload, "completed")
+
+    events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
+    # Expect zero sandbox_reset events
+    assert not [e for e in events if e["event"] == "sandbox_reset"], f"Expected zero sandbox_reset events, but found some"
+    # Expect zero stray_kill events
+    assert not [e for e in events if e["event"] == "stray_kill"], f"Expected zero stray_kill events, but found some"
+
+
+@pytest.mark.docker
+def test_docker_live_dotnet_build_leaves_no_stray(tmp_path, monkeypatch, capsys):
+    """Test that dotnet build doesn't leave stray processes."""
+    image = LIVE_IMAGE or DEFAULT_IMAGE
+
+    # Check if the image has .NET SDK
+    try:
+        sdks = _dotnet_list_sdks(image)
+    except Exception as e:
+        pytest.skip(f"Image {image} does not have .NET SDK: {e}")
+
+    if "8.0." not in sdks and "10.0." not in sdks:
+        pytest.skip(f"Image {image} does not have .NET SDK 8.0 or 10.0")
+
+    # Read the image's env to check for daemons_off
+    env_result = subprocess.run(
+        ["docker", "run", "--rm", "--entrypoint", "/usr/bin/env", image],
+        capture_output=True, text=True, timeout=60
+    )
+    if env_result.returncode != 0:
+        pytest.skip(f"Could not read environment from image {image}: {env_result.stderr}")
+
+    env_out = env_result.stdout
+    daemons_off = "UseSharedCompilation=false" in env_out
+
+    repo = _make_live_repo(tmp_path)
+    build_cmd = (
+        "dotnet new console --framework net8.0 -o app && dotnet build app"
+    )
+    responses = [
+        _resp(tool_calls=[_call("c1", "bash", {"command": build_cmd, "timeout": 300})]),
+        _resp(tool_calls=[_call("c2", "bash", {"command": "echo ok"})]),
+        _resp(content="done"),
+    ]
+
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, **_image_kwargs())
+    payload = json.loads(capsys.readouterr().out)
+    _assert_status(payload, "completed")
+
+    events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
+
+    # Expect no sandbox_reset either way
+    assert not [e for e in events if e["event"] == "sandbox_reset"], f"Expected no sandbox_reset events, but found some"
+
+    if daemons_off:
+        # When daemons_off: no stray_kill event
+        assert not [e for e in events if e["event"] == "stray_kill"], f"Expected no stray_kill events when daemons_off, but found some"
+    else:
+        # Otherwise: exactly one stray_kill whose strays contain an entry containing "VBCSCompiler"
+        stray_kills = [e for e in events if e["event"] == "stray_kill"]
+        assert len(stray_kills) == 1, f"Expected exactly one stray_kill event, got {len(stray_kills)}"
+        assert any("VBCSCompiler" in s for s in stray_kills[0].get("strays", [])), f"Expected stray_kill to contain VBCSCompiler in strays: {stray_kills[0]}"
+
+
+@pytest.mark.docker
+def test_docker_live_timed_out_grep_leaves_no_stray(tmp_path, monkeypatch, capsys):
+    """Test that a timed out grep doesn't leave stray processes."""
+    repo = _make_live_repo(tmp_path)
+
+    # Create a large file
+    responses = [
+        _resp(tool_calls=[_call("c1", "bash", {
+            "command": "yes y | head -c 200000000 > big.txt; echo made",
+            "timeout": 120
+        })]),
+        # The grep will time out (pattern never matches, large file)
+        _resp(tool_calls=[_call("c2", "grep", {
+            "pattern": "^zzz",
+            "path": ".",
+            "timeout": 1
+        })]),
+        _resp(tool_calls=[_call("c3", "bash", {"command": "echo ok"})]),
+        _resp(content="done"),
+    ]
+
+    _run_docker_main(monkeypatch, tmp_path, repo, responses, **_image_kwargs())
+    payload = json.loads(capsys.readouterr().out)
+    _assert_status(payload, "completed")
+
+    events = [json.loads(l) for l in Path(payload["transcript"]).read_text().splitlines()]
+
+    # Find the grep tool_result
+    grep_results = [e for e in events if e["event"] == "tool_result" and e["tool"] == "grep"]
+    assert len(grep_results) >= 1, "Expected at least one grep tool_result"
+
+    # The grep should have timed out
+    grep_result_text = grep_results[0]["result"]
+    assert "timed out" in grep_result_text.lower(), f"Expected grep to time out, got: {grep_result_text}"
+
+    # No stray_kill and no sandbox_reset events
+    assert not [e for e in events if e["event"] == "stray_kill"], f"Expected no stray_kill events, but found some"
+    assert not [e for e in events if e["event"] == "sandbox_reset"], f"Expected no sandbox_reset events, but found some"
