@@ -2634,3 +2634,295 @@ def test_exploding_sandbox_still_works(parts):
     transcript.close()
 
     assert result.status == "budget_exceeded"
+
+def test_chunk_target_cap_basis_and_floors():
+    """Spec §3.1: chunk_target's (chars, lines) are derived from the cap and cut sizes."""
+    from dirtywork.runner import chunk_target, MIN_CHUNK_CHARS, MIN_CHUNK_LINES
+
+    # Basis is cap_chars when cut_chars == 0: (1024, 17) since
+    # 8192 * 4 = 32768, divided by 4 = 8192, which is >= MIN_CHUNK_CHARS=200
+    # and lines = 8192 / 60 = ~136 (but actual formula: 8192 / 4 / 60 = 34 lines)
+    assert chunk_target(1024, 0, 0) == (1024, 17)
+    assert chunk_target(2048, 0, 0) == (2048, 34)
+    assert chunk_target(4096, 0, 0) == (4096, 68)
+    assert chunk_target(8192, 0, 0) == (8192, 136)
+
+    # When cut_chars > 0 but smaller than cap, basis is cut_chars
+    # (1024, 3000, 55): basis=3000, chars=750 (floored), per_line=3000/55=54.5,
+    # lines = 750 / 54.5 = ~13.7 -> floor to 13
+    assert chunk_target(1024, 3000, 55) == (750, 13)
+
+    # (1024, 100, 2): basis=100, chars = max(200, 100//4) = max(200, 25) = 200 (floor)
+    # per_line = DEFAULT_LINE_CHARS=60, lines = max(5, 200//60) = max(5, 3) = 5
+    assert chunk_target(1024, 100, 2) == (200, 5)
+
+    # Per-line calculation from the call: 300/10 = 30 chars/line → 200/30 = 6.67 -> 6
+    assert chunk_target(1024, 300, 10) == (200, 6)
+
+
+def test_reply_size_and_call_size(parts):
+    """Spec §3.2: reply_size and call_size measure received chars and one-call sizes."""
+    wt, registry, sandbox, transcript, tmp = parts
+    from dirtywork.runner import reply_size, call_size
+
+    # Build two calls with escaped newlines
+    raw1 = '{"path":"x","content":"a\\nb"}'
+    raw2 = "{}"
+    call1 = _bad_args("c1", "write_file", raw=raw1)
+    call2 = _bad_args("c2", "read_file", raw=raw2)
+
+    # reply_size: (text_chars, raw_chars_of_all_calls)
+    resp = _resp(content="abc", tool_calls=[call1, call2])
+    text_chars, raw_chars = reply_size(resp)
+    assert text_chars == 3
+    # raw1 has len('{"path":"x","content":"a\\nb"}') = 28
+    # raw2 has len('{}') = 2
+    assert raw_chars == len(raw1) + len(raw2)
+
+    # call_size for first call: (raw_chars, lines)
+    # raw1 = '{"path":"x","content":"a\\nb"}' has one escaped newline (\n)
+    chars, lines = call_size(call1)
+    assert chars == len(raw1)
+    # escaped newline count: "\\n" appears once, and actual newlines
+    assert lines == 2
+
+    # call_size for empty raw
+    call3 = _bad_args("c3", "write_file", raw="")
+    chars, lines = call_size(call3)
+    assert chars == 0
+    assert lines == 0
+
+    # Call with no newline in raw → lines == 1
+    call_no_newline = _bad_args("c4", "read_file", raw='{"path":"x"}')
+    chars, lines = call_size(call_no_newline)
+    assert chars == len('{"path":"x"}')
+    assert lines == 1
+
+
+def test_truncated_text_nudge_carries_the_numbers(parts):
+    """Spec §3.1: the text nudge for length truncation includes cap and target numbers."""
+    import tempfile
+    from pathlib import Path
+
+    wt, registry, sandbox, transcript, tmp = parts
+    from dirtywork.runner import MAX_TRUNCATED_REPLIES
+
+    # First turn is truncated, second succeeds
+    provider = FakeProvider([
+        _resp(content="I will now", finish_reason="length",
+              usage={"prompt_tokens": 1, "completion_tokens": 5}),
+        _resp(content="ok"),
+    ])
+
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_tokens=1234)
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "completed"
+
+    # The second request's last user message should have the truncated nudge
+    first_req = provider.requests[0]
+    second_req = provider.requests[1]
+
+    # Find the last user message in the second request
+    last_user_msg = [m for m in second_req if m["role"] == "user"][-1]
+    nudge_text = last_user_msg["content"]
+
+    # Check the format string values are present - use 1234 as max_tokens
+    from dirtywork.runner import chunk_target, call_size, reply_size
+    text_chars, raw_chars = reply_size(_resp())
+    target_chars, target_lines = chunk_target(1234, 0, 0)
+    trunc_dict = dict(cap=1234, cap_chars=1234*4, received=text_chars + raw_chars,
+                      cut_chars=0, cut_lines=0,
+                      target_chars=target_chars, target_lines=target_lines,
+                      n=1, max=6)
+    assert str(trunc_dict["cap"]) in nudge_text
+    assert str(trunc_dict["cap_chars"]) in nudge_text
+    # "I will now" = 10 characters (actual: 'I will now' without the trailing space)
+    assert "received only 10 characters" in nudge_text
+
+    # Second run: empty content (need fresh transcript)
+    with tempfile.TemporaryDirectory() as tmp2:
+        wt2 = Path(tmp2) / "wt"
+        wt2.mkdir()
+        transcript2 = Transcript(Path(tmp2) / "t.jsonl")
+        registry2 = default_registry(transcript=transcript2)
+        sandbox2 = HostSandbox(wt2)
+
+        provider2 = FakeProvider([
+            _resp(content="", finish_reason="length",
+                  usage={"prompt_tokens": 1, "completion_tokens": 5}),
+            _resp(content="ok"),
+        ])
+        r2 = Runner(provider2, registry2, sandbox2, transcript2, model="m", max_tokens=1234)
+        result2 = r2.run("s", "t")
+        transcript2.close()
+
+        second_req2 = provider2.requests[1]
+        last_user_msg2 = [m for m in second_req2 if m["role"] == "user"][-1]
+        nudge_text2 = last_user_msg2["content"]
+        assert "received only 0 characters" in nudge_text2
+
+
+def test_truncated_call_results_carry_the_cut_calls_numbers(parts):
+    """Spec §3.2: truncated_call_result includes the cut call's numbers."""
+    import tempfile
+    from pathlib import Path
+
+    # Single cut write_file call
+    wt1, registry1, sandbox1, transcript1, tmp1 = parts
+    raw = '{"path": "x", "content": "a\\nb\\nc'
+    tc1 = _bad_args("c", "write_file", raw=raw)
+    truncated_resp = _resp(tool_calls=[tc1], finish_reason="length",
+                          usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider = FakeProvider([truncated_resp, _resp(content="done")])
+
+    r = Runner(provider, registry1, sandbox1, transcript1, model="m", max_tokens=8192)
+    result = r.run("s", "t")
+    transcript1.close()
+
+    assert result.status == "completed"
+
+    # Check the tool message in the second request
+    tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
+    assert len(tool_msgs) == 1
+
+    # Build expected result with _trunc_dict
+    from dirtywork.runner import call_size, truncated_call_result
+    cut_chars, cut_lines = call_size(tc1)
+    trunc_dict = _trunc_dict(tc1)
+
+    # The result should match truncated_call_result
+    expected = truncated_call_result("write_file", tc1.raw_arguments, trunc_dict)
+    assert tool_msgs[0]["content"] == expected
+
+    # Generic form for malformed JSON (need fresh run)
+    with tempfile.TemporaryDirectory() as tmp2:
+        wt2 = Path(tmp2) / "wt"
+        wt2.mkdir()
+        transcript2 = Transcript(Path(tmp2) / "t.jsonl")
+        registry2 = default_registry(transcript=transcript2)
+        sandbox2 = HostSandbox(wt2)
+
+        raw2 = "{"
+        tc2 = _bad_args("c", "read_file", raw=raw2)
+        truncated_resp2 = _resp(tool_calls=[tc2], finish_reason="length",
+                               usage={"prompt_tokens": 1, "completion_tokens": 1})
+        provider2 = FakeProvider([truncated_resp2, _resp(content="done")])
+
+        r2 = Runner(provider2, registry2, sandbox2, transcript2, model="m", max_tokens=8192)
+        result2 = r2.run("s", "t")
+        transcript2.close()
+
+        tool_msgs2 = [m for m in provider2.requests[1] if m["role"] == "tool"]
+        trunc_dict2 = _trunc_dict(tc2)
+        expected2 = truncated_call_result("read_file", tc2.raw_arguments, trunc_dict2)
+        assert tool_msgs2[0]["content"] == expected2
+
+    # Two cut calls in one turn - both get same text with same n
+    with tempfile.TemporaryDirectory() as tmp3:
+        wt3 = Path(tmp3) / "wt"
+        wt3.mkdir()
+        transcript3 = Transcript(Path(tmp3) / "t.jsonl")
+        registry3 = default_registry(transcript=transcript3)
+        sandbox3 = HostSandbox(wt3)
+
+        tc3a = _bad_args("c1", "write_file", raw='{"path": "a","content": "x')
+        tc3b = _bad_args("c2", "read_file", raw='{"path": "b')
+        truncated_resp3 = _resp(tool_calls=[tc3a, tc3b], finish_reason="length",
+                               usage={"prompt_tokens": 1, "completion_tokens": 1})
+        provider3 = FakeProvider([truncated_resp3, _resp(content="done")])
+
+        r3 = Runner(provider3, registry3, sandbox3, transcript3, model="m", max_tokens=8192)
+        result3 = r3.run("s", "t")
+        transcript3.close()
+
+        tool_msgs3 = [m for m in provider3.requests[1] if m["role"] == "tool"]
+        assert len(tool_msgs3) == 2
+
+        # Both use the dict built at FIRST cut call (tc3a)
+        d3 = _trunc_dict(tc3a)
+        assert tool_msgs3[0]["content"] == truncated_call_result("write_file", tc3a.raw_arguments, d3)
+        assert tool_msgs3[1]["content"] == truncated_call_result("read_file", tc3b.raw_arguments, d3)
+        assert "cut-off reply 1 of 6" in tool_msgs3[1]["content"]
+
+    # One complete call + one cut call - target from cut call only
+    with tempfile.TemporaryDirectory() as tmp4:
+        wt4 = Path(tmp4) / "wt"
+        wt4.mkdir()
+        (wt4 / "f.txt").write_text("data\n")
+        transcript4 = Transcript(Path(tmp4) / "t.jsonl")
+        registry4 = default_registry(transcript=transcript4)
+        sandbox4 = HostSandbox(wt4)
+
+        tc4a = _call("c1", "read_file", {"path": "f.txt"})
+        tc4b = _bad_args("c2", "write_file", raw='{"path": "y","content": "z')
+        mixed_resp = _resp(tool_calls=[tc4a, tc4b], finish_reason="length",
+                          usage={"prompt_tokens": 1, "completion_tokens": 1})
+        provider4 = FakeProvider([mixed_resp, _resp(content="done")])
+
+        r4 = Runner(provider4, registry4, sandbox4, transcript4, model="m", max_tokens=8192)
+        result4 = r4.run("s", "t")
+        transcript4.close()
+
+        tool_msgs4 = [m for m in provider4.requests[1] if m["role"] == "tool"]
+        assert len(tool_msgs4) == 2
+
+        # Only the cut call should have truncation text
+        # The complete call (c1) executed successfully, so it gets normal result
+
+
+def test_truncations_counts_once_per_turn(parts):
+    """Spec §3.3: truncations counter increments once per turn, not per call."""
+    wt, registry, sandbox, transcript, tmp = parts
+
+    # One truncated reply then success
+    provider1 = FakeProvider([
+        _resp(content="truncated", finish_reason="length",
+              usage={"prompt_tokens": 1, "completion_tokens": 5}),
+        _resp(content="ok"),
+    ])
+    r1 = Runner(provider1, registry, sandbox, transcript, model="m", max_tokens=8192)
+    result1 = r1.run("s", "t")
+    transcript.close()
+
+    assert result1.status == "completed"
+    # Check the run_end has truncations=1
+    end_events = [e for e in _events(tmp) if e["event"] == "run_end"]
+    assert len(end_events) == 1
+    assert end_events[0]["truncations"] == 1
+
+    # A turn with two cut calls → +1 only
+    (tmp / "f.txt").write_text("data\n")
+    tc1 = _bad_args("c1", "write_file", raw='{"path": "a')
+    tc2 = _bad_args("c2", "read_file", raw='{"path": "b')
+    truncated = _resp(tool_calls=[tc1, tc2], finish_reason="length",
+                     usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider2 = FakeProvider([truncated, _resp(content="done")])
+
+    # Need new transcript
+    transcript2 = Transcript(tmp / "t2.jsonl")
+    r2 = Runner(provider2, registry, sandbox, transcript2, model="m", max_tokens=8192)
+    result2 = r2.run("s", "t")
+    transcript2.close()
+
+    # Verify the truncations count is 1 in result (it's inside extra)
+    assert result2.extra.get("truncations") == 1
+
+    # A length turn with a complete valid call (no truncation nudge, no count)
+    (tmp / "f2.txt").write_text("data\n")
+    complete_call = _resp(tool_calls=[_call("c", "write_file",
+                                            {"path": "f2.txt", "content": "hello\n"})],
+                         finish_reason="length",
+                         usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider3 = FakeProvider([complete_call, _resp(content="done")])
+
+    transcript3 = Transcript(tmp / "t3.jsonl")
+    r3 = Runner(provider3, registry, sandbox, transcript3, model="m", max_tokens=8192)
+    result3 = r3.run("s", "t")
+    transcript3.close()
+
+    # The turn should complete without incrementing truncations
+    assert result3.status == "completed"
+    # Verify result.extra["truncations"] equals run_end value
+    assert result3.extra.get("truncations") == 0
