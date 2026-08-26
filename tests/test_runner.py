@@ -79,13 +79,19 @@ def _trunc_dict(tc=None, text=""):
 
 
 class FakeProvider:
-    def __init__(self, responses):
+    name = "fake"
+
+    def __init__(self, responses, context_window=None):
         self.responses = list(responses)
-        self.requests: list[list[dict]] = []
-        self.timeouts: list[float | None] = []
+        self.requests = []
+        self.timeouts = []
+        self._context_window = context_window
+
+    def list_models(self):
+        return ["m"]
 
     def context_window(self, model):
-        return None
+        return self._context_window
 
     def chat(self, model, history, tools, *, temperature=None, max_tokens=4096, timeout=None):
         # Spec #60 §7: every request the runner makes is legal for strict templates.
@@ -576,10 +582,10 @@ def test_an_append_only_turn_counts_as_progress_and_does_not_stall(parts):
 
 
 def test_truncated_nudge_names_write_file_and_append_file(parts):
-    assert NUDGES["truncated"] == (
-        "Your reply was cut off at the token limit. Continue with smaller steps — "
-        "emit one tool call at a time; for a large file, write_file the first part "
-        "and append_file the rest.")
+    t = NUDGES["truncated"]
+    assert all(f in t for f in ("{cap}", "{cap_chars}", "{received}", "{target_chars}", "{target_lines}",
+                                "cut-off reply {n} of {max}",
+                                "write_file the first part and append_file the rest"))
 
 
 def test_run_start_includes_run_info(parts):
@@ -671,7 +677,7 @@ def test_finalize_merges_into_run_end_and_result_extra(parts):
     transcript.close()
     assert result.extra == {"stuck_on": None, "last_tool_result": None,
                             "last_assistant_text": "done", "verify": None,
-                            "trimmed_turns": 0, "timeouts": 0,
+                            "trimmed_turns": 0, "timeouts": 0, "truncations": 0,
                             "context_window_source": None,
                             "diff_stat": " 1 file changed"}
     events = _events(tmp)
@@ -932,7 +938,7 @@ def test_length_cutoff_without_tool_calls_is_not_completed(parts):
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed" and result.turns == 2
-    assert provider.requests[1][-1]["content"] == NUDGES["truncated"]
+    assert provider.requests[1][-1]["content"] == NUDGES["truncated"].format(**_trunc_dict(text="I will now"))
 
 
 def test_three_empty_replies_abort_as_model_error(parts):
