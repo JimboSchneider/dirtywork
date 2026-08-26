@@ -70,6 +70,10 @@ what Ollama actually had rather than what the model card promised. Across the so
 `--verify` — the check that can fail — fired in every one of the eight runs that
 carried it.
 
+![Three bounded tasks on a local model: tool calls before finish (explore, edit, check) and prompt tokens used against the 262,144-token window, for the three leg-C2 bench runs](assets/ollama-leg-c2.svg)
+
+*Leg C2 of the August 23 soak: three bench tasks, 5–9 turns and 10.6–19.4 s each, using 4.5–8.9% of the 262,144-token window the model was loaded with.*
+
 Two things I have not proven, so I'll say so. Parallel tool calls are unverified on
 Ollama. And Ollama's model list reports what has been *pulled*, not what is *loaded*,
 so an unloaded model passes preflight and then runs with whatever `num_ctx` Ollama
