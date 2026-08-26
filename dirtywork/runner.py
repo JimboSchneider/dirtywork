@@ -49,6 +49,8 @@ MIN_CHUNK_LINES = 5
 CHUNK_DIVISOR = 4
 DEFAULT_LINE_CHARS = 60
 MAX_TRUNCATED_REPLIES = 6
+TRUNCATION_ABORT = ("aborted after {n} cut-off replies at --max-tokens {cap}: raise --max-tokens "
+                    "or split the writes")
 BUDGET_FRACTION = 0.75
 MAX_CONSECUTIVE_FAILURES = 3
 FAILURE_KINDS = ("malformed_entry", "malformed_args", "unknown_tool", "bad_args", "empty_reply")
@@ -926,6 +928,9 @@ class Runner:
                 abort_reason = failures.record("empty_reply")
                 if abort_reason is not None:
                     return finish("model_error", abort_reason)
+                if truncations >= MAX_TRUNCATED_REPLIES and kind == "truncated":
+                    return finish("model_error",
+                                  TRUNCATION_ABORT.format(n=truncations, cap=self.max_tokens))
                 stalled, stall_text, stall_record = check_progress()
                 if stalled is not None:
                     return stalled
@@ -961,6 +966,8 @@ class Runner:
                         result = truncated_call_result(name, tc.raw_arguments, trunc)
                     else:
                         result = f"ERROR: {tc.error}"
+                    if abort_reason is None and truncations >= MAX_TRUNCATED_REPLIES:
+                        abort_reason = TRUNCATION_ABORT.format(n=truncations, cap=self.max_tokens)
                 elif finish_reason == "length" and self._missing_required(name, args):
                     # Spec §1.3 case (b): the Anthropic shape. A truncated
                     # tool_use whose `input` came back {} parses
@@ -972,6 +979,8 @@ class Runner:
                     abort_reason = failures.record("malformed_args")
                     note_truncation(tc)
                     result = truncated_call_result(name, tc.raw_arguments, trunc)
+                    if abort_reason is None and truncations >= MAX_TRUNCATED_REPLIES:
+                        abort_reason = TRUNCATION_ABORT.format(n=truncations, cap=self.max_tokens)
                 else:
                     try:
                         spec = self.registry.spec(name)

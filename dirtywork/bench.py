@@ -53,6 +53,7 @@ ACCEPTANCE_MEMORY = "2g"
 ACCEPTANCE_CPUS = "2"
 ACCEPTANCE_PIDS = 256
 _ABORT_RE = re.compile(r"aborted after \d+ consecutive (\S+) (?:tool )?failures")
+_CUTOFF_ABORT_RE = re.compile(r"aborted after \d+ cut-off replies")
 
 
 def _bench_json(task: str) -> dict:
@@ -245,6 +246,9 @@ def _abort_kind(final_message):
         return None
     match = _ABORT_RE.search(final_message)
     if match is None:
+        # Spec #65: check for cut-off replies abort
+        if _CUTOFF_ABORT_RE.search(final_message):
+            return "truncated"
         return None
     kind = match.group(1)
     if kind in FAILURE_KINDS:
