@@ -1,6 +1,6 @@
 # Ship the operator contract in the wheel: `dirtywork contract` + `dirtywork init` (#82) — design
 
-v2, 2026-08-26. Status: **owner review folded (six items); awaiting owner sign-off.** Next: red-team fold → plan → built the dogfood way (released dirtywork + local worker for the code; Claude writes the skill prose and reviews).
+v2.1, 2026-08-26. Status: **owner review folded (six items + five residuals); awaiting owner sign-off.** Next: red-team fold → plan → built the dogfood way (released dirtywork + local worker for the code; Claude writes the skill prose and reviews).
 
 ## 0. The owner's decision
 
@@ -17,7 +17,7 @@ Decisions taken in the conversation that this spec encodes:
 
 1. **Wheel-smoke job was not self-contained or gated** (`ci.yml:31` installs only `pytest`; `gate.needs` at `ci.yml:108` is `[test, docker-live]`). Fixed in §3.5: `python -m pip install build`, `wheel-smoke` added to `gate.needs`, and assertions written to files + `grep -q` — no `| head -1` (SIGPIPE under `pipefail`, and a truncated stream can mask a failure).
 2. **Stamp hash ignored the frontmatter.** v1 hashed only the bytes after the stamp, so an edited `description:`/`name:` survived the check and a version upgrade would clobber it. Fixed in §3.3: the hash covers the **entire file with the stamp line removed**; test 19 edits the frontmatter and expects a skip.
-3. **"Invisible to the worker" was false as written.** The worker is told to explore with `list_dir`/`read_file` (`__main__.py:90-100`) and docker populates the base tree from `HEAD` (`git read-tree -m -u HEAD`, `lifecycle.py:76`), so a *committed* project skill is readable like any file. Guarantee narrowed to "never injected into the worker prompt" (§3.4, §4, test 17 renamed); the skill's first body line tells a worker that reads it to ignore it; a real exclusion mechanism (hiding `.claude/` from the worker's tree) is a separate design — proposed as a follow-up issue, not built here.
+3. **"Invisible to the worker" was false as written.** The worker is told to explore with `list_dir`/`read_file` (`__main__.py:90-100`) and docker populates the base tree from `HEAD` (`git read-tree -m -u HEAD`, `lifecycle.py:76`), so a *committed* project skill is readable like any file. Guarantee narrowed to "never injected into the worker prompt" (§3.4, §4, test 17 renamed); the skill's first paragraph tells a worker that reads it to ignore it — **advisory, not a security boundary**; a real exclusion mechanism (hiding `.claude/` from the worker's tree) is a separate design, filed as #84, not built here.
 4. **Reject/cleanup flow did not work.** `runs clean` refuses a dirty worktree without `--force` (`runs.py:1088-1090`) and plain `clean` deletes `run.json` and the transcript — contradicting "keep receipts". Fixed in Appendix A: reject = `runs verdict <slug> reject --note`, then `runs clean <slug> --force --keep-transcript` (`_clean_run_dir` keeps exactly `transcript.jsonl` and `run.json`); plain `clean` is described as receipt-destroying.
 5. **Docker dependency guidance missed `--allow-network`** (`__main__.py:464`, bridge networking). Appendix A now says *default* docker mode and states the trade-off.
 6. **Documentation ripple missed live references.** Sweep found **eleven** sites, not eight: `docs/transcript-schema.md:350` plus docstrings in `dirtywork/tools.py:192` and `dirtywork/workspace.py:208`. The stub and every `docs/*.md` reference now use the absolute canonical GitHub URL rather than a relative path out of `docs/` (§3.1).
@@ -120,7 +120,7 @@ Exit code is `0` if every destination was written/updated/current, `1` if any wa
 Full text in Appendix A. Design rules it must satisfy (tests enforce the mechanical ones):
 
 - Frontmatter: `name: dirtywork`; `description:` one or two sentences naming the triggers (run dirtywork, delegate to a local/worker model, review a dirtywork run). No `disable-model-invocation` — the point is that Claude reaches for it unprompted.
-- The first body line after the title addresses a **worker** that might read the file (a committed project copy is visible in the worktree like any other file): it says the file is for the orchestrator and to ignore it. This is the only mitigation in scope; see §4.
+- The first paragraph after the title addresses a **worker** that might read the file (a committed project copy is visible in the worktree like any other file): it says the file is for the orchestrator and to ignore it. This is **advisory, not a security boundary** — a model can read past it; the real exclusion is #84. It is the only mitigation in scope; see §4.
 - ≤ 200 lines including frontmatter (Claude Code's general guidance for instruction files).
 - Says, early and plainly: run `dirtywork contract` for the reference; don't guess flags.
 - Covers the loop the maintainer actually runs: brief → run → parse stdout JSON → review the diff before the transcript → `resume --feedback` or re-brief → `runs verdict` → cleanup. Plus the three things that bite first-time orchestrators: stdout vs stderr, exit 0/1/2 semantics, and "the worker cannot install dependencies in docker mode".
@@ -130,7 +130,7 @@ Full text in Appendix A. Design rules it must satisfy (tests enforce the mechani
 ### 3.5 Contract ripple (each site named)
 
 - `dirtywork/contract/machine-contract.md` **Flags** section: add `dirtywork contract` and `dirtywork init` with the table in §3.3, the stamp format, and `init`'s exit codes. The contract documents its own delivery.
-- `docs/machine-contract.md` → stub (§3.1). Inbound links updated (eight sites, §3.1).
+- `docs/machine-contract.md` → stub (§3.1). Inbound references updated (eleven sites, §3.1).
 - `README.md`: a short **Use it from Claude Code** subsection — `pipx install dirtywork`, `dirtywork init --repo .`, "Claude now has the `dirtywork` skill; ask it to delegate a task" — and the Documentation list gains `dirtywork contract` beside the contract link.
 - `docs/operating.md`: **Setting up an orchestrator** (≤ 15 lines) pointing at `init`, `--no-user`, `--force`, and `contract`.
 - `dirtywork --help`: top-level parser description gets one sentence: "Driving it from an agent? `dirtywork init` installs the Claude Code skill; `dirtywork contract` prints the reference."
@@ -140,7 +140,7 @@ Full text in Appendix A. Design rules it must satisfy (tests enforce the mechani
 
 ### 3.6 Self-dogfood (after release, not part of the build)
 
-`dirtywork init --repo ~/repos/dirtywork` in this repo, commit `.claude/skills/dirtywork/SKILL.md`; the invocation block in Claude's memory shrinks to a pointer. Issue #82's first user is this repo's own orchestrator. Note the committed copy *is* readable by dirtywork's own worker (§4); the skill's worker-ignore line is what stands between the two roles until an exclusion mechanism exists.
+`dirtywork init --repo ~/repos/dirtywork` in this repo, commit `.claude/skills/dirtywork/SKILL.md`; the invocation block in Claude's memory shrinks to a pointer. Issue #82's first user is this repo's own orchestrator. Note the committed copy *is* readable by dirtywork's own worker (§4); the skill's worker-ignore paragraph is advisory; #84 is the exclusion mechanism.
 
 ## 4. Failure modes and limits
 
@@ -148,7 +148,7 @@ Full text in Appendix A. Design rules it must satisfy (tests enforce the mechani
 - **Edited copies stop updating.** By design — the stamp turns an edit into a skip, and the message says so. `--force` is the override; the stamp line itself tells the user this.
 - **Claude-shaped output.** `init` writes Claude Code's format. Other agents use `dirtywork contract` or `init --stdout` and place the text themselves. If a second format is ever wanted, it is a `--format` flag on `init`, not a new command.
 - **Skill/CLI drift.** The skill quotes flag names; the drift-guard test fails the suite if a named flag disappears from the parser.
-- **Worker exposure — narrowed.** `init` never writes `CLAUDE.md`/`AGENTS.md`, and the worker-prompt injection (`workspace.py:243-270`) reads only those two files at the base commit, so the skill is **never injected into the worker prompt** (test 17). It is *not* invisible: a project copy committed to the target repo lands in the worker's tree (`git read-tree -m -u HEAD`, `lifecycle.py:76`) and the worker is told to explore with `list_dir`/`read_file`. Mitigation in scope: the skill's first body line tells a worker to ignore it. Out of scope, proposed as a follow-up issue: exclude `.claude/` (orchestrator material) from the worker's populated tree — a sandbox-contract change that deserves its own spec. The user-level copy (`~/.claude/skills/`) is never in any repo and has no exposure.
+- **Worker exposure — narrowed.** `init` never writes `CLAUDE.md`/`AGENTS.md`, and the worker-prompt injection (`workspace.py:243-270`) reads only those two files at the base commit, so the skill is **never injected into the worker prompt** (test 17). It is *not* invisible: a project copy committed to the target repo lands in the worker's tree (`git read-tree -m -u HEAD`, `lifecycle.py:76`) and the worker is told to explore with `list_dir`/`read_file`. Mitigation in scope: the skill's first paragraph tells a worker to ignore it — advisory, not a security boundary. Out of scope, filed as #84: exclude `.claude/` (orchestrator material) from the worker's populated tree — a sandbox-contract change that deserves its own spec. The user-level copy (`~/.claude/skills/`) is never in any repo and has no exposure.
 - **`.claude/` gitignored in the target repo.** `init --repo` still writes; whether to commit is the user's call. `init` prints the path and never runs git.
 - **Windows.** Already unsupported; `Path.home()` and the atomic write work there regardless.
 
@@ -170,12 +170,12 @@ Full text in Appendix A. Design rules it must satisfy (tests enforce the mechani
 12. `test_init_stdout_prints_and_writes_nothing` — stdout == `render_skill(__version__)`, no files, rc 0.
 13. `test_init_repo_not_a_directory_exits_2`.
 14. `test_skill_frontmatter_and_size` — starts with `---`, has `name: dirtywork` and a non-empty `description:`, ≤ 200 lines, mentions `dirtywork contract`, `resume`, `runs verdict`, `--keep-transcript`, `--allow-network`, and all three exit codes.
-15. `test_skill_stamp_hash_matches_body` — recompute the SHA-256 of the bytes after the stamp line; equals the stamp's `HEX16`; version equals `__version__`.
+15. `test_skill_stamp_hash_matches_body` — recompute the SHA-256 of the entire UTF-8 file with the stamp line removed; its first 16 hex characters equal the stamp's `HEX16`; the stamp's version equals `__version__`.
 16. `test_skill_flags_exist_in_parser` — every `--[a-z][a-z-]*` token in the rendered skill is an option string somewhere in the argparse tree (walk subparsers via `_subparsers._group_actions[*].choices`).
 17. `test_worker_prompt_does_not_inject_skill_file` — a repo whose base commit contains `.claude/skills/dirtywork/SKILL.md` and no `CLAUDE.md`: the injected conventions are empty (model it on the `CLAUDE.md`/`AGENTS.md` tests in `tests/test_workspace.py`; the reader is `workspace.py:243-270`). This pins "not injected", nothing more.
 18. `test_version_flag` — `dirtywork --version` prints `dirtywork <__version__>` and exits 0 (argparse's `action="version"` raises `SystemExit(0)`; catch it with `pytest.raises`).
 19. `test_init_detects_edited_frontmatter` — plant a copy rendered with version `0.0.1`, change only its `description:` line, run `init`: `skipped (locally modified)`, rc 1, file unchanged; `--force` overwrites.
-20. `test_skill_first_line_addresses_the_worker` — the first non-empty body line after the title contains "worker" and "ignore".
+20. `test_skill_first_paragraph_addresses_the_worker` — the first paragraph of the body after the title (the lines up to the first blank line, joined) contains both "worker" and "ignore". The prose wraps, so the test reads the paragraph, not one physical line.
 
 CI: the `wheel-smoke` job in §3.5.
 
@@ -183,14 +183,14 @@ CI: the `wheel-smoke` job in §3.5.
 
 | # | Check | How |
 |---|---|---|
-| A1 | The contract is in the wheel | On a machine with no checkout: `pipx run --spec dirtywork==0.12.0 dirtywork contract \| head -1` prints `# Machine contract` |
+| A1 | The contract is in the wheel | On a machine with no checkout: `pipx run --spec dirtywork==0.12.0 dirtywork contract > contract.md && grep -q '^# Machine contract' contract.md` exits 0 (same file-plus-`grep -q` pattern as CI) |
 | A2 | `init` installs a discoverable skill | Fresh `HOME`; `dirtywork init`; open Claude Code in any directory; the `dirtywork` skill appears in its skill list (manual) |
 | A3 | The skill fires on intent | In a repo where `dirtywork init --repo .` was run: ask Claude Code to "delegate this to dirtywork" — it invokes the skill and runs `dirtywork contract` before its first `run` (manual, one session) |
 | A4 | Edits survive upgrades | Edit the installed skill; `dirtywork init` → `skipped (locally modified)`, rc 1, file unchanged |
 | A5 | Suite and CI green | Full suite passes; `wheel-smoke` job green on the PR |
 | A6 | Size | Rendered skill ≤ 200 lines (test 14) |
 | A7 | Nothing is injected into the worker prompt | Test 17 green (the narrowed claim; see §4) |
-| A8 | No stale contract path | `grep -rn 'docs/machine-contract.md' --include='*.md' --include='*.py' .` outside `docs/superpowers/` matches only the stub itself |
+| A8 | No stale contract path | `grep -rln 'docs/machine-contract.md' --include='*.md' --include='*.py' --exclude-dir=superpowers --exclude-dir=.worktrees .` prints exactly one path: `./docs/machine-contract.md` (the stub) |
 
 ## 7. Files
 
@@ -205,7 +205,7 @@ Modified: `dirtywork/__main__.py` (two subparsers, two dispatch branches, `--ver
 3. **Creating `~/.claude/skills/` for non-Claude users.** Yes; `--no-user` opts out.
 4. **Naming.** `init` and `contract` stay.
 
-Follow-up to file separately (not part of this spec): exclude `.claude/` from the tree the worker is given, so orchestrator material never reaches the worker at all (§4).
+Follow-up, filed as #84 (not part of this spec): exclude `.claude/` from the tree the worker is given, so orchestrator material never reaches the worker at all (§4).
 
 ---
 
