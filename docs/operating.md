@@ -353,8 +353,10 @@ When a reply does hit the cap (1.0, #65), the harness no longer just says
 content was cut: the message states the `--max-tokens` cap and a per-call
 target size (characters and lines) to stay under next time. Truncations are
 counted for the whole run and never reset; six cut-off replies end it
-`model_error` (the existing three-consecutive-failure rule can still end it
-sooner, and wins when both fire on the same turn).
+`model_error`. A cut-off reply counts only toward that budget: it takes no
+empty-reply or malformed-arguments strike, so the three-consecutive-failure
+rule is for replies that are genuinely empty and calls that are malformed
+without being cut.
 
 **Rules of thumb**
 
