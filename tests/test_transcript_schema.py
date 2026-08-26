@@ -18,17 +18,18 @@ DOC = Path(__file__).parent.parent / "docs" / "transcript-schema.md"
 EVENT_NAMES = ["run_start", "assistant", "tool_result", "guardrail_block", "nudge",
                "stray_kill", "sandbox_reset", "verify", "run_end"]
 NUDGE_KINDS = ["truncated", "empty", "text_tool_call", "stall", "timeout", "malformed_entry",
-               "stray_kill", "sandbox_reset"]
+               "stray_kill", "sandbox_reset", "no_change", "unchanged_finish"]
 STATUSES = ["completed", "max_turns", "timeout", "context_exhausted", "model_error",
             "interrupted", "stalled", "stuck", "verify_failed", "budget_exceeded",
-            "sandbox_error", "export_failed"]
+            "sandbox_error", "export_failed", "unchanged"]
 ASSISTANT_FIELDS = ["text", "tool_calls", "finish_reason", "placeholder"]
 RUN_END_FIELDS = ["diff_stat", "untracked", "patch_path", "escaping_symlinks",
                   "dropped_git_entries", "worktree_bytes", "worktree_files",
                   "export_status", "watchdog_violation", "watchdog_violation_kind",
                   "finalize_error", "stuck_on", "files_changed",
                   "files_changed_truncated", "last_tool_result", "last_assistant_text",
-                  "verify", "trimmed_turns", "timeouts", "truncations", "context_window_source"]
+                  "verify", "trimmed_turns", "timeouts", "truncations", "context_window_source",
+                  "changed", "changed_reason"]
 
 
 def _doc_tokens():

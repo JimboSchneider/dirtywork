@@ -1318,7 +1318,7 @@ def test_run_json_records_task_model_context_window_and_turns(tmp_path, monkeypa
     assert data["task"] == "some task"
     assert data["model"] == m.DEFAULT_MODEL
     assert data["context_window"] == 5000
-    assert data["turns"] == 1
+    assert data["turns"] == 2
     assert data["resumed_from"] is None
     start = next(e for e in (json.loads(l) for l in Path(
         next((tmp_path / "runs").rglob("transcript.jsonl"))).read_text().splitlines())
@@ -1366,7 +1366,7 @@ def test_bad_stall_turns_flag_exits_2(tmp_path, monkeypatch, capsys):
 def _first_run(monkeypatch, tmp_path, responses):
     m = _install_host_harness(monkeypatch, tmp_path, responses)
     repo = _host_repo(tmp_path)
-    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1", "add a file"])
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "2", "add a file"])
     return m, repo, rc
 
 
@@ -1374,6 +1374,10 @@ def _resume_responses():
     return [{"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
                 {"id": "b1", "type": "function", "function": {"name": "bash",
                  "arguments": json.dumps({"command": "git status --short; cat new.txt"})}}]}}],
+             "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+            {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "w1", "type": "function", "function": {"name": "write_file",
+                 "arguments": json.dumps({"path": "resumed.txt", "content": "x\n"})}}]}}],
              "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
             {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
                 {"id": "f1", "type": "function", "function": {"name": "finish",
@@ -1408,7 +1412,7 @@ def test_resume_host_mode_reuses_worktree_and_links_runs(tmp_path, monkeypatch, 
     second = json.loads((Path(out["run_dir"]) / "run.json").read_text())
     assert second["resumed_from"] == first_run_dir.name
     assert second["task"].startswith("add a file\n\n--- RESUMED RUN ---")
-    assert "ended with status 'max_turns' after 1 turns" in second["task"]
+    assert "ended with status 'max_turns' after 2 turns" in second["task"]
     assert second["model"] == m.DEFAULT_MODEL
     prior = json.loads((first_run_dir / "run.json").read_text())
     assert prior["resumed_by"] == second["slug"]
@@ -1723,9 +1727,9 @@ def test_resume_inherits_allow_commit_from_the_prior_run(tmp_path, monkeypatch, 
     ]
     m = _install_host_harness(monkeypatch, tmp_path, write_once)
     repo = _host_repo(tmp_path)
-    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "2",
                  "--allow-commit", "add a file"])
-    assert rc == 1                      # max_turns
+    assert rc == 1                      # max_turns after 2 turns
     first = json.loads(capsys.readouterr().out)
     assert json.loads((Path(first["run_dir"]) / "run.json").read_text())["allow_commit"] is True
 
@@ -1737,7 +1741,7 @@ def test_resume_inherits_allow_commit_from_the_prior_run(tmp_path, monkeypatch, 
         return real_build(display_root, repo_context, **kwargs)
 
     monkeypatch.setattr(m, "build_system_prompt", spy_build)
-    rc = m.main(["resume", Path(first["run_dir"]).name, "--max-turns", "1"])  # no --allow-commit
+    rc = m.main(["resume", Path(first["run_dir"]).name, "--max-turns", "2"])  # no --allow-commit
     second = json.loads(capsys.readouterr().out)
     assert captured["allow_commit"] is True
     assert json.loads((Path(second["run_dir"]) / "run.json").read_text())["allow_commit"] is True
@@ -1821,7 +1825,7 @@ def test_verify_is_null_without_the_flag_and_resume_inherits_the_command(
         tmp_path, monkeypatch, capsys):
     m = _install_host_harness(monkeypatch, tmp_path)
     repo = _host_repo(tmp_path)
-    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "2",
                    "--verify", "true", "do it"]) == 0
     first = json.loads(capsys.readouterr().out)
     assert first["verify"]["command"] == "true"
@@ -1848,7 +1852,7 @@ def test_resume_after_a_non_completed_end_inherits_verify_command_rounds_and_tim
     ]
     m = _install_host_harness(monkeypatch, tmp_path, write_then_loop)
     repo = _host_repo(tmp_path)
-    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "2",
                  "--verify", "true", "--verify-rounds", "3", "--verify-timeout", "45",
                  "add a file"])
     assert rc == 1
@@ -1881,7 +1885,7 @@ def test_resume_explicit_verify_rounds_overrides_the_inherited_value(
     ]
     m = _install_host_harness(monkeypatch, tmp_path, write_then_loop)
     repo = _host_repo(tmp_path)
-    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "2",
                  "--verify", "true", "--verify-rounds", "3", "--verify-timeout", "45",
                  "add a file"])
     assert rc == 1
@@ -2122,15 +2126,15 @@ def test_task_size_warning_fires_on_resume(tmp_path, monkeypatch, capsys):
     # resume has no args.task: the check runs against ctx.task, which
     # build_resume_task filled with the prior task plus the transcript tail.
     # The scripted client repeats its one tool call, so both runs end
-    # `max_turns` after a single turn -- resumable, and deterministic.
+    # `max_turns` after two turns -- resumable, and deterministic.
     loop = [tool_call_body("read_file", {"path": "README.md"})]
     m = _install_host_harness(monkeypatch, tmp_path, loop)
     repo = _host_repo(tmp_path)
-    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "2",
                    "x" * 4000]) == 1
     prior = json.loads(capsys.readouterr().out)
     assert m.main(["resume", Path(prior["run_dir"]).name, "--context-window", "2000",
-                   "--max-tokens", "500", "--max-turns", "1"]) == 1
+                   "--max-tokens", "500", "--max-turns", "2"]) == 1
     err = capsys.readouterr().err
     assert "warning: the task text is ~" in err
     assert "% of the 2000-token context window" in err
@@ -2159,17 +2163,17 @@ def test_context_window_source_lands_in_run_json_run_start_and_stdout(
 def test_resume_records_its_own_context_window_source(tmp_path, monkeypatch, capsys):
     # The window is re-resolved on resume exactly as on a fresh run, so the
     # source is the resuming invocation's, not the prior run's. Both runs end
-    # `max_turns` after one turn: the scripted client repeats its tool call.
+    # `max_turns` after two turns: the scripted client repeats its tool call.
     loop = [tool_call_body("read_file", {"path": "README.md"})]
     m = _install_host_harness(monkeypatch, tmp_path, loop)
     repo = _host_repo(tmp_path)
-    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "2",
                    "t"]) == 1
     prior = json.loads(capsys.readouterr().out)
     assert json.loads((Path(prior["run_dir"]) / "run.json").read_text())[
         "context_window_source"] == "default"
     assert m.main(["resume", Path(prior["run_dir"]).name, "--context-window", "7000",
-                   "--max-tokens", "1000", "--max-turns", "1"]) == 1
+                   "--max-tokens", "1000", "--max-turns", "2"]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["context_window_source"] == "flag"
     resumed = json.loads((Path(payload["run_dir"]) / "run.json").read_text())

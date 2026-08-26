@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .budget import BudgetExceeded
+from .changes import UNCHANGED_PLAIN, UNCHANGED_REQUIRED, fingerprint as _fingerprint
 from .llm import LLMTimeout, MalformedResponse
 from .providers import assistant_message, tool_message
 from .sandbox import SandboxError
@@ -524,7 +525,8 @@ class Runner:
                  stuck_repeats: int = DEFAULT_STUCK_REPEATS,
                  verify: str | None = None,
                  verify_rounds: int = DEFAULT_VERIFY_ROUNDS,
-                 verify_timeout: int = DEFAULT_VERIFY_TIMEOUT):
+                 verify_timeout: int = DEFAULT_VERIFY_TIMEOUT,
+                 require_changes: bool = False):
         self.provider = provider
         self.registry = registry
         self.sandbox = sandbox
@@ -550,6 +552,9 @@ class Runner:
         # Clamped to the bash tool's own range so --verify can never ask the
         # sandbox for a timeout the bash path would refuse.
         self.verify_timeout = max(1, min(int(verify_timeout), 600))
+        # Spec #66 §4.3: a completion that changed nothing ends the run `unchanged`
+        # on the second attempt (the CLI sets this for resume --feedback)
+        self.require_changes = require_changes
         # An explicit 0 is honoured (it is how a test forces context_exhausted);
         # only None means "ask the provider".
         self.context_window = (context_window if context_window is not None
@@ -595,6 +600,14 @@ class Runner:
         last_assistant_text = None  # spec §2: the newest non-empty reply text
         verify_state = None         # spec §4.3: the LAST verify run, or None
         verify_rounds_used = 0
+        # Spec #66 §4.1: the worktree fingerprint at run start (None = guard off)
+        fp_start = None             # measurement before first turn
+        fp_check = None             # §4.4: baseline of the every-K check (W3b)
+        fp_turn = -1                # turn of the newest measurement
+        fp_value = None
+        changed = None              # §4.3 one rule: newest measurement != fp_start; null = unknown
+        changed_reason = None       # why the newest measurement failed (sparse on run_end)
+        unchanged_finishes = 0      # count of zero-change finishes
         start = time.monotonic()
         deadline = start + self.timeout
 
@@ -720,6 +733,14 @@ class Runner:
                 resolve_finish(FINISH_DONE if status == "completed"
                                else f"run not finished: {status}")
             self.transcript.flush()
+            # Spec #66 §4.1 (4): take a final fingerprint at run_end for the
+            # change guard (except for statuses where it's already been measured)
+            if (status not in ("interrupted", "timeout", "budget_exceeded", "sandbox_error")
+                    and fp_start is not None and fp_turn != turns):
+                try:
+                    take_fingerprint()              # §4.1 (4): run_end.changed for max_turns/stalled/stuck/model_error/verify_failed/context_exhausted; a failure sets changed None + reason
+                except (BudgetExceeded, SandboxError):
+                    pass                            # reason and changed=None already stored by take_fingerprint
             # This evidence rides on EVERY result (null when there is none), so
             # a consumer never has to branch on status to read the fields. A
             # `max_turns` run with final_message "" is the case that made this
@@ -731,13 +752,21 @@ class Runner:
                            "trimmed_turns": trimmed_turns,
                            "timeouts": timeouts,
                            "truncations": truncations,
-                           "context_window_source": self.context_window_source}
+                           "context_window_source": self.context_window_source,
+                           "changed": changed}
+            if changed_reason is not None:
+                extra["changed_reason"] = changed_reason
             if self.finalize is not None:
                 run_finalize()
                 if isinstance(finalize_state["result"], dict):
                     extra.update(finalize_state["result"])
                 if finalize_state["error"] is not None:
                     extra["finalize_error"] = finalize_state["error"]
+            # Spec #66: budget watchdog violation (only if not set by finalize)
+            if changed_reason is not None and changed_reason.startswith("budget: ") \
+                    and not extra.get("watchdog_violation"):
+                extra["watchdog_violation"] = changed_reason[len("budget: "):]
+                extra["watchdog_violation_kind"] = "budget"
             if not run_end_written:
                 self.transcript.write("run_end", status=status, turns=turns,
                                       duration_s=round(time.monotonic() - start, 1),
@@ -785,6 +814,30 @@ class Runner:
                                           command=self.verify,
                                           exit_code=exit_code, output=tail), record
 
+        def take_fingerprint() -> str | None:
+            """Spec #66 §4.1/§4.3: one measurement. Returns the fingerprint or
+            None. One rule: a successful measurement sets changed/clears the
+            reason; a failed or raising one sets changed = None and stores
+            the reason (so changed_reason is present exactly when changed is
+            null for that reason). BudgetExceeded/SandboxError are stored,
+            then re-raised for the caller to map (finish() catches them)."""
+            nonlocal fp_turn, fp_value, changed, changed_reason
+            try:
+                fp, reason = _fingerprint(self.sandbox)
+            except BudgetExceeded as e:
+                changed, changed_reason = None, f"budget: {e.reason}"
+                raise
+            except SandboxError as e:
+                changed, changed_reason = None, f"sandbox: {e}"
+                raise
+            if fp is None:
+                changed, changed_reason = None, reason
+                return None
+            fp_turn, fp_value = turns, fp
+            if fp_start is not None:
+                changed, changed_reason = (fp != fp_start), None
+            return fp
+
         def check_verify(final: str, via: str):
             """(RunResult to return, or None; feedback to deliver, or None) for a
             completion path. Both completion paths — the finish tool and a plain
@@ -795,7 +848,30 @@ class Runner:
             branch resolves the turn's terminal records (§4) -- a no-op on the
             plain-answer path, which has none. BudgetExceeded/SandboxError end
             the run with the same statuses a tool call would."""
-            nonlocal stuck
+            nonlocal stuck, unchanged_finishes
+            if fp_start is not None:
+                try:
+                    fp = take_fingerprint()
+                except BudgetExceeded as e:
+                    resolve_finish(f"run not finished: change check could not run ({e.reason})")
+                    return finish("budget_exceeded", e.reason), None
+                except SandboxError as e:
+                    resolve_finish(f"run not finished: change check could not run ({e})")
+                    return finish("sandbox_error", str(e)), None
+                if fp is not None and fp == fp_start:
+                    if unchanged_finishes == 0:
+                        unchanged_finishes = 1
+                        stuck = None
+                        repeats.reset()             # a rejection round is a fresh episode, as verify feedback
+                        record = self.transcript.write("nudge", kind="unchanged_finish", turn=turns)
+                        if record is not None:
+                            record["via"] = "tool_result" if via == "finish_result" else "user"
+                        text = UNCHANGED_REQUIRED if self.require_changes else UNCHANGED_PLAIN
+                        resolve_finish(text)
+                        return None, text
+                    if self.require_changes:
+                        resolve_finish("run not finished: nothing changed")
+                        return finish("unchanged", final), None
             if not self.verify:
                 resolve_finish(FINISH_DONE)
                 return finish("completed", final), None
@@ -1076,6 +1152,15 @@ class Runner:
             deliver(_join_nudges(malformed_text, sandbox_text, timeout_text, stall_text),
                     [malformed_record, *sandbox_records, timeout_record, stall_record])
             return None
+        # Spec #66 §4.1: take the start fingerprint before the first turn
+        try:
+            fp_start = take_fingerprint()      # spec #66 §4.1 (1); None = guard off for this run
+        except BudgetExceeded as e:
+            return finish("budget_exceeded", e.reason)
+        except SandboxError as e:
+            return finish("sandbox_error", str(e))
+        fp_check = fp_start
+
         try:
             while True:
                 with self.transcript.turn():

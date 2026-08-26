@@ -37,6 +37,7 @@ from dirtywork.runner import (
 )
 from dirtywork.sandbox.host import HostSandbox
 from dirtywork.builtin_tools import default_registry
+from dirtywork.changes import FINGERPRINT_SCRIPT
 from dirtywork.transcript import Transcript
 
 from .provider_doubles import FingerprintSandbox
@@ -695,10 +696,12 @@ def test_finalize_merges_into_run_end_and_result_extra(parts):
               finalize=lambda: {"diff_stat": " 1 file changed"})
     result = r.run("s", "t")
     transcript.close()
+    assert result.extra.pop("changed_reason").startswith("fatal: not a git repository")
     assert result.extra == {"stuck_on": None, "last_tool_result": None,
                             "last_assistant_text": "done", "verify": None,
                             "trimmed_turns": 0, "timeouts": 0, "truncations": 0,
                             "context_window_source": None,
+                            "changed": None,
                             "diff_stat": " 1 file changed"}
     events = _events(tmp)
     run_end = next(e for e in events if e["event"] == "run_end")
@@ -1706,6 +1709,8 @@ class _TimeoutSandbox:
         self.commands = []
 
     def bash(self, command, timeout=120):
+        if command == FINGERPRINT_SCRIPT:
+            return "exit code: 1\nerror: test double"
         self.commands.append(command)
         if self.timing_out:
             from dirtywork.tools import timeout_result
@@ -1882,7 +1887,7 @@ def test_a_verify_timeout_is_not_counted(parts):
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "verify_failed"
-    assert box.commands == ["npm test"]        # it DID run, and it DID time out
+    assert [c for c in box.commands if c != FINGERPRINT_SCRIPT] == ["npm test"]        # it DID run, and it DID time out
     assert result.extra["timeouts"] == 0       # spec §4.3: worker tool calls only
     assert [e for e in _events(tmp) if e["event"] == "nudge"] == []
 
@@ -1944,6 +1949,8 @@ def test_verify_that_cannot_run_leaves_an_honest_finish_result(parts):
             self.exc = exc
 
         def bash(self, command, timeout=120):
+            if command == FINGERPRINT_SCRIPT:
+                return "exit code: 1\nerror: test double"
             raise self.exc
 
     for exc, status, reason in ((BudgetExceeded("worktree exceeds 2048 MB"), "budget_exceeded",
@@ -1971,6 +1978,8 @@ def test_terminal_exits_before_verify_never_leave_run_finished(parts):
 
     class InterruptingSandbox:
         def bash(self, command, timeout=120):
+            if command == FINGERPRINT_SCRIPT:
+                return "exit code: 1\nerror: test double"
             raise KeyboardInterrupt
 
     cases = [
@@ -2001,6 +2010,8 @@ def test_interrupt_inside_verify_resolves_the_finish_result_before_the_flush(par
 
     class InterruptingVerify:
         def bash(self, command, timeout=120):
+            if command == FINGERPRINT_SCRIPT:
+                return "exit code: 1\nerror: test double"
             raise KeyboardInterrupt
 
     provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "s"})])])
@@ -2022,6 +2033,8 @@ def test_unhandled_exception_after_finish_leaves_the_provisional_result_on_disk(
 
     class Exploding:
         def bash(self, command, timeout=120):
+            if command == FINGERPRINT_SCRIPT:
+                return "exit code: 1\nerror: test double"
             raise RuntimeError("disk on fire")
 
     provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "s"}), _bash_call("b1")])])
