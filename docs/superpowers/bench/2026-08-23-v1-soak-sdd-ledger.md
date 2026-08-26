@@ -359,3 +359,4 @@ Computed from this ledger's rows by a script (`scoreboard.py`, session scratch; 
 | #65/#66 (2026-08-25/26) (15) | 27 | 1142 | 113 min | 31.4 M | 27,513 | 5.9 | 9 | 17 | 14 | 2 | 8 | 33 (375, 142 min) |
 
 Readings: prompt volume per turn is flat across builds (22–28 k) — the reads-heavy loop is the cost, not the harness; the worker's completion rate on first runs is ~⅓ in every build and a Claude finish follows most feedback rounds; zero-change feedback resumes under the released runtime: 0 (#64) → 4 (#61) → 2 (#65/#66, both before W3 landed the guard on the branch). The next build runs on a runtime that refuses them — the column to watch.
+| (**C5 live suite, final code HEAD** 00ea23d, `dirtywork-worker-pytest:0.10`, serial after F5) | **26 passed / 3 skipped / 0 failed** (367 s) | the three skips are the .NET-image conditions (#70) | — | — | — | — | — | — | — | — | — | — | C5 live |
