@@ -50,7 +50,7 @@ def test_dotnet_list_sdks_fails_loudly_on_nonzero_exit(monkeypatch):
     # Unit-level (no docker daemon needed): a broken/missing image must fail
     # the test rather than read as '' and let the SDK-10 gate in
     # test_docker_live_dotnet_builds_and_runs_offline skip green as though it
-    # merely predates the 1.0 Dockerfile.
+    # merely predates the 0.11 Dockerfile.
     _dotnet_list_sdks.cache_clear()
     monkeypatch.setattr(
         subprocess, "run",
@@ -681,7 +681,7 @@ def test_docker_live_dotnet_builds_and_runs_offline(tmp_path, monkeypatch, capsy
     image = LIVE_IMAGE or DEFAULT_IMAGE
     sdks = _dotnet_list_sdks(image)
     if not any(line.startswith("10.") for line in sdks.splitlines()):
-        pytest.skip(f"image {image} predates the 1.0 Dockerfile (no .NET SDK 10.x, so no "
+        pytest.skip(f"image {image} predates the 0.11 Dockerfile (no .NET SDK 10.x, so no "
                     f"DOTNET_EnableWriteXorExecute=0 either) -- build docker/Dockerfile")
 
     repo = _make_live_repo(tmp_path)

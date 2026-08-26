@@ -8,11 +8,12 @@ installs .NET SDK **8.0 and 10.0**, both via Microsoft's official
 arm64 packages for Debian 12). 8.0 stays alongside 10.0 because the sandbox
 runs `--network none`: an SDK-10-only image can't build `net8.0` projects
 offline, since SDK 10 doesn't bundle the 8.0 targeting packs and a restore
-that can't reach NuGet fails with `NETSDK1145`. The **published**
-`ghcr.io/jimboschneider/dirtywork-worker:0.10` image predates this change
-and has SDK 8.0 only; 10.0 arrives with the 1.0 image (#59): that release
-bumps `DEFAULT_IMAGE` to `:1.0` and ships `PINNED_DIGEST = None` (first
-publish of the minor); the pin lands in 1.0.1 — see "Pin a digest" below.
+that can't reach NuGet fails with `NETSDK1145`. The
+`ghcr.io/jimboschneider/dirtywork-worker:0.11` image predated this change
+and had SDK 8.0 only; 10.0 arrived with the `:0.11` image (0.11.0, the
+image #59 asked for): that release bumped `DEFAULT_IMAGE` to `:0.11` and
+shipped `PINNED_DIGEST = None` (first publish of the minor); the pin lands
+in 0.11.1 — see "Pin a digest" below.
 Unless a repo's `global.json` pins otherwise, `dotnet` resolves to the
 highest installed SDK (10.0.x here), so a repo that previously built on
 8.0.424 in the old `:0.10` image sees a default-SDK change: newer
@@ -21,10 +22,11 @@ Dockerfile also sets
 `DOTNET_EnableWriteXorExecute=0`: dirtywork's `bash` tool runs every command
 under `ulimit -f 524288` (256 MiB), and with W^X enabled the .NET 8 runtime
 trips that limit at startup (even at 8 GiB — consistent with the size of its
-double-mapping file), so on the published `:0.10` image every .NET 8 process
-— `dotnet build`, `dotnet test`, a built app — dies with `File size limit
+double-mapping file), so on the old `:0.10` image every .NET 8 process
+— `dotnet build`, `dotnet test`, a built app — died with `File size limit
 exceeded` (exit 153); the .NET 10 runtime does not. Verified 2026-08-24; the
-variable fixes both, and a derived image based on `:0.10` must set it too.
+variable fixes both and `:0.11` bakes it, so a derived image `FROM :0.11`
+does not need to repeat it.
 No `ENTRYPOINT`/`CMD` — every `docker create`/`run`/`exec` in dirtywork
 passes its own explicit `--entrypoint` or absolute binary path.
 
@@ -35,14 +37,14 @@ installs) and by `dirtywork runs export` for re-exports.
 
 ## Build
 
-    docker build -t ghcr.io/jimboschneider/dirtywork-worker:0.10 docker/
+    docker build -t ghcr.io/jimboschneider/dirtywork-worker:0.11 docker/
 
 ## Verify locally
 
-    docker run --rm --entrypoint /usr/bin/git ghcr.io/jimboschneider/dirtywork-worker:0.10 --version
-    docker run --rm --entrypoint /usr/bin/rg ghcr.io/jimboschneider/dirtywork-worker:0.10 --version
-    docker run --rm --entrypoint /usr/bin/python3 ghcr.io/jimboschneider/dirtywork-worker:0.10 --version
-    docker run --rm --entrypoint /usr/bin/dotnet ghcr.io/jimboschneider/dirtywork-worker:0.10 --list-sdks
+    docker run --rm --entrypoint /usr/bin/git ghcr.io/jimboschneider/dirtywork-worker:0.11 --version
+    docker run --rm --entrypoint /usr/bin/rg ghcr.io/jimboschneider/dirtywork-worker:0.11 --version
+    docker run --rm --entrypoint /usr/bin/python3 ghcr.io/jimboschneider/dirtywork-worker:0.11 --version
+    docker run --rm --entrypoint /usr/bin/dotnet ghcr.io/jimboschneider/dirtywork-worker:0.11 --list-sdks
 
 `dotnet --version` prints only the highest-resolved SDK (`10.0.400`); use
 `--list-sdks` instead and check that both an `8.0.x` and a `10.0.x` line
@@ -62,8 +64,8 @@ the workflow by hand (`workflow_dispatch`, input: the release tag) and then
 re-pin `PINNED_DIGEST` in a follow-up.
 
 **Do not dispatch the current Dockerfile onto a `0.10.x` tag.** It is now
-intentionally *ahead* of the published `:0.10` image (two SDKs plus
-`DOTNET_EnableWriteXorExecute=0`) — it ships with the 1.0 image, not as a
+intentionally *ahead* of the old `:0.10` image (two SDKs plus
+`DOTNET_EnableWriteXorExecute=0`) — it shipped as `:0.11` with 0.11.0, not as a
 0.10 patch. Re-pushing `:0.10` from it would mismatch the `PINNED_DIGEST`
 shipped in 0.10.1, and `resolve_image()` refuses to run a *pulled* default
 image on a digest mismatch — breaking fresh 0.10.1 installs rather than
@@ -100,7 +102,7 @@ trigger a network pull.
 
 A *locally built or loaded* default image (no `RepoDigests` entry — it was
 never pushed to or pulled from a registry, e.g. `docker build -t
-ghcr.io/jimboschneider/dirtywork-worker:0.10 docker/` run by hand, or the CI
+ghcr.io/jimboschneider/dirtywork-worker:0.11 docker/` run by hand, or the CI
 gate that builds this same image locally) has nothing for the pin to
 compare against. `resolve_image()` does not refuse it: it returns the
 local Id and prints a one-line warning to stderr instead
@@ -113,15 +115,15 @@ default image only*.
 The first release of a minor (0.4.0, 0.5.0, 0.6.0, 0.7.0, 0.8.0, 0.9.0, 0.10.0) ships with `PINNED_DIGEST = None`: there is no prior publish to pin
 against on the very first release, so `resolve_image()` performs no pin
 check and trusts whatever `docker image inspect` currently reports for
-`ghcr.io/jimboschneider/dirtywork-worker:0.10`. The next patch release
+`ghcr.io/jimboschneider/dirtywork-worker:0.11`. The next patch release
 (0.4.1 for 0.4; 0.5.1 for 0.5; 0.6.1 for 0.6; 0.8.1 for 0.8; 0.9.1 for 0.9; 0.10.1 for 0.10 — 0.7.x shipped unpinned) pins — once `publish-image.yml` has run, take the
 digest from its job summary (or resolve it yourself below) and commit it
 as `PINNED_DIGEST` ahead of the next release.
 
 1. Resolve the published digest:
 
-       docker pull ghcr.io/jimboschneider/dirtywork-worker:0.10
-       docker image inspect --format '{{json .RepoDigests}}' ghcr.io/jimboschneider/dirtywork-worker:0.10
+       docker pull ghcr.io/jimboschneider/dirtywork-worker:0.11
+       docker image inspect --format '{{json .RepoDigests}}' ghcr.io/jimboschneider/dirtywork-worker:0.11
 
    This prints a JSON array like
    `["ghcr.io/jimboschneider/dirtywork-worker@sha256:<64 hex chars>"]`.
@@ -136,8 +138,8 @@ as `PINNED_DIGEST` ahead of the next release.
 `publish-image.yml` is the normal path; a manual push is only needed to
 recover from a broken automated run:
 
-    docker build -t ghcr.io/jimboschneider/dirtywork-worker:0.10 docker/
-    docker push ghcr.io/jimboschneider/dirtywork-worker:0.10
+    docker build -t ghcr.io/jimboschneider/dirtywork-worker:0.11 docker/
+    docker push ghcr.io/jimboschneider/dirtywork-worker:0.11
 
 then resolve/pin the digest as above.
 
@@ -149,15 +151,15 @@ inside a run will always fail. If your gate needs a tool this image does not
 ship, build a derived image once and point `--image` at it:
 
 ```Dockerfile
-FROM ghcr.io/jimboschneider/dirtywork-worker:0.10
+FROM ghcr.io/jimboschneider/dirtywork-worker:0.11
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends <packages> \
     && rm -rf /var/lib/apt/lists/*
 USER worker
 ```
 
-    docker build -t my-worker:0.10 .
-    dirtywork run --repo ~/repos/thing --image my-worker:0.10 "..."
+    docker build -t my-worker:0.11 .
+    dirtywork run --repo ~/repos/thing --image my-worker:0.11 "..."
 
 Keep `USER worker` as the last instruction and add no `ENTRYPOINT`/`CMD`:
 dirtywork always passes its own `--entrypoint` and `--user` explicitly at
@@ -192,7 +194,7 @@ build time (run the restore as root — `/opt` is root-owned — then open the
 result up to the host uid):
 
 ```Dockerfile
-FROM ghcr.io/jimboschneider/dirtywork-worker:0.10
+FROM ghcr.io/jimboschneider/dirtywork-worker:0.11
 USER root
 ENV DOTNET_EnableWriteXorExecute=0
 # until the 1.0 base image bakes these in — see the 0.10 defect note above;
@@ -207,8 +209,8 @@ RUN dotnet restore /tmp/restore/MyProject.csproj --packages /opt/nuget \
 USER worker
 ```
 
-    docker build -t my-worker:0.10 .
-    dirtywork run --repo ~/repos/thing --image my-worker:0.10 "..."
+    docker build -t my-worker:0.11 .
+    dirtywork run --repo ~/repos/thing --image my-worker:0.11 "..."
 
 Issue #63 also considered defaulting the image to redirect
 `NUGET_PACKAGES`/`DOTNET_CLI_HOME` off `$HOME`; the owner declined it — a
@@ -242,26 +244,14 @@ verify with the commands above, then repeat the pin procedure. `--image`
 lets an operator override the default per run; `PINNED_DIGEST` only
 constrains the maintained default.
 
-### 1.0 image checklist
+### The .NET 8+10 image: landed in 0.11, not 1.0
 
-Landing the 1.0 image (#59) is more than a rebuild — it changes the default
-tag. In order:
-
-1. Bump `DEFAULT_IMAGE` to `:1.0` in `dirtywork/sandbox/docker_args.py`.
-2. Sweep the `:0.10` literals in `docker/README.md` and
-   `docs/machine-contract.md` (`grep -n ':0\.10' <file>` in each): the image
-   description/build/verify/pin/manual-push sections and the derived-image
-   and baked-cache Dockerfile snippets in `docker/README.md`; the `--image`
-   default in the flags block and the `--image` bullet's own text and
-   Dockerfile snippets (derived-image and baked-cache) in
-   `docs/machine-contract.md`.
-3. Publish via the `v1.0.0` release: `publish-image.yml` pushes `:1.0`
-   for the first time, so `PINNED_DIGEST` ships `None` — pin it in 1.0.1,
-   same as every other minor.
-4. Verify with `--list-sdks` (both `8.0.x` and `10.0.x` present) and
-   `env | grep DOTNET_EnableWriteXorExecute` (`=0`) against the built image.
-5. Close #59.
-6. Drop the "a derived image based on `:0.10` must set the `ENV` line
-   itself" caveats from both docs — the 1.0 base image bakes
-   `DOTNET_EnableWriteXorExecute=0` and the four .NET stray-process variables,
-   so a derived `FROM :1.0` no longer needs to repeat them.
+This Dockerfile (SDK 8.0 + 10.0, `DOTNET_EnableWriteXorExecute=0`, the four
+.NET stray-process variables) was planned as the 1.0 image (#59) and shipped
+early as `:0.11` with the 0.11.0 release, following the same steps every new
+minor takes: `DEFAULT_IMAGE` bumped, the `:0.10` literals swept here and in
+`docs/machine-contract.md`, `publish-image.yml` pushing the tag on the
+`v0.11.0` release with `PINNED_DIGEST = None`, the pin in 0.11.1, and the
+built image verified with `--list-sdks` (both `8.0.x` and `10.0.x`) and
+`env | grep DOTNET_EnableWriteXorExecute` (`=0`). 1.0 renames nothing about
+the image; a `:1.0` tag is just the next minor's rebuild.
