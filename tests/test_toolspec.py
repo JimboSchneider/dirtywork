@@ -840,11 +840,11 @@ def test_tool_call_markers_include_the_sanitised_forms():
     """Assert len(TOOL_CALL_MARKERS) == 10 and sanitised forms are present."""
     from dirtywork.toolspec import TOOL_CALL_MARKERS as _markers
     assert len(_markers) == 10
-    
+
     # Sanitised forms should be present
     assert _SANITISED in _markers
     assert re.sub(r"[^A-Za-z0-9_-]", "_", TOOL_CALL_OPEN) in _markers
-    
+
     # Verify the tuple equals raw five followed by their sanitised twins
     from dirtywork.toolspec import _RAW_MARKERS as _raw_markers
     expected = _raw_markers + tuple(re.sub(r"[^A-Za-z0-9_-]", "_", m) for m in _raw_markers)
