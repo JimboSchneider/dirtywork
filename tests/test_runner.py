@@ -37,7 +37,7 @@ from dirtywork.runner import (
 )
 from dirtywork.sandbox.host import HostSandbox
 from dirtywork.builtin_tools import default_registry
-from dirtywork.changes import FINGERPRINT_SCRIPT
+from dirtywork.changes import FINGERPRINT_SCRIPT, UNCHANGED_PLAIN, UNCHANGED_REQUIRED
 from dirtywork.transcript import Transcript
 
 from .provider_doubles import FingerprintSandbox
@@ -3095,3 +3095,146 @@ def test_sixth_truncation_on_the_tool_path_records_its_result(parts):
     assert "cut off at the --max-tokens cap" in tool_results[-1]["result"]
     run_end = [e for e in events if e["event"] == "run_end"][0]
     assert run_end["status"] == "model_error"
+
+
+def test_start_fingerprint_before_first_chat(parts):
+    # Spec #66 §4.1 (1): the start fingerprint is taken before the first chat
+    # call, so it appears at the head of the sandbox's command log.
+    wt, registry, sandbox, transcript, tmp = parts
+    sandbox = FingerprintSandbox(wt, ["a" * 40])
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "done"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert sandbox.commands[0] == (FINGERPRINT_SCRIPT, 60)
+    finish_results = _finish_results(_events(tmp))
+    assert finish_results[0] == UNCHANGED_PLAIN
+    assert result.status == "completed"
+    run_end = next(e for e in _events(tmp) if e["event"] == "run_end")
+    assert run_end["changed"] is False
+
+    # A second run whose fingerprint DOES move: a single finish completes
+    # right away and run_end reports the change.
+    transcript2 = Transcript(tmp / "t2.jsonl")
+    registry2 = default_registry(transcript=transcript2)
+    sandbox2 = FingerprintSandbox(wt, ["a" * 40, "b" * 40])
+    provider2 = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "done"})])])
+    r2 = Runner(provider2, registry2, sandbox2, transcript2, model="m")
+    result2 = r2.run("s", "t")
+    transcript2.close()
+
+    assert result2.status == "completed"
+    events2 = [json.loads(l) for l in (tmp / "t2.jsonl").read_text().splitlines()]
+    run_end2 = next(e for e in events2 if e["event"] == "run_end")
+    assert run_end2["changed"] is True
+
+
+def test_start_fingerprint_failure_turns_guard_off(parts):
+    # Spec #66 §4.1 (1)/§4.3: a failed start measurement disables the guard
+    # for the whole run (fp_start stays None) -- no rejection, changed=None.
+    wt, registry, sandbox, transcript, tmp = parts
+    sandbox = FingerprintSandbox(wt, [None])
+    provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "done"})])])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "completed"
+    events = _events(tmp)
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end["changed"] is None
+    assert run_end["changed_reason"] == "error: boom"
+    assert len([c for c in sandbox.commands if c == (FINGERPRINT_SCRIPT, 60)]) == 1
+
+
+def test_zero_change_finish_rejected_once_then_completed(git_parts):
+    # Spec #66 §4.3: the first zero-change finish is rejected once; a second
+    # one (still require_changes=False) is accepted and verify runs.
+    wt, registry, sandbox, transcript, tmp = git_parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "done"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m", verify="test -e f.txt")
+    result = r.run("s", "t")
+    transcript.close()
+
+    events = _events(tmp)
+    finish_results = _finish_results(events)
+    assert finish_results[0] == UNCHANGED_PLAIN
+    nudge = next(e for e in events if e["event"] == "nudge" and e["kind"] == "unchanged_finish")
+    assert nudge["via"] == "tool_result"
+
+    commands = [c for c, _ in sandbox.commands]
+    fp_indices = [i for i, c in enumerate(commands) if c == FINGERPRINT_SCRIPT]
+    verify_idx = commands.index("test -e f.txt")
+    assert verify_idx > fp_indices[1]
+
+    assert result.status == "completed"
+    assert commands.count("test -e f.txt") == 1
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end["changed"] is False
+    assert result.extra["changed"] is False
+
+
+def test_zero_change_finish_ends_unchanged_when_required(git_parts):
+    # Spec #66 §4.3: with require_changes, a second zero-change finish ends
+    # the run `unchanged` instead of retrying verify.
+    wt, registry, sandbox, transcript, tmp = git_parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "done"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m",
+               require_changes=True, verify="test -e f.txt")
+    result = r.run("s", "t")
+    transcript.close()
+
+    events = _events(tmp)
+    assert _finish_results(events) == [UNCHANGED_REQUIRED, "run not finished: nothing changed"]
+    assert result.status == "unchanged"
+    assert result.final_message == "done"
+    assert "test -e f.txt" not in [c for c, _ in sandbox.commands]
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end["changed"] is False
+
+    # Variant: a write between the two finishes clears the guard -- the run
+    # completes and run_end reports the change.
+    transcript2 = Transcript(tmp / "t2.jsonl")
+    registry2 = default_registry(transcript=transcript2)
+    sandbox2 = FingerprintSandbox(wt, hashes=None)
+    provider2 = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("w1", "write_file", {"path": "g.txt", "content": "x\n"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "done"})]),
+    ])
+    r2 = Runner(provider2, registry2, sandbox2, transcript2, model="m",
+                require_changes=True, verify="test -e f.txt")
+    result2 = r2.run("s", "t")
+    transcript2.close()
+
+    assert result2.status == "completed"
+    events2 = [json.loads(l) for l in (tmp / "t2.jsonl").read_text().splitlines()]
+    run_end2 = next(e for e in events2 if e["event"] == "run_end")
+    assert run_end2["changed"] is True
+
+    # Variant: finalize raising does not change the `unchanged` status.
+    transcript3 = Transcript(tmp / "t3.jsonl")
+    registry3 = default_registry(transcript=transcript3)
+    sandbox3 = FingerprintSandbox(wt, hashes=None)
+    provider3 = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "done"})]),
+    ])
+    r3 = Runner(provider3, registry3, sandbox3, transcript3, model="m",
+                require_changes=True,
+                finalize=lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    result3 = r3.run("s", "t")
+    transcript3.close()
+
+    assert result3.status == "unchanged"
+    assert isinstance(result3.extra["finalize_error"], str) and result3.extra["finalize_error"]

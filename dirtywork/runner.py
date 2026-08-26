@@ -724,6 +724,14 @@ class Runner:
 
         def finish(status: str, final: str) -> RunResult:
             nonlocal run_end_written
+            # Spec #66 §4.1 (4): take a final fingerprint at run_end for the
+            # change guard (except for statuses where it's already been measured)
+            if (status not in ("interrupted", "timeout", "budget_exceeded", "sandbox_error")
+                    and fp_start is not None and fp_turn != turns):
+                try:
+                    take_fingerprint()              # §4.1 (4): run_end.changed for max_turns/stalled/stuck/model_error/verify_failed/context_exhausted; a failure sets changed None + reason
+                except (BudgetExceeded, SandboxError):
+                    pass                            # reason and changed=None already stored by take_fingerprint
             # Spec #60 §4(c): the single exit point resolves any terminal record
             # the verify path never reached (a later call raised, the failure
             # tracker aborted, Ctrl-C) -- then flushes the turn so its evidence
@@ -733,14 +741,6 @@ class Runner:
                 resolve_finish(FINISH_DONE if status == "completed"
                                else f"run not finished: {status}")
             self.transcript.flush()
-            # Spec #66 §4.1 (4): take a final fingerprint at run_end for the
-            # change guard (except for statuses where it's already been measured)
-            if (status not in ("interrupted", "timeout", "budget_exceeded", "sandbox_error")
-                    and fp_start is not None and fp_turn != turns):
-                try:
-                    take_fingerprint()              # §4.1 (4): run_end.changed for max_turns/stalled/stuck/model_error/verify_failed/context_exhausted; a failure sets changed None + reason
-                except (BudgetExceeded, SandboxError):
-                    pass                            # reason and changed=None already stored by take_fingerprint
             # This evidence rides on EVERY result (null when there is none), so
             # a consumer never has to branch on status to read the fields. A
             # `max_turns` run with final_message "" is the case that made this
