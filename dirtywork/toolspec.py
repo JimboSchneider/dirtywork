@@ -428,14 +428,21 @@ class ToolRegistry:
         else is returned unchanged with marker None: the unknown-tool path decides."""
         if name in self._table:
             return name, None, 0
-        best = max(((name.rfind(m), m) for m in TOOL_CALL_MARKERS if m in name),
-                   default=(-1, None))
-        if best[0] < 0:
-            return name, None, 0
-        pos, marker = best
-        suffix = name[pos + len(marker):].strip()
-        if suffix in self._table:
-            return suffix, marker, pos
+        # Every occurrence of every marker, latest END first: a sanitised
+        # marker can contain a shorter one ("__tool_call__" holds
+        # "_tool_call_" one character in), so keying on the start would pick
+        # the shorter marker and leave "_bash" behind. Candidates are tried
+        # in that order until one leaves a registered name behind.
+        candidates = []
+        for marker in TOOL_CALL_MARKERS:
+            pos = name.find(marker)
+            while pos >= 0:
+                candidates.append((pos + len(marker), len(marker), marker, pos))
+                pos = name.find(marker, pos + 1)
+        for _end, _length, marker, pos in sorted(candidates, reverse=True):
+            suffix = name[pos + len(marker):].strip()
+            if suffix in self._table:
+                return suffix, marker, pos
         return name, None, 0
 
     def execute(self, name: str, args: dict, *, sandbox, deadline) -> ToolResult:

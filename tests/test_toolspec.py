@@ -869,6 +869,17 @@ def test_recover_name_sanitised_and_raw_markers_in_one_name_uses_the_last():
     assert r.recover_name(name) == ("bash", _SANITISED, expected_cut)
 
 
+def test_recover_name_prefers_the_marker_whose_match_ends_latest():
+    # Review of #85: the sanitised "<|tool_call|>" contains the sanitised
+    # "<tool_call>" one character in; keyed on the start, the shorter marker
+    # won and left "_bash" behind. Keyed on the end, the longer one wins.
+    r = default_registry()
+    pipe = re.sub(r"[^A-Za-z0-9_-]", "_", "<" + "|tool_call|>")
+    assert pipe == "__tool_call__"
+    assert r.recover_name(pipe + "bash") == ("bash", pipe, 0)
+    assert r.recover_name("prose " + pipe + "read_file") == ("read_file", pipe, len("prose "))
+
+
 def test_recover_name_sanitised_marker_with_unknown_suffix_stays_unknown():
     """Test that a sanitised marker with unknown suffix is not recovered."""
     r = default_registry()
