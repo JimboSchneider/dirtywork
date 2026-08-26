@@ -224,8 +224,8 @@ NAME_RECOVERED_NUDGE = (
                 name_recovered_text = NAME_RECOVERED_NUDGE.format(
                     raw_head=raw_name[:40].replace("\n", "⏎"), marker=marker, tool=tool, cut=cut)
 
-3. The `pending_finish` branch (line ~1150-1167): today it writes a timeout record and joins `_join_nudges(sandbox_text, timeout_text)` when `timed_out_this_turn`, else joins sandbox text alone. Restructure so both nudges are handled: 
-   
+3. The `pending_finish` branch (line ~1150-1167): today it writes a timeout record and joins `_join_nudges(sandbox_text, timeout_text)` when `timed_out_this_turn`, else joins sandbox text alone. Restructure so both nudges are handled:
+
                 sandbox_text, sandbox_records = drain_sandbox()
                 extra_records = []
                 timeout_record = None
@@ -293,7 +293,7 @@ Issue #67, task T3 of 8: bench and the soak harvester learn the new nudge kind, 
    c. Two sites, mirroring `stray_kills`: in the dict `harvest_run` returns (line ~405, next to `"stray_kills": counts.get("stray_kill", 0)`) add `"recovered": sum(1 for e in events if e.get("event") == "tool_result" and "tool_raw" in e)`; in `_per_run_row` (line ~469, next to `"stray kills": h.get("stray_kills", 0)`) add `"recovered": h.get("recovered", 0)`. A run with no such events shows 0.
    d. detect_features (lines ~137-270): add feature code "S6" that fires when ANY of: a nudge event with kind "name_recovered"; a tool_result event with a "tool_raw" key; a tool_result event whose "result" starts with "ERROR: unknown tool" and whose "tool" contains any marker from TOOL_CALL_MARKERS (from dirtywork.toolspec import TOOL_CALL_MARKERS). Do not fold it into F8 or any other code.
 
-3. tests/test_soak_tools.py (import TOOL_CALLS from markers): 
+3. tests/test_soak_tools.py (import TOOL_CALLS from markers):
    a. test_s6_fires_on_each_trigger: three separate event lists — [a name_recovered nudge], [a tool_result with tool "bash" and tool_raw "x" + TOOL_CALLS + "bash"], [a tool_result whose tool is the CAPPED form of a long unrecovered name — `raw = "p" * 300 + TOOL_CALLS + "nope"; tool = raw[:120] + "…" + raw[-80:]` (the marker survives in the tail) — and result "ERROR: unknown tool 'p…'"] — each fires S6 (use BASE_RUN_JSON as the other tests do); a clean run (a bash tool_result, no tool_raw, no nudge) does not.
    b. test_recovered_column_counts_tool_raw: write a transcript with two tool_results carrying tool_raw and one without (use the file's `_write_run` helper the way the stray-kill tests do) → `harvest_run(...)["recovered"] == 2` and the `_per_run_row` of that dict has "recovered" == 2; "recovered" in harvest.PER_RUN_COLUMNS; `harvest._per_run_row({"label": "r"})["recovered"] == 0` (mirror the three stray-kill assertions at lines ~1031-1033).
 

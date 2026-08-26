@@ -417,7 +417,7 @@ def harvest_run(label: str, run_dir: Path, driver_row: dict = None) -> dict:
 
     # Count tool_result events with "tool_raw" key (S6 signal)
     recovered = sum(1 for e in events if e.get("event") == "tool_result" and "tool_raw" in e)
-    
+
     return {
         "label": label, "run_dir": run_dir, "model": run_json.get("model"),
         "status": status, "turns": turns, "wall_s": wall_s,

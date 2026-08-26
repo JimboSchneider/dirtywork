@@ -1043,7 +1043,7 @@ def test_s6_fires_on_each_trigger(harvest):
         {"ts": _ts(2), "event": "run_end", "status": "completed"},
     ]
     assert "S6" in harvest.detect_features(BASE_RUN_JSON, events_with_nudge)
-    
+
     # S6 fires on tool_result with tool_raw
     events_with_tool_raw = [
         {"ts": _ts(0), "event": "run_start"},
@@ -1053,7 +1053,7 @@ def test_s6_fires_on_each_trigger(harvest):
         {"ts": _ts(3), "event": "run_end", "status": "completed"},
     ]
     assert "S6" in harvest.detect_features(BASE_RUN_JSON, events_with_tool_raw)
-    
+
     # S6 fires on tool_result with ERROR: unknown tool and marker in tool name
     raw = "p" * 300 + TOOL_CALLS + "nope"
     tool = raw[:120] + "…" + raw[-80:]
@@ -1065,7 +1065,7 @@ def test_s6_fires_on_each_trigger(harvest):
         {"ts": _ts(3), "event": "run_end", "status": "completed"},
     ]
     assert "S6" in harvest.detect_features(BASE_RUN_JSON, events_with_unknown_tool)
-    
+
     # S6 does NOT fire on clean run (bash tool_result, no tool_raw, no nudge)
     events_clean = [
         {"ts": _ts(0), "event": "run_start"},
@@ -1079,7 +1079,7 @@ def test_s6_fires_on_each_trigger(harvest):
 
 def test_recovered_column_counts_tool_raw(harvest, tmp_path):
     # Write a run with two tool_results carrying tool_raw and one without
-    
+
     events_with_tool_raw = [
         {"ts": _ts(0), "event": "run_start"},
         {"ts": _ts(1), "event": "assistant", "tool_calls": [{"name": "bash"}]},

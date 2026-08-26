@@ -1081,12 +1081,12 @@ class Runner:
                 name = tc.name
                 raw_args = tc.raw_arguments or "{}"
                 args = tc.arguments
-                
+
                 raw_name = name
                 name, marker, cut = self.registry.recover_name(name)
                 if marker is not None and first_recovered is None:
                     first_recovered = (raw_name, marker, name, cut)
-                
+
                 abort_reason = None
                 terminal = False
                 if tc.error is not None:
