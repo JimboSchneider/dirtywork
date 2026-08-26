@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -37,6 +39,7 @@ from dirtywork.sandbox.host import HostSandbox
 from dirtywork.builtin_tools import default_registry
 from dirtywork.transcript import Transcript
 
+from .provider_doubles import FingerprintSandbox
 from .provider_doubles import assert_strict_template_legal
 from .provider_doubles import TimeoutThenFailingVerifySandbox as _TimeoutThenFailingVerifySandbox
 
@@ -112,6 +115,21 @@ def parts(tmp_path: Path):
     transcript = Transcript(tmp_path / "t.jsonl")
     registry = default_registry(transcript=transcript)
     sandbox = HostSandbox(wt)
+    return wt, registry, sandbox, transcript, tmp_path
+
+
+@pytest.fixture()
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
+def git_parts(tmp_path: Path):
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "f.txt").write_text("data\n")
+    subprocess.run(["git", "-C", str(wt), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(wt), "-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(wt), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], check=True)
+    transcript = Transcript(tmp_path / "t.jsonl")
+    registry = default_registry(transcript=transcript)
+    sandbox = FingerprintSandbox(wt, hashes=None)
     return wt, registry, sandbox, transcript, tmp_path
 
 
