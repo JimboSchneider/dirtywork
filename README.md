@@ -170,7 +170,8 @@ stdout JSON and exit codes: [docs/machine-contract.md](https://github.com/JimboS
    `append_file` adds text verbatim to the end of an existing file, so a file
    larger than one reply is `write_file` for the first part and `append_file`
    for each part after it — the recovery a truncated `write_file` is now told
-   to use by name.
+   to use by name, in a message that states the `--max-tokens` cap and a
+   chunk size to stay under (1.0, #65).
    `insert_before`/`insert_after` add
    whole lines around a unique anchor without touching the anchor's own line
    — the primitive for "add a line here", which `edit_file` could only express
@@ -190,7 +191,8 @@ stdout JSON and exit codes: [docs/machine-contract.md](https://github.com/JimboS
    `trimmed_turns` says on how many turns the oldest tool results had to be
    dropped to fit. Three consecutive tool failures of one kind (malformed
    call, malformed arguments, unknown tool, bad arguments, empty reply) or
-   six in total abort the run. The model ends a run by calling the
+   six in total abort the run, or six cut-off replies at `--max-tokens` (1.0,
+   #65). The model ends a run by calling the
    `finish(summary=...)` tool (a plain reply with no tool call also ends it);
    an empty, think-only, or truncated reply, or a tool call written as text,
    is sent back with a one-line nudge instead of being treated as completion.
