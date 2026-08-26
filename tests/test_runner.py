@@ -3264,9 +3264,12 @@ def test_plain_answer_rejection_is_a_user_message(git_parts):
     assert run_end["changed"] is False
 
     # With require_changes=True, second answer should end with "unchanged" status
+    # (the first "all done" is rejected -- unchanged -- and only the SECOND one
+    # ends the run, so two responses are needed).
     transcript2 = Transcript(tmp / "t2.jsonl")
     registry2 = default_registry(transcript=transcript2)
     provider2 = FakeProvider([
+        _resp(content="all done"),
         _resp(content="all done"),
     ])
     r2 = Runner(provider2, registry2, sandbox, transcript2, model="m",
@@ -3274,7 +3277,7 @@ def test_plain_answer_rejection_is_a_user_message(git_parts):
     result2 = r2.run("s", "t")
     transcript2.close()
 
-    events2 = _events(tmp / "t2.jsonl")
+    events2 = [json.loads(_l) for _l in (tmp / "t2.jsonl").read_text().splitlines()]
     assert result2.status == "unchanged"
     run_end2 = next(e for e in events2 if e["event"] == "run_end")
     assert run_end2["changed"] is False
@@ -3291,29 +3294,24 @@ def test_plain_answer_rejection_is_a_user_message(git_parts):
     transcript3.close()
 
     assert result3.status == "max_turns"
-    events3 = _events(tmp / "t3.jsonl")
+    events3 = [json.loads(_l) for _l in (tmp / "t3.jsonl").read_text().splitlines()]
     run_end3 = next(e for e in events3 if e["event"] == "run_end")
     assert run_end3["status"] == "max_turns"
 
 
 def test_mixed_turn_rejection(git_parts):
-    # Spec #66 §4.3 test 16: mixed turn with finish and other calls
-    # Finish is rejected, timeout nudge still delivered in same turn
+    # Spec #66 §4.3 test 16: a turn with read_file + a timing-out bash + finish,
+    # all in ONE turn. The finish is rejected (unchanged), but the turn's
+    # timeout nudge still has to be delivered -- it rides the rejected finish's
+    # own tool result (the last tool call of the turn), per one_turn's
+    # `if pending_finish is not None:` branch.
     wt, registry, sandbox, transcript, tmp = git_parts
 
     class TimeoutSandbox(FingerprintSandbox):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.timeout_turn = False
-
         def bash(self, command, timeout=120):
-            # Record commands
-            self.commands.append((command, timeout))
-            if command == FINGERPRINT_SCRIPT or not self.timeout_turn:
-                return super().bash(command, timeout)
-            # Return timeout for sleep command
             if "sleep" in command:
                 from dirtywork.tools import timeout_result
+                self.commands.append((command, timeout))
                 return timeout_result(timeout)
             return super().bash(command, timeout)
 
@@ -3321,52 +3319,50 @@ def test_mixed_turn_rejection(git_parts):
     provider = FakeProvider([
         _resp(tool_calls=[
             _call("r", "read_file", {"path": "f.txt"}),
+            _call("b", "bash", {"command": "sleep 999", "timeout": 1}),
             _call("f", "finish", {"summary": "s"}),
         ]),
-        _resp(tool_calls=[
-            _call("b", "bash", {"command": "sleep 999", "timeout": 1}),
-            _call("f2", "finish", {"summary": "s2"}),
-        ]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "s2"})]),
     ])
-    # Remove timeout=1 - instead add a bash call in first turn with small timeout
+    # Not passing timeout=1 to Runner -- that would be the wall-clock deadline,
+    # unrelated to the bash tool's own per-call timeout argument above.
     r = Runner(provider, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
 
-    # In provider.requests[1], tool messages come in call order (read_file, bash, finish)
-    # Check that both read_file and finish are present
-    assert len(provider.requests[1]) >= 4  # system + at least 3 messages
-    tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
-    assert len(tool_msgs) >= 2
-    
-    # The finish tool message should contain UNCHANGED_PLAIN and TIMEOUT_NUDGE
-    finish_msgs = [m for m in provider.requests[1] if m.get("tool_call_id") == "f2"]
-    assert len(finish_msgs) >= 1
-    finish_content = finish_msgs[0]["content"]
-    assert UNCHANGED_PLAIN in finish_content
-    assert TIMEOUT_NUDGE in finish_content
+    # provider.requests[1] is the turn-2 request: it carries turn 1's tool
+    # results (read_file, bash, finish) in call order.
+    second = provider.requests[1]
+    tool_msgs = [m for m in second if m["role"] == "tool"]
+    assert [m["tool_call_id"] for m in tool_msgs] == ["r", "b", "f"]
 
-    # Second finish should result in completed status
+    # The (turn 1) finish tool message was rejected as unchanged, and the
+    # turn's timeout nudge rides on it (the last tool result of that turn).
+    finish_msg = next(m for m in tool_msgs if m["tool_call_id"] == "f")
+    assert finish_msg["content"].startswith(UNCHANGED_PLAIN)
+    assert TIMEOUT_NUDGE in finish_msg["content"]
+
+    # The second finish is not rejected again -- unchanged_finishes is already
+    # 1 and require_changes is False, so this one completes the run.
+    assert result.status == "completed"
     events = _events(tmp)
     run_end = next(e for e in events if e["event"] == "run_end")
     assert run_end["status"] == "completed"
 
 
 def test_fingerprint_exceptions_map_like_verify(parts):
-    # Spec #66 §4.3 test 17: exceptions from fingerprints map like verify
+    # Spec #66 §4.3 test 17: exceptions from fingerprints map like verify.
+    # FingerprintSandbox already raises a scripted BaseException instance from
+    # its `bash`, so a raising exception entry needs no subclass -- but each
+    # sub-case still needs its OWN Transcript/registry/sandbox and must read
+    # its OWN file back (a shared `tmp / "t.jsonl"` would just keep re-reading
+    # the first run's events).
     wt, registry, sandbox, transcript, tmp = parts
 
-    # Test BudgetExceeded from start fingerprint
-    class RaisingSandbox1(FingerprintSandbox):
-        def bash(self, command, timeout=120):
-            if command == FINGERPRINT_SCRIPT:
-                raise BudgetExceeded("disk")
-            return super().bash(command, timeout)
-
-    sandbox1 = RaisingSandbox1(wt, hashes=None)
-    provider1 = FakeProvider([
-        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
-    ])
+    # (a) BudgetExceeded from the START fingerprint (before any turn: the
+    # provider is never called).
+    sandbox1 = FingerprintSandbox(wt, hashes=[BudgetExceeded("disk")])
+    provider1 = FakeProvider([])
     r1 = Runner(provider1, registry, sandbox1, transcript, model="m")
     result1 = r1.run("s", "t")
     transcript.close()
@@ -3375,34 +3371,25 @@ def test_fingerprint_exceptions_map_like_verify(parts):
     events1 = _events(tmp)
     run_end1 = next(e for e in events1 if e["event"] == "run_end")
     assert run_end1["changed"] is None
-    assert "budget: disk" in run_end1.get("changed_reason", "")
+    assert run_end1["changed_reason"] == "budget: disk"
 
-    # Test SandboxError
-    from dirtywork.sandbox import SandboxError
-
-    class RaisingSandbox2(FingerprintSandbox):
-        def bash(self, command, timeout=120):
-            if command == FINGERPRINT_SCRIPT:
-                raise SandboxError("gone")
-            return super().bash(command, timeout)
-
+    # (b) SandboxError from the START fingerprint.
     transcript2 = Transcript(tmp / "t2.jsonl")
     registry2 = default_registry(transcript=transcript2)
-    sandbox2 = RaisingSandbox2(wt, hashes=None)
-    provider2 = FakeProvider([
-        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
-    ])
+    sandbox2 = FingerprintSandbox(wt, hashes=[SandboxError("gone")])
+    provider2 = FakeProvider([])
     r2 = Runner(provider2, registry2, sandbox2, transcript2, model="m")
     result2 = r2.run("s", "t")
     transcript2.close()
 
     assert result2.status == "sandbox_error"
-    events2 = _events(tmp)
+    events2 = [json.loads(_l) for _l in (tmp / "t2.jsonl").read_text().splitlines()]
     run_end2 = next(e for e in events2 if e["event"] == "run_end")
     assert run_end2["changed"] is None
-    assert "sandbox_error" in run_end2.get("changed_reason", "")
+    assert run_end2["changed_reason"] == "sandbox: gone"
 
-    # Test on completion path - BudgetExceeded
+    # (c) completion path: the start fingerprint succeeds ("a"*40); the
+    # finish-time measurement (inside check_verify) raises BudgetExceeded.
     transcript3 = Transcript(tmp / "t3.jsonl")
     registry3 = default_registry(transcript=transcript3)
     sandbox3 = FingerprintSandbox(wt, hashes=["a" * 40, BudgetExceeded("disk")])
@@ -3414,54 +3401,46 @@ def test_fingerprint_exceptions_map_like_verify(parts):
     transcript3.close()
 
     assert result3.status == "budget_exceeded"
-    events3 = _events(tmp)
+    events3 = [json.loads(_l) for _l in (tmp / "t3.jsonl").read_text().splitlines()]
     finish_results3 = [e for e in events3 if e["event"] == "tool_result" and e["tool"] == "finish"]
-    assert len(finish_results3) == 2
-    assert finish_results3[-1]["result"] == "run not finished: change check could not run (disk)"
+    # The one finish tool_result is resolved IN PLACE (resolve_finish mutates
+    # the already-buffered record) -- one call, one result, not two.
+    assert len(finish_results3) == 1
     assert finish_results3[-1]["result"] == "run not finished: change check could not run (disk)"
 
-    # Test KeyboardInterrupt from start
-    class InterruptingSandbox(FingerprintSandbox):
-        def bash(self, command, timeout=120):
-            if command == FINGERPRINT_SCRIPT:
-                raise KeyboardInterrupt
-            return super().bash(command, timeout)
-
+    # (d) a KeyboardInterrupt raised by the START measurement: spec §4.1 (1)
+    # -- the start fingerprint sits inside the loop's try, so Ctrl-C there
+    # ends `interrupted` with one run_end and turns == 0.
     transcript4 = Transcript(tmp / "t4.jsonl")
     registry4 = default_registry(transcript=transcript4)
-    sandbox4 = InterruptingSandbox(wt, hashes=None)
-    provider4 = FakeProvider([
-        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
-    ])
+    sandbox4 = FingerprintSandbox(wt, hashes=[KeyboardInterrupt()])
+    provider4 = FakeProvider([])
     r4 = Runner(provider4, registry4, sandbox4, transcript4, model="m")
     result4 = r4.run("s", "t")
     transcript4.close()
-
     assert result4.status == "interrupted"
-    events4 = _events(tmp)
-    run_end4 = next(e for e in events4 if e["event"] == "run_end")
-    assert run_end4["turns"] == 0
-    # Exactly one run_end event (the interrupt handler doesn't write a second one)
-    assert len([e for e in events4 if e["event"] == "run_end"]) == 1
+    assert result4.turns == 0
+    events4 = [json.loads(_l) for _l in (tmp / "t4.jsonl").read_text().splitlines()]
+    assert [e["event"] for e in events4].count("run_end") == 1
+    assert events4[-1]["event"] == "run_end" and events4[-1]["changed"] is None
 
 
-def test_finish_time_fingerprint(parts, FingerprintSandbox):
-    # Spec #66 §4.3 test 19: finish-time fingerprint behavior
-    from dirtywork.budget import BudgetExceeded
-    from dirtywork.changes import FINGERPRINT_SCRIPT
-
-    # (a) max_turns run with changing fingerprints
+def test_finish_time_fingerprint(parts):
+    # Spec #66 §4.3 test 19: finish-time fingerprint behavior.
+    # (The second parameter in the original signature, `FingerprintSandbox`,
+    # made pytest look for a fixture by that name, which does not exist --
+    # FingerprintSandbox is a plain class, imported at module scope, not a
+    # fixture.)
     wt, registry, sandbox, transcript, tmp = parts
 
+    # (a) a max_turns run with changing fingerprints ("a"*40 at start,
+    # "b"*40 at finish-time): changed is True, and the finish-time
+    # FINGERPRINT_SCRIPT command is recorded right before finish()'s own
+    # drain_notices call (the very last command of the run).
     class TrackingSandbox(FingerprintSandbox):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.commands = []
-
-        def bash(self, command, timeout=120):
-            # Record all commands
-            self.commands.append((command, timeout))
-            return super().bash(command, timeout)
+        def drain_notices(self):
+            self.commands.append(("DRAIN", 0))
+            return []
 
     sandbox = TrackingSandbox(wt, hashes=["a" * 40, "b" * 40])
     provider = FakeProvider([
@@ -3471,61 +3450,65 @@ def test_finish_time_fingerprint(parts, FingerprintSandbox):
     r = Runner(provider, registry, sandbox, transcript, model="m", max_turns=2)
     result = r.run("s", "t")
     transcript.close()
+    assert result.status == "max_turns"
 
-    # finish-time measurement should show change=True
     events = _events(tmp)
     run_end = next(e for e in events if e["event"] == "run_end")
     assert run_end["changed"] is True
 
-    # The fingerprint script should have been called after last chat and before drain_notices
-    fp_commands = [i for i, (c, _) in enumerate(sandbox.commands) if c == FINGERPRINT_SCRIPT]
-    assert len(fp_commands) == 2  # start + finish
-    last_chat_idx = max(i for i, (c, _) in enumerate(sandbox.commands)
-                       if "read_file" in c or "finish" in str(c))
-    drain_idx = next((i for i, (c, _) in enumerate(sandbox.commands) if c == "drain_notices"),
-                    len(sandbox.commands))
-    # Check that finish-time fingerprint is after last chat
-    assert fp_commands[-1] > last_chat_idx
-    # And before drain_notices (or if drain is present)
-    assert fp_commands[-1] < drain_idx
+    fp_indices = [i for i, (c, _) in enumerate(sandbox.commands) if c == FINGERPRINT_SCRIPT]
+    assert len(fp_indices) == 2                                    # start + finish-time
+    assert sandbox.commands[-1] == ("DRAIN", 0)                    # finish()'s own drain, last
+    assert fp_indices[-1] == len(sandbox.commands) - 2             # ...right before it
 
-    # (b) subclass whose finalize() flips a flag
+    # (b) the RUNNER's finalize callback (not sandbox.finalize -- the runner
+    # never calls that) flips a flag; the fingerprint sandbox's bash fails
+    # once that flag is set. changed is not None on this max_turns run only
+    # if the finish-time measurement really runs BEFORE the finalize
+    # callback -- proving finish()'s ordering (fingerprint, then
+    # run_finalize()).
     class FlagSandbox(FingerprintSandbox):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.finalized = False
 
-        def finalize(self):
-            self.finalized = True
-            return super().finalize()
-
         def bash(self, command, timeout=120):
-            # On finalize call, return error to test that finish-time comes before finalize
             if command == FINGERPRINT_SCRIPT and self.finalized:
                 return "ERROR: bash failed: gone"
             return super().bash(command, timeout)
 
     transcript2 = Transcript(tmp / "t2.jsonl")
     registry2 = default_registry(transcript=transcript2)
-    sandbox2 = FlagSandbox(wt, hashes=["a" * 40])
+    sandbox2 = FlagSandbox(wt, hashes=["a" * 40, "b" * 40])
+
+    def finalize_cb():
+        sandbox2.finalized = True
+        return {"flag": "set"}
+
     provider2 = FakeProvider([
-        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
     ])
     r2 = Runner(provider2, registry2, sandbox2, transcript2, model="m",
-                finalize=lambda: {"flag": "set"})
+                max_turns=2, finalize=finalize_cb)
     result2 = r2.run("s", "t")
     transcript2.close()
+    assert result2.status == "max_turns"
 
-    # changed should not be None (measurement happened before finalize)
-    events2 = _events(tmp)
+    events2 = [json.loads(_l) for _l in (tmp / "t2.jsonl").read_text().splitlines()]
     run_end2 = next(e for e in events2 if e["event"] == "run_end")
     assert run_end2["changed"] is not None
+    assert run_end2["flag"] == "set"       # finalize did run -- just after the measurement
 
-    # (c) subclass whose fingerprint bash queues a notice
+    # (c) the finish-time fingerprint call queues a notice; drain_notices
+    # returns it exactly once, and the resulting nudge event precedes
+    # run_end. Two DIFFERENT hashes so the single finish() call is accepted
+    # outright (changed=True) rather than looping through a rejection round.
     class NoticeSandbox(FingerprintSandbox):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.notices = []
+            self.fp_calls = 0
 
         def drain_notices(self):
             notices = self.notices
@@ -3534,32 +3517,35 @@ def test_finish_time_fingerprint(parts, FingerprintSandbox):
 
         def bash(self, command, timeout=120):
             if command == FINGERPRINT_SCRIPT:
-                # Queue a notice from the fingerprint
-                self.notices.append(("stray_kill", "text"))
+                self.fp_calls += 1
+                if self.fp_calls == 2:            # the finish-time measurement
+                    self.notices.append(("stray_kill", "text"))
             return super().bash(command, timeout)
 
     transcript3 = Transcript(tmp / "t3.jsonl")
     registry3 = default_registry(transcript=transcript3)
-    sandbox3 = NoticeSandbox(wt, hashes=["a" * 40])
+    sandbox3 = NoticeSandbox(wt, hashes=["a" * 40, "b" * 40])
     provider3 = FakeProvider([
         _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
     ])
     r3 = Runner(provider3, registry3, sandbox3, transcript3, model="m")
     result3 = r3.run("s", "t")
     transcript3.close()
+    assert result3.status == "completed"
 
-    # The notice should precede run_end
-    events3 = _events(tmp)
-    nudge_idx = next((i for i, e in enumerate(events3) if e["event"] == "nudge"), -1)
+    events3 = [json.loads(_l) for _l in (tmp / "t3.jsonl").read_text().splitlines()]
+    nudge_idx = next((i for i, e in enumerate(events3) if e["event"] == "nudge"
+                      and e.get("kind") == "stray_kill"), -1)
     run_end_idx = next((i for i, e in enumerate(events3) if e["event"] == "run_end"), -1)
-    assert nudge_idx >= 0
-    assert run_end_idx >= 0
+    assert nudge_idx >= 0 and run_end_idx >= 0
     assert nudge_idx < run_end_idx
 
-    # (d) rejection on turn 1, finish-time fails on turn 2
+    # (d) rejection on turn 1 (fp == fp_start, both "a"*40); turn 2 is a plain
+    # read_file, so max_turns ends the run; the finish-time measurement then
+    # fails outright (None) -- changed must read as unknown (None), not as
+    # the stale False from turn 1's rejection.
     transcript4 = Transcript(tmp / "t4.jsonl")
     registry4 = default_registry(transcript=transcript4)
-    # First fingerprint succeeds (a*40), second fails (None)
     sandbox4 = FingerprintSandbox(wt, hashes=["a" * 40, "a" * 40, None])
     provider4 = FakeProvider([
         _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
@@ -3568,28 +3554,19 @@ def test_finish_time_fingerprint(parts, FingerprintSandbox):
     r4 = Runner(provider4, registry4, sandbox4, transcript4, model="m", max_turns=2)
     result4 = r4.run("s", "t")
     transcript4.close()
+    assert result4.status == "max_turns"
 
-    # finish on turn 1 is rejected (changed=False), turn 2 ends max_turns
-    # finish-time measurement fails, so changed=None (not stale False)
-    events4 = _events(tmp)
+    events4 = [json.loads(_l) for _l in (tmp / "t4.jsonl").read_text().splitlines()]
     run_end4 = next(e for e in events4 if e["event"] == "run_end")
     assert run_end4["changed"] is None
-    assert "error: boom" in run_end4.get("changed_reason", "")
+    assert run_end4["changed_reason"] == "error: boom"
 
-    # (e) BudgetExceeded as finish-time entry of max_turns run
-    class WatchdogSandbox(FingerprintSandbox):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.finalized = False
-
-        def finalize(self):
-            # Return watchdog violation info
-            return {"watchdog_violation": "other", "watchdog_violation_kind": "sandbox_error"}
-
+    # (e1) BudgetExceeded as the finish-time entry of a max_turns run, no
+    # finalize callback supplied: the watchdog fields are derived from
+    # changed_reason.
     transcript5 = Transcript(tmp / "t5.jsonl")
     registry5 = default_registry(transcript=transcript5)
-    # Finish-time fingerprint fails with BudgetExceeded
-    sandbox5 = WatchdogSandbox(wt, hashes=["a" * 40, BudgetExceeded("disk")])
+    sandbox5 = FingerprintSandbox(wt, hashes=["a" * 40, BudgetExceeded("disk")])
     provider5 = FakeProvider([
         _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
         _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
@@ -3597,37 +3574,48 @@ def test_finish_time_fingerprint(parts, FingerprintSandbox):
     r5 = Runner(provider5, registry5, sandbox5, transcript5, model="m", max_turns=2)
     result5 = r5.run("s", "t")
     transcript5.close()
-
-    # status should still be max_turns
     assert result5.status == "max_turns"
-    events5 = _events(tmp)
+
+    events5 = [json.loads(_l) for _l in (tmp / "t5.jsonl").read_text().splitlines()]
     run_end5 = next(e for e in events5 if e["event"] == "run_end")
-    # changed should be None (measurement failed)
     assert run_end5["changed"] is None
-    # changed_reason should start with budget:
-    assert "budget: disk" in run_end5.get("changed_reason", "")
-    # watchdog_violation should be "disk" (from fingerprint), not "other" from finalize
+    assert run_end5["changed_reason"] == "budget: disk"
     assert run_end5["watchdog_violation"] == "disk"
     assert run_end5["watchdog_violation_kind"] == "budget"
 
-    # (f) rejection on turn 1 then KeyboardInterrupt on turn 2
-    class InterruptingSandbox2(FingerprintSandbox):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.turn_count = 0
+    # (e2) same shape, but the RUNNER's finalize callback explicitly returns
+    # its own watchdog_violation/_kind: those values win over the
+    # budget-derived defaults (finish() only fills them in when finalize
+    # hasn't already set watchdog_violation).
+    transcript5b = Transcript(tmp / "t5b.jsonl")
+    registry5b = default_registry(transcript=transcript5b)
+    sandbox5b = FingerprintSandbox(wt, hashes=["a" * 40, BudgetExceeded("disk")])
+    provider5b = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+    ])
+    r5b = Runner(provider5b, registry5b, sandbox5b, transcript5b, model="m", max_turns=2,
+                 finalize=lambda: {"watchdog_violation": "other",
+                                   "watchdog_violation_kind": "sandbox_error"})
+    result5b = r5b.run("s", "t")
+    transcript5b.close()
+    assert result5b.status == "max_turns"
 
-        def bash(self, command, timeout=120):
-            self.turn_count += 1
-            if command == FINGERPRINT_SCRIPT:
-                # Start fingerprint is a*40, turn 2's finish-time should raise
-                if self.turn_count == 3:  # After start + finish-time for turn 1
-                    raise KeyboardInterrupt
-                return "exit code: 0\na" * 40 + "\n" + "0" * 40
-            return super().bash(command, timeout)
+    events5b = [json.loads(_l) for _l in (tmp / "t5b.jsonl").read_text().splitlines()]
+    run_end5b = next(e for e in events5b if e["event"] == "run_end")
+    assert run_end5b["watchdog_violation"] == "other"
+    assert run_end5b["watchdog_violation_kind"] == "sandbox_error"
 
+    # (f) rejection on turn 1 (both "a"*40), then turn 2's own tool call is a
+    # plain read_file (no bash), so the KeyboardInterrupt only fires from the
+    # max_turns finish-time measurement -- caught by the in-loop handler,
+    # which calls finish("interrupted", ...) a second time. `changed` keeps
+    # the value from turn 1's rejection (False); no changed_reason is added
+    # (interrupted is exempt from re-measuring, and the failed attempt never
+    # got to set one).
     transcript6 = Transcript(tmp / "t6.jsonl")
     registry6 = default_registry(transcript=transcript6)
-    sandbox6 = InterruptingSandbox2(wt, hashes=["a" * 40])
+    sandbox6 = FingerprintSandbox(wt, hashes=["a" * 40, "a" * 40, KeyboardInterrupt()])
     provider6 = FakeProvider([
         _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
         _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
@@ -3635,97 +3623,85 @@ def test_finish_time_fingerprint(parts, FingerprintSandbox):
     r6 = Runner(provider6, registry6, sandbox6, transcript6, model="m", max_turns=2)
     result6 = r6.run("s", "t")
     transcript6.close()
-
     assert result6.status == "interrupted"
-    events6 = _events(tmp)
+
+    events6 = [json.loads(_l) for _l in (tmp / "t6.jsonl").read_text().splitlines()]
     run_end6 = next(e for e in events6 if e["event"] == "run_end")
-    # changed should be False (from rejection on turn 1)
     assert run_end6["changed"] is False
-    # No changed_reason key (interrupted doesn't add one)
     assert "changed_reason" not in run_end6
 
-    # (g) count FINGERPRINT_SCRIPT commands for various statuses
-    # interrupted: no finish-time fingerprint (no turn 2 in this case)
+    # (g) statuses that take NO finish-time fingerprint: interrupted, timeout,
+    # budget_exceeded, sandbox_error. For budget/sandbox, the exception comes
+    # from a TOOL call (bash "true"), not from write_file, so the fingerprint
+    # machinery itself is exercised identically to the other sub-cases here.
+
+    # interrupted: the tool call itself raises (no completion path at all).
     transcript7 = Transcript(tmp / "t7.jsonl")
     registry7 = default_registry(transcript=transcript7)
 
     class InterruptingSandbox3(FingerprintSandbox):
         def bash(self, command, timeout=120):
-            self.commands.append((command, timeout))
             if command == FINGERPRINT_SCRIPT:
-                # Only start fingerprint, then interrupt on tool call
-                return "exit code: 0\na" * 40 + "\n" + "0" * 40
+                return super().bash(command, timeout)
             raise KeyboardInterrupt
 
     sandbox7 = InterruptingSandbox3(wt, hashes=["a" * 40])
-    provider7 = FakeProvider([
-        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
-    ])
+    provider7 = FakeProvider([_resp(tool_calls=[_call("b1", "bash", {"command": "true"})])])
     r7 = Runner(provider7, registry7, sandbox7, transcript7, model="m")
     result7 = r7.run("s", "t")
     transcript7.close()
 
     assert result7.status == "interrupted"
-    events7 = _events(tmp)
-    fp_count = sum(1 for c, _ in sandbox7.commands if c == FINGERPRINT_SCRIPT)
-    # Should only have start fingerprint, no finish-time
-    assert fp_count == 1
+    fp_count7 = sum(1 for c, _ in sandbox7.commands if c == FINGERPRINT_SCRIPT)
+    assert fp_count7 == 1                          # start only, no finish-time
 
-    # timeout: Runner(timeout=0) with one read turn
+    # timeout: Runner(timeout=0) ends the run before even the first chat call.
     transcript8 = Transcript(tmp / "t8.jsonl")
     registry8 = default_registry(transcript=transcript8)
     sandbox8 = FingerprintSandbox(wt, hashes=["a" * 40])
-    provider8 = FakeProvider([
-        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
-    ])
+    provider8 = FakeProvider([_resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})])])
     r8 = Runner(provider8, registry8, sandbox8, transcript8, model="m", timeout=0)
     result8 = r8.run("s", "t")
     transcript8.close()
 
     assert result8.status == "timeout"
-    events8 = _events(tmp)
     fp_count8 = sum(1 for c, _ in sandbox8.commands if c == FINGERPRINT_SCRIPT)
-    # timeout has no finish-time fingerprint
     assert fp_count8 == 1
 
-    # budget_exceeded from TOOL call via sandbox bash
-    class BudgetBustingSandbox(FingerprintSandbox):
-        def write_file(self, path, content):
+    # budget_exceeded: a bash tool call ("true") raises BudgetExceeded.
+    class BudgetBustingBashSandbox(FingerprintSandbox):
+        def bash(self, command, timeout=120):
+            if command == FINGERPRINT_SCRIPT:
+                return super().bash(command, timeout)
             raise BudgetExceeded("worktree exceeds 2048 MB")
 
     transcript9 = Transcript(tmp / "t9.jsonl")
     registry9 = default_registry(transcript=transcript9)
-    sandbox9 = BudgetBustingSandbox(wt, hashes=["a" * 40])
-    provider9 = FakeProvider([
-        _resp(tool_calls=[_call("w1", "write_file", {"path": "x", "content": "y"})]),
-    ])
+    sandbox9 = BudgetBustingBashSandbox(wt, hashes=["a" * 40])
+    provider9 = FakeProvider([_resp(tool_calls=[_call("b1", "bash", {"command": "true"})])])
     r9 = Runner(provider9, registry9, sandbox9, transcript9, model="m")
     result9 = r9.run("s", "t")
     transcript9.close()
 
     assert result9.status == "budget_exceeded"
-    events9 = _events(tmp)
     fp_count9 = sum(1 for c, _ in sandbox9.commands if c == FINGERPRINT_SCRIPT)
-    # budget_exceeded has no finish-time fingerprint
     assert fp_count9 == 1
 
-    # sandbox_error from TOOL call
-    class SandboxErrorSandbox(FingerprintSandbox):
-        def write_file(self, path, content):
+    # sandbox_error: same shape, SandboxError instead.
+    class SandboxErrorBashSandbox(FingerprintSandbox):
+        def bash(self, command, timeout=120):
+            if command == FINGERPRINT_SCRIPT:
+                return super().bash(command, timeout)
             raise SandboxError("container gone")
 
     transcript10 = Transcript(tmp / "t10.jsonl")
     registry10 = default_registry(transcript=transcript10)
-    sandbox10 = SandboxErrorSandbox(wt, hashes=["a" * 40])
-    provider10 = FakeProvider([
-        _resp(tool_calls=[_call("w1", "write_file", {"path": "x", "content": "y"})]),
-    ])
+    sandbox10 = SandboxErrorBashSandbox(wt, hashes=["a" * 40])
+    provider10 = FakeProvider([_resp(tool_calls=[_call("b1", "bash", {"command": "true"})])])
     r10 = Runner(provider10, registry10, sandbox10, transcript10, model="m")
     result10 = r10.run("s", "t")
     transcript10.close()
 
     assert result10.status == "sandbox_error"
-    events10 = _events(tmp)
     fp_count10 = sum(1 for c, _ in sandbox10.commands if c == FINGERPRINT_SCRIPT)
-    # sandbox_error has no finish-time fingerprint
     assert fp_count10 == 1

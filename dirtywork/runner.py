@@ -1152,16 +1152,17 @@ class Runner:
             deliver(_join_nudges(malformed_text, sandbox_text, timeout_text, stall_text),
                     [malformed_record, *sandbox_records, timeout_record, stall_record])
             return None
-        # Spec #66 §4.1: take the start fingerprint before the first turn
         try:
-            fp_start = take_fingerprint()      # spec #66 §4.1 (1); None = guard off for this run
-        except BudgetExceeded as e:
-            return finish("budget_exceeded", e.reason)
-        except SandboxError as e:
-            return finish("sandbox_error", str(e))
-        fp_check = fp_start
-
-        try:
+            # Spec #66 §4.1 (1): the start fingerprint, INSIDE this try so a
+            # Ctrl-C during the exec reaches the outer KeyboardInterrupt
+            # handler and ends `interrupted` with a run_end (turns == 0).
+            try:
+                fp_start = take_fingerprint()      # None = guard off for this run
+            except BudgetExceeded as e:
+                return finish("budget_exceeded", e.reason)
+            except SandboxError as e:
+                return finish("sandbox_error", str(e))
+            fp_check = fp_start
             while True:
                 with self.transcript.turn():
                     try:
