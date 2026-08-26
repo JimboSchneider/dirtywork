@@ -74,9 +74,27 @@ class ScriptedClient(DictProvider):
     def __init__(self, responses):
         super().__init__()
         self.responses = list(responses)
+        self._last = None
 
     def reply(self, model, messages, tools):
-        return self.responses.pop(0)
+        if not self.responses:
+            # The change guard (#66) refuses a fresh run's first completion
+            # when nothing in the worktree changed and accepts the second;
+            # a script whose last reply is a completion -- a plain answer
+            # or a `finish` call -- is asked once more and answers the same
+            # way. Running dry anywhere else is still a test failure.
+            if self._last is not None and _is_completion(self._last):
+                return self._last
+            raise IndexError("scripted responses exhausted before the run ended")
+        self._last = self.responses.pop(0)
+        return self._last
+
+
+def _is_completion(resp) -> bool:
+    calls = resp.get("tool_calls") or []
+    if not calls:
+        return True
+    return any((c.get("name") or (c.get("function") or {}).get("name")) == "finish" for c in calls)
 
 
 class _SlowClient(ScriptedClient):
