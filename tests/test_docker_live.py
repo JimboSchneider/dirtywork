@@ -837,3 +837,50 @@ def test_docker_live_timed_out_grep_leaves_no_stray(tmp_path, monkeypatch, capsy
     # No stray_kill and no sandbox_reset events
     assert not [e for e in events if e["event"] == "stray_kill"], f"Expected no stray_kill events, but found some"
     assert not [e for e in events if e["event"] == "sandbox_reset"], f"Expected no sandbox_reset events, but found some"
+
+@pytest.mark.docker
+def test_docker_live_fingerprint_matches_host_and_leaves_the_store_alone(tmp_path):
+    import subprocess
+    from dirtywork.changes import FINGERPRINT_SCRIPT, FINGERPRINT_TIMEOUT, fingerprint
+    from dirtywork.sandbox import docker_args
+    from dirtywork.sandbox.docker import DockerSandbox
+    from dirtywork.sandbox.docker_cli import resolve_image
+    from dirtywork.sandbox.host import HostSandbox
+    from dirtywork.workspace import create_worktree, ensure_worktrees_excluded, worktree_base_commit
+
+    def git(*args, cwd):
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *args], cwd=cwd, check=True, capture_output=True)
+
+    repo = _make_live_repo(tmp_path)              # README.md committed on main
+    ensure_worktrees_excluded(repo)
+    worktree = create_worktree(repo, "livefp", None)   # checked out: README.md present
+    base_commit = worktree_base_commit(worktree)
+    # nested repositories inside the worktree: a committed one and an unborn one
+    inner = worktree / "vendor" / "inner"; inner.mkdir(parents=True)
+    git("init", "-q", cwd=inner); (inner / "a.txt").write_text("a\n"); git("add", "-A", cwd=inner); git("commit", "-qm", "init", cwd=inner)
+    unborn = worktree / "vendor" / "unborn"; unborn.mkdir()
+    git("init", "-q", cwd=unborn); (unborn / "x.txt").write_text("x\n")
+
+    fp_host, reason = fingerprint(HostSandbox(worktree))
+    assert reason is None and fp_host is not None
+
+    cfg = docker_args.DockerConfig(**_image_kwargs())   # the file's helper: image override via DIRTYWORK_LIVE_IMAGE if set; check its return shape and adapt (it may return {"image": ...} or {})
+    run_dir = tmp_path / "rundir"; run_dir.mkdir()
+    sb = DockerSandbox(cfg, run_dir=run_dir, image_ref=resolve_image(cfg.image))
+    try:
+        sb.start(worktree, repo, "livefp", base_commit, branch=None, seed_from_worktree=True)
+        fp_docker, reason = fingerprint(sb)
+        assert reason is None
+        assert fp_docker == fp_host              # content-addressed, sorted: identical on host and in the container
+        count_cmd = "find /gitdir/objects -type f | wc -l"
+        before = sb.bash(count_cmd, 60).split("\n")[1].strip()
+        sb.bash("head -c 102400 /dev/urandom > big.bin", 60)     # a new untracked 100 KB file
+        fp2, reason = fingerprint(sb)
+        assert reason is None and fp2 != fp_docker
+        after = sb.bash(count_cmd, 60).split("\n")[1].strip()
+        assert before == after                    # the scratch object directory: the real store did not grow
+        sb.bash("cp README.md /tmp/r && cp /tmp/r README.md", 60)   # byte-identical rewrite
+        fp3, reason = fingerprint(sb)
+        assert reason is None and fp3 == fp2
+    finally:
+        sb.stop()
