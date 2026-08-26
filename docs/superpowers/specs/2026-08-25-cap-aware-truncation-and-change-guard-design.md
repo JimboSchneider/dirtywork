@@ -1153,9 +1153,10 @@ Doubles and fixtures (named so no ad-hoc class grows):
 24. Live (`tests/test_docker_live.py`, docker-marked): `DockerSandbox.bash(FINGERPRINT_SCRIPT)` in
     the worker image under the #61 gitfile layout equals the host fingerprint of the same tree —
     a root with a committed nested repository and an unborn one; the nested repositories are
-    created on both sides, because the docker seed (`tar --exclude=./.git`) drops every `.git`
-    directory and delivers a host-side nested repository as plain files (#75; the test asserts
-    that flattening first, then rebuilds them in the container with `git init`) — a second
+    created on both sides, because whether the docker seed (`tar --exclude=./.git`) keeps a
+    nested `.git` depends on the host's tar (#75: macOS bsdtar drops every `.git`, GNU tar keeps
+    the nested ones — CI on the 0.11.0 release PR found the Linux half); the test removes and
+    rebuilds them in the container with `git init`, asserting neither behaviour — a second
     call after a new untracked file differs; a byte-identical rewrite does not; `/gitdir/objects`
     has the same file count before and after (the scratch object directory).
 

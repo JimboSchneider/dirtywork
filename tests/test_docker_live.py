@@ -861,10 +861,9 @@ def test_docker_live_fingerprint_matches_host_and_leaves_the_store_alone(tmp_pat
     """Spec §7 test 24. The fingerprint is content-addressed, so the same tree
     hashes identically on the host and inside the worker container, nested
     repositories included. The nested repositories are created on both sides:
-    the docker seed (`tar --exclude=./.git`) drops every `.git` directory, not
-    only the root one, so a nested repository made on the host arrives in the
-    container as plain files -- a seed property, not the guard's -- and the
-    container gets its own `git init` for the same content."""
+    whether the docker seed (`tar --exclude=./.git`) keeps a nested `.git`
+    depends on the host's tar (#75: macOS bsdtar drops it, GNU tar keeps it),
+    so the container gets its own `git init` for the same content either way."""
     import subprocess
     from dirtywork.changes import fingerprint
     from dirtywork.sandbox import docker_args
@@ -895,10 +894,11 @@ def test_docker_live_fingerprint_matches_host_and_leaves_the_store_alone(tmp_pat
     sb = DockerSandbox(cfg, run_dir=run_dir, image_ref=resolve_image(cfg.image))
     try:
         sb.start(worktree, repo, "livefp", base_commit, branch=None, seed_from_worktree=True)
-        assert sb.bash("find . -name .git -mindepth 2", 60) == "exit code: 0\n"   # the seed flattened them
-        fp_flat, reason = fingerprint(sb)
-        assert reason is None and len(fp_flat.splitlines()) == 2 and fp_flat != fp_host
-        sb.bash("git -C vendor/inner init -q && git -C vendor/inner add -A && "
+        # Whether the nested .git directories survive the seed depends on the
+        # host's tar (#75: macOS bsdtar drops every .git, GNU tar keeps the
+        # nested ones), so the container gets fresh ones either way.
+        sb.bash("rm -rf vendor/inner/.git vendor/unborn/.git && "
+                "git -C vendor/inner init -q && git -C vendor/inner add -A && "
                 "git -C vendor/inner -c user.email=t@t -c user.name=t commit -qm init && "
                 "git -C vendor/unborn init -q", 60)
         fp_docker, reason = fingerprint(sb)
