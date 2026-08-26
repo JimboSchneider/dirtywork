@@ -13,9 +13,9 @@ from dirtywork.sandbox.docker_cli import DockerError
 from .provider_doubles import (DictProvider, PreflightProvider, patch_provider,
                                text_body, tool_call_body)
 
-# Fix item 3: the six 0.8 evidence keys must be present -- with these null/
-# empty defaults -- on EVERY stdout payload, including the two failure paths
-# where runner.run() never returns.
+# Fix item 3: the six 0.8 evidence keys plus changed must be present -- with
+# these null/empty defaults -- on EVERY stdout payload, including the two
+# failure paths where runner.run() never returns.
 _DEFAULT_EVIDENCE = {
     "stuck_on": None,
     "files_changed": [],
@@ -25,6 +25,8 @@ _DEFAULT_EVIDENCE = {
     "verify": None,
     "trimmed_turns": 0,
     "timeouts": 0,
+    "truncations": 0,
+    "changed": None,
 }
 
 
@@ -242,6 +244,100 @@ def test_main_docker_mode_happy_path_with_fake_sandbox(tmp_path, monkeypatch, ca
     run_end = next(e for e in events if e["event"] == "run_end")
     assert run_end["export_status"] == "ok"
     assert run_end["diff_stat"] == "1 file changed"
+
+
+def test_guard_off_prints_one_stderr_line(tmp_path, monkeypatch, capsys):
+    # Spec #66 §4.1/§4.3: a sandbox whose bash can't produce a fingerprint
+    # (here, FakeDockerSandbox.bash always returns "") turns the change
+    # guard off for the whole run. main() surfaces that exactly once, as a
+    # single stderr line -- never silently, never more than once.
+    import subprocess
+    import dirtywork.__main__ as m
+    from dirtywork.sandbox import RunArtifacts
+    from dirtywork.sandbox.docker import DockerSandbox as RealDockerSandbox
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
+                    "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
+                   capture_output=True)
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(m, "docker_version", lambda *a, **k: "29.7.2")
+    monkeypatch.setattr(m, "resolve_image", lambda *a, **k: "dirtywork/worker@sha256:" + "a" * 64)
+    monkeypatch.setattr(m, "validate_objects_dir", lambda repo: repo / ".git" / "objects")
+    from dirtywork.procs import Captured
+    monkeypatch.setattr(m.docker_cli, "run",
+                        lambda argv, *, timeout, stdin=None: Captured(1, b"", False, False))
+
+    class FakeWatchdog:
+        def start(self):
+            pass
+
+    class FakeDockerSandbox:
+        check_name_collision = staticmethod(RealDockerSandbox.check_name_collision)
+
+        def __init__(self, cfg, *, run_dir, transcript=None, image_ref=None):
+            self.cfg = cfg
+            self.run_dir = run_dir
+            self.uid = 501
+            self.gid = 20
+            self.image_ref = image_ref
+            self.watchdog = FakeWatchdog()
+
+        def start(self, worktree, repo, slug, base_commit, **kwargs):
+            pass
+
+        def stop(self):
+            pass
+
+        def read_file(self, path: str, offset: int = 0, limit: int = 400) -> str:
+            return ""
+
+        def write_file(self, path: str, content: str) -> str:
+            return ""
+
+        def edit_file(self, path: str, old_string: str, new_string: str) -> str:
+            return ""
+
+        def list_dir(self, path: str = ".") -> str:
+            return ""
+
+        def grep(self, pattern: str, path: str = ".", glob: str | None = None,
+                 timeout: int = 30) -> str:
+            return ""
+
+        def bash(self, command: str, timeout: int = 120) -> str:
+            return ""      # never a valid fingerprint -> guard off for this run
+
+        def finalize(self):
+            return RunArtifacts(export_status="ok", diff_stat="1 file changed")
+
+    monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
+
+    class WritingFakeClient(DictProvider):
+        def reply(self, model, messages, tools):
+            if self.calls == 1:
+                return {"choices": [{"message": {
+                    "role": "assistant", "content": None,
+                    "tool_calls": [{"id": "c1", "type": "function",
+                                     "function": {"name": "write_file",
+                                                  "arguments": json.dumps(
+                                                      {"path": "hi.txt", "content": "hi\n"})}}],
+                }}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+            return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    patch_provider(monkeypatch, m, lambda base_url=None: WritingFakeClient(base_url))
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])  # --sandbox defaults to docker
+    assert rc == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["status"] == "completed"
+
+    guard_lines = [line for line in captured.err.splitlines()
+                  if line.startswith("dirtywork: change guard off: ")]
+    assert len(guard_lines) == 1, captured.err
 
 
 def _docker_mode_scaffold(tmp_path, monkeypatch):
@@ -1317,7 +1413,7 @@ def test_run_json_records_task_model_context_window_and_turns(tmp_path, monkeypa
     assert data["task"] == "some task"
     assert data["model"] == m.DEFAULT_MODEL
     assert data["context_window"] == 5000
-    assert data["turns"] == 1
+    assert data["turns"] == 2
     assert data["resumed_from"] is None
     start = next(e for e in (json.loads(l) for l in Path(
         next((tmp_path / "runs").rglob("transcript.jsonl"))).read_text().splitlines())
@@ -1365,7 +1461,7 @@ def test_bad_stall_turns_flag_exits_2(tmp_path, monkeypatch, capsys):
 def _first_run(monkeypatch, tmp_path, responses):
     m = _install_host_harness(monkeypatch, tmp_path, responses)
     repo = _host_repo(tmp_path)
-    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1", "add a file"])
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "2", "add a file"])
     return m, repo, rc
 
 
@@ -1373,6 +1469,10 @@ def _resume_responses():
     return [{"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
                 {"id": "b1", "type": "function", "function": {"name": "bash",
                  "arguments": json.dumps({"command": "git status --short; cat new.txt"})}}]}}],
+             "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+            {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "w1", "type": "function", "function": {"name": "write_file",
+                 "arguments": json.dumps({"path": "resumed.txt", "content": "x\n"})}}]}}],
              "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
             {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
                 {"id": "f1", "type": "function", "function": {"name": "finish",
@@ -1407,7 +1507,7 @@ def test_resume_host_mode_reuses_worktree_and_links_runs(tmp_path, monkeypatch, 
     second = json.loads((Path(out["run_dir"]) / "run.json").read_text())
     assert second["resumed_from"] == first_run_dir.name
     assert second["task"].startswith("add a file\n\n--- RESUMED RUN ---")
-    assert "ended with status 'max_turns' after 1 turns" in second["task"]
+    assert "ended with status 'max_turns' after 2 turns" in second["task"]
     assert second["model"] == m.DEFAULT_MODEL
     prior = json.loads((first_run_dir / "run.json").read_text())
     assert prior["resumed_by"] == second["slug"]
@@ -1628,9 +1728,81 @@ def test_resume_inherits_the_prior_provider(tmp_path, monkeypatch, capsys):
     repo = _host_repo(tmp_path)
     assert m2.main(["run", "--repo", str(repo), "--sandbox", "none", "task"]) == 0
     slug = json.loads(capsys.readouterr().out)["run_dir"].rsplit("/", 1)[-1]
+    patch_provider(monkeypatch, m2, lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
     assert m2.main(["resume", str(tmp_path / "runs" / slug), "--feedback", "keep going"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["provider"] == "openai"
+
+
+def test_fresh_run_zero_change_completes_with_changed_false(tmp_path, monkeypatch, capsys):
+    # Spec #66 §4.3: a fresh run (no --feedback) does not require a change.
+    # A plain "done" reply with nothing written is refused once (a nudge),
+    # then accepted on the second "done" -- the run completes with
+    # changed=False rather than being forced to "unchanged".
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    assert rc == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["status"] == "completed"
+    assert payload["changed"] is False
+    assert "dirtywork: change guard off:" not in captured.err   # guard is ON (real worktree)
+
+    run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert run_json["status"] == "completed"
+    assert run_json["changed"] is False
+    assert run_json["truncations"] == 0
+    assert "changed_reason" not in run_json
+
+
+def test_resume_feedback_zero_change_ends_unchanged(tmp_path, monkeypatch, capsys):
+    # Spec #66 §4.3: a --feedback resume DOES require a change. Two finishes
+    # with nothing written -- the first refused, the second accepted -- ends
+    # the run as "unchanged" (not "completed"), rc 1.
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    assert first["status"] == "completed"
+    slug = Path(first["run_dir"]).name
+
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url, [
+        tool_call_body("finish", {"summary": "no change 1"}, call_id="f1"),
+        tool_call_body("finish", {"summary": "no change 2"}, call_id="f2"),
+    ]))
+    rc = m.main(["resume", slug, "--feedback", "keep going"])
+    assert rc == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "unchanged"
+    assert out["changed"] is False
+
+    run_json = json.loads((Path(out["run_dir"]) / "run.json").read_text())
+    assert run_json["status"] == "unchanged"
+    assert run_json["changed"] is False
+    assert "changed_reason" not in run_json
+
+
+def test_resume_feedback_with_a_write_completes_changed_true(tmp_path, monkeypatch, capsys):
+    # Same shape as the zero-change resume above, but a write_file lands
+    # between the two finish calls: the second finish's fingerprint differs
+    # from the run's starting fingerprint, so it is accepted immediately as
+    # "completed" with changed=True.
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    assert first["status"] == "completed"
+    slug = Path(first["run_dir"]).name
+
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url, [
+        tool_call_body("finish", {"summary": "no change 1"}, call_id="f1"),
+        tool_call_body("write_file", {"path": "resumed.txt", "content": "x\n"}, call_id="w1"),
+        tool_call_body("finish", {"summary": "changed and verified"}, call_id="f2"),
+    ]))
+    rc = m.main(["resume", slug, "--feedback", "write a file"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "completed"
+    assert out["changed"] is True
+
+    run_json = json.loads((Path(out["run_dir"]) / "run.json").read_text())
+    assert run_json["status"] == "completed"
+    assert run_json["changed"] is True
 
 
 def test_runs_list_dispatches_to_cmd_list(tmp_path, monkeypatch, capsys):
@@ -1722,9 +1894,9 @@ def test_resume_inherits_allow_commit_from_the_prior_run(tmp_path, monkeypatch, 
     ]
     m = _install_host_harness(monkeypatch, tmp_path, write_once)
     repo = _host_repo(tmp_path)
-    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "2",
                  "--allow-commit", "add a file"])
-    assert rc == 1                      # max_turns
+    assert rc == 1                      # max_turns after 2 turns
     first = json.loads(capsys.readouterr().out)
     assert json.loads((Path(first["run_dir"]) / "run.json").read_text())["allow_commit"] is True
 
@@ -1736,7 +1908,7 @@ def test_resume_inherits_allow_commit_from_the_prior_run(tmp_path, monkeypatch, 
         return real_build(display_root, repo_context, **kwargs)
 
     monkeypatch.setattr(m, "build_system_prompt", spy_build)
-    rc = m.main(["resume", Path(first["run_dir"]).name, "--max-turns", "1"])  # no --allow-commit
+    rc = m.main(["resume", Path(first["run_dir"]).name, "--max-turns", "2"])  # no --allow-commit
     second = json.loads(capsys.readouterr().out)
     assert captured["allow_commit"] is True
     assert json.loads((Path(second["run_dir"]) / "run.json").read_text())["allow_commit"] is True
@@ -1820,7 +1992,7 @@ def test_verify_is_null_without_the_flag_and_resume_inherits_the_command(
         tmp_path, monkeypatch, capsys):
     m = _install_host_harness(monkeypatch, tmp_path)
     repo = _host_repo(tmp_path)
-    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "2",
                    "--verify", "true", "do it"]) == 0
     first = json.loads(capsys.readouterr().out)
     assert first["verify"]["command"] == "true"
@@ -1847,7 +2019,7 @@ def test_resume_after_a_non_completed_end_inherits_verify_command_rounds_and_tim
     ]
     m = _install_host_harness(monkeypatch, tmp_path, write_then_loop)
     repo = _host_repo(tmp_path)
-    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "2",
                  "--verify", "true", "--verify-rounds", "3", "--verify-timeout", "45",
                  "add a file"])
     assert rc == 1
@@ -1880,7 +2052,7 @@ def test_resume_explicit_verify_rounds_overrides_the_inherited_value(
     ]
     m = _install_host_harness(monkeypatch, tmp_path, write_then_loop)
     repo = _host_repo(tmp_path)
-    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "2",
                  "--verify", "true", "--verify-rounds", "3", "--verify-timeout", "45",
                  "add a file"])
     assert rc == 1
@@ -2044,6 +2216,33 @@ def test_resume_of_a_completed_run_without_feedback_is_refused(tmp_path, monkeyp
     assert len(list((tmp_path / "runs").iterdir())) == 1     # nothing created
 
 
+def test_resume_of_an_unchanged_run_requires_feedback(tmp_path, monkeypatch, capsys):
+    # Build a genuinely "unchanged" prior run (a --feedback resume whose two
+    # finishes wrote nothing, per test_resume_feedback_zero_change_ends_unchanged
+    # above), then resume THAT run without --feedback -- it must be refused
+    # exactly the way a "completed" run is, just with the "unchanged" wording.
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    assert first["status"] == "completed"
+    slug = Path(first["run_dir"]).name
+
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url, [
+        tool_call_body("finish", {"summary": "no change 1"}, call_id="f1"),
+        tool_call_body("finish", {"summary": "no change 2"}, call_id="f2"),
+    ]))
+    rc = m.main(["resume", slug, "--feedback", "keep going"])
+    assert rc == 1
+    unchanged = json.loads(capsys.readouterr().out)
+    assert unchanged["status"] == "unchanged"
+    unchanged_slug = Path(unchanged["run_dir"]).name
+
+    assert m.main(["resume", unchanged_slug]) == 2
+    err = capsys.readouterr().err
+    assert f"run '{unchanged_slug}' ended 'unchanged' (the worker changed nothing)" in err
+    assert "pass --feedback to tell it what to change" in err
+    assert len(list((tmp_path / "runs").iterdir())) == 2     # nothing new created
+
+
 def test_resume_feedback_file_and_its_refusals(tmp_path, monkeypatch, capsys):
     m, repo, rc = _first_run(monkeypatch, tmp_path, None)
     first = json.loads(capsys.readouterr().out)
@@ -2121,15 +2320,15 @@ def test_task_size_warning_fires_on_resume(tmp_path, monkeypatch, capsys):
     # resume has no args.task: the check runs against ctx.task, which
     # build_resume_task filled with the prior task plus the transcript tail.
     # The scripted client repeats its one tool call, so both runs end
-    # `max_turns` after a single turn -- resumable, and deterministic.
+    # `max_turns` after two turns -- resumable, and deterministic.
     loop = [tool_call_body("read_file", {"path": "README.md"})]
     m = _install_host_harness(monkeypatch, tmp_path, loop)
     repo = _host_repo(tmp_path)
-    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "2",
                    "x" * 4000]) == 1
     prior = json.loads(capsys.readouterr().out)
     assert m.main(["resume", Path(prior["run_dir"]).name, "--context-window", "2000",
-                   "--max-tokens", "500", "--max-turns", "1"]) == 1
+                   "--max-tokens", "500", "--max-turns", "2"]) == 1
     err = capsys.readouterr().err
     assert "warning: the task text is ~" in err
     assert "% of the 2000-token context window" in err
@@ -2158,17 +2357,17 @@ def test_context_window_source_lands_in_run_json_run_start_and_stdout(
 def test_resume_records_its_own_context_window_source(tmp_path, monkeypatch, capsys):
     # The window is re-resolved on resume exactly as on a fresh run, so the
     # source is the resuming invocation's, not the prior run's. Both runs end
-    # `max_turns` after one turn: the scripted client repeats its tool call.
+    # `max_turns` after two turns: the scripted client repeats its tool call.
     loop = [tool_call_body("read_file", {"path": "README.md"})]
     m = _install_host_harness(monkeypatch, tmp_path, loop)
     repo = _host_repo(tmp_path)
-    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "1",
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "--max-turns", "2",
                    "t"]) == 1
     prior = json.loads(capsys.readouterr().out)
     assert json.loads((Path(prior["run_dir"]) / "run.json").read_text())[
         "context_window_source"] == "default"
     assert m.main(["resume", Path(prior["run_dir"]).name, "--context-window", "7000",
-                   "--max-tokens", "1000", "--max-turns", "1"]) == 1
+                   "--max-tokens", "1000", "--max-turns", "2"]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["context_window_source"] == "flag"
     resumed = json.loads((Path(payload["run_dir"]) / "run.json").read_text())

@@ -92,14 +92,14 @@ _TRUNCATED_WRITE_PATH_RE = re.compile(r"^ERROR: your write_file for ('.*?'|\".*?
 # The two message shapes `dirtywork.runner.truncated_call_result` (runner.py:128-144)
 # can produce for a tool call cut off by finish_reason=="length": the write_file
 # variant with a recoverable path ("ERROR: your write_file for %r was cut off at
-# the token limit — nothing was written. ...") and the generic variant for every
-# other tool, or a write_file whose path could not be recovered ("ERROR: your
-# {tool} call was cut off at the token limit before it completed. ..."). Matched
-# by prefix only -- the matrix doc's signal is "result starts with the
-# truncated_call_result text", not a byte-for-byte reproduction.
+# the --max-tokens cap of ...") and the generic variant for every other tool,
+# or a write_file whose path could not be recovered ("ERROR: your {tool} call
+# was cut off at the --max-tokens cap of ..."). The harvester reads historical
+# run dirs whose results carry the 0.10 wording ("…at the token limit before it
+# completed.") as well as 1.0's ("…at the --max-tokens cap of N tokens after
+# about …"), so both must match; the write_file branch is unchanged.
 _TRUNCATED_CALL_RESULT_RE = re.compile(
-    r"^ERROR: your (?:write_file for |\S+ call was cut off at the token limit "
-    r"before it completed\.)")
+    r"^ERROR: your (?:write_file for |\S+ call was cut off at the (?:token limit|--max-tokens cap)\b)")
 
 
 def _event_path(e: dict):
@@ -244,6 +244,13 @@ def detect_features(run_json: dict, events: list) -> list:
                           for e in events)
     if has_stall_nudge or run_json.get("status") == "stalled":
         fired.append("F8")
+
+    # S14: a harness-ended run due to unchanged status, unchanged_finish or no_change nudge,
+    # or run.json["changed"] being False.
+    has_unchanged_nudge = any(e.get("event") == "nudge" and e.get("kind") in ("unchanged_finish", "no_change")
+                              for e in events)
+    if has_unchanged_nudge or run_json.get("status") == "unchanged" or run_json.get("changed") is False:
+        fired.append("S14")
 
     # F10: a resume that carried reviewer feedback (`resume --feedback`):
     # run.json.feedback is the verbatim text, null otherwise.

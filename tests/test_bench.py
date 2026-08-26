@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from dirtywork import bench
+from dirtywork import runner
 from dirtywork.sandbox import docker_args
 
 from .fake_docker import FakeCaptured
@@ -394,6 +395,7 @@ def test_abort_kind_is_parsed_from_the_final_message():
     assert bench._abort_kind("aborted after 6 consecutive tool failures") == "mixed"
     assert bench._abort_kind("all done") is None
     assert bench._abort_kind(None) is None
+    assert bench._abort_kind(runner.TRUNCATION_ABORT.format(n=6, cap=1024)) == "truncated"
 
 
 def test_cmd_bench_requires_models(capsys):
@@ -838,21 +840,29 @@ def test_sandbox_nudges_are_not_empty_replies():
     assert failures["nudge_stray_kill"] == 2 and failures["nudge_sandbox_reset"] == 1
 
 
+def test_unchanged_status_counts_in_harness_failures():
+    counts = {f"nudge_{kind}": 0 for kind in bench.NUDGE_KINDS}
+    counts["nudge_other"] = 0
+    failures = bench._harness_failures(counts, "unchanged", None)
+    assert failures["unchanged"] == 1
+    assert failures["stalled"] == 0 and failures["max_turns"] == 0 and failures["sandbox_error"] == 0
+
+
 def test_empty_reply_nudge_kinds_match_the_runner():
     from dirtywork import runner
     assert bench.EMPTY_REPLY_NUDGE_KINDS == tuple(runner.NUDGES)
-    assert bench.NUDGE_KINDS[-2:] == ("stray_kill", "sandbox_reset")
-    assert len(bench.NUDGE_KINDS) == 8
+    assert bench.NUDGE_KINDS[-2:] == ("no_change", "unchanged_finish")
+    assert len(bench.NUDGE_KINDS) == 10
 
 
-def test_summarize_legend_and_detail_cell_list_eight_kinds(tmp_path, monkeypatch, capsys):
+def test_summarize_legend_and_detail_cell_list_ten_kinds(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs")
     results = tmp_path / "results.jsonl"
     harness = {f"nudge_{k}": 0 for k in bench.NUDGE_KINDS}
     harness.update({"nudge_stray_kill": 3, "nudge_other": 0, "empty_reply": 0, "timeouts": 0,
-                    "stalled": 0, "max_turns": 0, "sandbox_error": 0, "abort_kind": None})
+                    "stalled": 0, "max_turns": 0, "sandbox_error": 0, "unchanged": 1, "abort_kind": None})
     results.write_text(json.dumps({"model": "m1", "task": "t", "repeat": 1, "slug": "s1",
-                                   "status": "completed", "turns": 3, "wall_s": 1.0,
+                                   "status": "unchanged", "turns": 3, "wall_s": 1.0,
                                    "prompt_tokens": 1, "completion_tokens": 1,
                                    "acceptance": "skipped", "guardrail_blocks": 0,
                                    "sandbox_resets": 0, "stray_kills": 3, "diff_stat": None,
@@ -861,4 +871,13 @@ def test_summarize_legend_and_detail_cell_list_eight_kinds(tmp_path, monkeypatch
     out = capsys.readouterr().out
     assert rc == 0
     assert "nudges: " + "/".join(bench.NUDGE_KINDS) in out
-    assert "0/0/0/0/0/0/3/0" in out
+    # The detail row for s1, cell by cell (format_table pads with spaces and no
+    # cell here contains one): the nudges cell is the full ten-wide value and
+    # the failures cell names the new status -- exact values, not substrings,
+    # so a widened or narrowed column is caught. `"unchanged" in out` would be
+    # vacuous: the legend line already contains "unchanged_finish".
+    (row,) = [line for line in out.splitlines() if line.startswith("m1 ")]
+    cells = row.split()
+    assert len(cells) == len(bench.DETAIL_COLUMNS)
+    assert cells[bench.DETAIL_COLUMNS.index("nudges")] == "0/0/0/0/0/0/3/0/0/0"
+    assert cells[bench.DETAIL_COLUMNS.index("failures")] == "unchanged"

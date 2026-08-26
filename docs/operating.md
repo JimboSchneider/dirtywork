@@ -171,17 +171,26 @@ move it back or delete it, and never deletes a stash it did not create.
 
 **Sending review feedback.** `--feedback TEXT` (or `--feedback-file PATH`, a
 UTF-8 file, max 64 000 chars; the two are mutually exclusive) turns a resume
-into a review round: the resumed task keeps the original brief, then tells the
-worker that a reviewer read its work and sent *this*, and to inspect the
-worktree with `git status`/`git diff` and apply the feedback and nothing else.
+into a review round. The resumed task keeps the original brief, then (1.0)
+appends the tail of the earlier run's transcript, the status it ended with,
+the reviewer's feedback — framed as *not yet applied* — and a closing
+sentence telling the worker to inspect the worktree with `git status`/`git
+diff`, apply every item of the feedback and run the check it names, and
+nothing else, then call `finish(summary=...)`.
 
     dirtywork resume <slug> --feedback "You dropped the null check in api.ts; restore it."
 
-Resuming a run that ended `completed` **requires** feedback — without it the
-command refuses (exit 2, nothing created), because a completed run that is
-continued with its own original brief just re-does work it already declared
-done. Every other status resumes with or without feedback, as before. The
-feedback text is recorded in the new run's `run.json` (`feedback`) and its
+The harness will not accept a completion (`finish`, or a plain answer with no
+tool call) that changed nothing in the worktree since the resumed run
+started (1.0, #66): the first such completion is refused once, with the
+reason as its own result or the next user message, and the run continues; a
+second one ends the run `unchanged` — exit 1, nothing verified. Resuming a
+run that ended `completed` **or `unchanged`** requires feedback — without it
+the command refuses (exit 2, nothing created), because a plain resume strips
+the feedback block and would let the same non-work end `completed`/`unchanged`
+again with nothing new to apply. Every other status resumes with or without
+feedback, as before. The feedback text is recorded in the new run's
+`run.json` (`feedback`) and its
 `run_start` event; both resume markers (`--- RESUMED RUN ---` and
 `--- RESUMED RUN: REVIEW FEEDBACK ---`) are stripped from the prior task before
 a new block is built, so resuming a resume never accumulates preambles.
@@ -340,6 +349,15 @@ context than on one long reply. The refusal is flat, with no small-window
 exemption: a server-reported context window at or below 8192 refuses every run
 until you pass `--max-tokens` and lower it below that window.
 
+When a reply does hit the cap (1.0, #65), the harness no longer just says
+content was cut: the message states the `--max-tokens` cap and a per-call
+target size (characters and lines) to stay under next time. Truncations are
+counted for the whole run and never reset; six cut-off replies end it
+`model_error`. A cut-off reply counts only toward that budget: it takes no
+empty-reply or malformed-arguments strike, so the three-consecutive-failure
+rule is for replies that are genuinely empty and calls that are malformed
+without being cut.
+
 **Rules of thumb**
 
 - Keep a dispatched brief under ~450 lines. Past roughly 20% of the window
@@ -415,6 +433,25 @@ are not part of the installed package.
   `dirtywork resume <slug> --feedback "<what to fix>"` — the resume inherits
   the same verify command. In docker mode, check first that the command can run
   at all in the image (`--network none`, nothing installed at run time).
+- **status `unchanged`** (1.0, #66) — the run was a `resume --feedback` and
+  the worker completed twice — `finish` or a plain answer — without changing
+  the worktree since the run started; nothing was verified, but the export
+  still ran (the evidence is the prior work, unchanged). Read the transcript
+  to see what the reviewer's feedback actually asked for, then `dirtywork
+  resume <slug> --feedback "..."` again — resuming an `unchanged` run
+  requires `--feedback`, like `completed`.
+- **`changed: null` / `changed_reason` set** — the change guard could not
+  measure the worktree fingerprint; `changed_reason` on `run_end` (and echoed
+  once on stderr as `dirtywork: change guard off: <reason>`) names why. One
+  common cause on a resume: an over-budget worktree ends the run before the
+  first turn — clean the worktree or raise `--max-worktree-mb`.
+- **`changed: true` on a run that appears to have edited nothing (host
+  mode)** — host mode's `HOME` is the worktree, so a tool's caches
+  (`.npm/`, `.cache/`, `.nuget/`, `.dotnet/`, …) written there count as
+  changes just like `files_changed` counts them. Redirect the cache per tool
+  (`PIP_CACHE_DIR`, `npm_config_cache`, `NUGET_PACKAGES`, …) or list the
+  paths in the worktree's `.git/info/exclude` if you want the guard (and
+  `files_changed`) to ignore them.
 - **host mode (`--sandbox none`): "No module named pytest", or a
   `Library/`/`.cache/` directory appears in the worktree** — bash runs with
   `HOME` set to the worktree on purpose (so `~/.ssh` and friends are out of

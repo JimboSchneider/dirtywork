@@ -8,10 +8,16 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .budget import BudgetExceeded
+from .changes import (UNCHANGED_PLAIN, UNCHANGED_REQUIRED,
+                       DEFAULT_NO_CHANGE_TURNS,
+                       NO_CHANGE_SINCE_START_REQUIRED,
+                       NO_CHANGE_SINCE_START_PLAIN,
+                       NO_CHANGE_RECENT,
+                       fingerprint as _fingerprint)
 from .llm import LLMTimeout, MalformedResponse
 from .providers import assistant_message, tool_message
 from .sandbox import SandboxError
-from .tools import is_timeout_result
+from .tools import is_timeout_result, net_change, parse_exit_code
 
 MAX_ASSISTANT_TEXT_CHARS = 64_000
 # Spec §2: end-of-run evidence caps. These match the transcript's own preview
@@ -44,6 +50,13 @@ DEFAULT_WINDOW = 32768
 DEFAULT_MAX_TOKENS = 8192
 TRIM_MARKER = "[result trimmed — re-run the tool if needed]"
 CHARS_PER_TOKEN = 4
+MIN_CHUNK_CHARS = 200
+MIN_CHUNK_LINES = 5
+CHUNK_DIVISOR = 4
+DEFAULT_LINE_CHARS = 60
+MAX_TRUNCATED_REPLIES = 6
+TRUNCATION_ABORT = ("aborted after {n} cut-off replies at --max-tokens {cap}: raise --max-tokens "
+                    "or split the writes")
 BUDGET_FRACTION = 0.75
 MAX_CONSECUTIVE_FAILURES = 3
 FAILURE_KINDS = ("malformed_entry", "malformed_args", "unknown_tool", "bad_args", "empty_reply")
@@ -87,9 +100,12 @@ _THINK_RE = re.compile(re.escape(_THINK_OPEN) + r".*?(?:" + re.escape(_THINK_CLO
 _TEXT_TOOL_MARKERS = tuple("<" + m for m in ("tool_call>", "function=", "function_call>", "|tool_call|>"))
 
 NUDGES = {
-    "truncated": ("Your reply was cut off at the token limit. Continue with smaller steps — "
-                  "emit one tool call at a time; for a large file, write_file the first "
-                  "part and append_file the rest."),
+    "truncated": ("Your reply was cut off at the --max-tokens cap of {cap} tokens (about "
+                  "{cap_chars} characters); the harness received only {received} characters of "
+                  "it — cut-off reply {n} of {max}. Keep each tool call's content under about "
+                  "{target_chars} characters (about {target_lines} lines; split long lines if "
+                  "you must) and emit one tool call at a time; for a large file, write_file the "
+                  "first part and append_file the rest."),
     "empty": ("Your reply contained no tool call and no answer. Continue the task with a "
               "tool call, or call finish(summary=...) if the task is complete."),
     "text_tool_call": ("Your reply contained a tool call written as text; the harness only "
@@ -143,7 +159,7 @@ def _recovered_path(raw_arguments):
     return value[:TRUNCATED_PATH_CHARS]
 
 
-def truncated_call_result(tool: str, raw_arguments) -> str:
+def truncated_call_result(tool: str, raw_arguments, trunc: dict) -> str:
     """Spec §1.3: the tool result a call cut off at the token limit gets.
 
     A write_file whose path can be recovered is told exactly which write to
@@ -153,13 +169,53 @@ def truncated_call_result(tool: str, raw_arguments) -> str:
     if tool == "write_file":
         path = _recovered_path(raw_arguments)
         if path is not None:
-            return (f"ERROR: your write_file for {path!r} was cut off at the token "
-                    f"limit — nothing was written. Write the file in chunks: "
-                    f"write_file with the first part, then append_file for each "
-                    f"following part.")
-    return (f"ERROR: your {tool} call was cut off at the token limit before it "
-            f"completed. Emit smaller tool calls — for a large file, write_file "
-            f"the first part and append_file the rest.")
+            return (f"ERROR: your write_file for {path!r} was cut off at the --max-tokens cap of "
+                    f"{trunc['cap']} tokens after about {trunc['cut_chars']} characters "
+                    f"(~{trunc['cut_lines']} lines) — nothing was written; cut-off reply "
+                    f"{trunc['n']} of {trunc['max']}. Write the file in chunks of at most about "
+                    f"{trunc['target_chars']} characters (about {trunc['target_lines']} lines): "
+                    f"write_file with the first part, then append_file for each following part.")
+    return (f"ERROR: your {tool} call was cut off at the --max-tokens cap of {trunc['cap']} tokens "
+            f"after about {trunc['cut_chars']} characters (~{trunc['cut_lines']} lines) before it "
+            f"completed — cut-off reply {trunc['n']} of {trunc['max']}. Keep each tool call under "
+            f"about {trunc['target_chars']} characters (about {trunc['target_lines']} lines); for "
+            f"a large file, write_file the first part and append_file the rest.")
+
+
+def reply_size(resp) -> tuple[int, int]:
+    """(text_chars, raw_chars): what the harness RECEIVED -- the reply's prose
+    and the raw argument strings of every addressable tool call
+    (`_tool_call_arg_chars`). Reported to the model as `received`; never the
+    target's basis."""
+    return (len(resp.text or ""),
+            sum(_tool_call_arg_chars(tc) for tc in resp.tool_calls))
+
+
+def call_size(tc) -> tuple[int, int]:
+    """(chars, lines) of ONE tool call's raw arguments -- the call that was
+    cut (cases a/b). Newlines inside JSON string arguments arrive escaped
+    (`\\n`), so both forms are counted. (0, 0) when the adapter kept nothing
+    (Anthropic's error branch); the text path has no call and passes (0, 0)."""
+    raw = tc.raw_arguments or ""
+    chars = _tool_call_arg_chars(tc)
+    return chars, (raw.count("\\n") + raw.count("\n") + 1) if chars else 0
+
+
+def chunk_target(max_tokens: int, cut_chars: int, cut_lines: int) -> tuple[int, int]:
+    """(characters, lines) a single tool call's content must stay under.
+    Basis: the cap's character capacity (max_tokens * CHARS_PER_TOKEN), or the
+    smaller of that and what the CUT CALL actually got out when its raw
+    arguments are present (cut_chars > 0) -- that call's own ratio reflects
+    how densely THIS model tokenizes THIS content. A quarter of the basis
+    leaves room for JSON escaping, the call's other fields and any prose
+    around it. Lines come from the cut call's own characters-per-line when it
+    had enough lines to measure, else DEFAULT_LINE_CHARS."""
+    cap_chars = max_tokens * CHARS_PER_TOKEN
+    basis = min(cap_chars, cut_chars) if cut_chars > 0 else cap_chars
+    chars = max(MIN_CHUNK_CHARS, basis // CHUNK_DIVISOR)
+    per_line = (cut_chars / cut_lines
+                if cut_chars > 0 and cut_lines >= 3 else DEFAULT_LINE_CHARS)
+    return chars, max(MIN_CHUNK_LINES, int(chars / per_line))
 
 
 def strip_think(text) -> str:
@@ -258,30 +314,16 @@ def _bash_fingerprint(command, result: str) -> str:
     return hashlib.sha256((str(command) + "\0" + normalized).encode("utf-8", "replace")).hexdigest()
 
 
-def parse_exit_code(result):
-    """The integer after 'exit code: ' on a bash result's first line, or None
-    for an ERROR:/BLOCKED: result that never produced an exit status at all.
-    RepeatTracker.note_bash calls this to tell a passing rerun from a failing
-    one."""
-    if not isinstance(result, str):
-        return None
-    head = result.split("\n", 1)[0]
-    prefix = "exit code: "
-    if not head.startswith(prefix):
-        return None
-    try:
-        return int(head[len(prefix):].strip())
-    except ValueError:
-        return None
-
-
 class ProgressTracker:
     """Spec §3: a turn made progress if any tool call was new to this run
     (first time this exact tool + arguments — a file not read before, a new
     grep, a new command), a write/edit succeeded, or a bash call produced
     output not seen before (volatile tokens ignored). Only repeats are idle.
     Nudge once per idle streak at stall_turns // 2; report 'stalled' at
-    stall_turns. stall_turns <= 0 disables detection."""
+    stall_turns. stall_turns <= 0 disables detection.
+
+    Spec #66 §4.2: a write that changed nothing (+0 -0) is not progress;
+    an unknown result shape still is (fail open)."""
 
     def __init__(self, stall_turns: int):
         self.stall_turns = stall_turns
@@ -295,7 +337,10 @@ class ProgressTracker:
         if not isinstance(result, str) or result.startswith("ERROR"):
             return
         if name in _MUTATING_TOOLS:
-            self._progressed = True          # a successful write/edit is always progress
+            # Spec #66 §4.2: a write that changed nothing (`+0 -0`) is not
+            # progress; an unknown result shape still is (fail open).
+            if net_change(result) is not False:
+                self._progressed = True
             return
         call_key = name + "\0" + (json.dumps(args, sort_keys=True, default=str) if isinstance(args, dict) else "")
         if call_key not in self._seen_calls:
@@ -484,7 +529,9 @@ class Runner:
                  stuck_repeats: int = DEFAULT_STUCK_REPEATS,
                  verify: str | None = None,
                  verify_rounds: int = DEFAULT_VERIFY_ROUNDS,
-                 verify_timeout: int = DEFAULT_VERIFY_TIMEOUT):
+                 verify_timeout: int = DEFAULT_VERIFY_TIMEOUT,
+                 require_changes: bool = False,
+                 no_change_turns: int = DEFAULT_NO_CHANGE_TURNS):
         self.provider = provider
         self.registry = registry
         self.sandbox = sandbox
@@ -510,6 +557,11 @@ class Runner:
         # Clamped to the bash tool's own range so --verify can never ask the
         # sandbox for a timeout the bash path would refuse.
         self.verify_timeout = max(1, min(int(verify_timeout), 600))
+        # Spec #66 §4.3: a completion that changed nothing ends the run `unchanged`
+        # on the second attempt (the CLI sets this for resume --feedback)
+        self.require_changes = require_changes
+        # Spec #66 §4.4: every K turns a fingerprint; equal to the last check's -> a nudge, never an abort; 0 disables. Not a CLI flag.
+        self.no_change_turns = no_change_turns
         # An explicit 0 is honoured (it is how a test forces context_exhausted);
         # only None means "ask the provider".
         self.context_window = (context_window if context_window is not None
@@ -546,6 +598,7 @@ class Runner:
         turns = 0
         trimmed_turns = 0       # spec §2.2: turns on which trimming happened
         timeouts = 0            # spec §4.3: worker bash calls that timed out
+        truncations = 0         # spec #65 §3.3: turns with a truncation nudge or truncated_call_result; never reset
         failures = FailureTracker()
         progress = ProgressTracker(self.stall_turns)
         repeats = RepeatTracker(self.stuck_repeats)
@@ -554,6 +607,14 @@ class Runner:
         last_assistant_text = None  # spec §2: the newest non-empty reply text
         verify_state = None         # spec §4.3: the LAST verify run, or None
         verify_rounds_used = 0
+        # Spec #66 §4.1: the worktree fingerprint at run start (None = guard off)
+        fp_start = None             # measurement before first turn
+        fp_check = None             # §4.4: baseline of the every-K check (W3b)
+        fp_turn = -1                # turn of the newest measurement
+        fp_value = None
+        changed = None              # §4.3 one rule: newest measurement != fp_start; null = unknown
+        changed_reason = None       # why the newest measurement failed (sparse on run_end)
+        unchanged_finishes = 0      # count of zero-change finishes
         start = time.monotonic()
         deadline = start + self.timeout
 
@@ -670,6 +731,14 @@ class Runner:
 
         def finish(status: str, final: str) -> RunResult:
             nonlocal run_end_written
+            # Spec #66 §4.1 (4): take a final fingerprint at run_end for the
+            # change guard (except for statuses where it's already been measured)
+            if (status not in ("interrupted", "timeout", "budget_exceeded", "sandbox_error")
+                    and fp_start is not None and fp_turn != turns):
+                try:
+                    take_fingerprint()              # §4.1 (4): run_end.changed for max_turns/stalled/stuck/model_error/verify_failed/context_exhausted; a failure sets changed None + reason
+                except (BudgetExceeded, SandboxError):
+                    pass                            # reason and changed=None already stored by take_fingerprint
             # Spec #60 §4(c): the single exit point resolves any terminal record
             # the verify path never reached (a later call raised, the failure
             # tracker aborted, Ctrl-C) -- then flushes the turn so its evidence
@@ -689,13 +758,22 @@ class Runner:
                            "verify": verify_state,
                            "trimmed_turns": trimmed_turns,
                            "timeouts": timeouts,
-                           "context_window_source": self.context_window_source}
+                           "truncations": truncations,
+                           "context_window_source": self.context_window_source,
+                           "changed": changed}
+            if changed_reason is not None:
+                extra["changed_reason"] = changed_reason
             if self.finalize is not None:
                 run_finalize()
                 if isinstance(finalize_state["result"], dict):
                     extra.update(finalize_state["result"])
                 if finalize_state["error"] is not None:
                     extra["finalize_error"] = finalize_state["error"]
+            # Spec #66: budget watchdog violation (only if not set by finalize)
+            if changed_reason is not None and changed_reason.startswith("budget: ") \
+                    and not extra.get("watchdog_violation"):
+                extra["watchdog_violation"] = changed_reason[len("budget: "):]
+                extra["watchdog_violation_kind"] = "budget"
             if not run_end_written:
                 self.transcript.write("run_end", status=status, turns=turns,
                                       duration_s=round(time.monotonic() - start, 1),
@@ -716,6 +794,37 @@ class Runner:
                 record = self.transcript.write("nudge", kind="stall", turn=turns)
                 return None, STALL_NUDGE.format(n=self.stall_turns // 2), record
             return None, None, None
+
+        def check_no_change():
+            """(RunResult to end the run with, or None; nudge text, or None;
+            the nudge record, or None) -- spec #66 §4.4. Fires on turns that
+            are a multiple of no_change_turns when the guard is on. Equal to
+            the last check's fingerprint -> nudge and reset the baseline;
+            different -> reset the baseline silently; unmeasurable -> keep
+            the baseline (take_fingerprint stored the reason)."""
+            nonlocal fp_check
+            if (fp_start is None or self.no_change_turns <= 0
+                    or turns % self.no_change_turns != 0):
+                return None, None, None
+            try:
+                fp = take_fingerprint()
+            except BudgetExceeded as e:
+                return finish("budget_exceeded", e.reason), None, None
+            except SandboxError as e:
+                return finish("sandbox_error", str(e)), None, None
+            if fp is None:
+                return None, None, None
+            same = fp == fp_check
+            fp_check = fp
+            if not same:
+                return None, None, None
+            record = self.transcript.write("nudge", kind="no_change", turn=turns)
+            if fp == fp_start:
+                text = (NO_CHANGE_SINCE_START_REQUIRED if self.require_changes
+                        else NO_CHANGE_SINCE_START_PLAIN)
+            else:
+                text = NO_CHANGE_RECENT
+            return None, text.format(k=self.no_change_turns), record
 
         def run_verify():
             """One execution of the operator's gate (spec §4.2). Runs through
@@ -743,6 +852,30 @@ class Runner:
                                           command=self.verify,
                                           exit_code=exit_code, output=tail), record
 
+        def take_fingerprint() -> str | None:
+            """Spec #66 §4.1/§4.3: one measurement. Returns the fingerprint or
+            None. One rule: a successful measurement sets changed/clears the
+            reason; a failed or raising one sets changed = None and stores
+            the reason (so changed_reason is present exactly when changed is
+            null for that reason). BudgetExceeded/SandboxError are stored,
+            then re-raised for the caller to map (finish() catches them)."""
+            nonlocal fp_turn, fp_value, changed, changed_reason
+            try:
+                fp, reason = _fingerprint(self.sandbox)
+            except BudgetExceeded as e:
+                changed, changed_reason = None, f"budget: {e.reason}"
+                raise
+            except SandboxError as e:
+                changed, changed_reason = None, f"sandbox: {e}"
+                raise
+            if fp is None:
+                changed, changed_reason = None, reason
+                return None
+            fp_turn, fp_value = turns, fp
+            if fp_start is not None:
+                changed, changed_reason = (fp != fp_start), None
+            return fp
+
         def check_verify(final: str, via: str):
             """(RunResult to return, or None; feedback to deliver, or None) for a
             completion path. Both completion paths — the finish tool and a plain
@@ -753,7 +886,30 @@ class Runner:
             branch resolves the turn's terminal records (§4) -- a no-op on the
             plain-answer path, which has none. BudgetExceeded/SandboxError end
             the run with the same statuses a tool call would."""
-            nonlocal stuck
+            nonlocal stuck, unchanged_finishes
+            if fp_start is not None:
+                try:
+                    fp = take_fingerprint()
+                except BudgetExceeded as e:
+                    resolve_finish(f"run not finished: change check could not run ({e.reason})")
+                    return finish("budget_exceeded", e.reason), None
+                except SandboxError as e:
+                    resolve_finish(f"run not finished: change check could not run ({e})")
+                    return finish("sandbox_error", str(e)), None
+                if fp is not None and fp == fp_start:
+                    if unchanged_finishes == 0:
+                        unchanged_finishes = 1
+                        stuck = None
+                        repeats.reset()             # a rejection round is a fresh episode, as verify feedback
+                        record = self.transcript.write("nudge", kind="unchanged_finish", turn=turns)
+                        if record is not None:
+                            record["via"] = "tool_result" if via == "finish_result" else "user"
+                        text = UNCHANGED_REQUIRED if self.require_changes else UNCHANGED_PLAIN
+                        resolve_finish(text)
+                        return None, text
+                    if self.require_changes:
+                        resolve_finish("run not finished: nothing changed")
+                        return finish("unchanged", final), None
             if not self.verify:
                 resolve_finish(FINISH_DONE)
                 return finish("completed", final), None
@@ -788,7 +944,7 @@ class Runner:
         def one_turn():
             """One model turn (spec #60 §6.1: runs inside transcript.turn()).
             Returns the RunResult that ends the run, or None to continue."""
-            nonlocal turns, trimmed_turns, timeouts, stuck
+            nonlocal turns, trimmed_turns, timeouts, truncations, stuck
             turn_tool_msgs.clear()
             turn_terminal.clear()
             if turns >= self.max_turns:
@@ -838,6 +994,27 @@ class Runner:
             malformed_count = len(malformed_entries)
             tool_calls = [tc for tc in resp.tool_calls if tc.id]
             append_assistant(resp.text, tool_calls, finish_reason)
+            trunc: dict = {}
+            counted = False
+
+            def note_truncation(tc=None) -> None:
+                """Spec #65 §3.1: count this turn's truncation once and build
+                the numbers both texts format. `tc` is the cut call (cases
+                a/b) or None on the text path."""
+                nonlocal truncations, counted
+                if counted:
+                    return
+                truncations += 1
+                counted = True
+                text_chars, raw_chars = reply_size(resp)
+                cut_chars, cut_lines = call_size(tc) if tc is not None else (0, 0)
+                tc_chars, tc_lines = chunk_target(self.max_tokens, cut_chars, cut_lines)
+                trunc.update({"cap": self.max_tokens,
+                              "cap_chars": self.max_tokens * CHARS_PER_TOKEN,
+                              "received": text_chars + raw_chars,
+                              "cut_chars": cut_chars, "cut_lines": cut_lines,
+                              "target_chars": tc_chars, "target_lines": tc_lines,
+                              "n": truncations, "max": MAX_TRUNCATED_REPLIES})
             if not resp.tool_calls:
                 content = resp.text
                 kind = classify_text_reply(content, finish_reason)
@@ -848,15 +1025,26 @@ class Runner:
                     sandbox_text, sandbox_records = drain_sandbox()
                     deliver(_join_nudges(feedback, sandbox_text), sandbox_records)
                     return None
-                kind_record = self.transcript.write("nudge", kind=kind, turn=turns)
-                abort_reason = failures.record("empty_reply")
-                if abort_reason is not None:
-                    return finish("model_error", abort_reason)
+                if kind == "truncated":
+                    note_truncation()
+                    kind_record = self.transcript.write("nudge", kind=kind, turn=turns)
+                    if truncations >= MAX_TRUNCATED_REPLIES:
+                        return finish("model_error",
+                                      TRUNCATION_ABORT.format(n=truncations, cap=self.max_tokens))
+                else:
+                    kind_record = self.transcript.write("nudge", kind=kind, turn=turns)
+                    abort_reason = failures.record("empty_reply")
+                    if abort_reason is not None:
+                        return finish("model_error", abort_reason)
                 stalled, stall_text, stall_record = check_progress()
                 if stalled is not None:
                     return stalled
+                ended, nc_text, nc_record = check_no_change()
+                if ended is not None:
+                    return ended
                 sandbox_text, sandbox_records = drain_sandbox()
-                deliver(_join_nudges(NUDGES[kind], sandbox_text, stall_text), [kind_record, *sandbox_records, stall_record])
+                deliver(_join_nudges(NUDGES[kind].format(**trunc), sandbox_text, stall_text, nc_text),
+                        [r for r in (kind_record, *sandbox_records, stall_record, nc_record) if r is not None])
                 return None
 
             abort_reason = None
@@ -881,21 +1069,25 @@ class Runner:
                 abort_reason = None
                 terminal = False
                 if tc.error is not None:
-                    abort_reason = failures.record("malformed_args")
                     if finish_reason == "length":
-                        result = truncated_call_result(name, tc.raw_arguments)
+                        note_truncation(tc)
+                        result = truncated_call_result(name, tc.raw_arguments, trunc)
                     else:
+                        abort_reason = failures.record("malformed_args")
                         result = f"ERROR: {tc.error}"
+                    if abort_reason is None and truncations >= MAX_TRUNCATED_REPLIES:
+                        abort_reason = TRUNCATION_ABORT.format(n=truncations, cap=self.max_tokens)
                 elif finish_reason == "length" and self._missing_required(name, args):
                     # Spec §1.3 case (b): the Anthropic shape. A truncated
                     # tool_use whose `input` came back {} parses
                     # "successfully", so tc.error is None -- but a required
                     # parameter is simply absent. Checked BEFORE dispatch so
                     # the registry's bad_args path never swallows it: this
-                    # is a truncation, not an argument mistake, and it is
-                    # accounted as malformed_args exactly like case (a).
-                    abort_reason = failures.record("malformed_args")
-                    result = truncated_call_result(name, tc.raw_arguments)
+                    # is a truncation, not an argument mistake.
+                    note_truncation(tc)
+                    result = truncated_call_result(name, tc.raw_arguments, trunc)
+                    if abort_reason is None and truncations >= MAX_TRUNCATED_REPLIES:
+                        abort_reason = TRUNCATION_ABORT.format(n=truncations, cap=self.max_tokens)
                 else:
                     try:
                         spec = self.registry.spec(name)
@@ -986,6 +1178,9 @@ class Runner:
             stalled, stall_text, stall_record = check_progress()
             if stalled is not None:
                 return stalled
+            ended, nc_text, nc_record = check_no_change()
+            if ended is not None:
+                return ended
 
             malformed_text = malformed_record = None
             if malformed_count > 0:
@@ -999,10 +1194,20 @@ class Runner:
                 # Once per turn, however many commands timed out in it.
                 timeout_record = self.transcript.write("nudge", kind="timeout", turn=turns)
             sandbox_text, sandbox_records = drain_sandbox()
-            deliver(_join_nudges(malformed_text, sandbox_text, timeout_text, stall_text),
-                    [malformed_record, *sandbox_records, timeout_record, stall_record])
+            deliver(_join_nudges(malformed_text, sandbox_text, timeout_text, stall_text, nc_text),
+                    [r for r in (malformed_record, *sandbox_records, timeout_record, stall_record, nc_record) if r is not None])
             return None
         try:
+            # Spec #66 §4.1 (1): the start fingerprint, INSIDE this try so a
+            # Ctrl-C during the exec reaches the outer KeyboardInterrupt
+            # handler and ends `interrupted` with a run_end (turns == 0).
+            try:
+                fp_start = take_fingerprint()      # None = guard off for this run
+            except BudgetExceeded as e:
+                return finish("budget_exceeded", e.reason)
+            except SandboxError as e:
+                return finish("sandbox_error", str(e))
+            fp_check = fp_start
             while True:
                 with self.transcript.turn():
                     try:

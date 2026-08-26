@@ -329,7 +329,8 @@ MD_VERDICT_FIELDS = ("verdict", "note")
 # than disappearing, which is the point: "nothing was trimmed" and "nothing
 # timed out" are facts worth reading.
 MD_RESULT_FIELDS = ("status", "error", "export_status", "finalize_error",
-                    "watchdog_violation", "trimmed_turns", "timeouts")
+                    "watchdog_violation", "trimmed_turns", "timeouts",
+                    "truncations", "changed", "changed_reason")
 MD_ARGS_CHARS = 200      # the transcript already caps `args` at 500
 MD_RESULT_CHARS = 2000   # the transcript's preview cap for model/tool-authored results; finish is exempt (#60)
 

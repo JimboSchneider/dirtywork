@@ -74,9 +74,27 @@ class ScriptedClient(DictProvider):
     def __init__(self, responses):
         super().__init__()
         self.responses = list(responses)
+        self._last = None
 
     def reply(self, model, messages, tools):
-        return self.responses.pop(0)
+        if not self.responses:
+            # The change guard (#66) refuses a fresh run's first completion
+            # when nothing in the worktree changed and accepts the second;
+            # a script whose last reply is a completion -- a plain answer
+            # or a `finish` call -- is asked once more and answers the same
+            # way. Running dry anywhere else is still a test failure.
+            if self._last is not None and _is_completion(self._last):
+                return self._last
+            raise IndexError("scripted responses exhausted before the run ended")
+        self._last = self.responses.pop(0)
+        return self._last
+
+
+def _is_completion(resp) -> bool:
+    calls = resp.get("tool_calls") or []
+    if not calls:
+        return True
+    return any((c.get("name") or (c.get("function") or {}).get("name")) == "finish" for c in calls)
 
 
 class _SlowClient(ScriptedClient):
@@ -837,3 +855,64 @@ def test_docker_live_timed_out_grep_leaves_no_stray(tmp_path, monkeypatch, capsy
     # No stray_kill and no sandbox_reset events
     assert not [e for e in events if e["event"] == "stray_kill"], f"Expected no stray_kill events, but found some"
     assert not [e for e in events if e["event"] == "sandbox_reset"], f"Expected no sandbox_reset events, but found some"
+
+@pytest.mark.docker
+def test_docker_live_fingerprint_matches_host_and_leaves_the_store_alone(tmp_path):
+    """Spec §7 test 24. The fingerprint is content-addressed, so the same tree
+    hashes identically on the host and inside the worker container, nested
+    repositories included. The nested repositories are created on both sides:
+    the docker seed (`tar --exclude=./.git`) drops every `.git` directory, not
+    only the root one, so a nested repository made on the host arrives in the
+    container as plain files -- a seed property, not the guard's -- and the
+    container gets its own `git init` for the same content."""
+    import subprocess
+    from dirtywork.changes import fingerprint
+    from dirtywork.sandbox import docker_args
+    from dirtywork.sandbox.docker import DockerSandbox
+    from dirtywork.sandbox.docker_cli import resolve_image
+    from dirtywork.sandbox.host import HostSandbox
+    from dirtywork.workspace import create_worktree, ensure_worktrees_excluded, worktree_base_commit
+
+    def git(*args, cwd):
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *args], cwd=cwd, check=True, capture_output=True)
+
+    repo = _make_live_repo(tmp_path)              # README.md committed on main
+    ensure_worktrees_excluded(repo)
+    worktree = create_worktree(repo, "livefp", None)   # checked out: README.md present
+    base_commit = worktree_base_commit(worktree)
+    # nested repositories inside the worktree: a committed one and an unborn one
+    inner = worktree / "vendor" / "inner"; inner.mkdir(parents=True)
+    git("init", "-q", cwd=inner); (inner / "a.txt").write_text("a\n"); git("add", "-A", cwd=inner); git("commit", "-qm", "init", cwd=inner)
+    unborn = worktree / "vendor" / "unborn"; unborn.mkdir()
+    git("init", "-q", cwd=unborn); (unborn / "x.txt").write_text("x\n")
+
+    fp_host, reason = fingerprint(HostSandbox(worktree))
+    assert reason is None and fp_host is not None
+    assert len(fp_host.splitlines()) == 4        # root tree, HEAD, two nested trees
+
+    cfg = docker_args.DockerConfig(**_image_kwargs())
+    run_dir = tmp_path / "rundir"; run_dir.mkdir()
+    sb = DockerSandbox(cfg, run_dir=run_dir, image_ref=resolve_image(cfg.image))
+    try:
+        sb.start(worktree, repo, "livefp", base_commit, branch=None, seed_from_worktree=True)
+        assert sb.bash("find . -name .git -mindepth 2", 60) == "exit code: 0\n"   # the seed flattened them
+        fp_flat, reason = fingerprint(sb)
+        assert reason is None and len(fp_flat.splitlines()) == 2 and fp_flat != fp_host
+        sb.bash("git -C vendor/inner init -q && git -C vendor/inner add -A && "
+                "git -C vendor/inner -c user.email=t@t -c user.name=t commit -qm init && "
+                "git -C vendor/unborn init -q", 60)
+        fp_docker, reason = fingerprint(sb)
+        assert reason is None
+        assert fp_docker == fp_host              # content-addressed, sorted: identical on host and in the container
+        count_cmd = "find /gitdir/objects -type f | wc -l"
+        before = sb.bash(count_cmd, 60).split("\n")[1].strip()
+        sb.bash("head -c 102400 /dev/urandom > big.bin", 60)     # a new untracked 100 KB file
+        fp2, reason = fingerprint(sb)
+        assert reason is None and fp2 != fp_docker
+        after = sb.bash(count_cmd, 60).split("\n")[1].strip()
+        assert before == after                    # the scratch object directory: the real store did not grow
+        sb.bash("cp README.md /tmp/r && cp /tmp/r README.md", 60)   # byte-identical rewrite
+        fp3, reason = fingerprint(sb)
+        assert reason is None and fp3 == fp2
+    finally:
+        sb.stop()

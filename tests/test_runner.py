@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -24,17 +26,25 @@ from dirtywork.runner import (
     STALL_NUDGE,
     TIMEOUT_NUDGE,
     TRIM_MARKER,
+    TRUNCATION_ABORT,
     VERIFY_FEEDBACK,
     _bash_fingerprint,
     classify_text_reply,
     resolve_context_window,
     strip_think,
     trim_messages,
+    truncated_call_result,
 )
 from dirtywork.sandbox.host import HostSandbox
 from dirtywork.builtin_tools import default_registry
+from dirtywork.budget import BudgetExceeded
+from dirtywork.sandbox import SandboxError
+from dirtywork.changes import (FINGERPRINT_SCRIPT, UNCHANGED_PLAIN, UNCHANGED_REQUIRED,
+                                NO_CHANGE_SINCE_START_REQUIRED,
+                                NO_CHANGE_SINCE_START_PLAIN, NO_CHANGE_RECENT)
 from dirtywork.transcript import Transcript
 
+from .provider_doubles import FingerprintSandbox
 from .provider_doubles import assert_strict_template_legal
 from .provider_doubles import TimeoutThenFailingVerifySandbox as _TimeoutThenFailingVerifySandbox
 
@@ -64,6 +74,17 @@ def _bad_entry():
     answer it and counts a `malformed_entry` strike."""
     return ToolCall(id="", name="", arguments=None,
                     error="malformed tool call entry (missing or invalid id/function fields)")
+
+
+def _trunc_dict(tc=None, text=""):
+    """The dict the runner builds for a truncation on a turn with default
+    max_tokens (8192): the cut call's own size when there is one."""
+    from dirtywork.runner import call_size, chunk_target
+    cut_chars, cut_lines = call_size(tc) if tc is not None else (0, 0)
+    target_chars, target_lines = chunk_target(8192, cut_chars, cut_lines)
+    return dict(cap=8192, cap_chars=32768, received=len(text) + cut_chars,
+                cut_chars=cut_chars, cut_lines=cut_lines,
+                target_chars=target_chars, target_lines=target_lines, n=1, max=6)
 
 
 class FakeProvider:
@@ -99,6 +120,22 @@ def parts(tmp_path: Path):
     transcript = Transcript(tmp_path / "t.jsonl")
     registry = default_registry(transcript=transcript)
     sandbox = HostSandbox(wt)
+    return wt, registry, sandbox, transcript, tmp_path
+
+
+@pytest.fixture()
+def git_parts(tmp_path: Path):
+    if shutil.which("git") is None:   # a mark on a fixture is a no-op (PytestRemovedIn9Warning)
+        pytest.skip("git not on PATH")
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "f.txt").write_text("data\n")
+    subprocess.run(["git", "-C", str(wt), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(wt), "-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(wt), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], check=True)
+    transcript = Transcript(tmp_path / "t.jsonl")
+    registry = default_registry(transcript=transcript)
+    sandbox = FingerprintSandbox(wt, hashes=None)
     return wt, registry, sandbox, transcript, tmp_path
 
 
@@ -296,7 +333,7 @@ def test_empty_reply_after_a_tool_turn_gets_the_placeholder(parts):
     third = provider.requests[2]
     assert third[-3]["role"] == "tool"
     assert third[-2] == {"role": "assistant", "content": EMPTY_REPLY_PLACEHOLDER}
-    assert third[-1]["role"] == "user" and third[-1]["content"] == NUDGES["truncated"]
+    assert third[-1]["role"] == "user" and third[-1]["content"] == NUDGES["truncated"].format(**_trunc_dict(text=""))
     events = _events(tmp)
     assistants = [e for e in events if e["event"] == "assistant"]
     assert "placeholder" not in assistants[0]                # a tool-call turn: never a placeholder
@@ -370,7 +407,7 @@ def test_malformed_only_length_turn_gets_placeholder_and_no_truncated_nudge(part
     second = provider.requests[1]
     assert second[-2] == {"role": "assistant", "content": EMPTY_REPLY_PLACEHOLDER}
     assert second[-1]["role"] == "user" and "were malformed" in second[-1]["content"]
-    assert NUDGES["truncated"] not in second[-1]["content"]
+    assert "cut off at the --max-tokens cap" not in second[-1]["content"]
 
 
 def test_third_malformed_entry_strike_ends_after_recording_the_placeholder(parts):
@@ -450,41 +487,38 @@ def test_length_finish_reason_gives_helpful_hint(parts):
     transcript.close()
     assert result.status == "completed"
     tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
-    assert tool_msgs[0]["content"] == (
-        "ERROR: your write_file for 'x' was cut off at the token limit — nothing was "
-        "written. Write the file in chunks: write_file with the first part, then "
-        "append_file for each following part.")
+    tc = _bad_args("c", "write_file", '{"path": "x", "content": "abc')
+    assert tool_msgs[0]["content"] == truncated_call_result("write_file", tc.raw_arguments, _trunc_dict(tc))
 
 
-_GENERIC_TRUNCATION = ("ERROR: your {tool} call was cut off at the token limit before it "
-                       "completed. Emit smaller tool calls — for a large file, write_file "
-                       "the first part and append_file the rest.")
+def _generic_truncation(tool, tc):
+    return truncated_call_result(tool, tc.raw_arguments, _trunc_dict(tc))
 
 
 def test_length_truncation_of_a_non_write_file_tool_gives_the_generic_form(parts):
     wt, registry, sandbox, transcript, tmp = parts
-    truncated = _resp(tool_calls=[_bad_args("c", "edit_file", '{"path": "x", "old_string": "a')],
-                      finish_reason="length",
+    tc = _bad_args("c", "edit_file", '{"path": "x", "old_string": "a')
+    truncated = _resp(tool_calls=[tc], finish_reason="length",
                       usage={"prompt_tokens": 1, "completion_tokens": 1})
     provider = FakeProvider([truncated, _resp(content="done")])
     Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
     transcript.close()
     tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
-    assert tool_msgs[0]["content"] == _GENERIC_TRUNCATION.format(tool="edit_file")
+    assert tool_msgs[0]["content"] == _generic_truncation("edit_file", tc)
 
 
 def test_length_truncation_with_no_raw_arguments_gives_the_generic_form(parts):
     # The Anthropic shape: its error branches never set raw_arguments, so path
     # recovery has nothing to scan and degrades to the generic sentence.
     wt, registry, sandbox, transcript, tmp = parts
-    truncated = _resp(tool_calls=[_bad_args("c", "write_file", "")],
-                      finish_reason="length",
+    tc = _bad_args("c", "write_file", "")
+    truncated = _resp(tool_calls=[tc], finish_reason="length",
                       usage={"prompt_tokens": 1, "completion_tokens": 1})
     provider = FakeProvider([truncated, _resp(content="done")])
     Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
     transcript.close()
     tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
-    assert tool_msgs[0]["content"] == _GENERIC_TRUNCATION.format(tool="write_file")
+    assert tool_msgs[0]["content"] == _generic_truncation("write_file", tc)
 
 
 def test_length_truncation_with_an_invalid_escape_degrades_to_generic(parts):
@@ -498,7 +532,8 @@ def test_length_truncation_with_an_invalid_escape_degrades_to_generic(parts):
     Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
     transcript.close()
     tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
-    assert tool_msgs[0]["content"] == _GENERIC_TRUNCATION.format(tool="write_file")
+    tc = _bad_args("c", "write_file", '{"path": "a\\qb", "content": "z')
+    assert tool_msgs[0]["content"] == _generic_truncation("write_file", tc)
 
 
 def test_recovered_path_is_truncated_and_rendered_with_repr(parts):
@@ -516,21 +551,22 @@ def test_recovered_path_is_truncated_and_rendered_with_repr(parts):
     assert "z" * 201 not in tool_msgs[0]["content"]
 
 
-def test_length_truncation_with_empty_args_counts_as_malformed_args_not_bad_args(parts):
+def test_length_truncation_with_empty_args_counts_as_truncation_not_malformed_args(parts):
     # Spec §1.3 case (b): a truncated Anthropic tool_use whose `input` came
     # back {} PARSES, so tc.error is None -- but a required parameter is
-    # missing. It must be caught before dispatch and accounted as
-    # malformed_args, so three of them abort on THAT kind rather than bad_args.
+    # missing. It must be counted as truncation (not malformed_args), so three
+    # of them would hit the truncation budget (6) before aborting.
     wt, registry, sandbox, transcript, tmp = parts
     empty = _resp(tool_calls=[_call("c", "write_file", {})], finish_reason="length",
                   usage={"prompt_tokens": 1, "completion_tokens": 1})
-    provider = FakeProvider([empty, empty, empty])
+    provider = FakeProvider([empty, empty, empty, _resp(content="done")])
     result = Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
     transcript.close()
-    assert result.status == "model_error"
-    assert result.final_message == "aborted after 3 consecutive malformed_args failures"
+    assert result.status == "completed"
     results = [e["result"] for e in _events(tmp) if e["event"] == "tool_result"]
-    assert results[0] == _GENERIC_TRUNCATION.format(tool="write_file")
+    tc = _call("c", "write_file", {})
+    assert results[0] == _generic_truncation("write_file", tc)
+    # Should NOT mention bad arguments
     assert "bad arguments" not in results[0]
 
 
@@ -571,10 +607,10 @@ def test_an_append_only_turn_counts_as_progress_and_does_not_stall(parts):
 
 
 def test_truncated_nudge_names_write_file_and_append_file(parts):
-    assert NUDGES["truncated"] == (
-        "Your reply was cut off at the token limit. Continue with smaller steps — "
-        "emit one tool call at a time; for a large file, write_file the first part "
-        "and append_file the rest.")
+    t = NUDGES["truncated"]
+    assert all(f in t for f in ("{cap}", "{cap_chars}", "{received}", "{target_chars}", "{target_lines}",
+                                "cut-off reply {n} of {max}",
+                                "write_file the first part and append_file the rest"))
 
 
 def test_run_start_includes_run_info(parts):
@@ -643,6 +679,48 @@ def test_three_consecutive_malformed_tool_calls_aborts(parts):
     assert result.status == "model_error"
 
 
+def test_length_cut_tool_call_takes_no_malformed_strike(parts):
+    # Spec #65: A truncated tool call with finish_reason="length" and
+    # malformed_args does NOT count as a malformed_args strike (only truncation).
+    wt, registry, sandbox, transcript, tmp = parts
+    cut_bad_args = _resp(tool_calls=[_bad_args("c", "write_file",
+                                               '{"path": "x", "content": "abc}')],
+                         finish_reason="length")
+
+    def write(i):
+        return _resp(tool_calls=[_call(f"w{i}", "write_file",
+                                       {"path": "rows.csv", "content": f"row{i}\n"})])
+
+    # Three consecutive bad args with finish_reason="length"
+    provider = FakeProvider([cut_bad_args, cut_bad_args, cut_bad_args,
+                             write(0), _resp(tool_calls=[_call("f", "finish", {"summary": "done"})])])
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_tokens=1024)
+    result = r.run("s", "t")
+    transcript.close()
+
+    # The run should complete (not abort on malformed_args)
+    assert result.status == "completed"
+    # And it should have 3 truncations
+    assert result.extra["truncations"] == 3
+
+
+def test_three_consecutive_malformed_tool_calls_aborts_non_length(parts):
+    # Spec #65: Malformed_args with non-length finish_reason still counts
+    # as a strike and can abort after 3 consecutive.
+    wt, registry, sandbox, transcript, tmp = parts
+    # Use finish_reason="stop" (not length) for the malformed_args
+    bad = _resp(tool_calls=[_bad_args("c", "write_file",
+                                      '{"path": "x", "content": "abc}')],
+                finish_reason="stop")
+
+    provider = FakeProvider([bad, bad, bad])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    # Should still abort due to consecutive malformed_args failures
+    assert result.status == "model_error"
+
+
 def test_interrupted_status(parts):
     wt, registry, sandbox, transcript, tmp = parts
     class InterruptingClient(FakeProvider):
@@ -664,10 +742,12 @@ def test_finalize_merges_into_run_end_and_result_extra(parts):
               finalize=lambda: {"diff_stat": " 1 file changed"})
     result = r.run("s", "t")
     transcript.close()
+    assert result.extra.pop("changed_reason").startswith("fatal: not a git repository")
     assert result.extra == {"stuck_on": None, "last_tool_result": None,
                             "last_assistant_text": "done", "verify": None,
-                            "trimmed_turns": 0, "timeouts": 0,
+                            "trimmed_turns": 0, "timeouts": 0, "truncations": 0,
                             "context_window_source": None,
+                            "changed": None,
                             "diff_stat": " 1 file changed"}
     events = _events(tmp)
     run_end = next(e for e in events if e["event"] == "run_end")
@@ -927,7 +1007,7 @@ def test_length_cutoff_without_tool_calls_is_not_completed(parts):
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed" and result.turns == 2
-    assert provider.requests[1][-1]["content"] == NUDGES["truncated"]
+    assert provider.requests[1][-1]["content"] == NUDGES["truncated"].format(**_trunc_dict(text="I will now"))
 
 
 def test_three_empty_replies_abort_as_model_error(parts):
@@ -1062,6 +1142,56 @@ def test_progress_tracker_disabled_when_zero():
     t = ProgressTracker(stall_turns=0)
     for _ in range(50):
         assert t.end_turn() is None
+
+
+def test_progress_tracker_ignores_noop_writes():
+    """Spec #66 §4.2: a write that changed nothing (+0 -0) is not progress."""
+    t = ProgressTracker(stall_turns=4)
+
+    # +0 -0 write is not progress
+    t.note_call("write_file", {"path": "a"}, "Wrote a: +0 -0")
+    assert t.end_turn() is None
+    assert t.idle_turns == 1
+
+    # +1 -0 write is progress (resets idle)
+    t.note_call("write_file", {"path": "a"}, "Wrote a: +1 -0")
+    assert t.end_turn() is None
+    assert t.idle_turns == 0
+
+    # new file form (which should be progress)
+    t.note_call("write_file", {"path": "b"}, "Wrote 1 bytes to b (new file, 1 line)")
+    assert t.end_turn() is None
+    assert t.idle_turns == 0
+
+    # unknown result shape (fail open - should be progress)
+    t.note_call("write_file", {"path": "c"}, "weird")
+    assert t.end_turn() is None
+    assert t.idle_turns == 0
+
+
+def test_identical_rewrites_stall(parts):
+    """Spec #66 §4.2: a runner with a provider that keeps rewriting the same file
+    with identical content should end status 'stalled'."""
+    wt, registry, sandbox, transcript, tmp = parts
+
+    # Create an initial file
+    (wt / "f.txt").write_text("data\n")
+
+    # Provider that keeps rewriting f.txt with the same content
+    loop = _resp(tool_calls=[_call("c", "write_file", {"path": "f.txt", "content": "data\n"})])
+    provider = FakeProvider([loop] * 10)
+
+    r = Runner(provider, registry, sandbox, transcript, model="m", stall_turns=4)
+    result = r.run("s", "t")
+    transcript.close()
+
+    # Should stall because writes are +0 -0 (no progress)
+    assert result.status == "stalled"
+    # Turn 1: first write (+0 -0, not progress, idle=1)
+    # Turns 2-3: repeats (idle increases)
+    # Turn 4: idle reaches 4, returns "stalled"
+    assert result.turns == 4
+    assert result.final_message == "no progress in 4 consecutive turns"
 
 
 def test_runner_stalled_status_after_idle_turns(parts):
@@ -1625,6 +1755,8 @@ class _TimeoutSandbox:
         self.commands = []
 
     def bash(self, command, timeout=120):
+        if command == FINGERPRINT_SCRIPT:
+            return "exit code: 1\nerror: test double"
         self.commands.append(command)
         if self.timing_out:
             from dirtywork.tools import timeout_result
@@ -1801,7 +1933,7 @@ def test_a_verify_timeout_is_not_counted(parts):
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "verify_failed"
-    assert box.commands == ["npm test"]        # it DID run, and it DID time out
+    assert [c for c in box.commands if c != FINGERPRINT_SCRIPT] == ["npm test"]        # it DID run, and it DID time out
     assert result.extra["timeouts"] == 0       # spec §4.3: worker tool calls only
     assert [e for e in _events(tmp) if e["event"] == "nudge"] == []
 
@@ -1863,6 +1995,8 @@ def test_verify_that_cannot_run_leaves_an_honest_finish_result(parts):
             self.exc = exc
 
         def bash(self, command, timeout=120):
+            if command == FINGERPRINT_SCRIPT:
+                return "exit code: 1\nerror: test double"
             raise self.exc
 
     for exc, status, reason in ((BudgetExceeded("worktree exceeds 2048 MB"), "budget_exceeded",
@@ -1890,6 +2024,8 @@ def test_terminal_exits_before_verify_never_leave_run_finished(parts):
 
     class InterruptingSandbox:
         def bash(self, command, timeout=120):
+            if command == FINGERPRINT_SCRIPT:
+                return "exit code: 1\nerror: test double"
             raise KeyboardInterrupt
 
     cases = [
@@ -1920,6 +2056,8 @@ def test_interrupt_inside_verify_resolves_the_finish_result_before_the_flush(par
 
     class InterruptingVerify:
         def bash(self, command, timeout=120):
+            if command == FINGERPRINT_SCRIPT:
+                return "exit code: 1\nerror: test double"
             raise KeyboardInterrupt
 
     provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "s"})])])
@@ -1941,6 +2079,8 @@ def test_unhandled_exception_after_finish_leaves_the_provisional_result_on_disk(
 
     class Exploding:
         def bash(self, command, timeout=120):
+            if command == FINGERPRINT_SCRIPT:
+                return "exit code: 1\nerror: test double"
             raise RuntimeError("disk on fire")
 
     provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "s"}), _bash_call("b1")])])
@@ -2623,3 +2763,1341 @@ def test_exploding_sandbox_still_works(parts):
     transcript.close()
 
     assert result.status == "budget_exceeded"
+
+def test_chunk_target_cap_basis_and_floors():
+    """Spec §3.1: chunk_target's (chars, lines) are derived from the cap and cut sizes."""
+    from dirtywork.runner import chunk_target, MIN_CHUNK_CHARS, MIN_CHUNK_LINES
+
+    # Basis is cap_chars when cut_chars == 0: (1024, 17) since
+    # 8192 * 4 = 32768, divided by 4 = 8192, which is >= MIN_CHUNK_CHARS=200
+    # and lines = 8192 / 60 = ~136 (but actual formula: 8192 / 4 / 60 = 34 lines)
+    assert chunk_target(1024, 0, 0) == (1024, 17)
+    assert chunk_target(2048, 0, 0) == (2048, 34)
+    assert chunk_target(4096, 0, 0) == (4096, 68)
+    assert chunk_target(8192, 0, 0) == (8192, 136)
+
+    # When cut_chars > 0 but smaller than cap, basis is cut_chars
+    # (1024, 3000, 55): basis=3000, chars=750 (floored), per_line=3000/55=54.5,
+    # lines = 750 / 54.5 = ~13.7 -> floor to 13
+    assert chunk_target(1024, 3000, 55) == (750, 13)
+
+    # (1024, 100, 2): basis=100, chars = max(200, 100//4) = max(200, 25) = 200 (floor)
+    # per_line = DEFAULT_LINE_CHARS=60, lines = max(5, 200//60) = max(5, 3) = 5
+    assert chunk_target(1024, 100, 2) == (200, 5)
+
+    # Per-line calculation from the call: 300/10 = 30 chars/line → 200/30 = 6.67 -> 6
+    assert chunk_target(1024, 300, 10) == (200, 6)
+
+
+def test_reply_size_and_call_size(parts):
+    """Spec §3.2: reply_size and call_size measure received chars and one-call sizes."""
+    wt, registry, sandbox, transcript, tmp = parts
+    from dirtywork.runner import reply_size, call_size
+
+    # Build two calls with escaped newlines
+    raw1 = '{"path":"x","content":"a\\nb"}'
+    raw2 = "{}"
+    call1 = _bad_args("c1", "write_file", raw=raw1)
+    call2 = _bad_args("c2", "read_file", raw=raw2)
+
+    # reply_size: (text_chars, raw_chars_of_all_calls)
+    resp = _resp(content="abc", tool_calls=[call1, call2])
+    text_chars, raw_chars = reply_size(resp)
+    assert text_chars == 3
+    # raw1 has len('{"path":"x","content":"a\\nb"}') = 28
+    # raw2 has len('{}') = 2
+    assert raw_chars == len(raw1) + len(raw2)
+
+    # call_size for first call: (raw_chars, lines)
+    # raw1 = '{"path":"x","content":"a\\nb"}' has one escaped newline (\n)
+    chars, lines = call_size(call1)
+    assert chars == len(raw1)
+    # escaped newline count: "\\n" appears once, and actual newlines
+    assert lines == 2
+
+    # call_size for empty raw
+    call3 = _bad_args("c3", "write_file", raw="")
+    chars, lines = call_size(call3)
+    assert chars == 0
+    assert lines == 0
+
+    # Call with no newline in raw → lines == 1
+    call_no_newline = _bad_args("c4", "read_file", raw='{"path":"x"}')
+    chars, lines = call_size(call_no_newline)
+    assert chars == len('{"path":"x"}')
+    assert lines == 1
+
+
+def test_truncated_text_nudge_carries_the_numbers(parts):
+    """Spec §3.1: the text nudge for length truncation includes cap and target numbers."""
+    import tempfile
+    from pathlib import Path
+
+    wt, registry, sandbox, transcript, tmp = parts
+    from dirtywork.runner import MAX_TRUNCATED_REPLIES
+
+    # First turn is truncated, second succeeds
+    provider = FakeProvider([
+        _resp(content="I will now", finish_reason="length",
+              usage={"prompt_tokens": 1, "completion_tokens": 5}),
+        _resp(content="ok"),
+    ])
+
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_tokens=1234)
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "completed"
+
+    # The second request's last user message should have the truncated nudge
+    first_req = provider.requests[0]
+    second_req = provider.requests[1]
+
+    # Find the last user message in the second request
+    last_user_msg = [m for m in second_req if m["role"] == "user"][-1]
+    nudge_text = last_user_msg["content"]
+
+    # Check the format string values are present - use 1234 as max_tokens
+    from dirtywork.runner import chunk_target, call_size, reply_size
+    text_chars, raw_chars = reply_size(_resp())
+    target_chars, target_lines = chunk_target(1234, 0, 0)
+    trunc_dict = dict(cap=1234, cap_chars=1234*4, received=text_chars + raw_chars,
+                      cut_chars=0, cut_lines=0,
+                      target_chars=target_chars, target_lines=target_lines,
+                      n=1, max=6)
+    assert str(trunc_dict["cap"]) in nudge_text
+    assert str(trunc_dict["cap_chars"]) in nudge_text
+    # "I will now" = 10 characters (actual: 'I will now' without the trailing space)
+    assert "received only 10 characters" in nudge_text
+
+    # Second run: empty content (need fresh transcript)
+    with tempfile.TemporaryDirectory() as tmp2:
+        wt2 = Path(tmp2) / "wt"
+        wt2.mkdir()
+        transcript2 = Transcript(Path(tmp2) / "t.jsonl")
+        registry2 = default_registry(transcript=transcript2)
+        sandbox2 = HostSandbox(wt2)
+
+        provider2 = FakeProvider([
+            _resp(content="", finish_reason="length",
+                  usage={"prompt_tokens": 1, "completion_tokens": 5}),
+            _resp(content="ok"),
+        ])
+        r2 = Runner(provider2, registry2, sandbox2, transcript2, model="m", max_tokens=1234)
+        result2 = r2.run("s", "t")
+        transcript2.close()
+
+        second_req2 = provider2.requests[1]
+        last_user_msg2 = [m for m in second_req2 if m["role"] == "user"][-1]
+        nudge_text2 = last_user_msg2["content"]
+        assert "received only 0 characters" in nudge_text2
+
+
+def test_truncated_call_results_carry_the_cut_calls_numbers(parts):
+    """Spec §3.2: truncated_call_result includes the cut call's numbers."""
+    import tempfile
+    from pathlib import Path
+
+    # Single cut write_file call
+    wt1, registry1, sandbox1, transcript1, tmp1 = parts
+    raw = '{"path": "x", "content": "a\\nb\\nc'
+    tc1 = _bad_args("c", "write_file", raw=raw)
+    truncated_resp = _resp(tool_calls=[tc1], finish_reason="length",
+                          usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider = FakeProvider([truncated_resp, _resp(content="done")])
+
+    r = Runner(provider, registry1, sandbox1, transcript1, model="m", max_tokens=8192)
+    result = r.run("s", "t")
+    transcript1.close()
+
+    assert result.status == "completed"
+
+    # Check the tool message in the second request
+    tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
+    assert len(tool_msgs) == 1
+
+    # Build expected result with _trunc_dict
+    from dirtywork.runner import call_size, truncated_call_result
+    cut_chars, cut_lines = call_size(tc1)
+    trunc_dict = _trunc_dict(tc1)
+
+    # The result should match truncated_call_result
+    expected = truncated_call_result("write_file", tc1.raw_arguments, trunc_dict)
+    assert tool_msgs[0]["content"] == expected
+
+    # Generic form for malformed JSON (need fresh run)
+    with tempfile.TemporaryDirectory() as tmp2:
+        wt2 = Path(tmp2) / "wt"
+        wt2.mkdir()
+        transcript2 = Transcript(Path(tmp2) / "t.jsonl")
+        registry2 = default_registry(transcript=transcript2)
+        sandbox2 = HostSandbox(wt2)
+
+        raw2 = "{"
+        tc2 = _bad_args("c", "read_file", raw=raw2)
+        truncated_resp2 = _resp(tool_calls=[tc2], finish_reason="length",
+                               usage={"prompt_tokens": 1, "completion_tokens": 1})
+        provider2 = FakeProvider([truncated_resp2, _resp(content="done")])
+
+        r2 = Runner(provider2, registry2, sandbox2, transcript2, model="m", max_tokens=8192)
+        result2 = r2.run("s", "t")
+        transcript2.close()
+
+        tool_msgs2 = [m for m in provider2.requests[1] if m["role"] == "tool"]
+        trunc_dict2 = _trunc_dict(tc2)
+        expected2 = truncated_call_result("read_file", tc2.raw_arguments, trunc_dict2)
+        assert tool_msgs2[0]["content"] == expected2
+
+    # Two cut calls in one turn - both get same text with same n
+    with tempfile.TemporaryDirectory() as tmp3:
+        wt3 = Path(tmp3) / "wt"
+        wt3.mkdir()
+        transcript3 = Transcript(Path(tmp3) / "t.jsonl")
+        registry3 = default_registry(transcript=transcript3)
+        sandbox3 = HostSandbox(wt3)
+
+        tc3a = _bad_args("c1", "write_file", raw='{"path": "a","content": "x')
+        tc3b = _bad_args("c2", "read_file", raw='{"path": "b')
+        truncated_resp3 = _resp(tool_calls=[tc3a, tc3b], finish_reason="length",
+                               usage={"prompt_tokens": 1, "completion_tokens": 1})
+        provider3 = FakeProvider([truncated_resp3, _resp(content="done")])
+
+        r3 = Runner(provider3, registry3, sandbox3, transcript3, model="m", max_tokens=8192)
+        result3 = r3.run("s", "t")
+        transcript3.close()
+
+        tool_msgs3 = [m for m in provider3.requests[1] if m["role"] == "tool"]
+        assert len(tool_msgs3) == 2
+
+        # Both use the dict built at FIRST cut call (tc3a)
+        d3 = _trunc_dict(tc3a)
+        assert tool_msgs3[0]["content"] == truncated_call_result("write_file", tc3a.raw_arguments, d3)
+        assert tool_msgs3[1]["content"] == truncated_call_result("read_file", tc3b.raw_arguments, d3)
+        assert "cut-off reply 1 of 6" in tool_msgs3[1]["content"]
+
+    # One complete call + one cut call - target from cut call only
+    with tempfile.TemporaryDirectory() as tmp4:
+        wt4 = Path(tmp4) / "wt"
+        wt4.mkdir()
+        (wt4 / "f.txt").write_text("data\n")
+        transcript4 = Transcript(Path(tmp4) / "t.jsonl")
+        registry4 = default_registry(transcript=transcript4)
+        sandbox4 = HostSandbox(wt4)
+
+        tc4a = _call("c1", "read_file", {"path": "f.txt"})
+        tc4b = _bad_args("c2", "write_file", raw='{"path": "y","content": "z')
+        mixed_resp = _resp(tool_calls=[tc4a, tc4b], finish_reason="length",
+                          usage={"prompt_tokens": 1, "completion_tokens": 1})
+        provider4 = FakeProvider([mixed_resp, _resp(content="done")])
+
+        r4 = Runner(provider4, registry4, sandbox4, transcript4, model="m", max_tokens=8192)
+        result4 = r4.run("s", "t")
+        transcript4.close()
+
+        tool_msgs4 = [m for m in provider4.requests[1] if m["role"] == "tool"]
+        assert len(tool_msgs4) == 2
+
+        # Only the cut call should have truncation text
+        # The complete call (c1) executed successfully, so it gets normal result
+
+
+def test_truncations_counts_once_per_turn(parts):
+    """Spec §3.3: truncations counter increments once per turn, not per call."""
+    wt, registry, sandbox, transcript, tmp = parts
+
+    # One truncated reply then success
+    provider1 = FakeProvider([
+        _resp(content="truncated", finish_reason="length",
+              usage={"prompt_tokens": 1, "completion_tokens": 5}),
+        _resp(content="ok"),
+    ])
+    r1 = Runner(provider1, registry, sandbox, transcript, model="m", max_tokens=8192)
+    result1 = r1.run("s", "t")
+    transcript.close()
+
+    assert result1.status == "completed"
+    # Check the run_end has truncations=1
+    end_events = [e for e in _events(tmp) if e["event"] == "run_end"]
+    assert len(end_events) == 1
+    assert end_events[0]["truncations"] == 1
+
+    # A turn with two cut calls → +1 only
+    (tmp / "f.txt").write_text("data\n")
+    tc1 = _bad_args("c1", "write_file", raw='{"path": "a')
+    tc2 = _bad_args("c2", "read_file", raw='{"path": "b')
+    truncated = _resp(tool_calls=[tc1, tc2], finish_reason="length",
+                     usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider2 = FakeProvider([truncated, _resp(content="done")])
+
+    # Need new transcript
+    transcript2 = Transcript(tmp / "t2.jsonl")
+    r2 = Runner(provider2, registry, sandbox, transcript2, model="m", max_tokens=8192)
+    result2 = r2.run("s", "t")
+    transcript2.close()
+
+    # Verify the truncations count is 1 in result (it's inside extra)
+    assert result2.extra.get("truncations") == 1
+
+    # A length turn with a complete valid call (no truncation nudge, no count)
+    (tmp / "f2.txt").write_text("data\n")
+    complete_call = _resp(tool_calls=[_call("c", "write_file",
+                                            {"path": "f2.txt", "content": "hello\n"})],
+                         finish_reason="length",
+                         usage={"prompt_tokens": 1, "completion_tokens": 1})
+    provider3 = FakeProvider([complete_call, _resp(content="done")])
+
+    transcript3 = Transcript(tmp / "t3.jsonl")
+    r3 = Runner(provider3, registry, sandbox, transcript3, model="m", max_tokens=8192)
+    result3 = r3.run("s", "t")
+    transcript3.close()
+
+    # The turn should complete without incrementing truncations
+    assert result3.status == "completed"
+    # Verify result.extra["truncations"] equals run_end value
+    assert result3.extra.get("truncations") == 0
+
+def test_six_cutoff_replies_end_the_run(parts):
+    # Spec #65 S3: a cut-off reply followed by a successful tool call resets
+    # FailureTracker's consecutive counters, so a model that alternates
+    # cut/write forever would never hit the 3-consecutive-failure abort --
+    # the run-level truncation budget (6, never reset) is what ends this run.
+    wt, registry, sandbox, transcript, tmp = parts
+    cut = _resp(content="header", finish_reason="length")
+
+    def write(i):
+        return _resp(tool_calls=[_call(f"w{i}", "write_file",
+                                       {"path": "rows.csv", "content": f"row{i}\n"})])
+
+    responses = []
+    for i in range(5):
+        responses.append(cut)
+        responses.append(write(i))
+    responses.append(cut)
+    assert len(responses) == 11
+
+    provider = FakeProvider(responses)
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_tokens=1024, max_turns=20)
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "model_error"
+    assert result.final_message == TRUNCATION_ABORT.format(n=6, cap=1024)
+    assert result.extra["truncations"] == 6
+
+    events = _events(tmp)
+    run_end = [e for e in events if e["event"] == "run_end"][0]
+    assert run_end["truncations"] == 6
+    truncated_nudges = [e for e in events if e["event"] == "nudge" and e.get("kind") == "truncated"]
+    assert len(truncated_nudges) == 6
+    assert "via" not in truncated_nudges[-1]
+
+
+def test_three_consecutive_cutoffs_do_not_abort_the_budget_does(parts):
+    # Spec #65: three cut-off replies in a row do NOT end the run as consecutive
+    # failures; only the run-level truncation budget (6 cuts total) ends it.
+    wt, registry, sandbox, transcript, tmp = parts
+    cut = _resp(content="header", finish_reason="length")
+
+    def write(i):
+        return _resp(tool_calls=[_call(f"w{i}", "write_file",
+                                       {"path": "rows.csv", "content": f"row{i}\n"})])
+
+    provider = FakeProvider([cut, write(0), cut, write(1), cut, write(2), cut, cut, cut])
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_tokens=1024, max_turns=20)
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "model_error"
+    assert result.final_message == TRUNCATION_ABORT.format(n=6, cap=1024)
+    assert result.extra["truncations"] == 6
+
+
+def test_three_consecutive_cutoffs_then_a_write_continues(parts):
+    # Spec #65: three consecutive cut-off replies followed by a successful
+    # tool call and finish does not trigger the consecutive failures abort.
+    wt, registry, sandbox, transcript, tmp = parts
+    cut = _resp(content="header", finish_reason="length")
+
+    def write(i):
+        return _resp(tool_calls=[_call(f"w{i}", "write_file",
+                                       {"path": "rows.csv", "content": f"row{i}\n"})])
+
+    provider = FakeProvider([cut, cut, cut, write(0), _resp(tool_calls=[_call("f", "finish", {"summary": "done"})])])
+
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_tokens=1024, max_turns=20)
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "completed"
+    assert result.extra["truncations"] == 3
+    assert "consecutive" not in (result.final_message or "")
+
+
+def test_sixth_truncation_on_the_tool_path_records_its_result(parts):
+    # Spec #65: the run-level truncation budget also ends the run when the
+    # 6th cut-off reply is a truncated TOOL CALL (case a: malformed_args with
+    # finish_reason=="length"), not a bare text reply -- and the tool_result
+    # for that call is still written to the transcript before the run ends.
+    wt, registry, sandbox, transcript, tmp = parts
+    cut = _resp(content="header", finish_reason="length")
+
+    def write(i):
+        return _resp(tool_calls=[_call(f"w{i}", "write_file",
+                                       {"path": "rows.csv", "content": f"row{i}\n"})])
+
+    sixth = _resp(tool_calls=[_bad_args("c", "write_file", '{"path": "x", "content": "abc')],
+                  finish_reason="length")
+    provider = FakeProvider([cut, write(0), cut, write(1), cut, write(2), cut, write(3),
+                             cut, write(4), sixth])
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_tokens=1024, max_turns=20)
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "model_error"
+    assert result.final_message == TRUNCATION_ABORT.format(n=6, cap=1024)
+    assert result.extra["truncations"] == 6
+    # The run did NOT end for malformed_args (it ended for truncation budget)
+    assert "malformed_args" not in (result.final_message or "")
+
+    events = _events(tmp)
+    tool_results = [e for e in events if e["event"] == "tool_result"]
+    assert "cut off at the --max-tokens cap" in tool_results[-1]["result"]
+    run_end = [e for e in events if e["event"] == "run_end"][0]
+    assert run_end["status"] == "model_error"
+
+
+def test_start_fingerprint_before_first_chat(parts):
+    # Spec #66 §4.1 (1): the start fingerprint is taken before the first chat
+    # call, so it appears at the head of the sandbox's command log.
+    wt, registry, sandbox, transcript, tmp = parts
+    sandbox = FingerprintSandbox(wt, ["a" * 40])
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "done"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert sandbox.commands[0] == (FINGERPRINT_SCRIPT, 60)
+    finish_results = _finish_results(_events(tmp))
+    assert finish_results[0] == UNCHANGED_PLAIN
+    assert result.status == "completed"
+    run_end = next(e for e in _events(tmp) if e["event"] == "run_end")
+    assert run_end["changed"] is False
+
+    # A second run whose fingerprint DOES move: a single finish completes
+    # right away and run_end reports the change.
+    transcript2 = Transcript(tmp / "t2.jsonl")
+    registry2 = default_registry(transcript=transcript2)
+    sandbox2 = FingerprintSandbox(wt, ["a" * 40, "b" * 40])
+    provider2 = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "done"})])])
+    r2 = Runner(provider2, registry2, sandbox2, transcript2, model="m")
+    result2 = r2.run("s", "t")
+    transcript2.close()
+
+    assert result2.status == "completed"
+    events2 = [json.loads(l) for l in (tmp / "t2.jsonl").read_text().splitlines()]
+    run_end2 = next(e for e in events2 if e["event"] == "run_end")
+    assert run_end2["changed"] is True
+
+
+def test_start_fingerprint_failure_turns_guard_off(parts):
+    # Spec #66 §4.1 (1)/§4.3: a failed start measurement disables the guard
+    # for the whole run (fp_start stays None) -- no rejection, changed=None.
+    wt, registry, sandbox, transcript, tmp = parts
+    sandbox = FingerprintSandbox(wt, [None])
+    provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "done"})])])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "completed"
+    events = _events(tmp)
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end["changed"] is None
+    assert run_end["changed_reason"] == "error: boom"
+    assert len([c for c in sandbox.commands if c == (FINGERPRINT_SCRIPT, 60)]) == 1
+
+
+def test_zero_change_finish_rejected_once_then_completed(git_parts):
+    # Spec #66 §4.3: the first zero-change finish is rejected once; a second
+    # one (still require_changes=False) is accepted and verify runs.
+    wt, registry, sandbox, transcript, tmp = git_parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "done"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m", verify="test -e f.txt")
+    result = r.run("s", "t")
+    transcript.close()
+
+    events = _events(tmp)
+    finish_results = _finish_results(events)
+    assert finish_results[0] == UNCHANGED_PLAIN
+    nudge = next(e for e in events if e["event"] == "nudge" and e["kind"] == "unchanged_finish")
+    assert nudge["via"] == "tool_result"
+
+    commands = [c for c, _ in sandbox.commands]
+    fp_indices = [i for i, c in enumerate(commands) if c == FINGERPRINT_SCRIPT]
+    verify_idx = commands.index("test -e f.txt")
+    assert verify_idx > fp_indices[1]
+
+    assert result.status == "completed"
+    assert commands.count("test -e f.txt") == 1
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end["changed"] is False
+    assert result.extra["changed"] is False
+
+
+def test_zero_change_finish_ends_unchanged_when_required(git_parts):
+    # Spec #66 §4.3: with require_changes, a second zero-change finish ends
+    # the run `unchanged` instead of retrying verify.
+    wt, registry, sandbox, transcript, tmp = git_parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "done"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m",
+               require_changes=True, verify="test -e f.txt")
+    result = r.run("s", "t")
+    transcript.close()
+
+    events = _events(tmp)
+    assert _finish_results(events) == [UNCHANGED_REQUIRED, "run not finished: nothing changed"]
+    assert result.status == "unchanged"
+    assert result.final_message == "done"
+    assert "test -e f.txt" not in [c for c, _ in sandbox.commands]
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end["changed"] is False
+
+    # Variant: a write between the two finishes clears the guard -- the run
+    # completes and run_end reports the change.
+    transcript2 = Transcript(tmp / "t2.jsonl")
+    registry2 = default_registry(transcript=transcript2)
+    sandbox2 = FingerprintSandbox(wt, hashes=None)
+    provider2 = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("w1", "write_file", {"path": "g.txt", "content": "x\n"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "done"})]),
+    ])
+    r2 = Runner(provider2, registry2, sandbox2, transcript2, model="m",
+                require_changes=True, verify="test -e f.txt")
+    result2 = r2.run("s", "t")
+    transcript2.close()
+
+    assert result2.status == "completed"
+    events2 = [json.loads(l) for l in (tmp / "t2.jsonl").read_text().splitlines()]
+    run_end2 = next(e for e in events2 if e["event"] == "run_end")
+    assert run_end2["changed"] is True
+
+    # Variant: finalize raising does not change the `unchanged` status.
+    transcript3 = Transcript(tmp / "t3.jsonl")
+    registry3 = default_registry(transcript=transcript3)
+    sandbox3 = FingerprintSandbox(wt, hashes=None)
+    provider3 = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "done"})]),
+    ])
+    r3 = Runner(provider3, registry3, sandbox3, transcript3, model="m",
+                require_changes=True,
+                finalize=lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    result3 = r3.run("s", "t")
+    transcript3.close()
+
+    assert result3.status == "unchanged"
+    assert isinstance(result3.extra["finalize_error"], str) and result3.extra["finalize_error"]
+
+
+def test_plain_answer_rejection_is_a_user_message(git_parts):
+    # Spec #66 §4.1, §4.3 test 15: plain-answer path rejects as user message
+    # (not tool_result); nudge.kind="unchanged_finish" has via="user"
+    wt, registry, sandbox, transcript, tmp = git_parts
+    provider = FakeProvider([
+        _resp(content="all done"),
+        _resp(content="all done"),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+
+    events = _events(tmp)
+    # Second answer should be rejected (provider.requests[1][-1] contains the rejection)
+    assert provider.requests[1][-1] == {"role": "user", "content": UNCHANGED_PLAIN}
+    nudge = next(e for e in events if e["event"] == "nudge" and e["kind"] == "unchanged_finish")
+    assert nudge["via"] == "user"
+    assert result.status == "completed"
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end["changed"] is False
+
+    # With require_changes=True, second answer should end with "unchanged" status
+    # (the first "all done" is rejected -- unchanged -- and only the SECOND one
+    # ends the run, so two responses are needed).
+    transcript2 = Transcript(tmp / "t2.jsonl")
+    registry2 = default_registry(transcript=transcript2)
+    provider2 = FakeProvider([
+        _resp(content="all done"),
+        _resp(content="all done"),
+    ])
+    r2 = Runner(provider2, registry2, sandbox, transcript2, model="m",
+                require_changes=True)
+    result2 = r2.run("s", "t")
+    transcript2.close()
+
+    events2 = [json.loads(_l) for _l in (tmp / "t2.jsonl").read_text().splitlines()]
+    assert result2.status == "unchanged"
+    run_end2 = next(e for e in events2 if e["event"] == "run_end")
+    assert run_end2["changed"] is False
+
+    # Rejection on the last allowed turn (max_turns=1) ends with "max_turns"
+    transcript3 = Transcript(tmp / "t3.jsonl")
+    registry3 = default_registry(transcript=transcript3)
+    provider3 = FakeProvider([
+        _resp(content="all done"),
+    ])
+    r3 = Runner(provider3, registry3, sandbox, transcript3, model="m",
+                max_turns=1, require_changes=True)
+    result3 = r3.run("s", "t")
+    transcript3.close()
+
+    assert result3.status == "max_turns"
+    events3 = [json.loads(_l) for _l in (tmp / "t3.jsonl").read_text().splitlines()]
+    run_end3 = next(e for e in events3 if e["event"] == "run_end")
+    assert run_end3["status"] == "max_turns"
+
+
+def test_mixed_turn_rejection(git_parts):
+    # Spec #66 §4.3 test 16: a turn with read_file + a timing-out bash + finish,
+    # all in ONE turn. The finish is rejected (unchanged), but the turn's
+    # timeout nudge still has to be delivered -- it rides the rejected finish's
+    # own tool result (the last tool call of the turn), per one_turn's
+    # `if pending_finish is not None:` branch.
+    wt, registry, sandbox, transcript, tmp = git_parts
+
+    class TimeoutSandbox(FingerprintSandbox):
+        def bash(self, command, timeout=120):
+            if "sleep" in command:
+                from dirtywork.tools import timeout_result
+                self.commands.append((command, timeout))
+                return timeout_result(timeout)
+            return super().bash(command, timeout)
+
+    sandbox = TimeoutSandbox(wt, hashes=["a" * 40])
+    provider = FakeProvider([
+        _resp(tool_calls=[
+            _call("r", "read_file", {"path": "f.txt"}),
+            _call("b", "bash", {"command": "sleep 999", "timeout": 1}),
+            _call("f", "finish", {"summary": "s"}),
+        ]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "s2"})]),
+    ])
+    # Not passing timeout=1 to Runner -- that would be the wall-clock deadline,
+    # unrelated to the bash tool's own per-call timeout argument above.
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+
+    # provider.requests[1] is the turn-2 request: it carries turn 1's tool
+    # results (read_file, bash, finish) in call order.
+    second = provider.requests[1]
+    tool_msgs = [m for m in second if m["role"] == "tool"]
+    assert [m["tool_call_id"] for m in tool_msgs] == ["r", "b", "f"]
+
+    # The (turn 1) finish tool message was rejected as unchanged, and the
+    # turn's timeout nudge rides on it (the last tool result of that turn).
+    finish_msg = next(m for m in tool_msgs if m["tool_call_id"] == "f")
+    assert finish_msg["content"].startswith(UNCHANGED_PLAIN)
+    assert TIMEOUT_NUDGE in finish_msg["content"]
+
+    # The second finish is not rejected again -- unchanged_finishes is already
+    # 1 and require_changes is False, so this one completes the run.
+    assert result.status == "completed"
+    events = _events(tmp)
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end["status"] == "completed"
+
+
+def test_fingerprint_exceptions_map_like_verify(parts):
+    # Spec #66 §4.3 test 17: exceptions from fingerprints map like verify.
+    # FingerprintSandbox already raises a scripted BaseException instance from
+    # its `bash`, so a raising exception entry needs no subclass -- but each
+    # sub-case still needs its OWN Transcript/registry/sandbox and must read
+    # its OWN file back (a shared `tmp / "t.jsonl"` would just keep re-reading
+    # the first run's events).
+    wt, registry, sandbox, transcript, tmp = parts
+
+    # (a) BudgetExceeded from the START fingerprint (before any turn: the
+    # provider is never called).
+    sandbox1 = FingerprintSandbox(wt, hashes=[BudgetExceeded("disk")])
+    provider1 = FakeProvider([])
+    r1 = Runner(provider1, registry, sandbox1, transcript, model="m")
+    result1 = r1.run("s", "t")
+    transcript.close()
+
+    assert result1.status == "budget_exceeded"
+    events1 = _events(tmp)
+    run_end1 = next(e for e in events1 if e["event"] == "run_end")
+    assert run_end1["changed"] is None
+    assert run_end1["changed_reason"] == "budget: disk"
+
+    # (b) SandboxError from the START fingerprint.
+    transcript2 = Transcript(tmp / "t2.jsonl")
+    registry2 = default_registry(transcript=transcript2)
+    sandbox2 = FingerprintSandbox(wt, hashes=[SandboxError("gone")])
+    provider2 = FakeProvider([])
+    r2 = Runner(provider2, registry2, sandbox2, transcript2, model="m")
+    result2 = r2.run("s", "t")
+    transcript2.close()
+
+    assert result2.status == "sandbox_error"
+    events2 = [json.loads(_l) for _l in (tmp / "t2.jsonl").read_text().splitlines()]
+    run_end2 = next(e for e in events2 if e["event"] == "run_end")
+    assert run_end2["changed"] is None
+    assert run_end2["changed_reason"] == "sandbox: gone"
+
+    # (c) completion path: the start fingerprint succeeds ("a"*40); the
+    # finish-time measurement (inside check_verify) raises BudgetExceeded.
+    transcript3 = Transcript(tmp / "t3.jsonl")
+    registry3 = default_registry(transcript=transcript3)
+    sandbox3 = FingerprintSandbox(wt, hashes=["a" * 40, BudgetExceeded("disk")])
+    provider3 = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+    ])
+    r3 = Runner(provider3, registry3, sandbox3, transcript3, model="m")
+    result3 = r3.run("s", "t")
+    transcript3.close()
+
+    assert result3.status == "budget_exceeded"
+    events3 = [json.loads(_l) for _l in (tmp / "t3.jsonl").read_text().splitlines()]
+    finish_results3 = [e for e in events3 if e["event"] == "tool_result" and e["tool"] == "finish"]
+    # The one finish tool_result is resolved IN PLACE (resolve_finish mutates
+    # the already-buffered record) -- one call, one result, not two.
+    assert len(finish_results3) == 1
+    assert finish_results3[-1]["result"] == "run not finished: change check could not run (disk)"
+
+    # (d) a KeyboardInterrupt raised by the START measurement: spec §4.1 (1)
+    # -- the start fingerprint sits inside the loop's try, so Ctrl-C there
+    # ends `interrupted` with one run_end and turns == 0.
+    transcript4 = Transcript(tmp / "t4.jsonl")
+    registry4 = default_registry(transcript=transcript4)
+    sandbox4 = FingerprintSandbox(wt, hashes=[KeyboardInterrupt()])
+    provider4 = FakeProvider([])
+    r4 = Runner(provider4, registry4, sandbox4, transcript4, model="m")
+    result4 = r4.run("s", "t")
+    transcript4.close()
+    assert result4.status == "interrupted"
+    assert result4.turns == 0
+    events4 = [json.loads(_l) for _l in (tmp / "t4.jsonl").read_text().splitlines()]
+    assert [e["event"] for e in events4].count("run_end") == 1
+    assert events4[-1]["event"] == "run_end" and events4[-1]["changed"] is None
+
+
+def test_finish_time_fingerprint(parts):
+    # Spec #66 §4.3 test 19: finish-time fingerprint behavior.
+    # (The second parameter in the original signature, `FingerprintSandbox`,
+    # made pytest look for a fixture by that name, which does not exist --
+    # FingerprintSandbox is a plain class, imported at module scope, not a
+    # fixture.)
+    wt, registry, sandbox, transcript, tmp = parts
+
+    # (a) a max_turns run with changing fingerprints ("a"*40 at start,
+    # "b"*40 at finish-time): changed is True, and the finish-time
+    # FINGERPRINT_SCRIPT command is recorded right before finish()'s own
+    # drain_notices call (the very last command of the run).
+    class TrackingSandbox(FingerprintSandbox):
+        def drain_notices(self):
+            self.commands.append(("DRAIN", 0))
+            return []
+
+    sandbox = TrackingSandbox(wt, hashes=["a" * 40, "b" * 40])
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_turns=2)
+    result = r.run("s", "t")
+    transcript.close()
+    assert result.status == "max_turns"
+
+    events = _events(tmp)
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end["changed"] is True
+
+    fp_indices = [i for i, (c, _) in enumerate(sandbox.commands) if c == FINGERPRINT_SCRIPT]
+    assert len(fp_indices) == 2                                    # start + finish-time
+    assert sandbox.commands[-1] == ("DRAIN", 0)                    # finish()'s own drain, last
+    assert fp_indices[-1] == len(sandbox.commands) - 2             # ...right before it
+
+    # (b) the RUNNER's finalize callback (not sandbox.finalize -- the runner
+    # never calls that) flips a flag; the fingerprint sandbox's bash fails
+    # once that flag is set. changed is not None on this max_turns run only
+    # if the finish-time measurement really runs BEFORE the finalize
+    # callback -- proving finish()'s ordering (fingerprint, then
+    # run_finalize()).
+    class FlagSandbox(FingerprintSandbox):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.finalized = False
+
+        def bash(self, command, timeout=120):
+            if command == FINGERPRINT_SCRIPT and self.finalized:
+                return "ERROR: bash failed: gone"
+            return super().bash(command, timeout)
+
+    transcript2 = Transcript(tmp / "t2.jsonl")
+    registry2 = default_registry(transcript=transcript2)
+    sandbox2 = FlagSandbox(wt, hashes=["a" * 40, "b" * 40])
+
+    def finalize_cb():
+        sandbox2.finalized = True
+        return {"flag": "set"}
+
+    provider2 = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+    ])
+    r2 = Runner(provider2, registry2, sandbox2, transcript2, model="m",
+                max_turns=2, finalize=finalize_cb)
+    result2 = r2.run("s", "t")
+    transcript2.close()
+    assert result2.status == "max_turns"
+
+    events2 = [json.loads(_l) for _l in (tmp / "t2.jsonl").read_text().splitlines()]
+    run_end2 = next(e for e in events2 if e["event"] == "run_end")
+    assert run_end2["changed"] is not None
+    assert run_end2["flag"] == "set"       # finalize did run -- just after the measurement
+
+    # (c) the finish-time fingerprint call queues a notice; drain_notices
+    # returns it exactly once, and the resulting nudge event precedes
+    # run_end. Two DIFFERENT hashes so the single finish() call is accepted
+    # outright (changed=True) rather than looping through a rejection round.
+    class NoticeSandbox(FingerprintSandbox):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.notices = []
+            self.fp_calls = 0
+
+        def drain_notices(self):
+            notices = self.notices
+            self.notices = []
+            return notices
+
+        def bash(self, command, timeout=120):
+            if command == FINGERPRINT_SCRIPT:
+                self.fp_calls += 1
+                if self.fp_calls == 2:            # the finish-time measurement
+                    self.notices.append(("stray_kill", "text"))
+            return super().bash(command, timeout)
+
+    transcript3 = Transcript(tmp / "t3.jsonl")
+    registry3 = default_registry(transcript=transcript3)
+    sandbox3 = NoticeSandbox(wt, hashes=["a" * 40, "b" * 40])
+    provider3 = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+    ])
+    r3 = Runner(provider3, registry3, sandbox3, transcript3, model="m")
+    result3 = r3.run("s", "t")
+    transcript3.close()
+    assert result3.status == "completed"
+
+    events3 = [json.loads(_l) for _l in (tmp / "t3.jsonl").read_text().splitlines()]
+    nudge_idx = next((i for i, e in enumerate(events3) if e["event"] == "nudge"
+                      and e.get("kind") == "stray_kill"), -1)
+    run_end_idx = next((i for i, e in enumerate(events3) if e["event"] == "run_end"), -1)
+    assert nudge_idx >= 0 and run_end_idx >= 0
+    assert nudge_idx < run_end_idx
+
+    # (d) rejection on turn 1 (fp == fp_start, both "a"*40); turn 2 is a plain
+    # read_file, so max_turns ends the run; the finish-time measurement then
+    # fails outright (None) -- changed must read as unknown (None), not as
+    # the stale False from turn 1's rejection.
+    transcript4 = Transcript(tmp / "t4.jsonl")
+    registry4 = default_registry(transcript=transcript4)
+    sandbox4 = FingerprintSandbox(wt, hashes=["a" * 40, "a" * 40, None])
+    provider4 = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+    ])
+    r4 = Runner(provider4, registry4, sandbox4, transcript4, model="m", max_turns=2)
+    result4 = r4.run("s", "t")
+    transcript4.close()
+    assert result4.status == "max_turns"
+
+    events4 = [json.loads(_l) for _l in (tmp / "t4.jsonl").read_text().splitlines()]
+    run_end4 = next(e for e in events4 if e["event"] == "run_end")
+    assert run_end4["changed"] is None
+    assert run_end4["changed_reason"] == "error: boom"
+
+    # (e1) BudgetExceeded as the finish-time entry of a max_turns run, no
+    # finalize callback supplied: the watchdog fields are derived from
+    # changed_reason.
+    transcript5 = Transcript(tmp / "t5.jsonl")
+    registry5 = default_registry(transcript=transcript5)
+    sandbox5 = FingerprintSandbox(wt, hashes=["a" * 40, BudgetExceeded("disk")])
+    provider5 = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+    ])
+    r5 = Runner(provider5, registry5, sandbox5, transcript5, model="m", max_turns=2)
+    result5 = r5.run("s", "t")
+    transcript5.close()
+    assert result5.status == "max_turns"
+
+    events5 = [json.loads(_l) for _l in (tmp / "t5.jsonl").read_text().splitlines()]
+    run_end5 = next(e for e in events5 if e["event"] == "run_end")
+    assert run_end5["changed"] is None
+    assert run_end5["changed_reason"] == "budget: disk"
+    assert run_end5["watchdog_violation"] == "disk"
+    assert run_end5["watchdog_violation_kind"] == "budget"
+
+    # (e2) same shape, but the RUNNER's finalize callback explicitly returns
+    # its own watchdog_violation/_kind: those values win over the
+    # budget-derived defaults (finish() only fills them in when finalize
+    # hasn't already set watchdog_violation).
+    transcript5b = Transcript(tmp / "t5b.jsonl")
+    registry5b = default_registry(transcript=transcript5b)
+    sandbox5b = FingerprintSandbox(wt, hashes=["a" * 40, BudgetExceeded("disk")])
+    provider5b = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+    ])
+    r5b = Runner(provider5b, registry5b, sandbox5b, transcript5b, model="m", max_turns=2,
+                 finalize=lambda: {"watchdog_violation": "other",
+                                   "watchdog_violation_kind": "sandbox_error"})
+    result5b = r5b.run("s", "t")
+    transcript5b.close()
+    assert result5b.status == "max_turns"
+
+    events5b = [json.loads(_l) for _l in (tmp / "t5b.jsonl").read_text().splitlines()]
+    run_end5b = next(e for e in events5b if e["event"] == "run_end")
+    assert run_end5b["watchdog_violation"] == "other"
+    assert run_end5b["watchdog_violation_kind"] == "sandbox_error"
+
+    # (f) rejection on turn 1 (both "a"*40), then turn 2's own tool call is a
+    # plain read_file (no bash), so the KeyboardInterrupt only fires from the
+    # max_turns finish-time measurement -- caught by the in-loop handler,
+    # which calls finish("interrupted", ...) a second time. `changed` keeps
+    # the value from turn 1's rejection (False); no changed_reason is added
+    # (interrupted is exempt from re-measuring, and the failed attempt never
+    # got to set one).
+    transcript6 = Transcript(tmp / "t6.jsonl")
+    registry6 = default_registry(transcript=transcript6)
+    sandbox6 = FingerprintSandbox(wt, hashes=["a" * 40, "a" * 40, KeyboardInterrupt()])
+    provider6 = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+    ])
+    r6 = Runner(provider6, registry6, sandbox6, transcript6, model="m", max_turns=2)
+    result6 = r6.run("s", "t")
+    transcript6.close()
+    assert result6.status == "interrupted"
+
+    events6 = [json.loads(_l) for _l in (tmp / "t6.jsonl").read_text().splitlines()]
+    run_end6 = next(e for e in events6 if e["event"] == "run_end")
+    assert run_end6["changed"] is False
+    assert "changed_reason" not in run_end6
+
+    # (g) statuses that take NO finish-time fingerprint: interrupted, timeout,
+    # budget_exceeded, sandbox_error. For budget/sandbox, the exception comes
+    # from a TOOL call (bash "true"), not from write_file, so the fingerprint
+    # machinery itself is exercised identically to the other sub-cases here.
+
+    # interrupted: the tool call itself raises (no completion path at all).
+    transcript7 = Transcript(tmp / "t7.jsonl")
+    registry7 = default_registry(transcript=transcript7)
+
+    class InterruptingSandbox3(FingerprintSandbox):
+        def bash(self, command, timeout=120):
+            if command == FINGERPRINT_SCRIPT:
+                return super().bash(command, timeout)
+            raise KeyboardInterrupt
+
+    sandbox7 = InterruptingSandbox3(wt, hashes=["a" * 40])
+    provider7 = FakeProvider([_resp(tool_calls=[_call("b1", "bash", {"command": "true"})])])
+    r7 = Runner(provider7, registry7, sandbox7, transcript7, model="m")
+    result7 = r7.run("s", "t")
+    transcript7.close()
+
+    assert result7.status == "interrupted"
+    fp_count7 = sum(1 for c, _ in sandbox7.commands if c == FINGERPRINT_SCRIPT)
+    assert fp_count7 == 1                          # start only, no finish-time
+
+    # timeout: Runner(timeout=0) ends the run before even the first chat call.
+    transcript8 = Transcript(tmp / "t8.jsonl")
+    registry8 = default_registry(transcript=transcript8)
+    sandbox8 = FingerprintSandbox(wt, hashes=["a" * 40])
+    provider8 = FakeProvider([_resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})])])
+    r8 = Runner(provider8, registry8, sandbox8, transcript8, model="m", timeout=0)
+    result8 = r8.run("s", "t")
+    transcript8.close()
+
+    assert result8.status == "timeout"
+    fp_count8 = sum(1 for c, _ in sandbox8.commands if c == FINGERPRINT_SCRIPT)
+    assert fp_count8 == 1
+
+    # budget_exceeded: a bash tool call ("true") raises BudgetExceeded.
+    class BudgetBustingBashSandbox(FingerprintSandbox):
+        def bash(self, command, timeout=120):
+            if command == FINGERPRINT_SCRIPT:
+                return super().bash(command, timeout)
+            raise BudgetExceeded("worktree exceeds 2048 MB")
+
+    transcript9 = Transcript(tmp / "t9.jsonl")
+    registry9 = default_registry(transcript=transcript9)
+    sandbox9 = BudgetBustingBashSandbox(wt, hashes=["a" * 40])
+    provider9 = FakeProvider([_resp(tool_calls=[_call("b1", "bash", {"command": "true"})])])
+    r9 = Runner(provider9, registry9, sandbox9, transcript9, model="m")
+    result9 = r9.run("s", "t")
+    transcript9.close()
+
+    assert result9.status == "budget_exceeded"
+    fp_count9 = sum(1 for c, _ in sandbox9.commands if c == FINGERPRINT_SCRIPT)
+    assert fp_count9 == 1
+
+    # sandbox_error: same shape, SandboxError instead.
+    class SandboxErrorBashSandbox(FingerprintSandbox):
+        def bash(self, command, timeout=120):
+            if command == FINGERPRINT_SCRIPT:
+                return super().bash(command, timeout)
+            raise SandboxError("container gone")
+
+    transcript10 = Transcript(tmp / "t10.jsonl")
+    registry10 = default_registry(transcript=transcript10)
+    sandbox10 = SandboxErrorBashSandbox(wt, hashes=["a" * 40])
+    provider10 = FakeProvider([_resp(tool_calls=[_call("b1", "bash", {"command": "true"})])])
+    r10 = Runner(provider10, registry10, sandbox10, transcript10, model="m")
+    result10 = r10.run("s", "t")
+    transcript10.close()
+
+    assert result10.status == "sandbox_error"
+    fp_count10 = sum(1 for c, _ in sandbox10.commands if c == FINGERPRINT_SCRIPT)
+    assert fp_count10 == 1
+
+def test_no_change_nudge_since_start(parts):
+    # Spec #66 §4.4: Runner(no_change_turns=3, require_changes=True),
+    # hashes ["a"*40] (every measurement equal), responses [read_file x3,
+    # finish, finish] → a nudge event kind "no_change" turn 3 via tool_result,
+    # the third tool result's follow_up == NO_CHANGE_SINCE_START_REQUIRED.format(k=3)
+    # (and "finish" not in that text); the finish on turn 4 is rejected (UNCHANGED_REQUIRED),
+    # the finish on turn 5 ends the run "unchanged".
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r3", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "done"})]),
+    ])
+    sandbox = FingerprintSandbox(wt, hashes=["a" * 40])
+    r = Runner(provider, registry, sandbox, transcript, model="m",
+               no_change_turns=3, require_changes=True)
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "unchanged"
+
+    events = [json.loads(l) for l in (tmp / "t.jsonl").read_text().splitlines()]
+    # Find the no_change nudge on turn 3
+    no_change_nudges = [e for e in events if e["event"] == "nudge" and e["kind"] == "no_change"]
+    assert len(no_change_nudges) == 1
+    assert no_change_nudges[0]["turn"] == 3
+
+    # There should be exactly one tool_result with follow_up (the third read_file on turn 3)
+    tool_results_with_followup = [e for e in events if e["event"] == "tool_result" and e.get("follow_up")]
+    assert len(tool_results_with_followup) == 1
+    # The follow_up should be on the third tool_result (turn 3)
+    third_tool = tool_results_with_followup[0]
+    assert NO_CHANGE_SINCE_START_REQUIRED.format(k=3) in third_tool["follow_up"]
+    # The text should NOT mention finish
+    assert "finish" not in third_tool["follow_up"]
+
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end["status"] == "unchanged"
+    assert run_end["changed"] is False
+
+
+def test_no_change_nudge_recent_after_a_change(parts):
+    # Spec #66 §4.4: Runner(no_change_turns=3, require_changes=False),
+    # hashes ["a"*40, "b"*40, "b"*40] (start a; the K=3 check measures b → changed, silent;
+    # the turn-6 check measures b == fp_check → nudge), six read_file responses then [finish]
+    # → no nudge at turn 3 (measurement b != start a), a nudge at turn 6 with
+    # NO_CHANGE_RECENT.format(k=3) (it names finish); the finish on turn 7 → "completed",
+    # changed True.
+    wt, registry, sandbox, transcript, tmp = parts
+    wt2 = tmp / "wt2"
+    wt2.mkdir()
+    (wt2 / "f.txt").write_text("data\n")
+    transcript2 = Transcript(tmp / "t2.jsonl")
+    registry2 = default_registry(transcript=transcript2)
+    provider2 = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r3", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r4", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r5", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r6", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+    ])
+    sandbox2 = FingerprintSandbox(wt2, hashes=["a" * 40, "b" * 40, "b" * 40])
+    r2 = Runner(provider2, registry2, sandbox2, transcript2, model="m",
+                no_change_turns=3, require_changes=False)
+    result2 = r2.run("s", "t")
+    transcript2.close()
+
+    assert result2.status == "completed"
+    events2 = [json.loads(l) for l in (tmp / "t2.jsonl").read_text().splitlines()]
+    no_change_nudges2 = [e for e in events2 if e["event"] == "nudge" and e["kind"] == "no_change"]
+    assert len(no_change_nudges2) == 1
+    tool_results_with_followup2 = [e for e in events2 if e["event"] == "tool_result" and e.get("follow_up")]
+    assert len(tool_results_with_followup2) == 1
+    # The follow_up should be on the sixth tool_result (turn 6)
+    sixth_tool = tool_results_with_followup2[0]
+    assert NO_CHANGE_RECENT.format(k=3) in sixth_tool["follow_up"]
+    # The nudge mentions finish
+    assert "finish" in sixth_tool["follow_up"]
+
+    run_end2 = next(e for e in events2 if e["event"] == "run_end")
+    assert run_end2["status"] == "completed"
+    assert run_end2["changed"] is True
+
+
+def test_no_change_check_skips(parts):
+    # (a) Spec #66 §4.4: hashes ["a"*40, None, "a"*40] with six reads → no
+    # nudge at 3 (failed measurement, baseline kept, changed_reason "error: boom"
+    # set until turn 6 clears it), a nudge at 6 (a == the start baseline).
+    wt_a, registry_a, sandbox_a, transcript_a, tmp_a = parts
+    provider_a = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r3", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r4", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r5", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r6", "read_file", {"path": "f.txt"})]),
+    ])
+    sandbox_a = FingerprintSandbox(wt_a, hashes=["a" * 40, None, "a" * 40])
+    r_a = Runner(provider_a, registry_a, sandbox_a, transcript_a, model="m",
+                 no_change_turns=3, max_turns=6)
+    result_a = r_a.run("s", "t")
+    transcript_a.close()
+
+    assert result_a.status == "max_turns"
+    events_a = [json.loads(l) for l in (tmp_a / "t.jsonl").read_text().splitlines()]
+    # No nudge at turn 3 (measurement failed)
+    no_change_nudges_a = [e for e in events_a if e["event"] == "nudge" and e["kind"] == "no_change"]
+    # turn 6 measures "a" == the start baseline -> nudge with since-start text
+    assert [e["turn"] for e in no_change_nudges_a] == [6]
+    sixth_tool_result = [e for e in events_a if e["event"] == "tool_result"][5]
+    assert sixth_tool_result["follow_up"] == NO_CHANGE_SINCE_START_PLAIN.format(k=3)
+    run_end_a = next(e for e in events_a if e["event"] == "run_end")
+    assert run_end_a["changed"] is False
+    assert "changed_reason" not in run_end_a
+    fp_commands_a = [c for c, _ in sandbox_a.commands if c == FINGERPRINT_SCRIPT]
+    assert len(fp_commands_a) == 3   # start, turn 3 (failed), turn 6; finish() reuses turn 6's
+
+    # (b) Runner(no_change_turns=2, max_turns=3), hashes ["a"*40] (repeats
+    # forever): the finish on turn 2 (a K turn) is REJECTED via the completion
+    # check -- a pending finish skips check_no_change entirely, so there is no
+    # K-check measurement that turn, but the completion check itself still
+    # measures (that's the 2nd FINGERPRINT_SCRIPT command). The finish on turn
+    # 3 completes: require_changes is False, so the second unchanged
+    # completion is accepted rather than rejected again.
+    wt_b = tmp_a / "wt_b"
+    wt_b.mkdir()
+    (wt_b / "f.txt").write_text("data\n")
+    transcript_b = Transcript(tmp_a / "t_b.jsonl")
+    registry_b = default_registry(transcript=transcript_b)
+    sandbox_b = FingerprintSandbox(wt_b, hashes=["a" * 40])
+    provider_b = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "done"})]),
+    ])
+    r_b = Runner(provider_b, registry_b, sandbox_b, transcript_b, model="m",
+                 no_change_turns=2, max_turns=3)
+    result_b = r_b.run("s", "t")
+    transcript_b.close()
+
+    assert result_b.status == "completed"
+    events_b = [json.loads(l) for l in (tmp_a / "t_b.jsonl").read_text().splitlines()]
+    no_change_nudges_b = [e for e in events_b if e["event"] == "nudge" and e["kind"] == "no_change"]
+    assert no_change_nudges_b == []
+    fp_commands_b = [c for c, _ in sandbox_b.commands if c == FINGERPRINT_SCRIPT]
+    assert len(fp_commands_b) == 3   # start, turn 2 completion check, turn 3 completion check
+
+    # (c) no_change_turns=0 disables the K check, but the guard stays on (the
+    # start measurement succeeded): finish() takes ONE more fingerprint at
+    # max_turns because none was taken since the start measurement -- so this
+    # is 2 (start + finish-time), not 1, and there is still no "no_change" nudge.
+    wt_c = tmp_a / "wt_c"
+    wt_c.mkdir()
+    (wt_c / "f.txt").write_text("data\n")
+    transcript_c = Transcript(tmp_a / "t_c.jsonl")
+    registry_c = default_registry(transcript=transcript_c)
+    sandbox_c = FingerprintSandbox(wt_c, hashes=["a" * 40])
+    provider_c = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r3", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r4", "read_file", {"path": "f.txt"})]),
+    ])
+    r_c = Runner(provider_c, registry_c, sandbox_c, transcript_c, model="m",
+                 no_change_turns=0, max_turns=4)
+    result_c = r_c.run("s", "t")
+    transcript_c.close()
+
+    assert result_c.status == "max_turns"
+    events_c = [json.loads(l) for l in (tmp_a / "t_c.jsonl").read_text().splitlines()]
+    no_change_nudges_c = [e for e in events_c if e["event"] == "nudge" and e["kind"] == "no_change"]
+    assert no_change_nudges_c == []
+    fp_commands_c = [c for c, _ in sandbox_c.commands if c == FINGERPRINT_SCRIPT]
+    assert len(fp_commands_c) == 2  # start + finish-time (no K check ever ran)
+
+    # (d) a failed start measurement (None) turns the guard off for the whole
+    # run: no K checks (fp_start is None short-circuits check_no_change), and
+    # no finish-time measurement either (finish()'s retake is gated on
+    # fp_start is not None too) -- exactly the start command, and run_end
+    # carries the start failure's reason forever (nothing ever clears it).
+    wt_d = tmp_a / "wt_d"
+    wt_d.mkdir()
+    (wt_d / "f.txt").write_text("data\n")
+    transcript_d = Transcript(tmp_a / "t_d.jsonl")
+    registry_d = default_registry(transcript=transcript_d)
+    sandbox_d = FingerprintSandbox(wt_d, hashes=[None])
+    provider_d = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r3", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r4", "read_file", {"path": "f.txt"})]),
+    ])
+    r_d = Runner(provider_d, registry_d, sandbox_d, transcript_d, model="m",
+                 no_change_turns=2, max_turns=4)
+    result_d = r_d.run("s", "t")
+    transcript_d.close()
+
+    assert result_d.status == "max_turns"
+    fp_commands_d = [c for c, _ in sandbox_d.commands if c == FINGERPRINT_SCRIPT]
+    assert len(fp_commands_d) == 1  # the start measurement only
+    events_d = [json.loads(l) for l in (tmp_a / "t_d.jsonl").read_text().splitlines()]
+    run_end_d = next(e for e in events_d if e["event"] == "run_end")
+    assert run_end_d["changed"] is None
+    assert run_end_d["changed_reason"] == "error: boom"
+
+    # (e) BudgetExceeded("disk") as the turn-K measurement's entry ends the
+    # run "budget_exceeded" with the reason recorded on run_end; likewise
+    # SandboxError("gone") ends it "sandbox_error" with its own reason.
+    wt_e = tmp_a / "wt_e"
+    wt_e.mkdir()
+    (wt_e / "f.txt").write_text("data\n")
+    transcript_e = Transcript(tmp_a / "t_e.jsonl")
+    registry_e = default_registry(transcript=transcript_e)
+    sandbox_e = FingerprintSandbox(wt_e, hashes=["a" * 40, BudgetExceeded("disk")])
+    provider_e = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+    ])
+    r_e = Runner(provider_e, registry_e, sandbox_e, transcript_e, model="m",
+                 no_change_turns=2, max_turns=4)
+    result_e = r_e.run("s", "t")
+    transcript_e.close()
+
+    assert result_e.status == "budget_exceeded"
+    events_e = [json.loads(l) for l in (tmp_a / "t_e.jsonl").read_text().splitlines()]
+    run_end_e = next(e for e in events_e if e["event"] == "run_end")
+    assert run_end_e["changed"] is None
+    assert run_end_e["changed_reason"] == "budget: disk"
+
+    wt_e2 = tmp_a / "wt_e2"
+    wt_e2.mkdir()
+    (wt_e2 / "f.txt").write_text("data\n")
+    transcript_e2 = Transcript(tmp_a / "t_e2.jsonl")
+    registry_e2 = default_registry(transcript=transcript_e2)
+    sandbox_e2 = FingerprintSandbox(wt_e2, hashes=["a" * 40, SandboxError("gone")])
+    provider_e2 = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+    ])
+    r_e2 = Runner(provider_e2, registry_e2, sandbox_e2, transcript_e2, model="m",
+                  no_change_turns=2, max_turns=4)
+    result_e2 = r_e2.run("s", "t")
+    transcript_e2.close()
+
+    assert result_e2.status == "sandbox_error"
+    events_e2 = [json.loads(l) for l in (tmp_a / "t_e2.jsonl").read_text().splitlines()]
+    run_end_e2 = next(e for e in events_e2 if e["event"] == "run_end")
+    assert run_end_e2["changed"] is None
+    assert run_end_e2["changed_reason"] == "sandbox: gone"
+
+    # (f) stall + no_change landing on the SAME turn: Runner(stall_turns=4,
+    # no_change_turns=3, max_turns=5), hashes ["a"*40], responses
+    # [read_file f.txt, the identical read_file f.txt (idle 1), an empty reply
+    # (idle 2 -> the stall nudge fires at stall_turns // 2 == 2, and turn 3 is
+    # also a K turn), finish, finish] -- the turn-4 finish is rejected
+    # (unchanged since start) and the turn-5 finish completes. Turn 3's nudges
+    # land in transcript order empty -> stall -> no_change (the no-tool-call
+    # branch writes the "empty" record first, then check_progress(), then
+    # check_no_change()), and turn 3 delivers them all as one new user
+    # message (no tool call that turn to carry a follow_up), which becomes
+    # the last message of the turn-4 request.
+    wt_f = tmp_a / "wt_f"
+    wt_f.mkdir()
+    (wt_f / "f.txt").write_text("data\n")
+    transcript_f = Transcript(tmp_a / "t_f.jsonl")
+    registry_f = default_registry(transcript=transcript_f)
+    provider_f = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+        _resp(content=""),  # empty reply: idle 2, stall nudge fires at n=2
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "done"})]),
+    ])
+    sandbox_f = FingerprintSandbox(wt_f, hashes=["a" * 40])
+    r_f = Runner(provider_f, registry_f, sandbox_f, transcript_f, model="m",
+                 stall_turns=4, no_change_turns=3, max_turns=5)
+    result_f = r_f.run("s", "t")
+    transcript_f.close()
+
+    assert result_f.status == "completed"
+    events_f = [json.loads(l) for l in (tmp_a / "t_f.jsonl").read_text().splitlines()]
+    turn3_nudges = [e for e in events_f if e["event"] == "nudge" and e.get("turn") == 3]
+    assert [e["kind"] for e in turn3_nudges] == ["empty", "stall", "no_change"]
+
+    expected_nudge_text = (NUDGES["empty"] + "\n\n" + STALL_NUDGE.format(n=2) +
+                           "\n\n" + NO_CHANGE_SINCE_START_PLAIN.format(k=3))
+    assert provider_f.requests[3][-1]["content"] == expected_nudge_text
+
+
+def test_run_ending_on_a_k_check_turn_reuses_it(parts):
+    # Spec #66 §4.4 test (f): Runner(no_change_turns=4, require_changes=False,
+    # max_turns=4), hashes ["a"*40, "a"*40, "c"*40], responses [finish, read_file,
+    # write_file (path "g.txt"), read_file] → turn 1's finish is rejected (a == a),
+    # turn 4's K check measures "c" (changed, no nudge because c != a), then
+    # max_turns ends the run and finish() takes no further fingerprint because
+    # fp_turn == turns: exactly THREE FINGERPRINT_SCRIPT commands (start, turn 1's
+    # completion check, turn 4's K check), no nudge event with kind "no_change",
+    # run_end.changed is True.
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("w1", "write_file", {"path": "g.txt", "content": "hello"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+    ])
+    sandbox = FingerprintSandbox(wt, hashes=["a" * 40, "a" * 40, "c" * 40])
+    r = Runner(provider, registry, sandbox, transcript, model="m",
+               no_change_turns=4, require_changes=False, max_turns=4)
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "max_turns"
+    events = [json.loads(l) for l in (tmp / "t.jsonl").read_text().splitlines()]
+
+    # Count FINGERPRINT_SCRIPT commands
+    fp_commands = [c for c, _ in sandbox.commands if c == FINGERPRINT_SCRIPT]
+    assert len(fp_commands) == 3
+
+    # No nudge event with kind "no_change"
+    no_change_nudges = [e for e in events if e["event"] == "nudge" and e["kind"] == "no_change"]
+    assert len(no_change_nudges) == 0
+
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end["changed"] is True

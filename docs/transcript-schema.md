@@ -27,7 +27,9 @@ reason. **0.8 keeps `schema_version` at 2** for exactly that reason: everything
 it adds is additive. The same rule holds within `schema_version` 2 going forward — 1.0 (#61)
 adds an event name (`stray_kill`), two `nudge.kind` values and sparse fields — so a consumer must
 ignore event names, `nudge.kind` values and `sandbox_reset.reason` values it does not recognise
-rather than reject the line.
+rather than reject the line. 1.0 (#65/#66) adds two more `nudge.kind` values (`no_change`,
+`unchanged_finish`), one status (`unchanged`) and three `run_end` fields (`truncations`,
+`changed`, `changed_reason`) under the same rule.
 
 ## Events
 
@@ -81,7 +83,7 @@ One per tool call executed, plus one per malformed tool-call entry discarded.
 | `args` | ✓ | ✓ | string | the raw JSON argument string, capped at 500 chars; `""` for a discarded malformed entry |
 | `result` | ✓ | ✓ | string | the tool's result, trimmed per the tool's `Caps.transcript` setting. All built-in tools but `finish` declare `preview`, which caps the record at 2000 chars (`finish` declares `full` since 1.0 — its result is harness-authored and bounded); the registry also supports `none`, unused by any shipped tool (`full` is used only by `finish`). Since 0.8 a successful `edit_file`/`write_file`/`insert_before`/`insert_after` result is `<Verb> <path>: +A -D [(removed N non-blank lines)]` followed by a unified diff (capped at 40 lines / 3000 chars, then `[diff truncated: N more lines]`); `write_file` on a new file returns `Wrote N bytes to <path> (new file, M lines)` with no diff. 0.9's `apply_edits` uses the same shape with the verb `Applied N edits to` (`Applied 1 edit to` for a single edit). When either side of the edit exceeds 20000 lines, the diff itself is never computed (it is quadratic-ish on files with popular repeated lines) — the result is just `<Verb> <path>: <N> lines (diff omitted: file too large)`. An in-place tool whose RESULT would exceed the 5 MB write limit returns `ERROR: result is <n> bytes, over the <limit>-byte write limit; nothing was written` on both backends (0.9). 0.10's `append_file` uses the same shape with the verb `Appended to`; it reads `+A -0` only when the file already ended in a newline — when it did not, the final line is a REPLACE and the header reads `+A -1 (removed 1 non-blank line)`, which is the visible consequence of not starting `text` with a newline |
 | `timed_out` | | ✓ | boolean | 0.9: `true` on a `bash` tool result whose command hit its timeout. **Sparse** — the key is absent, not `false`, on every other result, including a `grep` timeout (a different wording and a different meaning: the harness's search, not the worker's command) and the `--verify` command (not a tool call, so it produces no `tool_result` at all; its outcome is in `verify`) |
-| `follow_up` | | ✓ | string | 1.0 (#60): **sparse** — present when this result carried harness text on the wire. The exact text appended after the tool's own result, uncapped (harness-authored and bounded): the model received `result + "\n\n" + follow_up` as this call's result. Only the **last** tool result of a turn can carry one; it merges every nudge of that turn in the order `malformed_entry`, `timeout`, `stall` (or `timeout` alone on a verify-feedback turn) |
+| `follow_up` | | ✓ | string | 1.0 (#60): **sparse** — present when this result carried harness text on the wire. The exact text appended after the tool's own result, uncapped (harness-authored and bounded): the model received `result + "\n\n" + follow_up` as this call's result. Only the **last** tool result of a turn can carry one; it merges every nudge of that turn in the order `malformed_entry`, sandbox notices, `timeout`, `stall`, `no_change` (1.0, #66) (or `timeout` alone on a verify-feedback turn). The `unchanged_finish` nudge's text is never a `follow_up`: on the finish-tool path it *is* the finish call's `result` (as verify feedback is), on a plain answer it is the next `user` message |
 
 A `finish(summary=…)` call is an ordinary tool call: it appears in the
 `assistant` event's `tool_calls` and produces a `tool_result`. Since 1.0 (#60)
@@ -93,7 +95,14 @@ FAILED (round r of R) …` feedback text when
 the model receives as the call's result); `run not finished: verify failed (exit
 N); no fix rounds remain` (run ends `verify_failed`); `run not finished: verify
 could not run (<reason>)` (`budget_exceeded`/`sandbox_error` raised by the verify
-command); `run not finished: <status>` when the turn ended before verify ran (a
+command); since 1.0 (#66) also `run not finished: change check could not run
+(<reason>)` (the same two statuses raised by the worktree fingerprint the harness
+takes before verify), the `Not accepted as the end of the run: …` text when the
+completion changed nothing in the worktree and it was the run's first such
+completion (the run continues; that text is what the model receives as the
+call's result), and `run not finished: nothing changed` when a second such
+completion ends a `resume --feedback` run `unchanged`; `run not finished:
+<status>` when the turn ended before verify ran (a
 later call in the same turn raised, three consecutive failures, or an
 interrupt); and `run not finished: verify did not run` only if an unhandled
 exception left the turn. The summary becomes the run's `final_message`.
@@ -106,17 +115,17 @@ call it is appended to that turn's **last** tool result (`via: "tool_result"`;
 the exact text is in that `tool_result` event's `follow_up`); on a text-only
 turn it is the next `user` message (`via: "user"`). Several nudges on one turn
 are merged into a single follow-up (in the order `malformed_entry`, sandbox notices
-(`stray_kill`/`sandbox_reset`, in the order they happened), `timeout`, `stall`;
-`truncated`/`empty`/`text_tool_call`, sandbox notices, then `stall` on a text turn),
+(`stray_kill`/`sandbox_reset`, in the order they happened), `timeout`, `stall`, `no_change`;
+`truncated`/`empty`/`text_tool_call`, sandbox notices, `stall`, then `no_change` on a text turn),
 but each is recorded here separately. The history never carries a `user` message
 directly after a tool result, nor two consecutive `user` messages — the shapes
 strict chat templates (Mistral/Devstral) reject.
 
 | Field | v1 | v2 | Type | Notes |
 |---|---|---|---|---|
-| `kind` | | ✓ | string | `truncated` (the reply hit the token limit), `empty` (no tool call and no answer), `text_tool_call` (a tool call written as prose instead of through the tools API), `stall` (no progress for `--stall-turns // 2` turns), `timeout` (0.9: at least one `bash` command timed out on this turn — exactly one per turn however many timed out, and only on a turn that continues; a timeout is not a `FailureTracker` event), `malformed_entry` (1.0: N tool-call entries had no usable id/name and were discarded — delivered since 0.5, recorded since 1.0), `stray_kill` and `sandbox_reset` (1.0, #61: a docker-mode sandbox notice — the container killed stray processes in place, or was reset; the text tells the worker what happened and what it lost; one per `stray_kill`/`sandbox_reset` event; delivered on the turn it was drained, which for a notice the watchdog thread queued after a turn's drain is the following turn; neither is a `FailureTracker` event) |
+| `kind` | | ✓ | string | `truncated` (the reply hit the token limit), `empty` (no tool call and no answer), `text_tool_call` (a tool call written as prose instead of through the tools API), `stall` (no progress for `--stall-turns // 2` turns), `timeout` (0.9: at least one `bash` command timed out on this turn — exactly one per turn however many timed out, and only on a turn that continues; a timeout is not a `FailureTracker` event), `malformed_entry` (1.0: N tool-call entries had no usable id/name and were discarded — delivered since 0.5, recorded since 1.0), `stray_kill` and `sandbox_reset` (1.0, #61: a docker-mode sandbox notice — the container killed stray processes in place, or was reset; the text tells the worker what happened and what it lost; one per `stray_kill`/`sandbox_reset` event; delivered on the turn it was drained, which for a notice the watchdog thread queued after a turn's drain is the following turn; neither is a `FailureTracker` event), `no_change` (1.0, #66: every ten turns the harness fingerprints the worktree — every repository under it, content-addressed — and when the fingerprint equals the previous check's it says so; never an abort; at most one per ten turns; the text names `finish` only when the tree has changed since the run started or the run required no changes), `unchanged_finish` (1.0, #66: a completion — `finish` or a plain answer — that left the worktree byte-identical to the run's start was not accepted; at most one per run, since a second such completion is accepted (`completed`, `run_end.changed: false`) or, on a `resume --feedback`, ends the run `unchanged`; `via: tool_result` when the text is the finish call's own `result`, `user` on a plain answer; not a `FailureTracker` event) |
 | `turn` | | ✓ | integer | 1-based turn number the nudge was issued on |
-| `via` | | ✓ | string | 1.0: `tool_result` or `user` — the carrier this nudge rode on (see above). **Sparse**: absent when the run ended on that same turn before the text was delivered (the third empty-reply strike → `model_error`; a stall verdict on a text turn → `stalled`); the event is still written, as in 0.9, so nudge counts stay comparable |
+| `via` | | ✓ | string | 1.0: `tool_result` or `user` — the carrier this nudge rode on (see above). **Sparse**: absent when the run ended on that same turn before the text was delivered (the third empty-reply strike or the sixth cut-off reply → `model_error`; a stall verdict on a text turn → `stalled`); the event is still written, as in 0.9, so nudge counts stay comparable |
 
 ### `guardrail_block`
 
@@ -239,6 +248,9 @@ run-level fields that are known even when the agent loop never started).
 | `trimmed_turns` | | ✓ | integer | **always** — 0.9: the number of turns on which the runner had to replace at least one tool result with `[result trimmed — re-run the tool if needed]` to fit the char budget. A result already trimmed is never recounted, and the final failing trim (the one that ends the run `context_exhausted`) counts if it trimmed anything. `0` on a run that never trimmed, and on the two failure paths where the runner never returned |
 | `context_window_source` | | ✓ | string | **always** — 0.9: the same value as `run_start.context_window_source`, repeated at the end so a consumer that reads only the last line still knows where the window came from |
 | `timeouts` | | ✓ | integer | **always** — 0.9: how many `bash` TOOL CALLS timed out during the run (per call, not per turn). `grep` timeouts and the `--verify` command are excluded. `0` on a run where nothing timed out, and on the two failure paths where the runner never returned |
+| `truncations` | | ✓ | integer | **always** — 1.0 (#65): how many TURNS produced a truncation message — a `truncated` nudge or a cut-off tool call's `ERROR: … cut off at the --max-tokens cap …` result (once per turn however many calls were cut). Never reset within a run; the sixth ends the run `model_error` with `aborted after 6 cut-off replies at --max-tokens N: …`. `0` when none, and on the two failure paths |
+| `changed` | | ✓ | boolean \| null | **always** — 1.0 (#66): whether the newest worktree fingerprint the harness took (at a completion, at a ten-turn check, or first thing when the run ended) differed from the one it took at run start — every repository under the worktree, tracked and untracked-but-not-ignored content plus the root's `HEAD`, so a commit counts and a byte-identical rewrite does not. `null` when the guard could not measure (see `changed_reason`), when the run ended before any measurement after the start one (`interrupted` on turn 1), and on the two failure paths |
+| `changed_reason` | | ✓ | string | **Sparse** — 1.0 (#66): present exactly when `changed` is `null` because a fingerprint was attempted and failed or raised — the first diagnostic line of the failed measurement, ≤ 200 chars (git's own `error: …`, `ERROR: command timed out after …`, `[output truncated at 10000 chars — bash output capped]`, `budget: <reason>`, `sandbox: <error>`, `sandbox has no bash`). The CLI echoes it once on stderr as `dirtywork: change guard off: <reason>`. Absent when `changed` is `null` only because nothing was measured after the start |
 
 ## Statuses
 
@@ -253,6 +265,7 @@ run-level fields that are known even when the agent loop never started).
 | `stalled` | | ✓ | `--stall-turns` consecutive turns with no progress (no new tool call, no successful write, no new command output) |
 | `stuck` | | ✓ | 0.8: the same **failing** bash command ran `--stuck-repeats` times in a row (fingerprint as the stall detector's: timings/shas stripped); edits in between do not reset the streak, a passing run does |
 | `verify_failed` | | ✓ | 0.8: the worker declared itself done, but the `--verify` command exited non-zero on its last allowed round |
+| `unchanged` | | ✓ | 1.0 (#66): the run required changes (`resume --feedback`) and the worker completed twice — `finish` or a plain answer — without changing the worktree since the run started; the first completion was refused with the reason as the call's result, the second ended the run here. Nothing was verified; the export is the prior work, unchanged. Exit code 1; resuming it requires `--feedback`, like `completed` |
 | `budget_exceeded` | | ✓ | worktree size/file budget or host disk floor breached |
 | `sandbox_error` | | ✓ | the sandbox backend failed in a way the run cannot continue past |
 | `export_failed` | | ✓ | the run itself completed, but the validated export of the worker's files did not |
@@ -266,7 +279,8 @@ run-level fields that are known even when the agent loop never started).
 `base_commit`, `resumed_from`, `finalize_error`, `watchdog_violation`,
 `watchdog_violation_kind`, `stuck_on`, `files_changed`,
 `files_changed_truncated`, `last_tool_result`, `last_assistant_text`, `verify`,
-`trimmed_turns`, `timeouts`, `context_window_source`,
+`trimmed_turns`, `timeouts`, `context_window_source`, `truncations`, `changed` (1.0, #65/#66;
+`changed_reason` rides along when present),
 and `export_status` on the exception-recovery path.
 Per this project's compatibility rule the stdout JSON may only gain fields,
 never lose or rename `status`, `worktree`, `branch`, `transcript`, `turns`,
@@ -330,6 +344,9 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `verify` | end | 0.8: `{command, exit_code, output_tail, rounds, passed}` for the last `--verify` execution, or null (null whenever verify never ran, even if `--verify` was given — see `verify_command` above, which `dirtywork resume` reads from instead) |
 | `trimmed_turns` | end | 0.9: turns on which at least one tool result was trimmed to fit the context budget; `0` when nothing was trimmed |
 | `timeouts` | end | 0.9: how many `bash` tool calls timed out; `0` when none did |
+| `truncations` | end | 1.0 (#65): turns that produced a truncation message; `0` when none did |
+| `changed` | end | 1.0 (#66): whether the worktree fingerprint changed between run start and the run's newest measurement; null when the guard could not measure |
+| `changed_reason` | end | 1.0 (#66): why the newest measurement failed, only when `changed` is null for that reason (absent otherwise) |
 | `allow_commit` | start | (bool) records whether the run's system prompt told the worker to commit as it went (`--allow-commit`, host mode only — see [docs/machine-contract.md](machine-contract.md)). A run that predates the flag has no such key. |
 | `verdict` | verdict | written by `dirtywork runs verdict`: `"accept"` \| `"reject"` \| `"cleanup"` |
 | `note` | verdict | `--note` text, or null |

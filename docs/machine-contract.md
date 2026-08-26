@@ -159,7 +159,10 @@ the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
 
 - `--stall-turns N` (default 12) — end the run with status `stalled` after N
   consecutive turns that changed no file and produced no new command output;
-  the model gets one nudge halfway. `0` disables.
+  the model gets one nudge halfway. `0` disables. Independently (1.0, #66):
+  every ten turns the harness fingerprints the worktree, and when it equals
+  the previous check's, the model gets a `no_change` nudge — never an abort,
+  and not a flag.
 - `--stuck-repeats N` (default 4) — end the run with status `stuck` after the
   same **failing** `bash` command has run N times in a row. "Same" uses the
   stall detector's own fingerprint (command plus output with timings, clock
@@ -177,7 +180,7 @@ the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
   ends the run either way. `dirtywork resume` inherits all three — the command,
   the rounds, and the timeout — from the run it continues (recorded in `run.json`
   at run start, so this works even when the prior run ended before verify ever
-  ran, e.g. `max_turns`/`stalled`/`stuck`/`timeout`/`budget_exceeded`); an
+  ran, e.g. `max_turns`/`stalled`/`stuck`/`timeout`/`budget_exceeded`/`unchanged`); an
   explicit flag on `resume` overrides the inherited value. Feedback for a fix
   round is delivered as the `finish` call's tool result (or as the next user
   message after a prose answer); the `verify` event records which (`via`).
@@ -243,16 +246,19 @@ not configurable; a run's tool surface is the same in host and docker mode.
   <limit>-byte write limit; nothing was written`). This is the second half of
   the large-file recipe: `write_file` the first part, `append_file` the rest —
   and it is what a truncated call is told to do by name. When a tool call is cut
-  off at the token limit (`finish_reason: "length"`), the harness answers it with
-  `ERROR: your write_file for '<path>' was cut off at the token limit — nothing
-  was written. Write the file in chunks: write_file with the first part, then
-  append_file for each following part.` when the path can be recovered from the
-  model's own argument fragment, and otherwise with `ERROR: your <tool> call was
-  cut off at the token limit before it completed. Emit smaller tool calls — for a
-  large file, write_file the first part and append_file the rest.` Either way the
-  turn counts as a `malformed_args` failure, including the Anthropic shape where
-  the truncated arguments parse as `{}` and a required parameter is simply
-  missing.
+  off at the token limit (`finish_reason: "length"`), the harness answers with an
+  error that states the `--max-tokens` cap, about how much of the call's own
+  content actually got out before the cut (characters, and lines when the cut
+  call's raw arguments are present), a per-call target size (characters and
+  lines) to stay under next time, and which cut-off reply of the run this is
+  ("cut-off reply *n* of 6"). A cut `write_file` whose path can be recovered
+  from the model's own argument fragment is told nothing was written and to
+  resume with `append_file`; any other cut call is told to keep calls under the
+  target size, splitting a large file across `write_file` and `append_file`.
+  Either way the turn counts as a `malformed_args` failure, including the
+  Anthropic shape where the truncated arguments parse as `{}` and a required
+  parameter is simply missing. Truncations are counted per run and never reset;
+  the sixth cut-off reply of a run ends it `model_error`.
 - `edit_file(path, old_string, new_string)` — one exact replacement;
   `old_string` must occur exactly once.
 - `apply_edits(path, edits)` — several exact replacements to ONE file in one
@@ -351,9 +357,14 @@ printed to stdout (nothing else goes to stdout):
   },
   "trimmed_turns": 0,
   "timeouts": 0,
-  "context_window_source": "provider:openai:server"
+  "context_window_source": "provider:openai:server",
+  "truncations": 0,
+  "changed": true
 }
 ```
+
+(`changed_reason` is sparse and so is absent here; it rides alongside
+`changed` only when `changed` is `null`.)
 
 Six of those keys are 0.8 additions (`stuck_on`, `files_changed`,
 `files_changed_truncated`, `last_tool_result`, `last_assistant_text`,
@@ -361,19 +372,29 @@ Six of those keys are 0.8 additions (`stuck_on`, `files_changed`,
 `context_window_source`). **0.10 adds no stdout key at all**: its additions are
 the eleventh tool (`append_file`), the `--max-tokens` flag, `max_tokens` on
 `run_start` and `run.json`, `finish_reason` on `assistant` events, and
-`--provider ollama` — all additive, `schema_version` still `2`. Every one of
-the nine keys above is present on every payload —
+`--provider ollama` — all additive, `schema_version` still `2`. 1.0 (#65/#66)
+adds two more stdout keys: `truncations` (integer, **always** — how many
+turns produced a truncation message; `0` when none) and `changed` (boolean \|
+null, **always** — whether the newest worktree fingerprint the harness took
+differed from the one at run start; `null` when the guard could not measure).
+A third field, `changed_reason` (string, **sparse**), rides alongside
+`changed` only when it is `null` because a fingerprint was attempted and
+failed or raised. Every one of the eleven keys above is present on every
+payload —
 `null` when it does not apply, `[]`/`false` for the list and its flag, `0` for
-the two counters — including the two paths where `runner.run()` never returns
+the three counters — including the two paths where `runner.run()` never returns
 (see below), where they carry those same defaults rather than being omitted.
 `trimmed_turns` is how many turns had to drop tool results to fit the context
-budget, `timeouts` how many `bash` calls never finished, and
+budget, `timeouts` how many `bash` calls never finished, `truncations` how
+many turns produced a truncation message, and
 `context_window_source` which precedence step produced `context_window`
 (`flag` | `env` | `provider:<name>:server` | `provider:<name>` | `default`).
 
 `status` is one of: `completed`, `max_turns`, `timeout`, `stalled`, `stuck`,
 `verify_failed`, `context_exhausted`, `model_error`, `interrupted`,
-`budget_exceeded`, `sandbox_error`, `export_failed`. When the run fails before a `RunResult`
+`budget_exceeded`, `sandbox_error`, `export_failed`, `unchanged` (1.0, #66: a
+`resume --feedback` run completed twice without changing the worktree; verify
+never ran; exit 1 like every non-`completed` status). When the run fails before a `RunResult`
 exists — the LLM client raises, post-worktree setup fails (e.g. the
 transcript can't be created), or any other exception escapes the run
 (status `model_error` in every case) — `turns` is `null` and `usage` is
@@ -389,7 +410,7 @@ added on the normal end-of-run path — i.e. whenever `runner.run()` returns a
 result, `completed` or not — normally `null`; see `run_end` below for what
 each means. `stuck_on`, `files_changed`, `files_changed_truncated`,
 `last_tool_result`, `last_assistant_text`, `verify`, `trimmed_turns`,
-`timeouts` and `context_window_source` are present on
+`timeouts`, `context_window_source`, `truncations` and `changed` are present on
 **every** payload (`null`/`[]`/`false`/`0` when they do not apply) — including
 the two paths below where `runner.run()` never returns, where they carry
 those same defaults rather than being omitted. Four of those 0.8 keys
@@ -404,7 +425,8 @@ starts, or an exception escapes the loop and is caught in `main()`) report
 `base_commit` and `resumed_from`, the six 0.8 evidence keys above (as their
 null/empty defaults) **and** the three 0.9 contract keys — `trimmed_turns` and
 `timeouts` as `0`, `context_window_source` as the value preflight actually
-resolved — plus `export_status` too if a docker `finalize()` ran
+resolved — **and** the 1.0 keys, `truncations` as `0` and `changed` as `null`
+with no `changed_reason` — plus `export_status` too if a docker `finalize()` ran
 during that exception recovery — `finalize_error`, `watchdog_violation` and
 `watchdog_violation_kind` are not present on these two paths, since they
 never got far enough to know.
@@ -414,7 +436,7 @@ never got far enough to know.
 - `0` — `completed`.
 - `1` — any non-`completed` status (`max_turns`, `timeout`, `stalled`,
   `stuck`, `verify_failed`, `context_exhausted`, `model_error`, `interrupted`,
-  `budget_exceeded`, `sandbox_error`, `export_failed`); the worktree and branch are kept for
+  `budget_exceeded`, `sandbox_error`, `export_failed`, `unchanged`); the worktree and branch are kept for
   salvage/review. `main` catches every `Exception` the run raises (not
   just ones the runner itself converts to a status) and reports
   it as `model_error` via the same JSON contract, so a post-preflight run
@@ -438,8 +460,11 @@ config, `schema_version: 2`, plus provenance: `worktree`, `base_commit`,
 `assistant` (text + tool calls — text capped at 64 000 chars in the
 transcript only, the full text is still sent to the model), `tool_result`
 (truncated), `guardrail_block`, `nudge` (`{"event": "nudge", "kind":
-"truncated|empty|text_tool_call|stall|timeout|malformed_entry|stray_kill|sandbox_reset", "turn": N,
-"via": "tool_result|user"}` — since 1.0 a nudge on a tool-call turn rides on
+"truncated|empty|text_tool_call|stall|timeout|malformed_entry|stray_kill|sandbox_reset|no_change|unchanged_finish", "turn": N,
+"via": "tool_result|user"}` — ten kinds; `no_change` (every ten turns, the
+worktree fingerprint equals the previous check's) and `unchanged_finish` (a
+completion rejected because nothing changed, see below) are 1.0 (#66)
+additions — since 1.0 a nudge on a tool-call turn rides on
 the turn's last `tool_result` (its `follow_up` field) and never as a user
 message after a tool result; the history never carries two consecutive user
 messages), `sandbox_reset`
@@ -464,6 +489,16 @@ worktree-sampling exec failing twice; otherwise `null`), and
 `finalize_error` (set when the finalize/export step itself raised an
 exception after the agent loop otherwise finished; `null` normally; `KeyboardInterrupt: interrupted during finalize` when an interrupt landed inside the export — the export is attempted once and never re-run, and `run_end.status` is `interrupted`)).
 A `finish(summary=...)` call appears in the transcript as an ordinary tool call in its `assistant` event followed by a `tool_result` event whose `result` is `run finished` when the agent loop ended `completed` (an interrupt or export failure *after* that point is reported in `run_end.status` / the CLI status, not here) — otherwise the verify feedback text (a fix round follows) or a `run not finished: …` reason (see `transcript-schema.md`); the summary becomes the run's `final_message`.
+
+A completion that changed nothing in the worktree since the run started — a
+`finish` call or a plain answer with no tool call — is refused once (1.0,
+#66): on the finish path the refusal is the finish tool's own `result`; on a
+plain answer it is the next user message; verify does not run. On a `resume
+--feedback` run a second such completion ends the run `unchanged` (exit 1);
+otherwise the run proceeds as if nothing had happened, and a second matching
+completion is accepted (`completed`, `run_end.changed: false`). The guard
+detects that the worktree changed, not that the feedback was applied — it
+catches a lazy completion, not a hostile one.
 
 Since 1.0 the history sent to the model obeys two rules (#60): a harness follow-up never directly follows a tool result — it rides on the turn's last `tool_result` as `follow_up`, or is the `finish` result — and an assistant reply with no tool call and no text is stored as `[empty reply]` (`assistant.placeholder`), so strict chat templates never see a dropped turn or a user message after a tool result.
 

@@ -589,6 +589,8 @@ def _emit_result(*, status: str, worktree: Path, branch: str, transcript_path: P
         "verify": None,
         "trimmed_turns": 0,
         "timeouts": 0,
+        "truncations": 0,
+        "changed": None,
         "context_window_source": None,
     }
     payload.update(extra)
@@ -606,9 +608,14 @@ def _contract_fields(extra: dict, ctx: RunContext) -> dict:
     resolved in preflight and is therefore known on every path a payload can
     exist on -- a context-window preflight failure exits 2 with no payload at
     all, as it did before 0.9."""
-    return {"trimmed_turns": extra.get("trimmed_turns", 0),
-            "timeouts": extra.get("timeouts", 0),
-            "context_window_source": ctx.context_window_source}
+    fields = {"trimmed_turns": extra.get("trimmed_turns", 0),
+              "timeouts": extra.get("timeouts", 0),
+              "truncations": extra.get("truncations", 0),
+              "changed": extra.get("changed"),
+              "context_window_source": ctx.context_window_source}
+    if extra.get("changed_reason") is not None:
+        fields["changed_reason"] = extra["changed_reason"]
+    return fields
 
 
 def _final_status(result) -> str:
@@ -844,6 +851,9 @@ def _load_resume_target(args) -> dict:
         raise PreflightFailure(
             f"run '{prior['slug']}' ended 'completed'; pass --feedback to continue it "
             f"with new instructions")
+    if prior.get("status") == "unchanged" and not args.feedback_text:
+        raise PreflightFailure(
+            f"run '{prior['slug']}' ended 'unchanged' (the worker changed nothing); pass --feedback to tell it what to change")
     return prior
 
 
@@ -946,12 +956,15 @@ def _execute(ctx: RunContext, args, client) -> int:
             verify=getattr(args, "verify", None),
             verify_rounds=getattr(args, "verify_rounds", DEFAULT_VERIFY_ROUNDS),
             verify_timeout=getattr(args, "verify_timeout", DEFAULT_VERIFY_TIMEOUT),
-        )
+            require_changes=ctx.feedback is not None,
+        )  # spec #66 §4.3: a feedback resume must change something
         display_root = DOCKER_WORKDIR if ctx.sandbox_mode == "docker" else str(ctx.worktree)
         system_prompt = build_system_prompt(display_root,
                                             load_repo_context(ctx.repo, ctx.base_commit),
                                             allow_commit=bool(args.allow_commit))
         result = runner.run(system_prompt, ctx.task)
+        if result.extra.get("changed_reason"):
+            print(f"dirtywork: change guard off: {result.extra['changed_reason']}", file=sys.stderr)
     except Exception as e:
         if not sandbox_started and isinstance(e, (SandboxError, WorkspaceError)):
             return _fail_setup(e, ctx=ctx, run_dir=run_dir, transcript=transcript,

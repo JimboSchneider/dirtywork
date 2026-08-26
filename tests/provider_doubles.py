@@ -4,7 +4,9 @@ ChatResponse with the real adapter's parser, so a CLI test exercises the same
 deserialization production does."""
 from __future__ import annotations
 
+from dirtywork.changes import FINGERPRINT_SCRIPT
 from dirtywork.providers.openai_compat import parse_chat_response
+from dirtywork.sandbox.host import HostSandbox
 
 DEFAULT_MODEL = "qwen/qwen3-coder-next"
 
@@ -116,3 +118,32 @@ class TimeoutThenFailingVerifySandbox:
             return "exit code: 1\nboom"
         from dirtywork.tools import timeout_result
         return timeout_result(timeout)
+
+
+class FingerprintSandbox(HostSandbox):
+    """A HostSandbox whose `bash` answers FINGERPRINT_SCRIPT from a scripted
+    list and delegates everything else (verify commands and the file tools
+    stay real). Entries: a str hash -> "exit code: 0\n<hash>\n<40 zeros>" (two
+    lines, as the real script prints a tree and HEAD) -- str entries MUST be
+    40 lowercase hex chars (e.g. "a" * 40): they go through
+    parse_fingerprint, which drops anything else; None -> "exit code:
+    1\nerror: boom"; an exception instance -> raised. The last entry repeats.
+    hashes=None -> the real script runs for the fingerprint too (a recording
+    HostSandbox). `commands` records every (command, timeout) the runner sends."""
+    def __init__(self, worktree, hashes=None, **kwargs):
+        super().__init__(worktree, **kwargs)
+        self.hashes = None if hashes is None else list(hashes)
+        for h in self.hashes or []:
+            assert h is None or isinstance(h, BaseException) or (len(h) == 40 and all(c in "0123456789abcdef" for c in h)), h
+        self.commands = []
+
+    def bash(self, command, timeout=120):
+        self.commands.append((command, timeout))
+        if command != FINGERPRINT_SCRIPT or self.hashes is None:
+            return super().bash(command, timeout)
+        entry = self.hashes.pop(0) if len(self.hashes) > 1 else self.hashes[0]
+        if isinstance(entry, BaseException):
+            raise entry
+        if entry is None:
+            return "exit code: 1\nerror: boom"
+        return f"exit code: 0\n{entry}\n{'0' * 40}"
