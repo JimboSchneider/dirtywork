@@ -25,6 +25,7 @@ _DEFAULT_EVIDENCE = {
     "verify": None,
     "trimmed_turns": 0,
     "timeouts": 0,
+    "truncations": 0,
 }
 
 

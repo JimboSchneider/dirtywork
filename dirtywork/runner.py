@@ -44,6 +44,11 @@ DEFAULT_WINDOW = 32768
 DEFAULT_MAX_TOKENS = 8192
 TRIM_MARKER = "[result trimmed — re-run the tool if needed]"
 CHARS_PER_TOKEN = 4
+MIN_CHUNK_CHARS = 200
+MIN_CHUNK_LINES = 5
+CHUNK_DIVISOR = 4
+DEFAULT_LINE_CHARS = 60
+MAX_TRUNCATED_REPLIES = 6
 BUDGET_FRACTION = 0.75
 MAX_CONSECUTIVE_FAILURES = 3
 FAILURE_KINDS = ("malformed_entry", "malformed_args", "unknown_tool", "bad_args", "empty_reply")
@@ -87,9 +92,13 @@ _THINK_RE = re.compile(re.escape(_THINK_OPEN) + r".*?(?:" + re.escape(_THINK_CLO
 _TEXT_TOOL_MARKERS = tuple("<" + m for m in ("tool_call>", "function=", "function_call>", "|tool_call|>"))
 
 NUDGES = {
-    "truncated": ("Your reply was cut off at the token limit. Continue with smaller steps — "
-                  "emit one tool call at a time; for a large file, write_file the first "
-                  "part and append_file the rest."),
+    "truncated": ("Your reply was cut off at the --max-tokens cap of {cap} tokens (about "
+                  "{cap_chars} characters); the harness received only {received} characters of "
+                  "it — cut-off reply {n} of {max} (the run ends at {max}; three in a row also "
+                  "end it). Keep each tool call's content under about {target_chars} characters "
+                  "(about {target_lines} lines; split long lines if you must) and emit one tool "
+                  "call at a time; for a large file, write_file the first part and append_file "
+                  "the rest."),
     "empty": ("Your reply contained no tool call and no answer. Continue the task with a "
               "tool call, or call finish(summary=...) if the task is complete."),
     "text_tool_call": ("Your reply contained a tool call written as text; the harness only "
@@ -143,7 +152,7 @@ def _recovered_path(raw_arguments):
     return value[:TRUNCATED_PATH_CHARS]
 
 
-def truncated_call_result(tool: str, raw_arguments) -> str:
+def truncated_call_result(tool: str, raw_arguments, trunc: dict) -> str:
     """Spec §1.3: the tool result a call cut off at the token limit gets.
 
     A write_file whose path can be recovered is told exactly which write to
@@ -153,13 +162,53 @@ def truncated_call_result(tool: str, raw_arguments) -> str:
     if tool == "write_file":
         path = _recovered_path(raw_arguments)
         if path is not None:
-            return (f"ERROR: your write_file for {path!r} was cut off at the token "
-                    f"limit — nothing was written. Write the file in chunks: "
-                    f"write_file with the first part, then append_file for each "
-                    f"following part.")
-    return (f"ERROR: your {tool} call was cut off at the token limit before it "
-            f"completed. Emit smaller tool calls — for a large file, write_file "
-            f"the first part and append_file the rest.")
+            return (f"ERROR: your write_file for {path!r} was cut off at the --max-tokens cap of "
+                    f"{trunc['cap']} tokens after about {trunc['cut_chars']} characters "
+                    f"(~{trunc['cut_lines']} lines) — nothing was written; cut-off reply "
+                    f"{trunc['n']} of {trunc['max']}. Write the file in chunks of at most about "
+                    f"{trunc['target_chars']} characters (about {trunc['target_lines']} lines): "
+                    f"write_file with the first part, then append_file for each following part.")
+    return (f"ERROR: your {tool} call was cut off at the --max-tokens cap of {trunc['cap']} tokens "
+            f"after about {trunc['cut_chars']} characters (~{trunc['cut_lines']} lines) before it "
+            f"completed — cut-off reply {trunc['n']} of {trunc['max']}. Keep each tool call under "
+            f"about {trunc['target_chars']} characters (about {trunc['target_lines']} lines); for "
+            f"a large file, write_file the first part and append_file the rest.")
+
+
+def reply_size(resp) -> tuple[int, int]:
+    """(text_chars, raw_chars): what the harness RECEIVED -- the reply's prose
+    and the raw argument strings of every addressable tool call
+    (`_tool_call_arg_chars`). Reported to the model as `received`; never the
+    target's basis."""
+    return (len(resp.text or ""),
+            sum(_tool_call_arg_chars(tc) for tc in resp.tool_calls))
+
+
+def call_size(tc) -> tuple[int, int]:
+    """(chars, lines) of ONE tool call's raw arguments -- the call that was
+    cut (cases a/b). Newlines inside JSON string arguments arrive escaped
+    (`\\n`), so both forms are counted. (0, 0) when the adapter kept nothing
+    (Anthropic's error branch); the text path has no call and passes (0, 0)."""
+    raw = tc.raw_arguments or ""
+    chars = _tool_call_arg_chars(tc)
+    return chars, (raw.count("\\n") + raw.count("\n") + 1) if chars else 0
+
+
+def chunk_target(max_tokens: int, cut_chars: int, cut_lines: int) -> tuple[int, int]:
+    """(characters, lines) a single tool call's content must stay under.
+    Basis: the cap's character capacity (max_tokens * CHARS_PER_TOKEN), or the
+    smaller of that and what the CUT CALL actually got out when its raw
+    arguments are present (cut_chars > 0) -- that call's own ratio reflects
+    how densely THIS model tokenizes THIS content. A quarter of the basis
+    leaves room for JSON escaping, the call's other fields and any prose
+    around it. Lines come from the cut call's own characters-per-line when it
+    had enough lines to measure, else DEFAULT_LINE_CHARS."""
+    cap_chars = max_tokens * CHARS_PER_TOKEN
+    basis = min(cap_chars, cut_chars) if cut_chars > 0 else cap_chars
+    chars = max(MIN_CHUNK_CHARS, basis // CHUNK_DIVISOR)
+    per_line = (cut_chars / cut_lines
+                if cut_chars > 0 and cut_lines >= 3 else DEFAULT_LINE_CHARS)
+    return chars, max(MIN_CHUNK_LINES, int(chars / per_line))
 
 
 def strip_think(text) -> str:
@@ -546,6 +595,7 @@ class Runner:
         turns = 0
         trimmed_turns = 0       # spec §2.2: turns on which trimming happened
         timeouts = 0            # spec §4.3: worker bash calls that timed out
+        truncations = 0         # spec #65 §3.3: turns with a truncation nudge or truncated_call_result; never reset
         failures = FailureTracker()
         progress = ProgressTracker(self.stall_turns)
         repeats = RepeatTracker(self.stuck_repeats)
@@ -689,6 +739,7 @@ class Runner:
                            "verify": verify_state,
                            "trimmed_turns": trimmed_turns,
                            "timeouts": timeouts,
+                           "truncations": truncations,
                            "context_window_source": self.context_window_source}
             if self.finalize is not None:
                 run_finalize()
@@ -788,7 +839,7 @@ class Runner:
         def one_turn():
             """One model turn (spec #60 §6.1: runs inside transcript.turn()).
             Returns the RunResult that ends the run, or None to continue."""
-            nonlocal turns, trimmed_turns, timeouts, stuck
+            nonlocal turns, trimmed_turns, timeouts, truncations, stuck
             turn_tool_msgs.clear()
             turn_terminal.clear()
             if turns >= self.max_turns:
@@ -838,6 +889,27 @@ class Runner:
             malformed_count = len(malformed_entries)
             tool_calls = [tc for tc in resp.tool_calls if tc.id]
             append_assistant(resp.text, tool_calls, finish_reason)
+            trunc: dict = {}
+            counted = False
+
+            def note_truncation(tc=None) -> None:
+                """Spec #65 §3.1: count this turn's truncation once and build
+                the numbers both texts format. `tc` is the cut call (cases
+                a/b) or None on the text path."""
+                nonlocal truncations, counted
+                if counted:
+                    return
+                truncations += 1
+                counted = True
+                text_chars, raw_chars = reply_size(resp)
+                cut_chars, cut_lines = call_size(tc) if tc is not None else (0, 0)
+                tc_chars, tc_lines = chunk_target(self.max_tokens, cut_chars, cut_lines)
+                trunc.update({"cap": self.max_tokens,
+                              "cap_chars": self.max_tokens * CHARS_PER_TOKEN,
+                              "received": text_chars + raw_chars,
+                              "cut_chars": cut_chars, "cut_lines": cut_lines,
+                              "target_chars": tc_chars, "target_lines": tc_lines,
+                              "n": truncations, "max": MAX_TRUNCATED_REPLIES})
             if not resp.tool_calls:
                 content = resp.text
                 kind = classify_text_reply(content, finish_reason)
@@ -848,6 +920,8 @@ class Runner:
                     sandbox_text, sandbox_records = drain_sandbox()
                     deliver(_join_nudges(feedback, sandbox_text), sandbox_records)
                     return None
+                if kind == "truncated":
+                    note_truncation()
                 kind_record = self.transcript.write("nudge", kind=kind, turn=turns)
                 abort_reason = failures.record("empty_reply")
                 if abort_reason is not None:
@@ -856,7 +930,7 @@ class Runner:
                 if stalled is not None:
                     return stalled
                 sandbox_text, sandbox_records = drain_sandbox()
-                deliver(_join_nudges(NUDGES[kind], sandbox_text, stall_text), [kind_record, *sandbox_records, stall_record])
+                deliver(_join_nudges(NUDGES[kind].format(**trunc), sandbox_text, stall_text), [kind_record, *sandbox_records, stall_record])
                 return None
 
             abort_reason = None
@@ -883,7 +957,8 @@ class Runner:
                 if tc.error is not None:
                     abort_reason = failures.record("malformed_args")
                     if finish_reason == "length":
-                        result = truncated_call_result(name, tc.raw_arguments)
+                        note_truncation(tc)
+                        result = truncated_call_result(name, tc.raw_arguments, trunc)
                     else:
                         result = f"ERROR: {tc.error}"
                 elif finish_reason == "length" and self._missing_required(name, args):
@@ -895,7 +970,8 @@ class Runner:
                     # is a truncation, not an argument mistake, and it is
                     # accounted as malformed_args exactly like case (a).
                     abort_reason = failures.record("malformed_args")
-                    result = truncated_call_result(name, tc.raw_arguments)
+                    note_truncation(tc)
+                    result = truncated_call_result(name, tc.raw_arguments, trunc)
                 else:
                     try:
                         spec = self.registry.spec(name)

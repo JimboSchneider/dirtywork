@@ -589,6 +589,7 @@ def _emit_result(*, status: str, worktree: Path, branch: str, transcript_path: P
         "verify": None,
         "trimmed_turns": 0,
         "timeouts": 0,
+        "truncations": 0,
         "context_window_source": None,
     }
     payload.update(extra)
@@ -608,6 +609,7 @@ def _contract_fields(extra: dict, ctx: RunContext) -> dict:
     all, as it did before 0.9."""
     return {"trimmed_turns": extra.get("trimmed_turns", 0),
             "timeouts": extra.get("timeouts", 0),
+            "truncations": extra.get("truncations", 0),
             "context_window_source": ctx.context_window_source}
 
 

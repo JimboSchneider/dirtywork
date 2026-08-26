@@ -30,6 +30,7 @@ from dirtywork.runner import (
     resolve_context_window,
     strip_think,
     trim_messages,
+    truncated_call_result,
 )
 from dirtywork.sandbox.host import HostSandbox
 from dirtywork.builtin_tools import default_registry
@@ -66,20 +67,25 @@ def _bad_entry():
                     error="malformed tool call entry (missing or invalid id/function fields)")
 
 
+def _trunc_dict(tc=None, text=""):
+    """The dict the runner builds for a truncation on a turn with default
+    max_tokens (8192): the cut call's own size when there is one."""
+    from dirtywork.runner import call_size, chunk_target
+    cut_chars, cut_lines = call_size(tc) if tc is not None else (0, 0)
+    target_chars, target_lines = chunk_target(8192, cut_chars, cut_lines)
+    return dict(cap=8192, cap_chars=32768, received=len(text) + cut_chars,
+                cut_chars=cut_chars, cut_lines=cut_lines,
+                target_chars=target_chars, target_lines=target_lines, n=1, max=6)
+
+
 class FakeProvider:
-    name = "fake"
-
-    def __init__(self, responses, context_window=None):
+    def __init__(self, responses):
         self.responses = list(responses)
-        self.requests = []
-        self.timeouts = []
-        self._context_window = context_window
-
-    def list_models(self):
-        return ["m"]
+        self.requests: list[list[dict]] = []
+        self.timeouts: list[float | None] = []
 
     def context_window(self, model):
-        return self._context_window
+        return None
 
     def chat(self, model, history, tools, *, temperature=None, max_tokens=4096, timeout=None):
         # Spec #60 §7: every request the runner makes is legal for strict templates.
@@ -296,7 +302,7 @@ def test_empty_reply_after_a_tool_turn_gets_the_placeholder(parts):
     third = provider.requests[2]
     assert third[-3]["role"] == "tool"
     assert third[-2] == {"role": "assistant", "content": EMPTY_REPLY_PLACEHOLDER}
-    assert third[-1]["role"] == "user" and third[-1]["content"] == NUDGES["truncated"]
+    assert third[-1]["role"] == "user" and third[-1]["content"] == NUDGES["truncated"].format(**_trunc_dict(text=""))
     events = _events(tmp)
     assistants = [e for e in events if e["event"] == "assistant"]
     assert "placeholder" not in assistants[0]                # a tool-call turn: never a placeholder
@@ -370,7 +376,7 @@ def test_malformed_only_length_turn_gets_placeholder_and_no_truncated_nudge(part
     second = provider.requests[1]
     assert second[-2] == {"role": "assistant", "content": EMPTY_REPLY_PLACEHOLDER}
     assert second[-1]["role"] == "user" and "were malformed" in second[-1]["content"]
-    assert NUDGES["truncated"] not in second[-1]["content"]
+    assert "cut off at the --max-tokens cap" not in second[-1]["content"]
 
 
 def test_third_malformed_entry_strike_ends_after_recording_the_placeholder(parts):
@@ -450,41 +456,38 @@ def test_length_finish_reason_gives_helpful_hint(parts):
     transcript.close()
     assert result.status == "completed"
     tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
-    assert tool_msgs[0]["content"] == (
-        "ERROR: your write_file for 'x' was cut off at the token limit — nothing was "
-        "written. Write the file in chunks: write_file with the first part, then "
-        "append_file for each following part.")
+    tc = _bad_args("c", "write_file", '{"path": "x", "content": "abc')
+    assert tool_msgs[0]["content"] == truncated_call_result("write_file", tc.raw_arguments, _trunc_dict(tc))
 
 
-_GENERIC_TRUNCATION = ("ERROR: your {tool} call was cut off at the token limit before it "
-                       "completed. Emit smaller tool calls — for a large file, write_file "
-                       "the first part and append_file the rest.")
+def _generic_truncation(tool, tc):
+    return truncated_call_result(tool, tc.raw_arguments, _trunc_dict(tc))
 
 
 def test_length_truncation_of_a_non_write_file_tool_gives_the_generic_form(parts):
     wt, registry, sandbox, transcript, tmp = parts
-    truncated = _resp(tool_calls=[_bad_args("c", "edit_file", '{"path": "x", "old_string": "a')],
-                      finish_reason="length",
+    tc = _bad_args("c", "edit_file", '{"path": "x", "old_string": "a')
+    truncated = _resp(tool_calls=[tc], finish_reason="length",
                       usage={"prompt_tokens": 1, "completion_tokens": 1})
     provider = FakeProvider([truncated, _resp(content="done")])
     Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
     transcript.close()
     tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
-    assert tool_msgs[0]["content"] == _GENERIC_TRUNCATION.format(tool="edit_file")
+    assert tool_msgs[0]["content"] == _generic_truncation("edit_file", tc)
 
 
 def test_length_truncation_with_no_raw_arguments_gives_the_generic_form(parts):
     # The Anthropic shape: its error branches never set raw_arguments, so path
     # recovery has nothing to scan and degrades to the generic sentence.
     wt, registry, sandbox, transcript, tmp = parts
-    truncated = _resp(tool_calls=[_bad_args("c", "write_file", "")],
-                      finish_reason="length",
+    tc = _bad_args("c", "write_file", "")
+    truncated = _resp(tool_calls=[tc], finish_reason="length",
                       usage={"prompt_tokens": 1, "completion_tokens": 1})
     provider = FakeProvider([truncated, _resp(content="done")])
     Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
     transcript.close()
     tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
-    assert tool_msgs[0]["content"] == _GENERIC_TRUNCATION.format(tool="write_file")
+    assert tool_msgs[0]["content"] == _generic_truncation("write_file", tc)
 
 
 def test_length_truncation_with_an_invalid_escape_degrades_to_generic(parts):
@@ -498,7 +501,8 @@ def test_length_truncation_with_an_invalid_escape_degrades_to_generic(parts):
     Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
     transcript.close()
     tool_msgs = [m for m in provider.requests[1] if m["role"] == "tool"]
-    assert tool_msgs[0]["content"] == _GENERIC_TRUNCATION.format(tool="write_file")
+    tc = _bad_args("c", "write_file", '{"path": "a\\qb", "content": "z')
+    assert tool_msgs[0]["content"] == _generic_truncation("write_file", tc)
 
 
 def test_recovered_path_is_truncated_and_rendered_with_repr(parts):
@@ -530,7 +534,8 @@ def test_length_truncation_with_empty_args_counts_as_malformed_args_not_bad_args
     assert result.status == "model_error"
     assert result.final_message == "aborted after 3 consecutive malformed_args failures"
     results = [e["result"] for e in _events(tmp) if e["event"] == "tool_result"]
-    assert results[0] == _GENERIC_TRUNCATION.format(tool="write_file")
+    tc = _call("c", "write_file", {})
+    assert results[0] == _generic_truncation("write_file", tc)
     assert "bad arguments" not in results[0]
 
 

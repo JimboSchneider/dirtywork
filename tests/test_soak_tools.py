@@ -942,7 +942,9 @@ def test_f5_path_from_truncated_call_result_text_when_args_are_capped():
     from soak_harvest import _event_path, detect_features
     from dirtywork.runner import truncated_call_result
     raw = '{"text": "' + "q" * 600 + '", "path": "bonus/lost.txt"}'
-    err = truncated_call_result("write_file", raw)
+    trunc = dict(cap=1024, cap_chars=4096, received=3000, cut_chars=3000, cut_lines=55,
+                 target_chars=750, target_lines=13, n=1, max=6)
+    err = truncated_call_result("write_file", raw, trunc)
     assert "'bonus/lost.txt'" in err
     ev = {"event": "tool_result", "tool": "write_file", "args": raw[:500], "result": err}
     assert _event_path(ev) == "bonus/lost.txt"
