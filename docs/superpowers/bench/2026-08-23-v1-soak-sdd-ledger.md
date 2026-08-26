@@ -249,7 +249,7 @@ sandbox still exports `GIT_DIR`). Spec: `docs/superpowers/specs/2026-08-25-cap-a
 `metrics-6566.csv` (scratchpad; per-window stats at the end).
 
 **S14 A/B (feedback resumes under the released runtime, which has no guard):** first completion
-zero-change — counted as they happen: (none yet).
+zero-change — counted as they happen: **1** — W1b resume 1 (`5a48930d`): yes, `finish` on turn 1 with a summary re-declaring run 1; the released runtime recorded it `completed`.
 
 | run (slug) | task | status | wall | turns | s/turn | prompt tok | compl tok | tok/s | nudges | guardrail | resets | tool mix | verify |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -259,3 +259,4 @@ zero-change — counted as they happen: (none yet).
 | `issue-65-task-w1a-2-of-0825192812-d115d401` | W1a-2 five #65 tests (run 1) | `max_turns`/60 — all five tests written (+294 lines), 177/179 pass; two test bugs (compared two different tools' messages verbatim; `run_end["extra"]["truncations"]` instead of the top-level field) | 461 s | 60 | 7.7 | 1,817,391 | 19,538 | ≈4.0k | 0 | 0 | 0 | read_file 28 / bash 18 / edit_file 9 / grep 3 / run 1 / append_file 1 | not reached → resume 1 with the two exact replacements |
 | `issue-65-task-w1a-2-of-0825193638-40a899c8` (resume 1: two exact replacements) | W1a-2 | `max_turns`/30 — both replacements applied, no `finish` | 136 s | 30 | 4.5 | 494,868 | 3,746 | ≈3.7k | 0 | 0 | 0 | bash 19 / read_file 7 / edit_file 4 | not reached — host suite run by Claude |
 | `issue-65-task-w1b-of-0825194046-25a1eb7c` | W1b abort + bench + harvest (run 1) | `completed`, verify PASSED in-sandbox (1 round) — the abort (both paths) and `_abort_kind` right; harvest regex re-shaped with a `[^ ]+` path constraint (breaks on a path with a space); **none of the three tests written** — finished with the task half done | 261 s | 57 | 4.6 | 1,480,528 | 6,973 | ≈5.7k | 0 | 0 | 0 | read_file 23 / bash 11 / grep 10 / edit_file 8 / list_dir 3 / glob 1 / finish 1 | passed (existing suite) → resume 1: exact regex, docstring sentence, the three tests |
+| `issue-65-task-w1b-of-0825194610-5a48930d` (resume 1: exact regex, docstring, three tests) | W1b | `completed` on turn 1 — **zero-change finish (S14, first of this build)**: summary re-declared the run-1 work, verify passed on the existing suite, 0/3 items applied | 59 s | 1 | 58.9 | 7,940 | 223 | ≈0.1k | 0 | 0 | 0 |  | passed (nothing changed) → resume 2 with the do-not-finish preamble |
