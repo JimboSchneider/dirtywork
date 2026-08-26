@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from .markers import TOOL_CALLS
+
 TOOLS = Path(__file__).resolve().parent.parent / "tools"
 
 
@@ -466,9 +468,9 @@ def test_truncate_leaves_short_text_alone(harvest):
 
 def test_slowest_tool_call_cell_is_capped_and_whitespace_collapsed(harvest):
     # Simulates the real devstral finding: tool holds ~200 chars of runaway
-    # text (e.g. the previous result plus a stray "[TOOL_CALLS]bash"), args
+    # text (e.g. the previous result plus a stray Devstral marker + "bash"), args
     # holds a multi-line blob well past 120 chars.
-    long_tool = "resultofpreviouscall[TOOL_CALLS]" + ("bash" * 40)
+    long_tool = "resultofpreviouscall" + TOOL_CALLS + ("bash" * 40)
     long_args = "line one\n\nline   two\r\n" + ("z" * 300)
     events = [
         {"ts": _ts(0), "event": "assistant"},

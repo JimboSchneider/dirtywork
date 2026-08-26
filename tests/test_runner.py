@@ -47,6 +47,7 @@ from dirtywork.transcript import Transcript
 from .provider_doubles import FingerprintSandbox
 from .provider_doubles import assert_strict_template_legal
 from .provider_doubles import TimeoutThenFailingVerifySandbox as _TimeoutThenFailingVerifySandbox
+from .markers import TOOL_CALL_OPEN, TOOL_CALL_CLOSE
 
 
 def _resp(content=None, tool_calls=None, usage=None, finish_reason=None):
@@ -345,7 +346,7 @@ def test_think_only_and_text_tool_call_replies_get_no_placeholder(parts):
     wt, registry, sandbox, transcript, tmp = parts
     think = "<" + "think>hmm</" + "think>"
     provider = FakeProvider([_resp(content=think),
-                             _resp(content="<tool_call>{}</tool_call>"),
+                             _resp(content=TOOL_CALL_OPEN + "{}" + TOOL_CALL_CLOSE),
                              _resp(content="done")])
     r = Runner(provider, registry, sandbox, transcript, model="m")
     r.run("s", "t")
