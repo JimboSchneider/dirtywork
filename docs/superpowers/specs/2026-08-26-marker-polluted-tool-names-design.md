@@ -97,22 +97,32 @@ markers beyond adding `[TOOL_CALLS]` (the tuple is the place for the next one).
 
 ### 3.1 Recovery (`dirtywork/toolspec.py`)
 
+The marker list moves here from `runner.py:100` and gains Devstral's token. **It is built by
+concatenation, on purpose, and stays that way** (the comment at `runner.py:91-94` moves with
+it): several local models' chat templates parse these exact tags in their own output, so a
+worker model editing this file through its tool channel cannot emit them literally — and
+`[TOOL_CALLS]` is Devstral's own function-calling token.
+
 ```python
-TOOL_CALL_MARKERS = ("[TOOL_CALLS]", "<tool_call>", "<function=", "<function_call>", "<|tool_call|>")   # one list for both paths, see 3.3
+# Built by concatenation ON PURPOSE -- see the comment above (moved from runner.py).
+TOOL_CALL_MARKERS = ("[" + "TOOL_CALLS]",) + tuple(
+    "<" + m for m in ("tool_call>", "function=", "function_call>", "|tool_call|>"))
 
 class ToolRegistry:
-    def recover_name(self, name: str) -> tuple[str, bool]:
-        """A registered name is returned as-is. A name that is not registered but,
-        after its LAST tool-call marker, ends in a registered name is recovered to
-        that name (True). Anything else is returned unchanged (False): the
-        existing unknown-tool path decides what to do with it."""
+    def recover_name(self, name: str) -> tuple[str, str | None, int]:
+        """(name, marker, cut). A registered name is returned as-is with marker None.
+        A name that is not registered but, after its LAST tool-call marker, ends in a
+        registered name is recovered to that name; `marker` is the marker found and `cut`
+        the number of characters before it (the model's stray text). Anything else is
+        returned unchanged with marker None: the unknown-tool path decides."""
         if name in self._table:
-            return name, False
-        cut = max((name.rfind(m) + len(m) for m in TOOL_CALL_MARKERS if m in name), default=-1)
-        if cut < 0:
-            return name, False
-        suffix = name[cut:].strip()
-        return (suffix, True) if suffix in self._table else (name, False)
+            return name, None, 0
+        best = max(((name.rfind(m), m) for m in TOOL_CALL_MARKERS if m in name), default=(-1, None))
+        if best[0] < 0:
+            return name, None, 0
+        pos, marker = best
+        suffix = name[pos + len(marker):].strip()
+        return (suffix, marker, pos) if suffix in self._table else (name, None, 0)
 ```
 
 The last marker wins because the model's own text sits *before* the token and the tool name
@@ -120,69 +130,105 @@ The last marker wins because the model's own text sits *before* the token and th
 around the suffix is stripped; nothing else is normalised — `Bash` is not `bash`, and a suffix
 that is not a tool is not guessed at.
 
-### 3.2 The runner's tool-call path (`dirtywork/runner.py` ~`:1062-1130`)
+### 3.2 The runner's tool-call path (`dirtywork/runner.py`)
 
-Right after `name = tc.name` and before the `tc.error` / `_missing_required` checks:
+**In the per-call loop** (`:1062-1130`), right after `name = tc.name` and before the
+`tc.error` / `_missing_required` checks:
 
 ```python
 raw_name = name
-name, recovered = self.registry.recover_name(name)
+name, marker, cut = self.registry.recover_name(name)
+if marker is not None and first_recovered is None:      # per-turn, like timed_out_this_turn
+    first_recovered = (raw_name, marker, name, cut)
 ```
 
 Everything downstream — validation, dispatch, `progress.note_call`, the bash repeat tracker,
-`note_last_tool_result` — sees the recovered name. Two additions:
+`note_last_tool_result`, the `pending_finish`/terminal branch for a recovered `finish` — sees
+the recovered name. A recovered call takes **no failure strike**: only the dispatch's own
+outcome is accounted (a recovered `bash` that fails `bad_args` still strikes `bad_args`).
 
-- **No strike, one nudge per turn.** A recovered call dispatches normally; only the dispatch's
-  own outcome is accounted (a recovered `bash` that fails `bad_args` still strikes `bad_args`).
-  The first recovered call on a turn attaches a nudge to its result — `nudge{kind:
-  "name_recovered", via: "tool_result"}` and the text as the result's `follow_up`, through the
-  same `deliver` carrier #60 built — so the history stays call → result. Further recovered calls
-  on the same turn dispatch silently (the nudge is per turn, like `timeout`). Text:
+**The name is capped once.** `transcript_name = cap_name(name)` is computed before the
+`tool_result` write (`:1125`) and passed to both that write and `note_last_tool_result`, so the
+transcript's `tool_result.tool`, `run_end.last_tool_result.tool` and `run.json.last_tool_result.tool`
+carry the same value. `cap_name` (one constant, `TOOL_NAME_TRANSCRIPT_CHARS = 200`) keeps
+**head and tail**: `name[:120] + "…" + name[-80:]` when longer than 200 (so the marker and the
+suffix — the diagnostic part — survive; the field can then be 201 characters). The same cap
+applies to `assistant.tool_calls[].name` in the transcript (`arguments` were already capped at
+2 000). The model still receives what it sent.
 
-  > Your tool call's name was `{raw_head}…[TOOL_CALLS]{tool}` — {n} characters of text
-  > before the tool name. The harness ran `{tool}` with the arguments you gave. Emit tool calls
+**The transcript records both names.** `tool_result.tool` is the recovered name (so `runs show`,
+the harvest's `_tool_mix` and its feature detection see `bash`); a **sparse** `tool_raw` field
+carries the raw name through the same `cap_name`, present only when a marker was found. An
+unrecovered garbage name goes through the unknown-tool path unchanged; its `tool` is the raw
+name through `cap_name`, and the `tool` schema row becomes open: a registered name, or on an
+`unknown_tool` error the name the model sent (capped), or `""` for a discarded malformed entry.
+
+**The nudge follows the `timeout` pattern exactly** (`:1123-1124`, `:1140-1167`, `:1183-1199`):
+
+- The text is a module constant next to `TIMEOUT_NUDGE` — `NAME_RECOVERED_NUDGE`, a
+  `str.format` template — and **never a `runner.NUDGES` key** (`bench.EMPTY_REPLY_NUDGE_KINDS ==
+  tuple(runner.NUDGES)` pins that dict to the three kinds that strike `empty_reply`; this nudge
+  strikes nothing):
+
+  > Your tool call's name was `{raw_head}…{marker}{tool}` — {cut} characters of text before
+  > the tool-call marker. The harness ran `{tool}` with the arguments you gave. Emit tool calls
   > only through the tools API: the name field holds the tool name and nothing else.
 
-  (`raw_head` = the first 40 characters of the raw name, newlines shown as `⏎`; `n` = the
-  characters before the recovered suffix.)
+  `raw_head` = the first 40 characters of the raw name with newlines shown as `⏎`; `marker` and
+  `cut` come from `recover_name`; the first recovered call of the turn supplies them.
+- After the loop, `name_recovered_text` is composed beside `timeout_text` (`:1148`) when
+  `first_recovered` is set, and joined into **both** delivery points: the `pending_finish`
+  branch (`:1160`, today `_join_nudges(sandbox_text, timeout_text)`) and the end of the turn
+  (`:1198`), **after `timeout` and before `stall`** in the merge order. The `nudge` record
+  (`kind: "name_recovered"`, `turn`) is written where `timeout_record` is written (`:1158`,
+  `:1195-1196`), so `deliver` stamps `via: "tool_result"` on it and the text rides the turn's
+  **last** tool result, exactly as `timeout` does. One nudge per turn however many calls were
+  recovered.
+- **On a turn that ends the run** — a recovered `finish` whose completion is accepted, or any
+  terminal outcome — the nudge is neither delivered nor recorded (the `timeout` rule at
+  `:1140-1147`); the record of what happened is the `tool_raw` field on that call's
+  `tool_result`, which is what the ledger counts. A recovered `finish` whose completion is
+  *refused* (verify feedback, the change guard's first refusal) continues through the
+  `pending_finish` branch and gets the nudge there.
 
-- **The transcript records both names.** `tool_result.tool` is the recovered name (so
-  `runs show`, bench's tool mix and the harvest see `bash`); a **sparse** `tool_raw` field
-  carries the polluted name capped at 200 characters, present only when `recovered`. The
-  `assistant` event's `tool_calls[].name` is capped at 200 characters in the transcript (its
-  `arguments` were already capped at 2 000); the model still receives what it sent. A
-  polluted name that is *not* recovered goes through the unknown-tool path unchanged —
-  `tool_result.tool` is the raw name capped at 200, as the harvest already assumed.
+### 3.3 The text path
 
-### 3.3 The marker tuple and the text path
-
-The marker list moves to `toolspec.py` as `TOOL_CALL_MARKERS` (the four `<…>` markers
-`runner.py:100` builds today plus the literal `"[TOOL_CALLS]"`), and `runner.py`'s
-`_TEXT_TOOL_MARKERS` becomes an import of it — one list serves both paths, and `toolspec`
-never imports `runner` (that would be circular). `classify_text_reply` therefore turns a
-prose reply that contains the token into the existing `text_tool_call` nudge.
+`runner.py`'s `_TEXT_TOOL_MARKERS` becomes `from .toolspec import TOOL_CALL_MARKERS as
+_TEXT_TOOL_MARKERS` (toolspec never imports runner — the reverse would be circular), so
+`classify_text_reply` turns a prose reply that contains `[TOOL_CALLS]` into the existing
+`text_tool_call` nudge; the other four markers behave as today.
 
 ### 3.4 The unknown-tool error text (`toolspec.py:414`)
 
 `ERROR: unknown tool '{name}'` echoes the name back; the observed names show the model
-re-quoting that error as its next name. The echoed name is capped at 80 characters with
-`…` and `(name truncated)` after the quote. The `Available:` list and the finish hint stay.
+re-quoting that error as its next name. The echoed name is capped **head and tail** — the
+first 40 characters, `…`, the last 40, then `(name truncated)` — so the marker and suffix stay
+visible to the model without the whole echo. The `Available:` list and the finish hint stay.
 
-### 3.5 Contract ripple
+### 3.5 Contract ripple (each site named)
 
-- **Nudge kinds**: `name_recovered` joins the list — `bench.NUDGE_KINDS` 10 → 11 (appended;
-  the summarize legend widens to eleven components; `EMPTY_REPLY_NUDGE_KINDS` unchanged — this
-  nudge records no failure), `docs/transcript-schema.md`'s `kind` row, `docs/machine-contract.md`
-  `:463` and its nudge paragraph, `README.md`'s nudge sentence if it lists kinds.
-- **Transcript**: `tool_result.tool_raw` (sparse, ≤ 200 chars, 1.0/#67) and the 200-char cap on
-  `assistant.tool_calls[].name` and on `tool_result.tool` — rows in `transcript-schema.md`;
-  `tests/test_transcript_schema.py`'s field lists.
-- **soak_harvest**: feature code **S6** fires on `nudge.kind == "name_recovered"`, on a
-  `tool_result` with `tool_raw`, or on an `unknown tool` error whose name contains a marker;
-  `_tool_mix`'s 30-char cap stays (it now mostly sees clean names).
-- **operating.md**: a troubleshooting entry ("`aborted after 3 consecutive unknown_tool
-  failures` on Devstral — fixed in 1.0 by #67; the transcript's `tool_raw` shows what the
-  model sent").
+- **Nudge kinds** — `name_recovered` is appended: `bench.NUDGE_KINDS` 10 → 11 (the summarize
+  legend and detail cell widen to eleven; `tests/test_bench.py:854` becomes
+  `NUDGE_KINDS[-3:] == ("no_change", "unchanged_finish", "name_recovered")`, `:857` `len == 11`,
+  the "ten kinds" test at `:875` renamed to eleven; `EMPTY_REPLY_NUDGE_KINDS` unchanged);
+  `docs/transcript-schema.md` `kind` row (`:126`), the `follow_up` row (`:86`) and the
+  merge-order sentences (`:117-119`, including the verify-feedback clause) gain the kind at its
+  position; the version sentence at `:27-32` gains "#67 adds one `nudge.kind` (`name_recovered`),
+  one sparse `tool_result` field (`tool_raw`) and the name caps"; `docs/machine-contract.md:463`
+  kinds string and `:464` "ten kinds" → eleven, `:460-461` the name cap; `README.md`'s nudge
+  sentence if it lists kinds; `tests/test_transcript_schema.py`'s lists.
+- **Transcript fields** — rows for `tool_raw` (sparse, ≤ 201 chars, 1.0/#67), the cap form on
+  `assistant.tool_calls[].name`, `tool_result.tool` (now an open row, see §3.2) and
+  `run_end`/`run.json` `last_tool_result.tool` (`transcript-schema.md:245`, `:342`).
+- **soak_harvest** — feature code **S6** fires on `nudge.kind == "name_recovered"`, on a
+  `tool_result` carrying `tool_raw`, or on a `tool_result` whose `result` starts with
+  `ERROR: unknown tool` and whose `tool` contains a `TOOL_CALL_MARKERS` marker (the capped
+  field keeps the tail, so the marker survives; a prefix so long that the head+tail cap drops
+  every marker is the stated blind spot — none observed). `_tool_mix`'s 30-char cap stays.
+- **operating.md** — a troubleshooting entry: "`aborted after 3 consecutive unknown_tool
+  failures` on Devstral — 1.0 (#67) recovers the call; the transcript's `tool_raw` shows what
+  the model sent". `runs show --markdown` does not render `tool_raw` (the entry points at the
+  transcript).
 
 ## 4. Failure modes and limits
 
@@ -198,40 +244,58 @@ re-quoting that error as its next name. The echoed name is capped at 80 characte
 
 ## 5. Tests
 
+All marker strings in tests are built by concatenation, as in `tests/test_runner.py:348` and
+`tests/test_soak_tools.py:471` — never spelled literally.
+
 Unit (`tests/test_toolspec.py`, `tests/test_runner.py`, `tests/test_bench.py`,
 `tests/test_soak_tools.py`, `tests/test_transcript_schema.py`):
 
-1. `recover_name`: registered name → unchanged/False; `"…[TOOL_CALLS]bash"` → `bash`/True;
-   `"…[TOOL_CALLS][TOOL_CALLS]read_file"` → `read_file`/True (last marker); `"…[TOOL_CALLS]nope"`
-   → unchanged/False; `"garbage"` (no marker) → unchanged/False; `"<tool_call>bash"` → `bash`/True;
-   surrounding whitespace stripped; `"[TOOL_CALLS]Bash"` → unchanged/False.
-2. Runner: a polluted `bash` call dispatches and its result carries the `follow_up` text;
-   the `nudge` event is `name_recovered` with `via: tool_result`; `tool_result.tool == "bash"`,
-   `tool_raw` is the raw name capped at 200; **three polluted calls in a row do not abort**
-   (no strike); two polluted calls on one turn produce one nudge; a polluted name with an
-   unknown suffix still strikes `unknown_tool`; the error text's name is capped at 80 chars.
-3. `classify_text_reply("…[TOOL_CALLS]bash{…}", "stop") == "text_tool_call"`.
-4. Transcript caps: `assistant.tool_calls[].name` at 200; `tool_result.tool` at 200 for an
-   unrecovered garbage name.
-5. bench: `NUDGE_KINDS[-1] == "name_recovered"`, `len == 11`, the legend and the eleven-wide
-   detail cell (exact column value); `EMPTY_REPLY_NUDGE_KINDS == tuple(runner.NUDGES)` holds.
-6. harvest: S6 fires for each of its three triggers and not for a clean run.
-7. Schema test lists updated with the new kind and field.
+1. `recover_name`: registered name → `(name, None, 0)`; `"…" + M + "bash"` → `("bash", M, cut)`;
+   `"…" + M + M + "read_file"` → `read_file` (last marker); `"…" + M + "nope"` → unchanged, marker
+   `None`; `"garbage"` (no marker) → unchanged; `"<" + "tool_call>" + "bash"` → `bash` with that
+   marker; surrounding whitespace stripped; `M + "Bash"` → unchanged.
+2. Runner: a polluted `bash` call dispatches; the turn's **last** tool result carries the
+   `follow_up` text and the `nudge` event is `name_recovered` with `via: tool_result`;
+   `tool_result.tool == "bash"` and `tool_raw` is the raw name through `cap_name`;
+   **three polluted calls in a row do not abort** (no strike); two polluted calls on one turn →
+   one nudge, on the second call's result; a polluted name with an unknown suffix still strikes
+   `unknown_tool`; a recovered `finish` on a verify-feedback turn continues and gets the nudge
+   through the `pending_finish` branch; a recovered `finish` that completes writes no `nudge`
+   record and the run's last `tool_result` has `tool_raw`; `run_end.last_tool_result.tool` equals
+   the capped transcript name for a 1 000-character unrecovered garbage name; the error text's
+   name is head+tail capped with `(name truncated)`; the merge order on a turn with a timeout
+   and a recovery is `timeout` then `name_recovered`.
+3. `classify_text_reply("…" + M + "bash{…}", "stop") == "text_tool_call"`.
+4. Transcript caps: `assistant.tool_calls[].name` and `tool_result.tool` through `cap_name`
+   (201 chars, head 120 + `…` + tail 80) for a long unrecovered name; `tool_raw` absent on a
+   clean call.
+5. bench: `NUDGE_KINDS[-3:]`, `len == 11`, the legend and the eleven-wide detail cell as an exact
+   column value; `EMPTY_REPLY_NUDGE_KINDS == tuple(runner.NUDGES)` holds.
+6. harvest: S6 fires for each of its three triggers separately — including an unrecovered name
+   whose prefix exceeds 120 characters, where the tail keeps the marker — and not for a clean run.
+7. Schema: `tool_raw` and `name_recovered` are documented tokens (`_doc_tokens()`), checked by a
+   runner-driven case that emits a recovered call and asserts every emitted `tool_result` key is
+   documented.
 
 ## 6. Acceptance
 
-- **F5 Devstral rows rerun serially** on the built branch (`tools/soak_driver.py`, the six
-  `F5-*-dev-*` rows of the #65/#66 plan, one driver, nothing else on the GPU): **no run ends
-  `aborted after 3 consecutive unknown_tool failures`**; the ledger row per run reports
-  `name_recovered` nudge count, status, strict-check verdict and wall. Expected from §1.2:
-  the 1024/2048 rows that had written their file before aborting now reach `finish`.
+- **F5 Devstral rows rerun serially** on the built branch: `tools/soak_driver.py
+  docs/superpowers/bench/2026-08-26-issue-67-f5-devstral-plan.jsonl` (the six `F5-*-dev-*` rows
+  of the #65/#66 plan, committed with this spec; one driver, nothing else on the GPU): **no run
+  ends `aborted after 3 consecutive unknown_tool failures`**; the ledger row per run reports
+  `name_recovered` nudges, `tool_raw` count, status, strict-check verdict and wall. Expected
+  from §1.2: the 1024/2048 rows that had written their file before aborting now reach `finish`.
 - Unit and live suites green at the final code HEAD (the live suite on the pytest image).
-- Built by `pipx run dirtywork==0.11.0`: the ledger's `## #67` section records every run —
-  and, for the first time, any zero-change feedback resume is refused by the runtime itself.
+- Built by `pipx run dirtywork==0.11.0` with `dirtywork-worker-pytest:0.11`: the ledger's
+  `## #67` section records every run — and, for the first time, any zero-change feedback
+  resume is refused by the runtime itself.
 
 ## 7. Files
 
-`dirtywork/toolspec.py` (`TOOL_CALL_MARKERS`, `recover_name`, error-text cap), `dirtywork/runner.py`
-(recovery call, nudge text + delivery, transcript caps, `_TEXT_TOOL_MARKERS` as the import),
+`dirtywork/toolspec.py` (`TOOL_CALL_MARKERS` by concatenation, `recover_name`, error-text cap),
+`dirtywork/runner.py` (recovery call, `first_recovered`, `NAME_RECOVERED_NUDGE` beside
+`TIMEOUT_NUDGE`, both delivery points, `cap_name`/`TOOL_NAME_TRANSCRIPT_CHARS`, `_TEXT_TOOL_MARKERS`
+as the import),
 `dirtywork/bench.py` (`NUDGE_KINDS`), `tools/soak_harvest.py` (S6), `docs/transcript-schema.md`,
-`docs/machine-contract.md`, `docs/operating.md`, `README.md`, tests as in §5, the ledger.
+`docs/machine-contract.md`, `docs/operating.md`, `README.md`, tests as in §5,
+`docs/superpowers/bench/2026-08-26-issue-67-f5-devstral-plan.jsonl`, the ledger.
