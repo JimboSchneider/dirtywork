@@ -50,6 +50,7 @@ never a removed or renamed one, no new event name, no new `via` value.
 
 | finding (lens) | fold |
 | **Build-time (C1/W4b, 2026-08-25)** test 24's premise — nested repositories created on the host are visible inside the worker container — is false in docker mode: the seed's `tar --exclude=./.git` drops every `.git` directory, so they arrive as plain files (#75). The content-addressed claim stands and is what the test asserts | §7 test 24: the test creates the same nested repositories inside the container (`git init`/`add`/`commit`, plus an unborn one) after asserting the seed flattened them, then `fp_docker == fp_host`; the store-growth and byte-identical-rewrite assertions unchanged. Passes live on both worker images |
+| **Build-time (F5 first pass, 2026-08-25 23:47, owner decision)** on LM Studio a cut tool call is dropped, so every cut-off reply reaches the runner as a text-only reply and takes a `FailureTracker` `empty_reply` strike before the six-cut-off check; three consecutive cut-offs abort at turn 4 on the old rule (1024 r2, both 2048 runs) and the six budget is unreachable for them — the 0.10.1 baseline's abort, unchanged | §3.3: a cut-off reply counts **only** toward `MAX_TRUNCATED_REPLIES` — no `empty_reply` strike on the text path, no `malformed_args` strike for a `length`-cut tool call (cases a and b); the three-strike rules remain for genuinely empty replies and non-`length` malformed calls; the "three in a row also end the run" clause leaves the text; §7 test 6's precedence case inverts; F5 rerun serially after |
 |---|---|
 | **B** chunk basis measures the visible reply; on LM Studio a cut tool call is dropped and only the prose preamble survives, so the target collapsed to the 200-char floor and §8's F5 recovery could not hold (model-behaviour ×2, acceptance) | §3.1 rewritten: basis = the cap unless the cut call's raw arguments are actually present; per-line ratio only from raw arguments; the text path says how much the harness *received*, never "after about N characters of content"; worked values recomputed |
 | **B** third worked value contradicted the code (200/5, not 1024/17) (model-behaviour) | §3.1: `chunk_target(max_tokens, cut_chars, cut_lines)` (v4 name: the cut call's own arguments); the example now follows from the code |
@@ -277,9 +278,9 @@ No change to the script was needed. **P4 is satisfied** (§8).
 
 1. **Every truncation message carries the numbers**: the `--max-tokens` cap, how much of the reply
    the harness received (characters; lines when the cut call's arguments are present), a per-call
-   target (characters and lines), and "cut-off reply *n* of *N*" (the text-reply nudge adds the
-   reminder that three in a row also end the run). Both texts — the text-reply nudge and the
-   tool-call result — derive the target from one function (§3.1).
+   target (characters and lines), and "cut-off reply *n* of *N*". Both texts — the text-reply
+   nudge and the tool-call result — derive the target from one function (§3.1). (v4 build-time
+   fold: the earlier "three in a row also end the run" reminder is gone with the rule it named.)
 2. **Truncations are counted per run and never reset.** A turn with a `length` reply that produced
    a truncation nudge or a `truncated_call_result` counts once; `MAX_TRUNCATED_REPLIES` (6) ends the
    run `model_error` with a reason naming the cap and the fix (§3.3). The existing three-consecutive
@@ -455,12 +456,15 @@ TRUNCATION_ABORT = ("aborted after {n} cut-off replies at --max-tokens {cap}: ra
   `truncated_call_result` of the tool loop (cases a and b). A `length` turn whose calls all parsed
   completely does not count (invariant 2; the pin at `tests/test_runner.py:537-554` stands).
 - After the increment, `truncations >= MAX_TRUNCATED_REPLIES` sets the turn's abort reason to
-  `TRUNCATION_ABORT.format(n=truncations, cap=self.max_tokens)` — on the text path right after
-  `failures.record("empty_reply")` (the consecutive-failure reason, if any, is computed first and
-  wins, as the existing code returns before reaching the budget check); on the tool path the
-  truncated result is still produced, recorded and appended (the transcript shows the cut call and
-  its result) and the loop's existing `if abort_reason is not None: return finish("model_error",
-  abort_reason)` (`:945`) ends the run. The nudge record on the text path is written before the
+  `TRUNCATION_ABORT.format(n=truncations, cap=self.max_tokens)`. **A cut-off reply counts only
+  toward this budget** (build-time fold, owner decision after the first F5 pass): on the text
+  path a `truncated` reply records its nudge and skips `failures.record("empty_reply")` — the
+  three-strike rule is for genuinely empty replies — and on the tool path a `length`-cut call
+  (cases a and b) skips `failures.record("malformed_args")`, which stays for non-`length`
+  parse errors. Neither resets the consecutive-failure streak. On the tool path the truncated
+  result is still produced, recorded and appended (the transcript shows the cut call and its
+  result) and the loop's existing `if abort_reason is not None: return finish("model_error",
+  abort_reason)` ends the run. The nudge record on the text path is written before the
   abort, exactly as the third strike is today (sparse `via`).
 - `run_end` / `run.json` / stdout JSON carry `truncations` (integer, **always**, `0` when none),
   seeded like `timeouts` in `_seed_payload` (`__main__.py:590-591`) and `_contract_fields` (`:609`).
@@ -1040,9 +1044,10 @@ Doubles and fixtures (named so no ad-hoc class grows):
 6. Budget abort (the S3 shape): `length` reply, successful `write_file`, `length`, … — six
    truncations interleaved with five successful writes → `model_error`,
    `final_message == TRUNCATION_ABORT.format(n=6, cap=…)`, `truncations == 6`, the aborting turn's
-   `nudge{truncated}` has no `via`; when the sixth truncation is also a third consecutive
-   `empty_reply` the consecutive reason wins; the tool-path sixth truncation still records its
-   `tool_result` before the abort.
+   `nudge{truncated}` has no `via`; three consecutive cut-off text replies do **not** abort (no
+   `empty_reply` strike — the budget is the only truncation abort) and a `length`-cut tool call
+   takes no `malformed_args` strike while a non-`length` parse error still does; the tool-path
+   sixth truncation still records its `tool_result` before the abort.
 7. `bench._abort_kind(TRUNCATION_ABORT.format(n=6, cap=1024)) == "truncated"`; the existing forms
    unchanged; `soak_harvest.detect_features` fires F5 for both the old and the new generic text
    (`tests/test_soak_tools.py`, beside the `:215/:294/:316` fixtures), and `:939` passes the dict.
