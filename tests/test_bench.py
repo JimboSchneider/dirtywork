@@ -862,7 +862,7 @@ def test_summarize_legend_and_detail_cell_list_ten_kinds(tmp_path, monkeypatch, 
     harness.update({"nudge_stray_kill": 3, "nudge_other": 0, "empty_reply": 0, "timeouts": 0,
                     "stalled": 0, "max_turns": 0, "sandbox_error": 0, "unchanged": 1, "abort_kind": None})
     results.write_text(json.dumps({"model": "m1", "task": "t", "repeat": 1, "slug": "s1",
-                                   "status": "completed", "turns": 3, "wall_s": 1.0,
+                                   "status": "unchanged", "turns": 3, "wall_s": 1.0,
                                    "prompt_tokens": 1, "completion_tokens": 1,
                                    "acceptance": "skipped", "guardrail_blocks": 0,
                                    "sandbox_resets": 0, "stray_kills": 3, "diff_stat": None,
@@ -871,7 +871,13 @@ def test_summarize_legend_and_detail_cell_list_ten_kinds(tmp_path, monkeypatch, 
     out = capsys.readouterr().out
     assert rc == 0
     assert "nudges: " + "/".join(bench.NUDGE_KINDS) in out
-    # The nudges column shows all 10 nudge kinds; failures column shows unchanged as a harness status
-    assert "0/0/0/0/0/0/3/0/0/0" in out
-    # The failures column should contain "unchanged"
-    assert "unchanged" in out
+    # The detail row for s1, cell by cell (format_table pads with spaces and no
+    # cell here contains one): the nudges cell is the full ten-wide value and
+    # the failures cell names the new status -- exact values, not substrings,
+    # so a widened or narrowed column is caught. `"unchanged" in out` would be
+    # vacuous: the legend line already contains "unchanged_finish".
+    (row,) = [line for line in out.splitlines() if line.startswith("m1 ")]
+    cells = row.split()
+    assert len(cells) == len(bench.DETAIL_COLUMNS)
+    assert cells[bench.DETAIL_COLUMNS.index("nudges")] == "0/0/0/0/0/0/3/0/0/0"
+    assert cells[bench.DETAIL_COLUMNS.index("failures")] == "unchanged"
