@@ -1,8 +1,9 @@
 # Marker-polluted tool names: recover the call, nudge the model (#67) — design
 
 *dirtywork 1.0 roadmap item 6 (soak finding S6). Written 2026-08-26 from the #48 soak's leg B and
-the #65/#66 build's F5 Devstral rows. Owner decision recorded in §0. Built by the released
-dirtywork 0.11.0 — the first build on a runtime that refuses a zero-change finish.*
+the #65/#66 build's F5 Devstral rows. Owner decision recorded in §0; v2 after a four-lens
+red-team (§0.1). Built by the released dirtywork 0.11.0 — the first build on a runtime that
+refuses a zero-change finish.*
 
 ## 0. The owner's decision
 
@@ -11,6 +12,18 @@ dirtywork 0.11.0 — the first build on a runtime that refuses a zero-change fin
 | 1 | When a tool call's name is not a registered tool but ends in one after a tool-call marker, **recover it**: dispatch the suffix tool with the given arguments, take no failure strike, and tell the model on that result to emit clean calls. A marker with a suffix that is not a tool, or a garbage name with no marker, keeps today's `unknown_tool` strike. (Jim, 2026-08-26 12:15; the alternatives — nudge-only per the issue's proposal, or recover-always — were declined.) | §3 |
 
 Everything else here is the designer's proposal for the owner's review: the nudge kind's name (`name_recovered`), the transcript caps, the error-text cap, and the acceptance run.
+
+### 0.1 Red-team fold (v2 — four lenses, 24 findings, 6 confirmed by adversarial verification)
+
+| finding | fold |
+|---|---|
+| **Major** `deliver` (`runner.py:638-657`) rides the turn's *last* tool result and is called at two continuation sites (`:1150-1167` pending-finish branch, `:1193-1198` end of turn) that v1's "attaches a nudge to its result" and cited range did not cover; the `timeout` nudge v1 said to mirror is a per-turn flag composed after the loop and never written on a turn that ends the run; the merge order in `transcript-schema.md:86, :117-119` had no place for the kind | §3.2 rewritten to the `timeout` pattern exactly; merge position stated; ending-turn rule stated; §3.5 and §5 updated |
+| **Major** the marker tuple is built by concatenation on purpose (`runner.py:91-94`; sp2.5 ruling): a local worker cannot emit its own template's control tags literally — v1's §3.1 code and §5.1 test strings spelled them out | §3.1/§3.3/§5: concatenation form kept and required, including `"[" + "TOOL_CALLS]"`; the worker brief says so |
+| **Major** `run_end`/`run.json` `last_tool_result.tool` (`note_last_tool_result`) stayed uncapped while the transcript's `tool` was capped | §3.2: the name is capped once, before both writes; schema rows named |
+| **Major** head-only caps (80/200) drop the marker and the suffix — the diagnostic tail — so S6's third trigger could never see them | §3.2/§3.4: head + `…` + tail form; S6 defined on `tool_result.tool` |
+| **Major** the nudge text's home was unstated; a `NUDGES` entry would break `EMPTY_REPLY_NUDGE_KINDS == tuple(runner.NUDGES)` | §3.2: `NAME_RECOVERED_NUDGE` module constant, never a `NUDGES` key |
+| **Major** the acceptance referenced a plan file in the session scratchpad | §6: the six rows committed at `docs/superpowers/bench/2026-08-26-issue-67-f5-devstral-plan.jsonl` |
+| Minors (7): evidence counts recounted from the transcripts (4 of 8 aborts, marker/length buckets); the nudge text must not hard-code one marker and `n` needed a definition; the `tool` schema row becomes open; "bench's tool mix" is the harvest's; the pinned counts and enumerations named one by one; a schema test for `tool_raw` named; `runs show` does not read `tool_raw` (consistent with the operating.md entry) | folded in place |
 
 ## 1. Problem and evidence
 
@@ -38,22 +51,23 @@ soak) until the third strike.
 - **Soak leg B** (`~/.dirtywork/bench/soak-B.jsonl`, label `F5-default-dev`, S6 in the ledger):
   the run aborted after its file was complete, 709 s.
 - **The #65/#66 build's F5 Devstral rows** (ledger `## #65/#66`, F5 serial pass and tie-breaks,
-  2026-08-26 00:0x–01:07, branch runtime at `00ea23d`): 5 of 8 Devstral runs ended
+  2026-08-26 00:0x–01:07, branch runtime at `00ea23d`): 4 of 8 Devstral runs ended
   `aborted after 3 consecutive unknown_tool failures` (1024-r2 at turn 30 after writing all
-  401 rows; 2048-r1 turn 9; 2048-r2 turn 24 after writing the file; 4096-r1 turn 18), and the
-  three that completed carried polluted names in their transcripts too. Every one of the
+  401 rows; 2048-r1 turn 9; 2048-r2 turn 24 after writing the file; 4096-r1 turn 18); a fifth
+  (1024-r1) aborted on the #65 six-cut-off budget with no polluted call; the three that
+  completed carried polluted names in their transcripts too. Every one of the
   **28** polluted calls across those transcripts has the same shape:
 
   | property | count |
   |---|---|
   | suffix after the last marker is a registered tool | 28 / 28 (`bash` 23, `read_file` 3, `finish` 2) |
   | `arguments` is valid JSON for that tool | 28 / 28 |
-  | markers in the name | one: 4 · two: 22 · seven: 1 |
-  | name length | < 500 chars: 21 · 500–1 000: 6 · 1 410: 1 |
+  | markers in the name | one: 4 · two: 23 · seven: 1 |
+  | name length | < 500 chars: 22 · 500–1 000: 5 · 1 410: 1 |
   | prefix content | echoed prior tool result (`exit code: 0\n…`, `Appended to …`) or the model's own prose, once a previous `ERROR: unknown tool '…'` text |
 
-  Measured with a script over the run dirs' `transcript.jsonl` `assistant.tool_calls`
-  entries; the run slugs are on the ledger rows.
+  Measured over the run dirs' `transcript.jsonl` `assistant.tool_calls` entries (recounted by
+  the red-team's verifier; the run slugs are on the ledger rows).
 
 So the call is *recoverable*, not merely nudgeable: the tool and its arguments are intact, only
 the name field carries the model's stray prose. Refusing it costs the turn, and three refusals
