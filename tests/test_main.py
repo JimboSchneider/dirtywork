@@ -13,9 +13,9 @@ from dirtywork.sandbox.docker_cli import DockerError
 from .provider_doubles import (DictProvider, PreflightProvider, patch_provider,
                                text_body, tool_call_body)
 
-# Fix item 3: the six 0.8 evidence keys must be present -- with these null/
-# empty defaults -- on EVERY stdout payload, including the two failure paths
-# where runner.run() never returns.
+# Fix item 3: the six 0.8 evidence keys plus changed must be present -- with
+# these null/empty defaults -- on EVERY stdout payload, including the two
+# failure paths where runner.run() never returns.
 _DEFAULT_EVIDENCE = {
     "stuck_on": None,
     "files_changed": [],
@@ -26,6 +26,7 @@ _DEFAULT_EVIDENCE = {
     "trimmed_turns": 0,
     "timeouts": 0,
     "truncations": 0,
+    "changed": None,
 }
 
 
@@ -1633,9 +1634,125 @@ def test_resume_inherits_the_prior_provider(tmp_path, monkeypatch, capsys):
     repo = _host_repo(tmp_path)
     assert m2.main(["run", "--repo", str(repo), "--sandbox", "none", "task"]) == 0
     slug = json.loads(capsys.readouterr().out)["run_dir"].rsplit("/", 1)[-1]
+    patch_provider(monkeypatch, m2, lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))
     assert m2.main(["resume", str(tmp_path / "runs" / slug), "--feedback", "keep going"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["provider"] == "openai"
+
+
+def test_resume_change_guard_end_to_end_host_mode(tmp_path, monkeypatch, capsys):
+    import dirtywork.__main__ as m
+    # Create a fresh run with no write (should end completed, changed=False)
+    def client_no_change():
+        return _ScriptedClient(
+            base_url=None,
+            responses=[
+                {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "f1", "type": "function", "function": {"name": "finish",
+                     "arguments": json.dumps({"summary": "no change 1"})}}]}],
+                 "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+                {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "f2", "type": "function", "function": {"name": "finish",
+                     "arguments": json.dumps({"summary": "no change 2"})}}]}],
+                 "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+            ])
+    
+    m2 = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    
+    # Fresh run that finishes twice with no write
+    patch_provider(monkeypatch, m2, client_no_change)
+    rc = m2.main(["run", "--repo", str(repo), "--sandbox", "none", "task"])
+    assert rc == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["status"] == "completed"
+    assert first["changed"] is False
+    run_dir1 = Path(first["run_dir"])
+    
+    # Resume without feedback (no write) -> unchanged
+    patch_provider(monkeypatch, m2, client_no_change)
+    rc = m2.main(["resume", str(run_dir1), "--feedback", "keep going"])
+    assert rc == 0
+    resume_no_write = json.loads(capsys.readouterr().out)
+    assert resume_no_write["status"] == "unchanged"
+    assert resume_no_write["changed"] is False
+    assert resume_no_write["truncations"] == 0
+    assert "changed_reason" not in resume_no_write
+    
+    # Resume with write -> completed
+    def client_with_write():
+        return _ScriptedClient(
+            base_url=None,
+            responses=[
+                {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "w1", "type": "function", "function": {"name": "write_file",
+                     "arguments": json.dumps({"path": "resumed.txt", "content": "x\n"})}}]}],
+                 "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+                {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "f1", "type": "function", "function": {"name": "finish",
+                     "arguments": json.dumps({"summary": "changed and verified"})}}]}],
+                 "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+            ])
+    patch_provider(monkeypatch, m2, client_with_write)
+    rc = m2.main(["resume", str(run_dir1), "--feedback", "write a file"])
+    assert rc == 0
+    resume_with_write = json.loads(capsys.readouterr().out)
+    assert resume_with_write["status"] == "completed"
+    assert resume_with_write["changed"] is True
+    run_dir2 = Path(resume_with_write["run_dir"])
+    
+    # Fresh run that finishes twice (no change)
+    patch_provider(monkeypatch, m2, client_no_change)
+    rc = m2.main(["run", "--repo", str(repo), "--sandbox", "none", "task"])
+    assert rc == 0
+    fresh = json.loads(capsys.readouterr().out)
+    assert fresh["status"] == "completed"
+    assert fresh["changed"] is False
+
+
+def test_resume_change_guard_stderr_on_guard_off(tmp_path, monkeypatch, capsys):
+    import dirtywork.__main__ as m
+    from pathlib import Path
+    
+    # Create a client that changes on second try (simulating guard-off run)
+    def client_with_guard_off():
+        return _ScriptedClient(
+            base_url=None,
+            responses=[
+                {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "f1", "type": "function", "function": {"name": "finish",
+                     "arguments": json.dumps({"summary": "no change 1"})}}]}],
+                 "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+                {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "f2", "type": "function", "function": {"name": "finish",
+                     "arguments": json.dumps({"summary": "no change 2"})}}]}],
+                 "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+            ])
+    
+    m2 = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    
+    # Create a fresh run with status="unchanged"
+    patch_provider(monkeypatch, m2, client_with_guard_off)
+    rc = m2.main(["run", "--repo", str(repo), "--sandbox", "none", "task"])
+    assert rc == 0
+    first = json.loads(capsys.readouterr().out)
+    
+    # Simulate a guard-off run (changed_reason present in extra)
+    run_dir = Path(first["run_dir"])
+    run_data = json.loads((run_dir / "run.json").read_text())
+    run_data["status"] = "unchanged"
+    run_data["changed_reason"] = "second finish call returned no changes"
+    (run_dir / "run.json").write_text(json.dumps(run_data))
+    
+    # Resume with feedback should run but print stderr line about guard off
+    patch_provider(monkeypatch, m2, client_with_guard_off)
+    rc = m2.main(["resume", str(run_dir), "--feedback", "keep going"])
+    assert rc == 0
+    
+    # Capture stderr to check for guard-off line
+    err = capsys.readouterr().err
+    assert "dirtywork: change guard off:" in err
 
 
 def test_runs_list_dispatches_to_cmd_list(tmp_path, monkeypatch, capsys):
@@ -2047,6 +2164,32 @@ def test_resume_of_a_completed_run_without_feedback_is_refused(tmp_path, monkeyp
     assert f"run '{slug}' ended 'completed'" in err
     assert "--feedback" in err
     assert len(list((tmp_path / "runs").iterdir())) == 1     # nothing created
+
+
+def test_resume_of_an_unchanged_run_without_feedback_is_refused(tmp_path, monkeypatch, capsys):
+    # First create a prior run with status "unchanged"
+    m = _install_host_harness(monkeypatch, tmp_path)
+    repo = _host_repo(tmp_path)
+    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "t"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    slug = Path(payload["run_dir"]).name
+    run_dir = Path(payload["run_dir"])
+    
+    # Simulate a prior run with status "unchanged"
+    data = json.loads((run_dir / "run.json").read_text())
+    data["status"] = "unchanged"
+    (run_dir / "run.json").write_text(json.dumps(data))
+    
+    # Resume without feedback should fail
+    assert m.main(["resume", slug]) == 2
+    err = capsys.readouterr().err
+    assert f"run '{slug}' ended 'unchanged' (the worker changed nothing)" in err
+    assert "--feedback" in err
+    assert len(list((tmp_path / "runs").iterdir())) == 1     # nothing created
+    
+    # Resume with feedback should succeed
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url))
+    assert m.main(["resume", slug, "--feedback", "keep going"]) == 0
 
 
 def test_resume_feedback_file_and_its_refusals(tmp_path, monkeypatch, capsys):
