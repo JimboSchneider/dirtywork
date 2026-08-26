@@ -245,6 +245,13 @@ def detect_features(run_json: dict, events: list) -> list:
     if has_stall_nudge or run_json.get("status") == "stalled":
         fired.append("F8")
 
+    # S14: a harness-ended run due to unchanged status, unchanged_finish or no_change nudge,
+    # or run.json["changed"] being False.
+    has_unchanged_nudge = any(e.get("event") == "nudge" and e.get("kind") in ("unchanged_finish", "no_change")
+                              for e in events)
+    if has_unchanged_nudge or run_json.get("status") == "unchanged" or run_json.get("changed") is False:
+        fired.append("S14")
+
     # F10: a resume that carried reviewer feedback (`resume --feedback`):
     # run.json.feedback is the verbatim text, null otherwise.
     if run_json.get("feedback"):

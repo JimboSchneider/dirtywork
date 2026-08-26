@@ -383,6 +383,27 @@ def test_f8_fires_on_stall_nudge_or_stalled_status(harvest):
     assert "F8" in harvest.detect_features(BASE_RUN_JSON, events)
     run_json = {**BASE_RUN_JSON, "status": "stalled"}
     assert "F8" in harvest.detect_features(run_json, [])
+    # F8 is NOT affected by unchanged_finish nudge
+    events = [{"ts": _ts(0), "event": "nudge", "kind": "unchanged_finish", "turn": 1}]
+    assert "F8" not in harvest.detect_features(BASE_RUN_JSON, events)
+
+
+def test_s14_fires_on_unchanged_signals(harvest):
+    # S14 fires on unchanged_finish nudge
+    events = [{"ts": _ts(0), "event": "nudge", "kind": "unchanged_finish", "turn": 1}]
+    assert "S14" in harvest.detect_features(BASE_RUN_JSON, events)
+    # S14 fires on no_change nudge
+    events = [{"ts": _ts(0), "event": "nudge", "kind": "no_change", "turn": 1}]
+    assert "S14" in harvest.detect_features(BASE_RUN_JSON, events)
+    # S14 fires on status "unchanged"
+    run_json = {**BASE_RUN_JSON, "status": "unchanged"}
+    assert "S14" in harvest.detect_features(run_json, [])
+    # S14 fires on changed=False
+    run_json = {**BASE_RUN_JSON, "changed": False}
+    assert "S14" in harvest.detect_features(run_json, [])
+    # S14 does NOT fire when changed=True and no guard nudges
+    run_json = {**BASE_RUN_JSON, "changed": True}
+    assert "S14" not in harvest.detect_features(run_json, [])
 
 
 def test_f9_fires_on_pinned_image(harvest):

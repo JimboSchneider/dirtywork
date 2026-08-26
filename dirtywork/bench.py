@@ -45,10 +45,12 @@ BENCH_REPOS = Path(__file__).resolve().parent.parent / "bench" / "repos"
 BENCH_HOME = rundir.BENCH_HOME
 # Order is the order the NUDGES column prints in; the plain summary's legend
 # line spells it out and must stay in step.
-NUDGE_KINDS = ("stall", "empty", "truncated", "text_tool_call", "timeout", "malformed_entry", "stray_kill", "sandbox_reset")
+NUDGE_KINDS = ("stall", "empty", "truncated", "text_tool_call", "timeout", "malformed_entry", "stray_kill", "sandbox_reset", "no_change", "unchanged_finish")
 # The kinds whose nudge path records a FailureTracker "empty_reply" -- exactly
 # runner.NUDGES's keys, in that order (a test asserts the two stay equal).
 EMPTY_REPLY_NUDGE_KINDS = ("truncated", "empty", "text_tool_call")
+# Status codes that indicate a harness-ended run (as opposed to model completion).
+_STATUS_FAILURES = ("stalled", "max_turns", "sandbox_error", "unchanged")
 ACCEPTANCE_MEMORY = "2g"
 ACCEPTANCE_CPUS = "2"
 ACCEPTANCE_PIDS = 256
@@ -275,7 +277,7 @@ def _harness_failures(counts: dict, status, final_message, timeouts=0) -> dict:
     failures["nudge_other"] = counts["nudge_other"]
     failures["empty_reply"] = non_stall
     failures["timeouts"] = int(timeouts or 0)
-    for name in ("stalled", "max_turns", "sandbox_error"):
+    for name in _STATUS_FAILURES:
         failures[name] = 1 if status == name else 0
     failures["abort_kind"] = _abort_kind(final_message)
     return failures
@@ -428,7 +430,7 @@ def _verdict_for(row: dict) -> tuple:
 
 
 def _failure_cell(harness: dict) -> str:
-    parts = [name for name in ("stalled", "max_turns", "sandbox_error") if harness.get(name)]
+    parts = [name for name in _STATUS_FAILURES if harness.get(name)]
     if harness.get("empty_reply"):
         parts.append(f"empty_reply={harness['empty_reply']}")
     if harness.get("timeouts"):

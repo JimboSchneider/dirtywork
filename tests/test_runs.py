@@ -11,6 +11,7 @@ import pytest
 
 from dirtywork import rundir, runs
 from dirtywork.budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB
+from dirtywork.changes import UNCHANGED_PLAIN, UNCHANGED_REQUIRED
 from dirtywork.resume import stash_dir_for
 from dirtywork.sandbox import RunArtifacts, docker_args
 
@@ -1366,6 +1367,18 @@ def test_timed_out_is_its_own_outcome_class_in_both_views(tmp_path, monkeypatch,
     assert "- **timeouts:** 2" in md
 
 
+def test_tool_result_outcome_returns_not_finished_for_finish_results(tmp_path, monkeypatch):
+    # finish results other than "run finished" return "not finished"
+    assert runs._tool_result_outcome("run not finished: verify failed (exit 1)", tool="finish") == "not finished"
+    assert runs._tool_result_outcome("run not finished: nothing changed", tool="finish") == "not finished"
+    assert runs._tool_result_outcome("run not finished: change check could not run (x)", tool="finish") == "not finished"
+    # UNCHANGED_REQUIRED and UNCHANGED_PLAIN
+    assert runs._tool_result_outcome(UNCHANGED_REQUIRED, tool="finish") == "not finished"
+    assert runs._tool_result_outcome(UNCHANGED_PLAIN, tool="finish") == "not finished"
+    # But "run finished" returns ok
+    assert runs._tool_result_outcome("run finished", tool="finish") == "ok"
+
+
 def test_render_markdown_notes_a_truncated_files_changed_list():
     doc = runs.render_markdown("slug1", {"files_changed": ["a.py", "b.py"],
                                          "files_changed_truncated": True}, [])
@@ -1374,6 +1387,32 @@ def test_render_markdown_notes_a_truncated_files_changed_list():
                                            "files_changed_truncated": False}, [])
     assert "**files changed (2)**" in plain
     assert "list truncated" not in plain
+
+
+def test_show_renders_truncations_and_changed_fields(tmp_path, monkeypatch, capsys):
+    # truncations and changed False both render
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    run_dir = _write_run(tmp_path / "runs", "tr1", {
+        "slug": "tr1", "status": "unchanged", "task": "t",
+        "truncations": 2, "changed": False,
+    })
+    assert runs.cmd_show(argparse.Namespace(slug="tr1", diff=False, markdown=True)) == 0
+    md = capsys.readouterr().out
+    assert "- **truncations:** 2" in md
+    assert "- **changed:** False" in md
+
+
+def test_show_skips_none_truncations_and_changed_reason(tmp_path, monkeypatch, capsys):
+    # changed None and no changed_reason → neither line
+    monkeypatch.setattr(rundir, "RUNS_DIR", tmp_path / "runs")
+    run_dir = _write_run(tmp_path / "runs", "tr2", {
+        "slug": "tr2", "status": "completed", "task": "t",
+        "changed": None,
+    })
+    assert runs.cmd_show(argparse.Namespace(slug="tr2", diff=False, markdown=True)) == 0
+    md = capsys.readouterr().out
+    assert "- **changed:**" not in md
+    assert "changed_reason" not in md
 
 
 ADVERSARIAL_FOLLOW_UP = "```\n> quoted\n# heading\n</details>\r\nlast line"
