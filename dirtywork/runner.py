@@ -21,6 +21,18 @@ from .tools import is_timeout_result, net_change, parse_exit_code
 from .toolspec import TOOL_CALL_MARKERS as _TEXT_TOOL_MARKERS
 
 MAX_ASSISTANT_TEXT_CHARS = 64_000
+TOOL_NAME_TRANSCRIPT_CHARS = 200
+
+
+def cap_name(name: str) -> str:
+    """Transcript/run.json cap for a tool name, head AND tail so a marker-polluted
+    name keeps its diagnostic end (spec #67 §3.2): 200 chars pass through; longer
+    names become the first 120 + "…" + the last 80 (201 chars)."""
+    if len(name) <= TOOL_NAME_TRANSCRIPT_CHARS:
+        return name
+    return name[:120] + "…" + name[-80:]
+
+
 # Spec §2: end-of-run evidence caps. These match the transcript's own preview
 # caps on purpose — the values are taken from the very same variables the
 # transcript records, so a payload and a transcript can never disagree.
@@ -691,7 +703,7 @@ class Runner:
                 fields["placeholder"] = EMPTY_REPLY_PLACEHOLDER
             self.transcript.write(
                 "assistant", text=transcript_text,
-                tool_calls=[{"name": tc.name, "arguments": (tc.raw_arguments or "")[:2000]}
+                tool_calls=[{"name": cap_name(tc.name), "arguments": (tc.raw_arguments or "")[:2000]}
                             for tc in tool_calls],
                 # Spec §1.5: an OPEN enum. Adapters do not guarantee a
                 # string (Anthropic passes an unknown stop reason through
@@ -1059,10 +1071,17 @@ class Runner:
 
             pending_finish = None
             timed_out_this_turn = False   # spec §4.3: at most ONE nudge per turn
+            first_recovered = None
             for tc in tool_calls:
                 name = tc.name
                 raw_args = tc.raw_arguments or "{}"
                 args = tc.arguments
+                
+                raw_name = name
+                name, marker, cut = self.registry.recover_name(name)
+                if marker is not None and first_recovered is None:
+                    first_recovered = (raw_name, marker, name, cut)
+                
                 abort_reason = None
                 terminal = False
                 if tc.error is not None:
@@ -1119,12 +1138,15 @@ class Runner:
                         timeouts += 1
                         timed_out_this_turn = True
                         timed_out_fields["timed_out"] = True
-                record = self.transcript.write("tool_result", tool=name,
+                transcript_name = cap_name(name)
+                raw_fields = {"tool_raw": cap_name(raw_name)} if marker is not None else {}
+                record = self.transcript.write("tool_result", tool=transcript_name,
                                                args=raw_args[:500],
                                                result=self.registry.transcript_preview(name, result),
-                                               **timed_out_fields)
+                                               **timed_out_fields,
+                                               **raw_fields)
                 if name != FINISH_TOOL:
-                    note_last_tool_result(name, raw_args, result)
+                    note_last_tool_result(transcript_name, raw_args, result)
                 msg = tool_message(tc.id, result)
                 messages.append(msg)
                 turn_tool_msgs.append((msg, record))

@@ -4106,3 +4106,138 @@ def test_run_ending_on_a_k_check_turn_reuses_it(parts):
 
     run_end = next(e for e in events if e["event"] == "run_end")
     assert run_end["changed"] is True
+
+
+# Spec #67 §3.2 tests: marker-polluted tool names
+
+def test_polluted_bash_name_is_recovered_and_dispatched(parts):
+    # polluted bash call, then a finish
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("c1", "exit code: 0\n1,User1" + TOOL_CALLS + "bash",
+                               {"command": "echo hi"})]),
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "completed"
+
+    events = [json.loads(l) for l in (tmp / "t.jsonl").read_text().splitlines()]
+    tool_results = [e for e in events if e["event"] == "tool_result"]
+    # find the bash result (not finish)
+    bash_tr = next(tr for tr in tool_results if tr["tool"] == "bash")
+    assert bash_tr["tool"] == "bash"
+    assert "hi" in bash_tr["result"]
+    assert bash_tr.get("tool_raw") == "exit code: 0\n1,User1" + TOOL_CALLS + "bash"
+
+
+def test_three_polluted_calls_in_a_row_do_not_abort(parts):
+    # three polluted bash calls on three turns, then a finish
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("c1", "exit code: 0\n1,User1" + TOOL_CALLS + "bash",
+                               {"command": "echo a"})]),
+        _resp(tool_calls=[_call("c2", "exit code: 0\n1,User2" + TOOL_CALLS + "bash",
+                               {"command": "echo b"})]),
+        _resp(tool_calls=[_call("c3", "exit code: 0\n1,User3" + TOOL_CALLS + "bash",
+                               {"command": "echo c"})]),
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "completed"
+    assert "consecutive" not in (result.final_message or "")
+
+
+def test_unrecovered_polluted_name_still_strikes_unknown_tool(parts):
+    # three calls with unrecovered polluted names (unknown tool)
+    wt, registry, sandbox, transcript, tmp = parts
+    name = "x" + TOOL_CALLS + "nope"
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("c1", name, {"xxx": "yyy"})]),
+        _resp(tool_calls=[_call("c2", name, {"xxx": "yyy"})]),
+        _resp(tool_calls=[_call("c3", name, {"xxx": "yyy"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "model_error"
+    assert result.final_message == "aborted after 3 consecutive unknown_tool failures"
+
+    events = [json.loads(l) for l in (tmp / "t.jsonl").read_text().splitlines()]
+    tool_results = [e for e in events if e["event"] == "tool_result"]
+    assert len(tool_results) == 3
+    for tr in tool_results:
+        # unknown tool: no tool_raw key, name unchanged (short enough)
+        assert "tool_raw" not in tr
+        assert tr["tool"] == name
+
+
+def test_recorded_names_are_capped_head_and_tail(parts):
+    # long unrecovered name (about 1000 chars), then finish
+    wt, registry, sandbox, transcript, tmp = parts
+    long_name = "p" * 950 + TOOL_CALLS + "zzzz"
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("c1", long_name, {"xxx": "yyy"})]),
+        _resp(content="done"),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "completed"
+
+    events = [json.loads(l) for l in (tmp / "t.jsonl").read_text().splitlines()]
+    assistants = [e for e in events if e["event"] == "assistant"]
+    tool_results = [e for e in events if e["event"] == "tool_result"]
+
+    # assistant tool_calls[0]["name"] has length 201 and contains "…"
+    # (there are 2 assistants: one with the long name call, one for content reply)
+    ac = assistants[0]["tool_calls"][0]
+    assert len(ac["name"]) == 201
+    assert "…" in ac["name"]
+
+    # tool_result's tool equals cap_name(name)
+    tr = next(tr for tr in tool_results if tr["tool"] != "finish")
+    assert len(tr["tool"]) == 201
+    assert "…" in tr["tool"]
+
+    # run_end's last_tool_result["tool"] == cap_name(name)
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert len(run_end["last_tool_result"]["tool"]) == 201
+    assert "…" in run_end["last_tool_result"]["tool"]
+
+
+def test_tool_raw_absent_on_a_clean_call(parts):
+    # normal bash call's tool_result has no tool_raw key
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("c1", "bash", {"command": "echo hi"})]),
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "completed"
+
+    events = [json.loads(l) for l in (tmp / "t.jsonl").read_text().splitlines()]
+    tool_results = [e for e in events if e["event"] == "tool_result"]
+    # find the bash result (not finish)
+    tr = next(tr for tr in tool_results if tr["tool"] == "bash")
+    assert "tool_raw" not in tr
+
+
+def test_cap_name():
+    from dirtywork.runner import cap_name, TOOL_NAME_TRANSCRIPT_CHARS
+    # exactly 200 chars pass through
+    assert cap_name("a" * 200) == "a" * 200
+    # exactly 201 chars becomes 120 + "…" + 80 = 201
+    assert cap_name("a" * 201) == "a" * 120 + "…" + "a" * 80
+    # verify lengths
+    assert len(cap_name("a" * 201)) == 201
