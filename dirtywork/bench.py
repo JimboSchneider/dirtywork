@@ -45,7 +45,7 @@ BENCH_REPOS = Path(__file__).resolve().parent.parent / "bench" / "repos"
 BENCH_HOME = rundir.BENCH_HOME
 # Order is the order the NUDGES column prints in; the plain summary's legend
 # line spells it out and must stay in step.
-NUDGE_KINDS = ("stall", "empty", "truncated", "text_tool_call", "timeout", "malformed_entry", "stray_kill", "sandbox_reset", "no_change", "unchanged_finish")
+NUDGE_KINDS = ("stall", "empty", "truncated", "text_tool_call", "timeout", "malformed_entry", "stray_kill", "sandbox_reset", "no_change", "unchanged_finish", "name_recovered")
 # The kinds whose nudge path records a FailureTracker "empty_reply" -- exactly
 # runner.NUDGES's keys, in that order (a test asserts the two stay equal).
 EMPTY_REPLY_NUDGE_KINDS = ("truncated", "empty", "text_tool_call")
