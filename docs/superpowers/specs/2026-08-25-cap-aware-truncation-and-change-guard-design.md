@@ -49,6 +49,7 @@ never a removed or renamed one, no new event name, no new `via` value.
 ### 0.1 Red-team fold (v2)
 
 | finding (lens) | fold |
+| **Build-time (C1/W4b, 2026-08-25)** test 24's premise — nested repositories created on the host are visible inside the worker container — is false in docker mode: the seed's `tar --exclude=./.git` drops every `.git` directory, so they arrive as plain files (#75). The content-addressed claim stands and is what the test asserts | §7 test 24: the test creates the same nested repositories inside the container (`git init`/`add`/`commit`, plus an unborn one) after asserting the seed flattened them, then `fp_docker == fp_host`; the store-growth and byte-identical-rewrite assertions unchanged. Passes live on both worker images |
 |---|---|
 | **B** chunk basis measures the visible reply; on LM Studio a cut tool call is dropped and only the prose preamble survives, so the target collapsed to the 200-char floor and §8's F5 recovery could not hold (model-behaviour ×2, acceptance) | §3.1 rewritten: basis = the cap unless the cut call's raw arguments are actually present; per-line ratio only from raw arguments; the text path says how much the harness *received*, never "after about N characters of content"; worked values recomputed |
 | **B** third worked value contradicted the code (200/5, not 1024/17) (model-behaviour) | §3.1: `chunk_target(max_tokens, cut_chars, cut_lines)` (v4 name: the cut call's own arguments); the example now follows from the code |
@@ -1145,8 +1146,12 @@ Doubles and fixtures (named so no ad-hoc class grows):
     prints `truncations` and a non-null `changed`, skips a null one; `_tool_result_outcome` says
     `not finished` for the four new texts — T4.
 24. Live (`tests/test_docker_live.py`, docker-marked): `DockerSandbox.bash(FINGERPRINT_SCRIPT)` in
-    the worker image under the #61 gitfile layout equals the host fingerprint of the same tree;
-    a second call after `write_file` differs; a byte-identical rewrite does not; `/gitdir/objects`
+    the worker image under the #61 gitfile layout equals the host fingerprint of the same tree —
+    a root with a committed nested repository and an unborn one; the nested repositories are
+    created on both sides, because the docker seed (`tar --exclude=./.git`) drops every `.git`
+    directory and delivers a host-side nested repository as plain files (#75; the test asserts
+    that flattening first, then rebuilds them in the container with `git init`) — a second
+    call after a new untracked file differs; a byte-identical rewrite does not; `/gitdir/objects`
     has the same file count before and after (the scratch object directory).
 
 ## 8. Acceptance evidence, gates, and the build
