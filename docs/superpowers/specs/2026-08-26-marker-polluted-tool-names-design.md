@@ -324,7 +324,7 @@ Unit (`tests/test_toolspec.py`, `tests/test_runner.py`, `tests/test_bench.py`,
   strict-check verdict and wall. Expected
   from §1.2: the 1024/2048 rows that had written their file before aborting now reach `finish`.
 - Unit and live suites green at the final code HEAD (the live suite on the pytest image).
-- Built by `pipx run dirtywork==0.11.0` with `dirtywork-worker-pytest:0.11`: the ledger's
+- Built by `pipx run dirtywork==0.11.1` with `dirtywork-worker-pytest:0.11`: the ledger's
   `## #67` section records every run — and, for the first time, any zero-change feedback
   resume is refused by the runtime itself.
 
