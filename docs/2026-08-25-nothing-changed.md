@@ -1,7 +1,6 @@
 # Nothing Changed
 
-*dirtywork 1.0's change guard, issues #65 and #66. Written 2026-08-25. Draft — the
-bracketed slots fill in when the branch's own acceptance run finishes.*
+*dirtywork 0.11's change guard, issues #65 and #66. Written 2026-08-25, published 2026-08-26.*
 
 ---
 
@@ -207,14 +206,17 @@ Some other things the ledger says:
 | Per-task review + feedback rounds | the finish-time fingerprint taken after the sandbox notices it should have carried had already been drained |
 | A reviewer's test | the start fingerprint outside the interrupt handling |
 | C1 acceptance (13 runs, host and container) | the guard refusing a false "matches 'prior\n'" claim and the worker then fixing the byte |
-| The live suite on the branch | test 24's own premise: the docker seed drops every nested `.git`, so a host-side nested repository arrives as plain files (#75) — and twelve scripted live tests that finish without changing anything ran out of script when the guard asked for a second completion |
+| The live suite on the branch | test 24's own premise: on a macOS host the docker seed (bsdtar) drops every nested `.git`, so a host-side nested repository arrives as plain files (#75) — and twelve scripted live tests that finish without changing anything ran out of script when the guard asked for a second completion |
+| CI on the release PR, after the merge | the other half of #75: GNU tar on the Linux runner keeps the nested `.git` that bsdtar drops, so test 24 as merged had asserted my laptop; fixed in 0.11.0's own PR |
 
 Every row is something that survived the rows above it. Same lesson as the last post,
 one turn further along: the reviews outranked the spec, and then the build outranked the
 reviews — by producing the very failure the branch exists to stop, on the record, while
 the fix was four tasks out.
 
-PR #76 — "Closes #65, closes #66" — [[merged as …, suite re-verified on main]].
+PR #76 — "Closes #65, closes #66" — merged the next morning as `136b69d`, suite re-verified on
+main, and released as **0.11.0** the same hour, so the next build runs on a runtime that has
+the guard.
 
 If you want to check the arithmetic: the six data points are §1.3 of
 [the spec](https://github.com/JimboSchneider/dirtywork/blob/main/docs/superpowers/specs/2026-08-25-cap-aware-truncation-and-change-guard-design.md),
@@ -238,5 +240,5 @@ briefs, reviewed every branch, finished the tasks the local model couldn't after
 feedback rounds, and drafted this post from the session record. The local model
 (qwen3-coder-next via LM Studio) did the typing inside the released dirtywork. Jim
 chose the approach, reviewed the spec (four corrections and two clarifications, all
-folded), watched the RAM, edited this post, and [[decided what merged]]. Same process
+folded), watched the RAM, edited this post, approved the merge and cut the release. Same process
 as the earlier posts.*
