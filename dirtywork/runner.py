@@ -102,11 +102,10 @@ _TEXT_TOOL_MARKERS = tuple("<" + m for m in ("tool_call>", "function=", "functio
 NUDGES = {
     "truncated": ("Your reply was cut off at the --max-tokens cap of {cap} tokens (about "
                   "{cap_chars} characters); the harness received only {received} characters of "
-                  "it — cut-off reply {n} of {max} (the run ends at {max}; three in a row also "
-                  "end it). Keep each tool call's content under about {target_chars} characters "
-                  "(about {target_lines} lines; split long lines if you must) and emit one tool "
-                  "call at a time; for a large file, write_file the first part and append_file "
-                  "the rest."),
+                  "it — cut-off reply {n} of {max}. Keep each tool call's content under about "
+                  "{target_chars} characters (about {target_lines} lines; split long lines if "
+                  "you must) and emit one tool call at a time; for a large file, write_file the "
+                  "first part and append_file the rest."),
     "empty": ("Your reply contained no tool call and no answer. Continue the task with a "
               "tool call, or call finish(summary=...) if the task is complete."),
     "text_tool_call": ("Your reply contained a tool call written as text; the harness only "
@@ -1028,13 +1027,15 @@ class Runner:
                     return None
                 if kind == "truncated":
                     note_truncation()
-                kind_record = self.transcript.write("nudge", kind=kind, turn=turns)
-                abort_reason = failures.record("empty_reply")
-                if abort_reason is not None:
-                    return finish("model_error", abort_reason)
-                if truncations >= MAX_TRUNCATED_REPLIES and kind == "truncated":
-                    return finish("model_error",
-                                  TRUNCATION_ABORT.format(n=truncations, cap=self.max_tokens))
+                    kind_record = self.transcript.write("nudge", kind=kind, turn=turns)
+                    if truncations >= MAX_TRUNCATED_REPLIES:
+                        return finish("model_error",
+                                      TRUNCATION_ABORT.format(n=truncations, cap=self.max_tokens))
+                else:
+                    kind_record = self.transcript.write("nudge", kind=kind, turn=turns)
+                    abort_reason = failures.record("empty_reply")
+                    if abort_reason is not None:
+                        return finish("model_error", abort_reason)
                 stalled, stall_text, stall_record = check_progress()
                 if stalled is not None:
                     return stalled
@@ -1068,11 +1069,11 @@ class Runner:
                 abort_reason = None
                 terminal = False
                 if tc.error is not None:
-                    abort_reason = failures.record("malformed_args")
                     if finish_reason == "length":
                         note_truncation(tc)
                         result = truncated_call_result(name, tc.raw_arguments, trunc)
                     else:
+                        abort_reason = failures.record("malformed_args")
                         result = f"ERROR: {tc.error}"
                     if abort_reason is None and truncations >= MAX_TRUNCATED_REPLIES:
                         abort_reason = TRUNCATION_ABORT.format(n=truncations, cap=self.max_tokens)
@@ -1082,9 +1083,7 @@ class Runner:
                     # "successfully", so tc.error is None -- but a required
                     # parameter is simply absent. Checked BEFORE dispatch so
                     # the registry's bad_args path never swallows it: this
-                    # is a truncation, not an argument mistake, and it is
-                    # accounted as malformed_args exactly like case (a).
-                    abort_reason = failures.record("malformed_args")
+                    # is a truncation, not an argument mistake.
                     note_truncation(tc)
                     result = truncated_call_result(name, tc.raw_arguments, trunc)
                     if abort_reason is None and truncations >= MAX_TRUNCATED_REPLIES:

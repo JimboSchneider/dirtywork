@@ -551,22 +551,22 @@ def test_recovered_path_is_truncated_and_rendered_with_repr(parts):
     assert "z" * 201 not in tool_msgs[0]["content"]
 
 
-def test_length_truncation_with_empty_args_counts_as_malformed_args_not_bad_args(parts):
+def test_length_truncation_with_empty_args_counts_as_truncation_not_malformed_args(parts):
     # Spec §1.3 case (b): a truncated Anthropic tool_use whose `input` came
     # back {} PARSES, so tc.error is None -- but a required parameter is
-    # missing. It must be caught before dispatch and accounted as
-    # malformed_args, so three of them abort on THAT kind rather than bad_args.
+    # missing. It must be counted as truncation (not malformed_args), so three
+    # of them would hit the truncation budget (6) before aborting.
     wt, registry, sandbox, transcript, tmp = parts
     empty = _resp(tool_calls=[_call("c", "write_file", {})], finish_reason="length",
                   usage={"prompt_tokens": 1, "completion_tokens": 1})
-    provider = FakeProvider([empty, empty, empty])
+    provider = FakeProvider([empty, empty, empty, _resp(content="done")])
     result = Runner(provider, registry, sandbox, transcript, model="m").run("s", "t")
     transcript.close()
-    assert result.status == "model_error"
-    assert result.final_message == "aborted after 3 consecutive malformed_args failures"
+    assert result.status == "completed"
     results = [e["result"] for e in _events(tmp) if e["event"] == "tool_result"]
     tc = _call("c", "write_file", {})
     assert results[0] == _generic_truncation("write_file", tc)
+    # Should NOT mention bad arguments
     assert "bad arguments" not in results[0]
 
 
@@ -676,6 +676,48 @@ def test_three_consecutive_malformed_tool_calls_aborts(parts):
     r = Runner(provider, registry, sandbox, transcript, model="m")
     result = r.run("s", "t")
     transcript.close()
+    assert result.status == "model_error"
+
+
+def test_length_cut_tool_call_takes_no_malformed_strike(parts):
+    # Spec #65: A truncated tool call with finish_reason="length" and
+    # malformed_args does NOT count as a malformed_args strike (only truncation).
+    wt, registry, sandbox, transcript, tmp = parts
+    cut_bad_args = _resp(tool_calls=[_bad_args("c", "write_file",
+                                               '{"path": "x", "content": "abc}')],
+                         finish_reason="length")
+
+    def write(i):
+        return _resp(tool_calls=[_call(f"w{i}", "write_file",
+                                       {"path": "rows.csv", "content": f"row{i}\n"})])
+
+    # Three consecutive bad args with finish_reason="length"
+    provider = FakeProvider([cut_bad_args, cut_bad_args, cut_bad_args,
+                             write(0), _resp(tool_calls=[_call("f", "finish", {"summary": "done"})])])
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_tokens=1024)
+    result = r.run("s", "t")
+    transcript.close()
+
+    # The run should complete (not abort on malformed_args)
+    assert result.status == "completed"
+    # And it should have 3 truncations
+    assert result.extra["truncations"] == 3
+
+
+def test_three_consecutive_malformed_tool_calls_aborts_non_length(parts):
+    # Spec #65: Malformed_args with non-length finish_reason still counts
+    # as a strike and can abort after 3 consecutive.
+    wt, registry, sandbox, transcript, tmp = parts
+    # Use finish_reason="stop" (not length) for the malformed_args
+    bad = _resp(tool_calls=[_bad_args("c", "write_file",
+                                      '{"path": "x", "content": "abc}')],
+                finish_reason="stop")
+
+    provider = FakeProvider([bad, bad, bad])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+    # Should still abort due to consecutive malformed_args failures
     assert result.status == "model_error"
 
 
@@ -3050,11 +3092,9 @@ def test_six_cutoff_replies_end_the_run(parts):
     assert "via" not in truncated_nudges[-1]
 
 
-def test_consecutive_rule_wins_over_the_cutoff_budget(parts):
-    # Spec #65: FailureTracker's 3-consecutive-empty_reply abort is checked
-    # BEFORE the run-level truncation budget on the same turn, so three
-    # cut-off replies in a row end the run as a consecutive-failure abort --
-    # even though the third of them is also the 6th cut-off reply overall.
+def test_three_consecutive_cutoffs_do_not_abort_the_budget_does(parts):
+    # Spec #65: three cut-off replies in a row do NOT end the run as consecutive
+    # failures; only the run-level truncation budget (6 cuts total) ends it.
     wt, registry, sandbox, transcript, tmp = parts
     cut = _resp(content="header", finish_reason="length")
 
@@ -3068,7 +3108,29 @@ def test_consecutive_rule_wins_over_the_cutoff_budget(parts):
     transcript.close()
 
     assert result.status == "model_error"
-    assert result.final_message == "aborted after 3 consecutive empty_reply failures"
+    assert result.final_message == TRUNCATION_ABORT.format(n=6, cap=1024)
+    assert result.extra["truncations"] == 6
+
+
+def test_three_consecutive_cutoffs_then_a_write_continues(parts):
+    # Spec #65: three consecutive cut-off replies followed by a successful
+    # tool call and finish does not trigger the consecutive failures abort.
+    wt, registry, sandbox, transcript, tmp = parts
+    cut = _resp(content="header", finish_reason="length")
+
+    def write(i):
+        return _resp(tool_calls=[_call(f"w{i}", "write_file",
+                                       {"path": "rows.csv", "content": f"row{i}\n"})])
+
+    provider = FakeProvider([cut, cut, cut, write(0), _resp(tool_calls=[_call("f", "finish", {"summary": "done"})])])
+
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_tokens=1024, max_turns=20)
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "completed"
+    assert result.extra["truncations"] == 3
+    assert "consecutive" not in (result.final_message or "")
 
 
 def test_sixth_truncation_on_the_tool_path_records_its_result(parts):
@@ -3093,6 +3155,9 @@ def test_sixth_truncation_on_the_tool_path_records_its_result(parts):
 
     assert result.status == "model_error"
     assert result.final_message == TRUNCATION_ABORT.format(n=6, cap=1024)
+    assert result.extra["truncations"] == 6
+    # The run did NOT end for malformed_args (it ended for truncation budget)
+    assert "malformed_args" not in (result.final_message or "")
 
     events = _events(tmp)
     tool_results = [e for e in events if e["event"] == "tool_result"]
