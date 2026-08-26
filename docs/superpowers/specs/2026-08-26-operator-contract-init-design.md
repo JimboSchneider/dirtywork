@@ -190,7 +190,7 @@ CI: the `wheel-smoke` job in §3.5.
 | A5 | Suite and CI green | Full suite passes; `wheel-smoke` job green on the PR |
 | A6 | Size | Rendered skill ≤ 200 lines (test 14) |
 | A7 | Nothing is injected into the worker prompt | Test 17 green (the narrowed claim; see §4) |
-| A8 | No stale contract path | `grep -rln 'docs/machine-contract.md' --include='*.md' --include='*.py' --exclude-dir=superpowers --exclude-dir=.worktrees .` prints exactly one path: `./docs/machine-contract.md` (the stub) |
+| A8 | No stale contract reference | `grep -rn 'machine-contract\.md' --include='*.md' --include='*.py' --exclude-dir=superpowers --exclude-dir=.worktrees . \| grep -v 'dirtywork/contract/machine-contract.md'` prints only lines from `./docs/machine-contract.md` (the stub's own text). Matches every spelling — `docs/machine-contract.md`, bare relative `machine-contract.md#…` as in `operating.md` — and passes only when each one has become the canonical `dirtywork/contract/machine-contract.md` path or URL |
 
 ## 7. Files
 
