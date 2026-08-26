@@ -840,8 +840,15 @@ def test_docker_live_timed_out_grep_leaves_no_stray(tmp_path, monkeypatch, capsy
 
 @pytest.mark.docker
 def test_docker_live_fingerprint_matches_host_and_leaves_the_store_alone(tmp_path):
+    """Spec §7 test 24. The fingerprint is content-addressed, so the same tree
+    hashes identically on the host and inside the worker container, nested
+    repositories included. The nested repositories are created on both sides:
+    the docker seed (`tar --exclude=./.git`) drops every `.git` directory, not
+    only the root one, so a nested repository made on the host arrives in the
+    container as plain files -- a seed property, not the guard's -- and the
+    container gets its own `git init` for the same content."""
     import subprocess
-    from dirtywork.changes import FINGERPRINT_SCRIPT, FINGERPRINT_TIMEOUT, fingerprint
+    from dirtywork.changes import fingerprint
     from dirtywork.sandbox import docker_args
     from dirtywork.sandbox.docker import DockerSandbox
     from dirtywork.sandbox.docker_cli import resolve_image
@@ -863,12 +870,19 @@ def test_docker_live_fingerprint_matches_host_and_leaves_the_store_alone(tmp_pat
 
     fp_host, reason = fingerprint(HostSandbox(worktree))
     assert reason is None and fp_host is not None
+    assert len(fp_host.splitlines()) == 4        # root tree, HEAD, two nested trees
 
-    cfg = docker_args.DockerConfig(**_image_kwargs())   # the file's helper: image override via DIRTYWORK_LIVE_IMAGE if set; check its return shape and adapt (it may return {"image": ...} or {})
+    cfg = docker_args.DockerConfig(**_image_kwargs())
     run_dir = tmp_path / "rundir"; run_dir.mkdir()
     sb = DockerSandbox(cfg, run_dir=run_dir, image_ref=resolve_image(cfg.image))
     try:
         sb.start(worktree, repo, "livefp", base_commit, branch=None, seed_from_worktree=True)
+        assert sb.bash("find . -name .git -mindepth 2", 60) == "exit code: 0\n"   # the seed flattened them
+        fp_flat, reason = fingerprint(sb)
+        assert reason is None and len(fp_flat.splitlines()) == 2 and fp_flat != fp_host
+        sb.bash("git -C vendor/inner init -q && git -C vendor/inner add -A && "
+                "git -C vendor/inner -c user.email=t@t -c user.name=t commit -qm init && "
+                "git -C vendor/unborn init -q", 60)
         fp_docker, reason = fingerprint(sb)
         assert reason is None
         assert fp_docker == fp_host              # content-addressed, sorted: identical on host and in the container
