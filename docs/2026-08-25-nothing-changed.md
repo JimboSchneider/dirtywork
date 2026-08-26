@@ -1,7 +1,6 @@
 # Nothing Changed
 
-*dirtywork 1.0's change guard, issues #65 and #66. Written 2026-08-25. Draft — the
-bracketed slots fill in when the branch's own acceptance run finishes.*
+*dirtywork 0.11's change guard, issues #65 and #66. Written 2026-08-25, published 2026-08-26.*
 
 ---
 
@@ -214,7 +213,9 @@ one turn further along: the reviews outranked the spec, and then the build outra
 reviews — by producing the very failure the branch exists to stop, on the record, while
 the fix was four tasks out.
 
-PR #76 — "Closes #65, closes #66" — [[merged as …, suite re-verified on main]].
+PR #76 — "Closes #65, closes #66" — merged the next morning as `136b69d`, suite re-verified on
+main, and released as **0.11.0** the same hour, so the next build runs on a runtime that has
+the guard.
 
 If you want to check the arithmetic: the six data points are §1.3 of
 [the spec](https://github.com/JimboSchneider/dirtywork/blob/main/docs/superpowers/specs/2026-08-25-cap-aware-truncation-and-change-guard-design.md),
@@ -238,5 +239,5 @@ briefs, reviewed every branch, finished the tasks the local model couldn't after
 feedback rounds, and drafted this post from the session record. The local model
 (qwen3-coder-next via LM Studio) did the typing inside the released dirtywork. Jim
 chose the approach, reviewed the spec (four corrections and two clarifications, all
-folded), watched the RAM, edited this post, and [[decided what merged]]. Same process
+folded), watched the RAM, edited this post, approved the merge and cut the release. Same process
 as the earlier posts.*
