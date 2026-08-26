@@ -321,7 +321,7 @@ class ProgressTracker:
     output not seen before (volatile tokens ignored). Only repeats are idle.
     Nudge once per idle streak at stall_turns // 2; report 'stalled' at
     stall_turns. stall_turns <= 0 disables detection.
-    
+
     Spec #66 §4.2: a write that changed nothing (+0 -0) is not progress;
     an unknown result shape still is (fail open)."""
 

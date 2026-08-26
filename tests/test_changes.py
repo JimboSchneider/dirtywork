@@ -184,13 +184,13 @@ def _git(*args, cwd):
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
 def test_real_script_on_the_host(tmp_path: Path):
     """Test the real fingerprint script on a repository with nested repositories.
-    
+
     Spec §7 test 11b: one host test that runs the real fingerprint script
     (dirtywork.changes.FINGERPRINT_SCRIPT, added in W2b-1) on a repository with
     nested repositories.
     """
     import os
-    
+
     # 1. Build a simple repo in tmp_path
     repo = tmp_path
     _git("init", "-q", cwd=repo)
@@ -202,10 +202,10 @@ def test_real_script_on_the_host(tmp_path: Path):
     from dirtywork.changes import FINGERPRINT_SCRIPT, FINGERPRINT_TIMEOUT
     raw = HostSandbox(tmp_path).bash(FINGERPRINT_SCRIPT, FINGERPRINT_TIMEOUT)
     fp, reason = parse_fingerprint(raw)
-    
+
     assert reason is None
     assert fp is not None
-    
+
     # Count hex lines (40 chars, lowercase)
     hex_pattern = re.compile(r"^[0-9a-f]{40}$")
     hex_lines = [line for line in raw.split("\n") if hex_pattern.match(line)]
@@ -249,10 +249,10 @@ def test_real_script_on_the_host(tmp_path: Path):
     # Run again - should have 7 hash lines
     raw2 = HostSandbox(tmp_path).bash(FINGERPRINT_SCRIPT, FINGERPRINT_TIMEOUT)
     fp2, reason2 = parse_fingerprint(raw2)
-    
+
     code = parse_exit_code(raw2)
     assert code == 0, f"Expected exit code 0, got {code}"
-    
+
     hex_lines2 = [line for line in raw2.split("\n") if hex_pattern.match(line)]
     assert len(hex_lines2) == 7, f"Expected 7 hash lines (root tree/HEAD + 5 repos), got {len(hex_lines2)}: {hex_lines2}"
     assert fp2 is not None
@@ -261,7 +261,7 @@ def test_real_script_on_the_host(tmp_path: Path):
     (vendor_unborn / "new.txt").write_text("new in unborn\n")
     raw3 = HostSandbox(tmp_path).bash(FINGERPRINT_SCRIPT, FINGERPRINT_TIMEOUT)
     fp3, reason3 = parse_fingerprint(raw3)
-    
+
     # The fingerprint should change because vendor/unborn changed
     hex_lines3 = [line for line in raw3.split("\n") if hex_pattern.match(line)]
     # Compare sets: symmetric difference should have 2 elements
@@ -274,15 +274,15 @@ def test_real_script_on_the_host(tmp_path: Path):
     # 5. Rewrite README.md byte-identically
     readme_content = (tmp_path / "README.md").read_bytes()
     (tmp_path / "README.md").write_bytes(readme_content)
-    
+
     raw4 = HostSandbox(tmp_path).bash(FINGERPRINT_SCRIPT, FINGERPRINT_TIMEOUT)
     fp4, reason4 = parse_fingerprint(raw4)
-    
+
     assert fp4 == fp3, "Byte-identical rewrite should not change fingerprint"
 
     # 6. Count files under real object store before and after a run with new file
     import os
-    
+
     # Get the real git objects path
     result = subprocess.run(
         ["git", "rev-parse", "--git-path", "objects"],
@@ -292,38 +292,38 @@ def test_real_script_on_the_host(tmp_path: Path):
         text=True
     )
     real_objects = result.stdout.strip()
-    
+
     def count_files(path):
         """Count files under a path recursively."""
         count = 0
         for root, dirs, files in os.walk(path):
             count += len(files)
         return count
-    
+
     before_count = count_files(real_objects)
-    
+
     # Create a new 100KB untracked file
     large_file = tmp_path / "large.dat"
     large_file.write_bytes(os.urandom(100 * 1024))  # 100 KB
-    
+
     raw5 = HostSandbox(tmp_path).bash(FINGERPRINT_SCRIPT, FINGERPRINT_TIMEOUT)
-    
+
     after_count = count_files(real_objects)
     assert after_count == before_count, f"Object store file count should not change: {before_count} -> {after_count}"
 
     # 7. Count entries of tempfile.gettempdir() before and after
     import tempfile
-    
+
     temp_dir = tempfile.gettempdir()
-    
+
     def count_temp_entries(path):
         """Count entries in a directory."""
         return len(os.listdir(path))
-    
+
     before_temp = count_temp_entries(temp_dir)
-    
+
     raw6 = HostSandbox(tmp_path).bash(FINGERPRINT_SCRIPT, FINGERPRINT_TIMEOUT)
-    
+
     after_temp = count_temp_entries(temp_dir)
     assert after_temp == before_temp, f"Temp dir entry count should not change: {before_temp} -> {after_temp}"
 

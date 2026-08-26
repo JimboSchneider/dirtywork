@@ -1064,7 +1064,7 @@ def test_parse_change_head_and_net_change_round_trip():
     new = "a\nc\n"  # changes b to c: +1 line, -1 line
     new_same = "a\nb\n"  # identical to old: +0 -0
     new_less = "a\n"  # removed b: +0 -1
-    
+
     for v in ("Wrote", "Edited", "Appended to", "Inserted into",
               "Applied 1 edit to", "Applied 2 edits to"):
         # With actual changes
@@ -1072,42 +1072,42 @@ def test_parse_change_head_and_net_change_round_trip():
         parsed = tools.parse_change_head(result)
         assert parsed == (v, "f.txt", 1, 1), f"failed for verb={v}"
         assert tools.net_change(result) is True, f"net_change failed for verb={v}"
-        
+
         # With no changes (byte-identical)
         result = tools.describe_change("f.txt", old, new_same, verb=v)
         parsed = tools.parse_change_head(result)
         assert parsed == (v, "f.txt", 0, 0), f"failed for verb={v} (no changes)"
         assert tools.net_change(result) is False, f"net_change failed for verb={v} (no changes)"
-        
+
         # With removals
         result = tools.describe_change("f.txt", old, new_less, verb=v)
         parsed = tools.parse_change_head(result)
         assert parsed == (v, "f.txt", 0, 1), f"failed for verb={v} (removal)"
         assert tools.net_change(result) is True, f"net_change failed for verb={v} (removal)"
-    
+
     # describe_write new file form
     result = tools.describe_write("new.txt", None, "x\n", 3)
     parsed = tools.parse_change_head(result)
     assert parsed is None, "describe_write new file form should return None for parse_change_head"
     assert tools.net_change(result) is True, "new file should be net_change=True"
-    
+
     # (diff omitted: file too large) head
     many_lines = "\n".join(f"line{i}" for i in range(tools.DESCRIBE_DIFF_MAX_LINES + 1))
     result = tools.describe_change("big.txt", "", many_lines, verb="Wrote")
     parsed = tools.parse_change_head(result)
     assert parsed is None, "diff omitted head should return None"
     assert tools.net_change(result) is None, "diff omitted should be net_change=None"
-    
+
     # ERROR:/BLOCKED: results
     assert tools.parse_change_head("ERROR: no such file") is None
     assert tools.net_change("ERROR: no such file") is None
-    
+
     assert tools.parse_change_head("BLOCKED: permission denied") is None
     assert tools.net_change("BLOCKED: permission denied") is None
-    
+
     # [output truncated at ...] and other non-matching strings
     assert tools.parse_change_head("[output truncated at 10000 chars]") is None
     assert tools.net_change("[output truncated at 10000 chars]") is None
-    
+
     assert tools.parse_change_head("hello") is None
     assert tools.net_change("hello") is None
