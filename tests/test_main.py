@@ -246,6 +246,100 @@ def test_main_docker_mode_happy_path_with_fake_sandbox(tmp_path, monkeypatch, ca
     assert run_end["diff_stat"] == "1 file changed"
 
 
+def test_guard_off_prints_one_stderr_line(tmp_path, monkeypatch, capsys):
+    # Spec #66 §4.1/§4.3: a sandbox whose bash can't produce a fingerprint
+    # (here, FakeDockerSandbox.bash always returns "") turns the change
+    # guard off for the whole run. main() surfaces that exactly once, as a
+    # single stderr line -- never silently, never more than once.
+    import subprocess
+    import dirtywork.__main__ as m
+    from dirtywork.sandbox import RunArtifacts
+    from dirtywork.sandbox.docker import DockerSandbox as RealDockerSandbox
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
+                    "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
+                   capture_output=True)
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(m, "docker_version", lambda *a, **k: "29.7.2")
+    monkeypatch.setattr(m, "resolve_image", lambda *a, **k: "dirtywork/worker@sha256:" + "a" * 64)
+    monkeypatch.setattr(m, "validate_objects_dir", lambda repo: repo / ".git" / "objects")
+    from dirtywork.procs import Captured
+    monkeypatch.setattr(m.docker_cli, "run",
+                        lambda argv, *, timeout, stdin=None: Captured(1, b"", False, False))
+
+    class FakeWatchdog:
+        def start(self):
+            pass
+
+    class FakeDockerSandbox:
+        check_name_collision = staticmethod(RealDockerSandbox.check_name_collision)
+
+        def __init__(self, cfg, *, run_dir, transcript=None, image_ref=None):
+            self.cfg = cfg
+            self.run_dir = run_dir
+            self.uid = 501
+            self.gid = 20
+            self.image_ref = image_ref
+            self.watchdog = FakeWatchdog()
+
+        def start(self, worktree, repo, slug, base_commit, **kwargs):
+            pass
+
+        def stop(self):
+            pass
+
+        def read_file(self, path: str, offset: int = 0, limit: int = 400) -> str:
+            return ""
+
+        def write_file(self, path: str, content: str) -> str:
+            return ""
+
+        def edit_file(self, path: str, old_string: str, new_string: str) -> str:
+            return ""
+
+        def list_dir(self, path: str = ".") -> str:
+            return ""
+
+        def grep(self, pattern: str, path: str = ".", glob: str | None = None,
+                 timeout: int = 30) -> str:
+            return ""
+
+        def bash(self, command: str, timeout: int = 120) -> str:
+            return ""      # never a valid fingerprint -> guard off for this run
+
+        def finalize(self):
+            return RunArtifacts(export_status="ok", diff_stat="1 file changed")
+
+    monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
+
+    class WritingFakeClient(DictProvider):
+        def reply(self, model, messages, tools):
+            if self.calls == 1:
+                return {"choices": [{"message": {
+                    "role": "assistant", "content": None,
+                    "tool_calls": [{"id": "c1", "type": "function",
+                                     "function": {"name": "write_file",
+                                                  "arguments": json.dumps(
+                                                      {"path": "hi.txt", "content": "hi\n"})}}],
+                }}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+            return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    patch_provider(monkeypatch, m, lambda base_url=None: WritingFakeClient(base_url))
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])  # --sandbox defaults to docker
+    assert rc == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["status"] == "completed"
+
+    guard_lines = [line for line in captured.err.splitlines()
+                  if line.startswith("dirtywork: change guard off: ")]
+    assert len(guard_lines) == 1, captured.err
+
+
 def _docker_mode_scaffold(tmp_path, monkeypatch):
     """Shared setup for the docker-mode CLI tests below: a one-commit repo,
     LM Studio and docker preflight faked, run dir under tmp_path. Returns
@@ -1640,119 +1734,75 @@ def test_resume_inherits_the_prior_provider(tmp_path, monkeypatch, capsys):
     assert payload["provider"] == "openai"
 
 
-def test_resume_change_guard_end_to_end_host_mode(tmp_path, monkeypatch, capsys):
-    import dirtywork.__main__ as m
-    # Create a fresh run with no write (should end completed, changed=False)
-    def client_no_change():
-        return _ScriptedClient(
-            base_url=None,
-            responses=[
-                {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
-                    {"id": "f1", "type": "function", "function": {"name": "finish",
-                     "arguments": json.dumps({"summary": "no change 1"})}}]}],
-                 "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
-                {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
-                    {"id": "f2", "type": "function", "function": {"name": "finish",
-                     "arguments": json.dumps({"summary": "no change 2"})}}]}],
-                 "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
-            ])
-    
-    m2 = _install_host_harness(monkeypatch, tmp_path)
-    repo = _host_repo(tmp_path)
-    
-    # Fresh run that finishes twice with no write
-    patch_provider(monkeypatch, m2, client_no_change)
-    rc = m2.main(["run", "--repo", str(repo), "--sandbox", "none", "task"])
+def test_fresh_run_zero_change_completes_with_changed_false(tmp_path, monkeypatch, capsys):
+    # Spec #66 §4.3: a fresh run (no --feedback) does not require a change.
+    # A plain "done" reply with nothing written is refused once (a nudge),
+    # then accepted on the second "done" -- the run completes with
+    # changed=False rather than being forced to "unchanged".
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
     assert rc == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["status"] == "completed"
+    assert payload["changed"] is False
+    assert "dirtywork: change guard off:" not in captured.err   # guard is ON (real worktree)
+
+    run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert run_json["status"] == "completed"
+    assert run_json["changed"] is False
+    assert run_json["truncations"] == 0
+    assert "changed_reason" not in run_json
+
+
+def test_resume_feedback_zero_change_ends_unchanged(tmp_path, monkeypatch, capsys):
+    # Spec #66 §4.3: a --feedback resume DOES require a change. Two finishes
+    # with nothing written -- the first refused, the second accepted -- ends
+    # the run as "unchanged" (not "completed"), rc 1.
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
     first = json.loads(capsys.readouterr().out)
     assert first["status"] == "completed"
-    assert first["changed"] is False
-    run_dir1 = Path(first["run_dir"])
-    
-    # Resume without feedback (no write) -> unchanged
-    patch_provider(monkeypatch, m2, client_no_change)
-    rc = m2.main(["resume", str(run_dir1), "--feedback", "keep going"])
-    assert rc == 0
-    resume_no_write = json.loads(capsys.readouterr().out)
-    assert resume_no_write["status"] == "unchanged"
-    assert resume_no_write["changed"] is False
-    assert resume_no_write["truncations"] == 0
-    assert "changed_reason" not in resume_no_write
-    
-    # Resume with write -> completed
-    def client_with_write():
-        return _ScriptedClient(
-            base_url=None,
-            responses=[
-                {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
-                    {"id": "w1", "type": "function", "function": {"name": "write_file",
-                     "arguments": json.dumps({"path": "resumed.txt", "content": "x\n"})}}]}],
-                 "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
-                {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
-                    {"id": "f1", "type": "function", "function": {"name": "finish",
-                     "arguments": json.dumps({"summary": "changed and verified"})}}]}],
-                 "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
-            ])
-    patch_provider(monkeypatch, m2, client_with_write)
-    rc = m2.main(["resume", str(run_dir1), "--feedback", "write a file"])
-    assert rc == 0
-    resume_with_write = json.loads(capsys.readouterr().out)
-    assert resume_with_write["status"] == "completed"
-    assert resume_with_write["changed"] is True
-    run_dir2 = Path(resume_with_write["run_dir"])
-    
-    # Fresh run that finishes twice (no change)
-    patch_provider(monkeypatch, m2, client_no_change)
-    rc = m2.main(["run", "--repo", str(repo), "--sandbox", "none", "task"])
-    assert rc == 0
-    fresh = json.loads(capsys.readouterr().out)
-    assert fresh["status"] == "completed"
-    assert fresh["changed"] is False
+    slug = Path(first["run_dir"]).name
+
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url, [
+        tool_call_body("finish", {"summary": "no change 1"}, call_id="f1"),
+        tool_call_body("finish", {"summary": "no change 2"}, call_id="f2"),
+    ]))
+    rc = m.main(["resume", slug, "--feedback", "keep going"])
+    assert rc == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "unchanged"
+    assert out["changed"] is False
+
+    run_json = json.loads((Path(out["run_dir"]) / "run.json").read_text())
+    assert run_json["status"] == "unchanged"
+    assert run_json["changed"] is False
+    assert "changed_reason" not in run_json
 
 
-def test_resume_change_guard_stderr_on_guard_off(tmp_path, monkeypatch, capsys):
-    import dirtywork.__main__ as m
-    from pathlib import Path
-    
-    # Create a client that changes on second try (simulating guard-off run)
-    def client_with_guard_off():
-        return _ScriptedClient(
-            base_url=None,
-            responses=[
-                {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
-                    {"id": "f1", "type": "function", "function": {"name": "finish",
-                     "arguments": json.dumps({"summary": "no change 1"})}}]}],
-                 "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
-                {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
-                    {"id": "f2", "type": "function", "function": {"name": "finish",
-                     "arguments": json.dumps({"summary": "no change 2"})}}]}],
-                 "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
-            ])
-    
-    m2 = _install_host_harness(monkeypatch, tmp_path)
-    repo = _host_repo(tmp_path)
-    
-    # Create a fresh run with status="unchanged"
-    patch_provider(monkeypatch, m2, client_with_guard_off)
-    rc = m2.main(["run", "--repo", str(repo), "--sandbox", "none", "task"])
-    assert rc == 0
+def test_resume_feedback_with_a_write_completes_changed_true(tmp_path, monkeypatch, capsys):
+    # Same shape as the zero-change resume above, but a write_file lands
+    # between the two finish calls: the second finish's fingerprint differs
+    # from the run's starting fingerprint, so it is accepted immediately as
+    # "completed" with changed=True.
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
     first = json.loads(capsys.readouterr().out)
-    
-    # Simulate a guard-off run (changed_reason present in extra)
-    run_dir = Path(first["run_dir"])
-    run_data = json.loads((run_dir / "run.json").read_text())
-    run_data["status"] = "unchanged"
-    run_data["changed_reason"] = "second finish call returned no changes"
-    (run_dir / "run.json").write_text(json.dumps(run_data))
-    
-    # Resume with feedback should run but print stderr line about guard off
-    patch_provider(monkeypatch, m2, client_with_guard_off)
-    rc = m2.main(["resume", str(run_dir), "--feedback", "keep going"])
+    assert first["status"] == "completed"
+    slug = Path(first["run_dir"]).name
+
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url, [
+        tool_call_body("finish", {"summary": "no change 1"}, call_id="f1"),
+        tool_call_body("write_file", {"path": "resumed.txt", "content": "x\n"}, call_id="w1"),
+        tool_call_body("finish", {"summary": "changed and verified"}, call_id="f2"),
+    ]))
+    rc = m.main(["resume", slug, "--feedback", "write a file"])
     assert rc == 0
-    
-    # Capture stderr to check for guard-off line
-    err = capsys.readouterr().err
-    assert "dirtywork: change guard off:" in err
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "completed"
+    assert out["changed"] is True
+
+    run_json = json.loads((Path(out["run_dir"]) / "run.json").read_text())
+    assert run_json["status"] == "completed"
+    assert run_json["changed"] is True
 
 
 def test_runs_list_dispatches_to_cmd_list(tmp_path, monkeypatch, capsys):
@@ -2166,30 +2216,31 @@ def test_resume_of_a_completed_run_without_feedback_is_refused(tmp_path, monkeyp
     assert len(list((tmp_path / "runs").iterdir())) == 1     # nothing created
 
 
-def test_resume_of_an_unchanged_run_without_feedback_is_refused(tmp_path, monkeypatch, capsys):
-    # First create a prior run with status "unchanged"
-    m = _install_host_harness(monkeypatch, tmp_path)
-    repo = _host_repo(tmp_path)
-    assert m.main(["run", "--repo", str(repo), "--sandbox", "none", "t"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    slug = Path(payload["run_dir"]).name
-    run_dir = Path(payload["run_dir"])
-    
-    # Simulate a prior run with status "unchanged"
-    data = json.loads((run_dir / "run.json").read_text())
-    data["status"] = "unchanged"
-    (run_dir / "run.json").write_text(json.dumps(data))
-    
-    # Resume without feedback should fail
-    assert m.main(["resume", slug]) == 2
+def test_resume_of_an_unchanged_run_requires_feedback(tmp_path, monkeypatch, capsys):
+    # Build a genuinely "unchanged" prior run (a --feedback resume whose two
+    # finishes wrote nothing, per test_resume_feedback_zero_change_ends_unchanged
+    # above), then resume THAT run without --feedback -- it must be refused
+    # exactly the way a "completed" run is, just with the "unchanged" wording.
+    m, repo, rc = _first_run(monkeypatch, tmp_path, None)
+    first = json.loads(capsys.readouterr().out)
+    assert first["status"] == "completed"
+    slug = Path(first["run_dir"]).name
+
+    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url, [
+        tool_call_body("finish", {"summary": "no change 1"}, call_id="f1"),
+        tool_call_body("finish", {"summary": "no change 2"}, call_id="f2"),
+    ]))
+    rc = m.main(["resume", slug, "--feedback", "keep going"])
+    assert rc == 1
+    unchanged = json.loads(capsys.readouterr().out)
+    assert unchanged["status"] == "unchanged"
+    unchanged_slug = Path(unchanged["run_dir"]).name
+
+    assert m.main(["resume", unchanged_slug]) == 2
     err = capsys.readouterr().err
-    assert f"run '{slug}' ended 'unchanged' (the worker changed nothing)" in err
-    assert "--feedback" in err
-    assert len(list((tmp_path / "runs").iterdir())) == 1     # nothing created
-    
-    # Resume with feedback should succeed
-    patch_provider(monkeypatch, m, lambda base_url=None: _ScriptedClient(base_url))
-    assert m.main(["resume", slug, "--feedback", "keep going"]) == 0
+    assert f"run '{unchanged_slug}' ended 'unchanged' (the worker changed nothing)" in err
+    assert "pass --feedback to tell it what to change" in err
+    assert len(list((tmp_path / "runs").iterdir())) == 2     # nothing new created
 
 
 def test_resume_feedback_file_and_its_refusals(tmp_path, monkeypatch, capsys):
