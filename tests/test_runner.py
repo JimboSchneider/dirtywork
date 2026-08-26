@@ -39,7 +39,9 @@ from dirtywork.sandbox.host import HostSandbox
 from dirtywork.builtin_tools import default_registry
 from dirtywork.budget import BudgetExceeded
 from dirtywork.sandbox import SandboxError
-from dirtywork.changes import FINGERPRINT_SCRIPT, UNCHANGED_PLAIN, UNCHANGED_REQUIRED
+from dirtywork.changes import (FINGERPRINT_SCRIPT, UNCHANGED_PLAIN, UNCHANGED_REQUIRED,
+                                NO_CHANGE_SINCE_START_REQUIRED,
+                                NO_CHANGE_SINCE_START_PLAIN, NO_CHANGE_RECENT)
 from dirtywork.transcript import Transcript
 
 from .provider_doubles import FingerprintSandbox
@@ -3705,3 +3707,338 @@ def test_finish_time_fingerprint(parts):
     assert result10.status == "sandbox_error"
     fp_count10 = sum(1 for c, _ in sandbox10.commands if c == FINGERPRINT_SCRIPT)
     assert fp_count10 == 1
+
+def test_no_change_nudge_since_start(parts):
+    # Spec #66 §4.4: Runner(no_change_turns=3, require_changes=True),
+    # hashes ["a"*40] (every measurement equal), responses [read_file x3,
+    # finish, finish] → a nudge event kind "no_change" turn 3 via tool_result,
+    # the third tool result's follow_up == NO_CHANGE_SINCE_START_REQUIRED.format(k=3)
+    # (and "finish" not in that text); the finish on turn 4 is rejected (UNCHANGED_REQUIRED),
+    # the finish on turn 5 ends the run "unchanged".
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r3", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "done"})]),
+    ])
+    sandbox = FingerprintSandbox(wt, hashes=["a" * 40])
+    r = Runner(provider, registry, sandbox, transcript, model="m",
+               no_change_turns=3, require_changes=True)
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "unchanged"
+
+    events = [json.loads(l) for l in (tmp / "t.jsonl").read_text().splitlines()]
+    # Find the no_change nudge on turn 3
+    no_change_nudges = [e for e in events if e["event"] == "nudge" and e["kind"] == "no_change"]
+    assert len(no_change_nudges) == 1
+    assert no_change_nudges[0]["turn"] == 3
+
+    # There should be exactly one tool_result with follow_up (the third read_file on turn 3)
+    tool_results_with_followup = [e for e in events if e["event"] == "tool_result" and e.get("follow_up")]
+    assert len(tool_results_with_followup) == 1
+    # The follow_up should be on the third tool_result (turn 3)
+    third_tool = tool_results_with_followup[0]
+    assert NO_CHANGE_SINCE_START_REQUIRED.format(k=3) in third_tool["follow_up"]
+    # The text should NOT mention finish
+    assert "finish" not in third_tool["follow_up"]
+
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end["status"] == "unchanged"
+    assert run_end["changed"] is False
+
+
+def test_no_change_nudge_recent_after_a_change(parts):
+    # Spec #66 §4.4: Runner(no_change_turns=3, require_changes=False),
+    # hashes ["a"*40, "b"*40, "b"*40] (start a; the K=3 check measures b → changed, silent;
+    # the turn-6 check measures b == fp_check → nudge), six read_file responses then [finish]
+    # → no nudge at turn 3 (measurement b != start a), a nudge at turn 6 with
+    # NO_CHANGE_RECENT.format(k=3) (it names finish); the finish on turn 7 → "completed",
+    # changed True.
+    wt, registry, sandbox, transcript, tmp = parts
+    wt2 = tmp / "wt2"
+    wt2.mkdir()
+    (wt2 / "f.txt").write_text("data\n")
+    transcript2 = Transcript(tmp / "t2.jsonl")
+    registry2 = default_registry(transcript=transcript2)
+    provider2 = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r3", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r4", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r5", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r6", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+    ])
+    sandbox2 = FingerprintSandbox(wt2, hashes=["a" * 40, "b" * 40, "b" * 40])
+    r2 = Runner(provider2, registry2, sandbox2, transcript2, model="m",
+                no_change_turns=3, require_changes=False)
+    result2 = r2.run("s", "t")
+    transcript2.close()
+
+    assert result2.status == "completed"
+    events2 = [json.loads(l) for l in (tmp / "t2.jsonl").read_text().splitlines()]
+    no_change_nudges2 = [e for e in events2 if e["event"] == "nudge" and e["kind"] == "no_change"]
+    assert len(no_change_nudges2) == 1
+    tool_results_with_followup2 = [e for e in events2 if e["event"] == "tool_result" and e.get("follow_up")]
+    assert len(tool_results_with_followup2) == 1
+    # The follow_up should be on the sixth tool_result (turn 6)
+    sixth_tool = tool_results_with_followup2[0]
+    assert NO_CHANGE_RECENT.format(k=3) in sixth_tool["follow_up"]
+    # The nudge mentions finish
+    assert "finish" in sixth_tool["follow_up"]
+
+    run_end2 = next(e for e in events2 if e["event"] == "run_end")
+    assert run_end2["status"] == "completed"
+    assert run_end2["changed"] is True
+
+
+def test_no_change_check_skips(parts):
+    # (a) Spec #66 §4.4: hashes ["a"*40, None, "a"*40] with six reads → no
+    # nudge at 3 (failed measurement, baseline kept, changed_reason "error: boom"
+    # set until turn 6 clears it), a nudge at 6 (a == the start baseline).
+    wt_a, registry_a, sandbox_a, transcript_a, tmp_a = parts
+    provider_a = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r3", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r4", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r5", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r6", "read_file", {"path": "f.txt"})]),
+    ])
+    sandbox_a = FingerprintSandbox(wt_a, hashes=["a" * 40, None, "a" * 40])
+    r_a = Runner(provider_a, registry_a, sandbox_a, transcript_a, model="m",
+                 no_change_turns=3, max_turns=6)
+    result_a = r_a.run("s", "t")
+    transcript_a.close()
+
+    assert result_a.status == "max_turns"
+    events_a = [json.loads(l) for l in (tmp_a / "t.jsonl").read_text().splitlines()]
+    # No nudge at turn 3 (measurement failed)
+    no_change_nudges_a = [e for e in events_a if e["event"] == "nudge" and e["kind"] == "no_change"]
+    # turn 6 measures "a" == the start baseline -> nudge with since-start text
+    assert [e["turn"] for e in no_change_nudges_a] == [6]
+    third = [e for e in events_a if e["event"] == "tool_result"][5]
+    assert third["follow_up"] == NO_CHANGE_SINCE_START_PLAIN.format(k=3)
+    run_end_a = next(e for e in events_a if e["event"] == "run_end")
+    assert run_end_a["changed"] is False
+    assert "changed_reason" not in run_end_a
+    fp_commands = [c for c, _ in sandbox_a.commands if c == FINGERPRINT_SCRIPT]
+    assert len(fp_commands) == 3   # start, turn 3 (failed), turn 6; finish() reuses turn 6's
+
+    # (b) a finish on turn K → no K measurement that turn (count FINGERPRINT_SCRIPT commands)
+    # Start hash is "a"*40, so K=3 check measures same hash (no nudge)
+    wt_b = tmp_a / "wt_b"
+    wt_b.mkdir()
+    (wt_b / "f.txt").write_text("data\n")
+    transcript_b = Transcript(tmp_a / "t_b.jsonl")
+    registry_b = default_registry(transcript=transcript_b)
+    sandbox_b = FingerprintSandbox(wt_b, hashes=["a" * 40])
+    provider_b = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r3", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+    ])
+    r_b = Runner(provider_b, registry_b, sandbox_b, transcript_b, model="m",
+                 no_change_turns=3)
+    result_b = r_b.run("s", "t")
+    transcript_b.close()
+
+    fp_commands_b = [c for c, _ in sandbox_b.commands if c == FINGERPRINT_SCRIPT]
+    assert len(fp_commands_b) == 2   # start + turn 3's completion check (no K measurement)
+
+    # (c) no_change_turns=0 → only the start fingerprint is ever sent
+    wt_c = tmp_a / "wt_c"
+    wt_c.mkdir()
+    (wt_c / "f.txt").write_text("data\n")
+    transcript_c = Transcript(tmp_a / "t_c.jsonl")
+    registry_c = default_registry(transcript=transcript_c)
+    sandbox_c = FingerprintSandbox(wt_c, hashes=["a" * 40])
+    provider_c = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r3", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r4", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r5", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r6", "read_file", {"path": "f.txt"})]),
+    ])
+    r_c = Runner(provider_c, registry_c, sandbox_c, transcript_c, model="m",
+                 no_change_turns=0)
+    result_c = r_c.run("s", "t")
+    transcript_c.close()
+
+    fp_commands_c = [c for c, _ in sandbox_c.commands if c == FINGERPRINT_SCRIPT]
+    assert len(fp_commands_c) == 1  # start only
+
+    # (d) a guard-off run (start None) → no FINGERPRINT_SCRIPT after the start one
+    wt_d = tmp_a / "wt_d"
+    wt_d.mkdir()
+    (wt_d / "f.txt").write_text("data\n")
+    transcript2 = Transcript(tmp_a / "t2.jsonl")
+    registry2 = default_registry(transcript=transcript2)
+    sandbox2 = HostSandbox(wt_d)  # No fingerprint support
+    provider2 = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+    ])
+    r2 = Runner(provider2, registry2, sandbox2, transcript2, model="m", no_change_turns=3)
+    result2 = r2.run("s", "t")
+    transcript2.close()
+
+    fp_commands2 = [c for c, _ in sandbox2.commands if c == FINGERPRINT_SCRIPT]
+    assert len(fp_commands2) == 1  # exactly one (start), no subsequent checks
+
+    # (e) BudgetExceeded("disk") as the entry the turn-K check pops → status
+    # "budget_exceeded", run_end.changed None, changed_reason "budget: disk"
+    wt_e = tmp / "wt_e"
+    wt_e.mkdir()
+    (wt_e / "f.txt").write_text("data\n")
+    transcript3 = Transcript(tmp / "t3.jsonl")
+    registry3 = default_registry(transcript=transcript3)
+    sandbox3 = FingerprintSandbox(wt_e, hashes=["a" * 40])
+    provider3 = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r3", "read_file", {"path": "f.txt"})]),
+    ])
+    # Inject BudgetExceeded on the third turn's fingerprint check
+    original_bash = sandbox3.bash
+
+    def budget_bash(command, timeout=120):
+        if command == FINGERPRINT_SCRIPT and len([c for c, _ in sandbox3.commands if c == FINGERPRINT_SCRIPT]) >= 1:
+            raise BudgetExceeded("disk")
+        return original_bash(command, timeout)
+
+    sandbox3.bash = budget_bash
+    r3 = Runner(provider3, registry3, sandbox3, transcript3, model="m", no_change_turns=3)
+    result3 = r3.run("s", "t")
+    transcript3.close()
+
+    assert result3.status == "budget_exceeded"
+    events3 = [json.loads(l) for l in (tmp / "t3.jsonl").read_text().splitlines()]
+    run_end3 = next(e for e in events3 if e["event"] == "run_end")
+    assert run_end3["changed"] is None
+    assert run_end3["changed_reason"] == "budget: disk"
+
+    # (e) SandboxError("gone") likewise → "sandbox_error", "sandbox: gone"
+    wt_f = tmp / "wt_f"
+    wt_f.mkdir()
+    (wt_f / "f.txt").write_text("data\n")
+    transcript4 = Transcript(tmp / "t4.jsonl")
+    registry4 = default_registry(transcript=transcript4)
+    sandbox4 = FingerprintSandbox(wt_f, hashes=["a" * 40])
+    provider4 = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r3", "read_file", {"path": "f.txt"})]),
+    ])
+    original_bash4 = sandbox4.bash
+
+    def sandbox_error_bash(command, timeout=120):
+        if command == FINGERPRINT_SCRIPT and len([c for c, _ in sandbox4.commands if c == FINGERPRINT_SCRIPT]) >= 1:
+            raise SandboxError("gone")
+        return original_bash4(command, timeout)
+
+    sandbox4.bash = sandbox_error_bash
+    r4 = Runner(provider4, registry4, sandbox4, transcript4, model="m", no_change_turns=3)
+    result4 = r4.run("s", "t")
+    transcript4.close()
+
+    assert result4.status == "sandbox_error"
+    events4 = [json.loads(l) for l in (tmp / "t4.jsonl").read_text().splitlines()]
+    run_end4 = next(e for e in events4 if e["event"] == "run_end")
+    assert run_end4["changed"] is None
+    assert run_end4["changed_reason"] == "sandbox: gone"
+
+    # (f) stall + no_change on one turn: Runner(stall_turns=4, no_change_turns=3),
+    # hashes ["a"*40], responses [read_file f.txt, the identical read_file f.txt
+    # (idle 1), _resp(content="") (an empty reply: idle 2 and the stall nudge fires
+    # at stall_turns // 2 == 2), finish, finish] → the fourth request's last user
+    # message == NUDGES["empty"] + "\n\n" + STALL_NUDGE.format(n=2) + "\n\n"
+    # NO_CHANGE_SINCE_START_PLAIN.format(k=3), and the transcript order on turn 3
+    # is nudge{empty} → nudge{stall} → nudge{no_change}.
+    wt_g = tmp / "wt_g"
+    wt_g.mkdir()
+    (wt_g / "f.txt").write_text("data\n")
+    transcript5 = Transcript(tmp / "t5.jsonl")
+    registry5 = default_registry(transcript=transcript5)
+    provider5 = FakeProvider([
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+        _resp(content=""),  # empty reply triggers stall at n=2
+    ])
+    sandbox5 = FingerprintSandbox(wt_g, hashes=["a" * 40])
+    r5 = Runner(provider5, registry5, sandbox5, transcript5, model="m",
+                stall_turns=4, no_change_turns=3)
+    result5 = r5.run("s", "t")
+    transcript5.close()
+
+    assert result5.status == "stalled"
+    events5 = [json.loads(l) for l in (tmp / "t5.jsonl").read_text().splitlines()]
+    # Check nudge order on turn 3
+    nudge_events = [e for e in events5 if e["event"] == "nudge" and e.get("turn") == 3]
+    assert len(nudge_events) == 3
+    # Order should be: empty, stall, no_change
+    assert nudge_events[0]["kind"] == "empty"
+    assert nudge_events[1]["kind"] == "stall"
+    assert nudge_events[2]["kind"] == "no_change"
+
+    # Check the user message on turn 4 (should have all nudges combined)
+    provider5_requests = []
+    for req in provider5.requests:
+        if isinstance(req, list):
+            for msg in req:
+                provider5_requests.append(msg)
+        else:
+            provider5_requests.append(req)
+    
+    # The fourth request should have all nudges in its last user message
+    if len(provider5_requests) >= 4:
+        fourth_request = provider5_requests[3]
+        if isinstance(fourth_request, list):
+            last_user_msg = fourth_request[-1]["content"]
+        else:
+            last_user_msg = str(fourth_request)
+        expected_nudge_text = (NUDES["empty"] + "\n\n" + STALL_NUDGE.format(n=2) + 
+                               "\n\n" + NO_CHANGE_SINCE_START_PLAIN.format(k=3))
+        assert expected_nudge_text in last_user_msg
+
+
+def test_run_ending_on_a_k_check_turn_reuses_it(parts):
+    # Spec #66 §4.4 test (f): Runner(no_change_turns=4, require_changes=False,
+    # max_turns=4), hashes ["a"*40, "a"*40, "c"*40], responses [finish, read_file,
+    # write_file (path "g.txt"), read_file] → turn 1's finish is rejected (a == a),
+    # turn 4's K check measures "c" (changed, no nudge because c != a), then
+    # max_turns ends the run and finish() takes no further fingerprint because
+    # fp_turn == turns: exactly THREE FINGERPRINT_SCRIPT commands (start, turn 1's
+    # completion check, turn 4's K check), no nudge event with kind "no_change",
+    # run_end.changed is True.
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("r1", "read_file", {"path": "f.txt"})]),
+        _resp(tool_calls=[_call("w1", "write_file", {"path": "g.txt", "content": "hello"})]),
+        _resp(tool_calls=[_call("r2", "read_file", {"path": "f.txt"})]),
+    ])
+    sandbox = FingerprintSandbox(wt, hashes=["a" * 40, "a" * 40, "c" * 40])
+    r = Runner(provider, registry, sandbox, transcript, model="m",
+               no_change_turns=4, require_changes=False, max_turns=4)
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "max_turns"
+    events = [json.loads(l) for l in (tmp / "t.jsonl").read_text().splitlines()]
+
+    # Count FINGERPRINT_SCRIPT commands
+    fp_commands = [c for c, _ in sandbox.commands if c == FINGERPRINT_SCRIPT]
+    assert len(fp_commands) == 3
+
+    # No nudge event with kind "no_change"
+    no_change_nudges = [e for e in events if e["event"] == "nudge" and e["kind"] == "no_change"]
+    assert len(no_change_nudges) == 0
+
+    run_end = next(e for e in events if e["event"] == "run_end")
+    assert run_end["changed"] is True

@@ -8,7 +8,12 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .budget import BudgetExceeded
-from .changes import UNCHANGED_PLAIN, UNCHANGED_REQUIRED, fingerprint as _fingerprint
+from .changes import (UNCHANGED_PLAIN, UNCHANGED_REQUIRED,
+                       DEFAULT_NO_CHANGE_TURNS,
+                       NO_CHANGE_SINCE_START_REQUIRED,
+                       NO_CHANGE_SINCE_START_PLAIN,
+                       NO_CHANGE_RECENT,
+                       fingerprint as _fingerprint)
 from .llm import LLMTimeout, MalformedResponse
 from .providers import assistant_message, tool_message
 from .sandbox import SandboxError
@@ -526,7 +531,8 @@ class Runner:
                  verify: str | None = None,
                  verify_rounds: int = DEFAULT_VERIFY_ROUNDS,
                  verify_timeout: int = DEFAULT_VERIFY_TIMEOUT,
-                 require_changes: bool = False):
+                 require_changes: bool = False,
+                 no_change_turns: int = DEFAULT_NO_CHANGE_TURNS):
         self.provider = provider
         self.registry = registry
         self.sandbox = sandbox
@@ -555,6 +561,8 @@ class Runner:
         # Spec #66 §4.3: a completion that changed nothing ends the run `unchanged`
         # on the second attempt (the CLI sets this for resume --feedback)
         self.require_changes = require_changes
+        # Spec #66 §4.4: every K turns a fingerprint; equal to the last check's -> a nudge, never an abort; 0 disables. Not a CLI flag.
+        self.no_change_turns = no_change_turns
         # An explicit 0 is honoured (it is how a test forces context_exhausted);
         # only None means "ask the provider".
         self.context_window = (context_window if context_window is not None
@@ -788,6 +796,37 @@ class Runner:
                 return None, STALL_NUDGE.format(n=self.stall_turns // 2), record
             return None, None, None
 
+        def check_no_change():
+            """(RunResult to end the run with, or None; nudge text, or None;
+            the nudge record, or None) -- spec #66 §4.4. Fires on turns that
+            are a multiple of no_change_turns when the guard is on. Equal to
+            the last check's fingerprint -> nudge and reset the baseline;
+            different -> reset the baseline silently; unmeasurable -> keep
+            the baseline (take_fingerprint stored the reason)."""
+            nonlocal fp_check
+            if (fp_start is None or self.no_change_turns <= 0
+                    or turns % self.no_change_turns != 0):
+                return None, None, None
+            try:
+                fp = take_fingerprint()
+            except BudgetExceeded as e:
+                return finish("budget_exceeded", e.reason), None, None
+            except SandboxError as e:
+                return finish("sandbox_error", str(e)), None, None
+            if fp is None:
+                return None, None, None
+            same = fp == fp_check
+            fp_check = fp
+            if not same:
+                return None, None, None
+            record = self.transcript.write("nudge", kind="no_change", turn=turns)
+            if fp == fp_start:
+                text = (NO_CHANGE_SINCE_START_REQUIRED if self.require_changes
+                        else NO_CHANGE_SINCE_START_PLAIN)
+            else:
+                text = NO_CHANGE_RECENT
+            return None, text.format(k=self.no_change_turns), record
+
         def run_verify():
             """One execution of the operator's gate (spec §4.2). Runs through
             the same sandbox.bash the tool uses — same guardrails, same budget
@@ -999,8 +1038,12 @@ class Runner:
                 stalled, stall_text, stall_record = check_progress()
                 if stalled is not None:
                     return stalled
+                ended, nc_text, nc_record = check_no_change()
+                if ended is not None:
+                    return ended
                 sandbox_text, sandbox_records = drain_sandbox()
-                deliver(_join_nudges(NUDGES[kind].format(**trunc), sandbox_text, stall_text), [kind_record, *sandbox_records, stall_record])
+                deliver(_join_nudges(NUDGES[kind].format(**trunc), sandbox_text, stall_text, nc_text),
+                        [r for r in (kind_record, *sandbox_records, stall_record, nc_record) if r is not None])
                 return None
 
             abort_reason = None
@@ -1136,6 +1179,9 @@ class Runner:
             stalled, stall_text, stall_record = check_progress()
             if stalled is not None:
                 return stalled
+            ended, nc_text, nc_record = check_no_change()
+            if ended is not None:
+                return ended
 
             malformed_text = malformed_record = None
             if malformed_count > 0:
@@ -1149,8 +1195,8 @@ class Runner:
                 # Once per turn, however many commands timed out in it.
                 timeout_record = self.transcript.write("nudge", kind="timeout", turn=turns)
             sandbox_text, sandbox_records = drain_sandbox()
-            deliver(_join_nudges(malformed_text, sandbox_text, timeout_text, stall_text),
-                    [malformed_record, *sandbox_records, timeout_record, stall_record])
+            deliver(_join_nudges(malformed_text, sandbox_text, timeout_text, stall_text, nc_text),
+                    [r for r in (malformed_record, *sandbox_records, timeout_record, stall_record, nc_record) if r is not None])
             return None
         try:
             # Spec #66 §4.1 (1): the start fingerprint, INSIDE this try so a
