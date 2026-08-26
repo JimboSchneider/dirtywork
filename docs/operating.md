@@ -17,7 +17,7 @@ Day-to-day usage once dirtywork is installed: running a task, reviewing and resu
   > **The worker cannot install dependencies in docker mode** (`--network none`,
   > no host directories mounted); it can only run what the image ships — git,
   > bash, coreutils, findutils, python3, node/npm, the .NET SDKs (8.0 and 10.0
-  > from the 1.0 image; the published `:0.10` image has 8.0 only), ripgrep, jq,
+  > from the `:0.11` image; the old `:0.10` image had 8.0 only), ripgrep, jq,
   > uuid-runtime, shellcheck and curl. Always run the repo's own gate yourself
   > on the exported worktree, or pass it as [`--verify`](#verifying-a-run). For
   > a Node repo whose gate needs `node_modules`, symlink your own into the
@@ -477,11 +477,11 @@ are not part of the installed package.
   See the `--tmp-size`/`--gitdir-size`/`--home-size` bullet in
   [Machine contract](machine-contract.md#machine-contract).
 - **`File size limit exceeded` / exit 153 from any `dotnet` command on the
-  published `:0.10` image** — a 0.10 defect, not a dirtywork bug: that
-  image's .NET 8 runtime trips the sandbox's per-command file-size limit
+  old `:0.10` image** — a 0.10 defect, not a dirtywork bug: that image's
+  .NET 8 runtime trips the sandbox's per-command file-size limit
   (`ulimit -f 524288`, 256 MiB) at startup with W^X enabled, the .NET
-  default. Use the 1.0 image (`:1.0`, once released), or a derived image
-  that adds `ENV DOTNET_EnableWriteXorExecute=0` — see
+  default. Use the `:0.11` image (the default since 0.11.0), or a derived
+  image based on `:0.10` that adds `ENV DOTNET_EnableWriteXorExecute=0` — see
   [`docker/README.md`](../docker/README.md).
 - **exit 2, "Docker is the default sandbox since 0.4..."** — Docker
   Desktop/dockerd isn't running or isn't reachable. Start it, or pass
