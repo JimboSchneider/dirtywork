@@ -418,6 +418,42 @@ def _unified_diff_lines(matcher, old_lines: list, new_lines: list, path: str) ->
     return out
 
 
+_CHANGE_HEAD_RE = re.compile(
+    r"^(Wrote|Edited|Appended to|Inserted into|Applied \d+ edits? to) (.+): \+(\d+) -(\d+)"
+    r"(?: \(removed \d+ non-blank lines?\))?$")
+_NEW_FILE_HEAD_RE = re.compile(r"^Wrote \d+ bytes to (.+) \(new file, \d+ lines?\)$")
+
+
+def parse_change_head(result: str) -> tuple[str, str, int, int] | None:
+    """(verb, path, added, deleted) from the head line of a describe_change /
+    describe_write result, or None for any other string (an ERROR:/BLOCKED:
+    result, the `(diff omitted: file too large)` head, a capped or foreign
+    string). The regex tracks describe_change's head format above."""
+    if not isinstance(result, str):
+        return None
+    head = result.split("\n", 1)[0]
+    match = _CHANGE_HEAD_RE.match(head)
+    if match is None:
+        return None
+    verb, path, added, deleted = match.groups()
+    return verb, path, int(added), int(deleted)
+
+
+def net_change(result: str) -> bool | None:
+    """Did a mutating tool's result describe a net change? True for a new
+    file or a head with added + deleted > 0, False for `+0 -0` (a
+    byte-identical rewrite), None when the result is not a describe_change
+    head at all -- the runner treats None as 'unknown, count it as progress'."""
+    if not isinstance(result, str):
+        return None
+    if _NEW_FILE_HEAD_RE.match(result.split("\n", 1)[0]):
+        return True
+    parsed = parse_change_head(result)
+    if parsed is None:
+        return None
+    return parsed[2] + parsed[3] > 0
+
+
 def describe_change(path: str, old_text: str, new_text: str, *, verb: str) -> str:
     """Spec §3.1: '<Verb> <path>: +A -D [(removed N non-blank line(s))]' plus a
     capped unified diff. Lines are compared WITH their line endings, via
@@ -996,6 +1032,23 @@ def is_timeout_result(text) -> bool:
     never re-derive this from a substring search somewhere else, or the two
     will drift the first time the wording changes."""
     return isinstance(text, str) and text.startswith(TIMEOUT_PREFIX)
+
+
+def parse_exit_code(result):
+    """The integer after 'exit code: ' on a bash result's first line, or None
+    for an ERROR:/BLOCKED: result that never produced an exit status at all.
+    RepeatTracker.note_bash calls this to tell a passing rerun from a failing
+    one."""
+    if not isinstance(result, str):
+        return None
+    head = result.split("\n", 1)[0]
+    prefix = "exit code: "
+    if not head.startswith(prefix):
+        return None
+    try:
+        return int(head[len(prefix):].strip())
+    except ValueError:
+        return None
 
 
 

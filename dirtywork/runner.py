@@ -11,7 +11,7 @@ from .budget import BudgetExceeded
 from .llm import LLMTimeout, MalformedResponse
 from .providers import assistant_message, tool_message
 from .sandbox import SandboxError
-from .tools import is_timeout_result
+from .tools import is_timeout_result, net_change, parse_exit_code
 
 MAX_ASSISTANT_TEXT_CHARS = 64_000
 # Spec §2: end-of-run evidence caps. These match the transcript's own preview
@@ -309,30 +309,16 @@ def _bash_fingerprint(command, result: str) -> str:
     return hashlib.sha256((str(command) + "\0" + normalized).encode("utf-8", "replace")).hexdigest()
 
 
-def parse_exit_code(result):
-    """The integer after 'exit code: ' on a bash result's first line, or None
-    for an ERROR:/BLOCKED: result that never produced an exit status at all.
-    RepeatTracker.note_bash calls this to tell a passing rerun from a failing
-    one."""
-    if not isinstance(result, str):
-        return None
-    head = result.split("\n", 1)[0]
-    prefix = "exit code: "
-    if not head.startswith(prefix):
-        return None
-    try:
-        return int(head[len(prefix):].strip())
-    except ValueError:
-        return None
-
-
 class ProgressTracker:
     """Spec §3: a turn made progress if any tool call was new to this run
     (first time this exact tool + arguments — a file not read before, a new
     grep, a new command), a write/edit succeeded, or a bash call produced
     output not seen before (volatile tokens ignored). Only repeats are idle.
     Nudge once per idle streak at stall_turns // 2; report 'stalled' at
-    stall_turns. stall_turns <= 0 disables detection."""
+    stall_turns. stall_turns <= 0 disables detection.
+    
+    Spec #66 §4.2: a write that changed nothing (+0 -0) is not progress;
+    an unknown result shape still is (fail open)."""
 
     def __init__(self, stall_turns: int):
         self.stall_turns = stall_turns
@@ -346,7 +332,10 @@ class ProgressTracker:
         if not isinstance(result, str) or result.startswith("ERROR"):
             return
         if name in _MUTATING_TOOLS:
-            self._progressed = True          # a successful write/edit is always progress
+            # Spec #66 §4.2: a write that changed nothing (`+0 -0`) is not
+            # progress; an unknown result shape still is (fail open).
+            if net_change(result) is not False:
+                self._progressed = True
             return
         call_key = name + "\0" + (json.dumps(args, sort_keys=True, default=str) if isinstance(args, dict) else "")
         if call_key not in self._seen_calls:

@@ -1076,6 +1076,56 @@ def test_progress_tracker_disabled_when_zero():
         assert t.end_turn() is None
 
 
+def test_progress_tracker_ignores_noop_writes():
+    """Spec #66 §4.2: a write that changed nothing (+0 -0) is not progress."""
+    t = ProgressTracker(stall_turns=4)
+    
+    # +0 -0 write is not progress
+    t.note_call("write_file", {"path": "a"}, "Wrote a: +0 -0")
+    assert t.end_turn() is None
+    assert t.idle_turns == 1
+    
+    # +1 -0 write is progress (resets idle)
+    t.note_call("write_file", {"path": "a"}, "Wrote a: +1 -0")
+    assert t.end_turn() is None
+    assert t.idle_turns == 0
+    
+    # new file form (which should be progress)
+    t.note_call("write_file", {"path": "b"}, "Wrote 1 bytes to b (new file, 1 line)")
+    assert t.end_turn() is None
+    assert t.idle_turns == 0
+    
+    # unknown result shape (fail open - should be progress)
+    t.note_call("write_file", {"path": "c"}, "weird")
+    assert t.end_turn() is None
+    assert t.idle_turns == 0
+
+
+def test_identical_rewrites_stall(parts):
+    """Spec #66 §4.2: a runner with a provider that keeps rewriting the same file
+    with identical content should end status 'stalled'."""
+    wt, registry, sandbox, transcript, tmp = parts
+    
+    # Create an initial file
+    (wt / "f.txt").write_text("data\n")
+    
+    # Provider that keeps rewriting f.txt with the same content
+    loop = _resp(tool_calls=[_call("c", "write_file", {"path": "f.txt", "content": "data\n"})])
+    provider = FakeProvider([loop] * 10)
+    
+    r = Runner(provider, registry, sandbox, transcript, model="m", stall_turns=4)
+    result = r.run("s", "t")
+    transcript.close()
+    
+    # Should stall because writes are +0 -0 (no progress)
+    assert result.status == "stalled"
+    # Turn 1: first write (+0 -0, not progress, idle=1)
+    # Turns 2-3: repeats (idle increases)
+    # Turn 4: idle reaches 4, returns "stalled"
+    assert result.turns == 4
+    assert result.final_message == "no progress in 4 consecutive turns"
+
+
 def test_runner_stalled_status_after_idle_turns(parts):
     wt, registry, sandbox, transcript, tmp = parts
     loop = _resp(tool_calls=[_call("c", "read_file", {"path": "f.txt"})])
