@@ -241,7 +241,8 @@ def _event_counts(run_dir, *, events=None) -> dict:
 
 def _abort_kind(final_message):
     """Which FailureTracker abort ended a `model_error` run, read back out of the
-    final message the runner produced (`FailureTracker.record`)."""
+    final message the runner produced (`FailureTracker.record`). `truncated` is
+    the run-level budget of six cut-off replies (#65), not a consecutive count."""
     if not isinstance(final_message, str):
         return None
     match = _ABORT_RE.search(final_message)

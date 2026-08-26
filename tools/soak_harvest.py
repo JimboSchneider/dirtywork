@@ -99,7 +99,7 @@ _TRUNCATED_WRITE_PATH_RE = re.compile(r"^ERROR: your write_file for ('.*?'|\".*?
 # completed.") as well as 1.0's ("…at the --max-tokens cap of N tokens after
 # about …"), so both must match; the write_file branch is unchanged.
 _TRUNCATED_CALL_RESULT_RE = re.compile(
-    r"^ERROR: your (?:write_file for '[^']*'|\S+ call) was cut off at the (?:token limit|--max-tokens cap)")
+    r"^ERROR: your (?:write_file for |\S+ call was cut off at the (?:token limit|--max-tokens cap)\b)")
 
 
 def _event_path(e: dict):

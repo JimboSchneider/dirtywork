@@ -978,6 +978,31 @@ def test_f5_ignores_a_write_file_that_comes_after_the_append():
     assert "F5" in detect_features({}, write_before)
 
 
+def test_f5_fires_on_the_new_generic_truncation_wording(harvest):
+    # #65/#66: _TRUNCATED_CALL_RESULT_RE's new wording ("...call was cut off
+    # at the --max-tokens cap...") must still satisfy F5's truncation signal
+    # for a non-write_file tool call cut off on the tool path (case a) -- the
+    # append_file success is vouched for by an earlier successful write_file
+    # to the same path, same as the historical-wording fixtures above.
+    from dirtywork import runner
+    trunc = dict(cap=1024, cap_chars=4096, received=10, cut_chars=0, cut_lines=0,
+                 target_chars=1024, target_lines=17, n=1, max=6)
+    events = [
+        {"ts": _ts(0), "event": "assistant", "finish_reason": "length",
+         "tool_calls": [{"name": "write_file"}, {"name": "read_file"}]},
+        {"ts": _ts(1), "event": "tool_result", "tool": "write_file",
+         "args": '{"path": "big.txt", "text": "a"}',
+         "result": "Wrote 1 bytes to big.txt (new file, 1 line)"},
+        {"ts": _ts(2), "event": "tool_result", "tool": "read_file", "args": "{",
+         "result": runner.truncated_call_result("read_file", "{", trunc)},
+        {"ts": _ts(3), "event": "assistant", "tool_calls": [{"name": "append_file"}]},
+        {"ts": _ts(4), "event": "tool_result", "tool": "append_file",
+         "args": '{"path": "big.txt", "text": "b"}',
+         "result": "Appended to big.txt: +1 -0"},
+    ]
+    assert "F5" in harvest.detect_features(BASE_RUN_JSON, events)
+
+
 def test_per_run_row_reports_stray_kills(harvest):
     row = harvest._per_run_row({"label": "r", "status": "completed", "turns": 2, "wall_s": 4.0,
                                 "prompt_tok": 100, "compl_tok": 10, "nudges": 1,

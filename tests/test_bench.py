@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from dirtywork import bench
+from dirtywork import runner
 from dirtywork.sandbox import docker_args
 
 from .fake_docker import FakeCaptured
@@ -394,6 +395,7 @@ def test_abort_kind_is_parsed_from_the_final_message():
     assert bench._abort_kind("aborted after 6 consecutive tool failures") == "mixed"
     assert bench._abort_kind("all done") is None
     assert bench._abort_kind(None) is None
+    assert bench._abort_kind(runner.TRUNCATION_ABORT.format(n=6, cap=1024)) == "truncated"
 
 
 def test_cmd_bench_requires_models(capsys):

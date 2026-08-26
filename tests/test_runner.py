@@ -24,6 +24,7 @@ from dirtywork.runner import (
     STALL_NUDGE,
     TIMEOUT_NUDGE,
     TRIM_MARKER,
+    TRUNCATION_ABORT,
     VERIFY_FEEDBACK,
     _bash_fingerprint,
     classify_text_reply,
@@ -2926,3 +2927,89 @@ def test_truncations_counts_once_per_turn(parts):
     assert result3.status == "completed"
     # Verify result.extra["truncations"] equals run_end value
     assert result3.extra.get("truncations") == 0
+
+def test_six_cutoff_replies_end_the_run(parts):
+    # Spec #65 S3: a cut-off reply followed by a successful tool call resets
+    # FailureTracker's consecutive counters, so a model that alternates
+    # cut/write forever would never hit the 3-consecutive-failure abort --
+    # the run-level truncation budget (6, never reset) is what ends this run.
+    wt, registry, sandbox, transcript, tmp = parts
+    cut = _resp(content="header", finish_reason="length")
+
+    def write(i):
+        return _resp(tool_calls=[_call(f"w{i}", "write_file",
+                                       {"path": "rows.csv", "content": f"row{i}\n"})])
+
+    responses = []
+    for i in range(5):
+        responses.append(cut)
+        responses.append(write(i))
+    responses.append(cut)
+    assert len(responses) == 11
+
+    provider = FakeProvider(responses)
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_tokens=1024, max_turns=20)
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "model_error"
+    assert result.final_message == TRUNCATION_ABORT.format(n=6, cap=1024)
+    assert result.extra["truncations"] == 6
+
+    events = _events(tmp)
+    run_end = [e for e in events if e["event"] == "run_end"][0]
+    assert run_end["truncations"] == 6
+    truncated_nudges = [e for e in events if e["event"] == "nudge" and e.get("kind") == "truncated"]
+    assert len(truncated_nudges) == 6
+    assert "via" not in truncated_nudges[-1]
+
+
+def test_consecutive_rule_wins_over_the_cutoff_budget(parts):
+    # Spec #65: FailureTracker's 3-consecutive-empty_reply abort is checked
+    # BEFORE the run-level truncation budget on the same turn, so three
+    # cut-off replies in a row end the run as a consecutive-failure abort --
+    # even though the third of them is also the 6th cut-off reply overall.
+    wt, registry, sandbox, transcript, tmp = parts
+    cut = _resp(content="header", finish_reason="length")
+
+    def write(i):
+        return _resp(tool_calls=[_call(f"w{i}", "write_file",
+                                       {"path": "rows.csv", "content": f"row{i}\n"})])
+
+    provider = FakeProvider([cut, write(0), cut, write(1), cut, write(2), cut, cut, cut])
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_tokens=1024, max_turns=20)
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "model_error"
+    assert result.final_message == "aborted after 3 consecutive empty_reply failures"
+
+
+def test_sixth_truncation_on_the_tool_path_records_its_result(parts):
+    # Spec #65: the run-level truncation budget also ends the run when the
+    # 6th cut-off reply is a truncated TOOL CALL (case a: malformed_args with
+    # finish_reason=="length"), not a bare text reply -- and the tool_result
+    # for that call is still written to the transcript before the run ends.
+    wt, registry, sandbox, transcript, tmp = parts
+    cut = _resp(content="header", finish_reason="length")
+
+    def write(i):
+        return _resp(tool_calls=[_call(f"w{i}", "write_file",
+                                       {"path": "rows.csv", "content": f"row{i}\n"})])
+
+    sixth = _resp(tool_calls=[_bad_args("c", "write_file", '{"path": "x", "content": "abc')],
+                  finish_reason="length")
+    provider = FakeProvider([cut, write(0), cut, write(1), cut, write(2), cut, write(3),
+                             cut, write(4), sixth])
+    r = Runner(provider, registry, sandbox, transcript, model="m", max_tokens=1024, max_turns=20)
+    result = r.run("s", "t")
+    transcript.close()
+
+    assert result.status == "model_error"
+    assert result.final_message == TRUNCATION_ABORT.format(n=6, cap=1024)
+
+    events = _events(tmp)
+    tool_results = [e for e in events if e["event"] == "tool_result"]
+    assert "cut off at the --max-tokens cap" in tool_results[-1]["result"]
+    run_end = [e for e in events if e["event"] == "run_end"][0]
+    assert run_end["status"] == "model_error"
