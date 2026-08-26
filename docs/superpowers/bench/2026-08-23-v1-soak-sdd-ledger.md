@@ -253,3 +253,4 @@ zero-change — counted as they happen: (none yet).
 
 | run (slug) | task | status | wall | turns | s/turn | prompt tok | compl tok | tok/s | nudges | guardrail | resets | tool mix | verify |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `issue-65-cap-aware-truncation-task-0825191220-0681dfcf` | W1a-1 numbers/texts/counter (run 1) | `max_turns` — runner.py items 1–8 exact, __main__/schema-list/test_main/soak_tools edits done, but `note_truncation` written with JSON-escaped quotes (`\"` → SyntaxError, the #61 W8b shape) and none of the seven test_runner pins rewritten (39 `read_file`) | 328 s | 60 | 5.5 | 2,262,743 (≈37.7k/turn) | 8,473 | ≈6.9k | 0 | 0 | 0 | read_file 39 / edit_file 15 / apply_edits 3 / bash 3 | not reached — host: SyntaxError → resume 1 with a `sed` fix + `_trunc_dict(tc)` helper per pin |
