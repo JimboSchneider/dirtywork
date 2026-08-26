@@ -1,6 +1,6 @@
 # Ship the operator contract in the wheel: `dirtywork contract` + `dirtywork init` (#82) — design
 
-v2.1, 2026-08-26. Status: **owner review folded (six items + five residuals); awaiting owner sign-off.** Next: red-team fold → plan → built the dogfood way (released dirtywork + local worker for the code; Claude writes the skill prose and reviews).
+v3, 2026-08-26. Status: **red-team folded; one release decision (§0.2 item C2) needs the owner's call, then sign-off.** Next: plan → built the dogfood way (released dirtywork + local worker for the code; Claude writes the skill prose and reviews).
 
 ## 0. The owner's decision
 
@@ -23,6 +23,22 @@ Decisions taken in the conversation that this spec encodes:
 6. **Documentation ripple missed live references.** Sweep found **eleven** sites, not eight: `docs/transcript-schema.md:350` plus docstrings in `dirtywork/tools.py:192` and `dirtywork/workspace.py:208`. The stub and every `docs/*.md` reference now use the absolute canonical GitHub URL rather than a relative path out of `docs/` (§3.1).
 
 Owner decisions on §8 recorded: **move** (contingent on item 6, now addressed), **exit 1 on skipped copies**, **create `~/.claude/skills/` by default**, names **`init`** and **`contract`** stay.
+
+### 0.2 Red-team fold (v3, 2026-08-26 17:16 — four lenses, 24 findings, 10 verified by adversarial refuters, 10 confirmed, 0 refuted; 12 of the 14 unverified minors folded, 2 superseded)
+
+Confirmed and folded — each with the code fact behind it:
+
+- **C1 A8 would fail a correct implementation.** The `grep -v` allowance let the new `read("machine-contract.md")` call sites through. A8 now matches only the two stale spellings and requires empty output (§6).
+- **C2/C6 A new minor is not a string bump here.** `publish-image.yml` publishes `ghcr.io/jimboschneider/dirtywork-worker:0.12` on any `v0.12.0` release; `DEFAULT_IMAGE` is the hardcoded `:0.11` (`docker_args.py:8`), `PINNED_DIGEST` pins it, `ci.yml:89` builds `:0.11` for docker-live, and the packaged contract carries seven `:0.11` literals. The spec now follows the documented per-minor image cycle (§3.5) — **owner decision pending**: follow the cycle for 0.12.0 (recommended; it is what 0.10.0 and 0.11.0 did) or release this as a patch and skip it.
+- **C3 Non-regular-file destinations and `OSError` were undecided.** §3.3 mechanics: `is_file()` existence, bytes-level stamp parse, any `OSError` → `error:` + rc 2 and stop.
+- **C4 Test 16 had no parser to walk.** `_parse_args` builds its `ArgumentParser` locally (`__main__.py:1166-1190`); §3.5 adds a `_build_parser()` split, behaviour unchanged.
+- **C5 Test 20 vs "Ignore".** Sentence-initial capital; the test lower-cases the paragraph.
+- **C7 "The contract's security section" does not exist** — the shipped contract only points at `docs/security.md`, which is not in the wheel. §3.5 adds a `**Security:**` entry to the packaged contract; the skill points at it.
+- **C8 A resume mints a new slug.** The skill now says so, tells the orchestrator to take the slug from `run_dir`, and lists `resumed_from`.
+- **C9 No reusable atomic writer exists** (`tools._write_atomic` is private/bytes/returns `ERROR:` strings; `rundir.write_run_json` is JSON-only, mode 0600). §3.3 specifies a small `_write_text_atomic` beside `init`.
+- **C10 `init --stdout --no-user` was undecided.** Prints, rc 0 (§3.3); test 12b.
+
+Minors folded from the unverified tail: "up to date" now means bytes-equal-to-render, so a same-version template change installs (U1); stamp location, regex and hash input are exact (U2); validation before any write, and OSError stops processing (U4); destinations de-duplicated by `resolve()`, symlinks staged beside their target (U5); both commands use `sys.stdout.write`, tests compare bytes (U6/U9); `{{VERSION}}` via `str.replace`, never `str.format` (U7); the wheel-smoke `--version` check goes through a file and the rationale no longer claims `pipefail` (U10); test 17's helpers named (U11); "past preflight, stdout is one JSON object; on exit 2 it is empty" (U12); `stuck_on` is set only on `stuck` (U13); "no host directories mounted (only the run volume and a read-only view of the repo's git objects)", and `clean` removes the branch too (U14). Superseded: U3 by C10, U8 by C1.
 
 Verified against current Claude Code docs (2026-08-26): skills are discovered at `~/.claude/skills/<name>/SKILL.md` and `<project>/.claude/skills/<name>/SKILL.md`; `description` is the only required frontmatter field; `AGENTS.md` is *not* read natively by Claude Code; there is **no** documented mechanism for an installed CLI to register instructions without writing files. A subcommand that writes the skill file is therefore the sanctioned path, not a workaround. (Sources: code.claude.com/docs/en/skills.md, memory.md, plugins.md.)
 
@@ -74,7 +90,7 @@ dirtywork/contract/
 
 ### 3.2 `dirtywork contract`
 
-Prints `machine-contract.md` to stdout verbatim. No flags. Nothing on stderr. Exit 0. The doc already says of `run` that "stdout is the contract"; `contract` is the same promise for documentation — any orchestrator, Claude or not, can `dirtywork contract` and read it.
+Prints `machine-contract.md` to stdout verbatim via `sys.stdout.write(text)` — no added trailing newline; the file's own final newline is the terminator, so `stdout == packaged bytes` holds exactly. No flags. Nothing on stderr. Exit 0. The doc already says of `run` that "stdout is the contract"; `contract` is the same promise for documentation — any orchestrator, Claude or not, can `dirtywork contract` and read it.
 
 ### 3.3 `dirtywork init`
 
@@ -90,9 +106,9 @@ dirtywork init [--repo PATH] [--no-user] [--force] [--stdout]
 | `--repo PATH` | write | write |
 | `--repo PATH --no-user` | — | write |
 | `--no-user` alone | — | — → usage error, exit 2 ("nothing to write") |
-| `--stdout` | print rendered skill to stdout, write nowhere, exit 0 (other flags validated but not acted on) |
+| `--stdout` | write the rendered skill to stdout (`sys.stdout.write`, no added newline), write nowhere, exit 0. `--stdout` short-circuits the nothing-to-write check: `--no-user` is accepted and ignored (so `init --stdout --no-user` prints, rc 0); `--repo PATH`, if given, is still validated (rc 2 if not a directory) |
 
-`~` is `Path.home()`. Parent directories are created (`mkdir -p`); a user without Claude Code gets a `~/.claude/skills/` directory — accepted for "seamless", `--no-user` opts out. `--repo` must be an existing directory (it does **not** have to be a git repo — `init` never touches git); otherwise exit 2. Files are written atomically (temp file in the same directory + `os.replace`; reuse the repo's existing atomic-write helper if one is exported — grep for `os.replace` — rather than adding a second).
+`~` is `Path.home()`. Parent directories are created (`mkdir -p`); a user without Claude Code gets a `~/.claude/skills/` directory — accepted for "seamless", `--no-user` opts out. `--repo` must be an existing directory (it does **not** have to be a git repo — `init` never touches git); otherwise exit 2. Files are written atomically by a small `_write_text_atomic(path: Path, text: str) -> None` beside the `init` code: `path.parent.mkdir(parents=True, exist_ok=True)`, temp file in the same directory, `os.replace`. No existing helper is reused: `tools._write_atomic` (`tools.py:167`) is private, bytes-in and returns model-facing `ERROR: …` strings instead of raising; `rundir.write_run_json` (`rundir.py:99`) is JSON-only, fixed name, mode 0600. Neither file is touched.
 
 **The stamp.** First line of the body, immediately after the frontmatter's closing `---`:
 
@@ -115,6 +131,14 @@ dirtywork init [--repo PATH] [--no-user] [--force] [--stdout]
 
 Exit code is `0` if every destination was written/updated/current, `1` if any was skipped, `2` on usage or environment error (`--repo` not a directory, unwritable path). Messages: one stdout line per destination in the order user → project; errors are `error: ...` on stderr, matching the CLI's existing convention. (`init` is human/agent-facing plain text, like `runs list`; the "one JSON object on stdout" rule is `run`'s and stays `run`'s.)
 
+**Mechanics (normative — tests 7–13, 15 and 19–23 pin these):**
+
+- *Rendering.* `render_skill(version)` does `template.replace("{{VERSION}}", version)` — never `str.format`, whose escape rule would turn `{{VERSION}}` into a literal `{VERSION}`. It then inserts the stamp as the first line after the frontmatter's closing `---`. The rendered text ends with exactly one newline.
+- *Stamp.* Recognised only on that line, by `^<!-- dirtywork-skill v(?P<version>\S+) sha256:(?P<hash>[0-9a-f]{16})\b`. The hash input is the file's bytes with the stamp line **and its newline** deleted — i.e. exactly the text `render_skill` had before inserting the stamp — so frontmatter edits count (§0.1 item 2).
+- *Existing file.* Existence is `is_file()`. It is read with `read_bytes()`; the stamp regex runs on those bytes. Content that is not UTF-8, or has no parseable stamp, is the "no parseable stamp" row (rc 1) — never an exception.
+- *Up to date vs updated.* "Hash matches" means the file is self-consistent with its own stamp (unmodified by a human). Given that: existing bytes equal to the fresh render → `up to date:`; bytes differ → overwrite, `updated: <path>` with ` (v{old} -> v{new})` appended when the stamp's version differs from `__version__`. So a same-version template change still installs.
+- *Order and errors.* All flag and `--repo` validation completes before any write (test 13 asserts the user copy does not exist after a bad `--repo`). Destinations are then processed user → project, de-duplicated by `Path.resolve()` (a `--repo` that resolves to `$HOME` yields one destination, one line). A destination that exists but is not a regular file, and any `OSError` from mkdir, read, temp-write or `os.replace`, is an environment error: `error: <path>: <strerror>` on stderr, rc 2, and `init` stops there (re-running is safe — `init` is idempotent). If the destination is a symlink it is resolved and the temp file is staged beside the target so the link survives.
+
 ### 3.4 The skill
 
 Full text in Appendix A. Design rules it must satisfy (tests enforce the mechanical ones):
@@ -129,14 +153,16 @@ Full text in Appendix A. Design rules it must satisfy (tests enforce the mechani
 
 ### 3.5 Contract ripple (each site named)
 
-- `dirtywork/contract/machine-contract.md` **Flags** section: add `dirtywork contract` and `dirtywork init` with the table in §3.3, the stamp format, and `init`'s exit codes. The contract documents its own delivery.
+- `dirtywork/contract/machine-contract.md` **Flags** section: add `dirtywork contract`, `dirtywork init` (the table in §3.3, the stamp format, `init`'s exit codes) and `--version`. The contract documents its own delivery.
+- `dirtywork/contract/machine-contract.md` gains a `**Security:**` labelled paragraph (the file uses bold labels, not headings) next to the `--sandbox` flag: docker mode protects host integrity and host execution, not repository-history confidentiality (the worker can read the whole parent object store — do not point it at a clone whose history holds secrets); `--sandbox none` guardrails block accidents, not adversaries; full treatment in `docs/security.md` on GitHub. The skill points at this entry, so `dirtywork contract` stays self-sufficient (§3.2).
+- `dirtywork/__main__.py`: split `_parse_args` (`:1166-1190`) into `_build_parser() -> argparse.ArgumentParser` (everything but the final `parse_args`) and `_parse_args(argv) = _build_parser().parse_args(argv)`. `main()` (`:1217`) and the existing `_parse_args` tests are unchanged; test 16 walks `_build_parser()`.
 - `docs/machine-contract.md` → stub (§3.1). Inbound references updated (eleven sites, §3.1).
 - `README.md`: a short **Use it from Claude Code** subsection — `pipx install dirtywork`, `dirtywork init --repo .`, "Claude now has the `dirtywork` skill; ask it to delegate a task" — and the Documentation list gains `dirtywork contract` beside the contract link.
 - `docs/operating.md`: **Setting up an orchestrator** (≤ 15 lines) pointing at `init`, `--no-user`, `--force`, and `contract`.
 - `dirtywork --help`: top-level parser description gets one sentence: "Driving it from an agent? `dirtywork init` installs the Claude Code skill; `dirtywork contract` prints the reference."
 - `dirtywork --version`: `p.add_argument("--version", action="version", version=f"dirtywork {__version__}")` on the top-level parser (`__main__.py` already imports `__version__` at line 25).
-- Version 0.12.0 in `pyproject.toml` and `dirtywork/__init__.py` (the string is hardcoded in both).
-- `.github/workflows/ci.yml`: a `wheel-smoke` job (ubuntu, one Python), added to `gate.needs` alongside `test` and `docker-live` so a failure blocks the gate. Steps: `python -m pip install build` (CI installs only `pytest` today) → `python -m build` → `python -m venv smoke && smoke/bin/pip install dist/*.whl` → in the venv, `dirtywork contract > contract.md && grep -q '^# Machine contract' contract.md`, `dirtywork init --stdout > skill.md && grep -q '^name: dirtywork' skill.md && grep -q 'dirtywork-skill v' skill.md`, and `dirtywork --version | grep -q '^dirtywork '`. Outputs go to files and are asserted with `grep -q` — no `| head -1` (SIGPIPE under `pipefail`; a truncated stream can hide a crash after line 1). This is the only check that catches a missing `package-data` entry; unit tests run from the source tree and would pass anyway.
+- Version 0.12.0 in `pyproject.toml` and `dirtywork/__init__.py` (the string is hardcoded in both) — **plus the per-minor worker-image cycle `docker/README.md` prescribes**, because `publish-image.yml` publishes `:0.12` on the `v0.12.0` release whether or not the CLI points at it: `dirtywork/sandbox/docker_args.py` `DEFAULT_IMAGE` → `:0.12` and `PINNED_DIGEST = None` (comment records the 0.11 digest in the history parenthetical, as 0.10's is); `tests/test_docker_args.py` asserts updated; `.github/workflows/ci.yml:89` docker-live tag → `:0.12`; the seven `:0.11` literals in the packaged contract and `docker/README.md`'s current-default references swept to `:0.12`; `docs/operating.md`'s image list gains 0.12. The digest is pinned in 0.12.1, as 0.11.1 did. *(Owner decision pending — see §0.2 C2; the alternative is a patch release that skips this bullet.)*
+- `.github/workflows/ci.yml`: a `wheel-smoke` job (ubuntu, one Python), added to `gate.needs` alongside `test` and `docker-live` so a failure blocks the gate. Steps: `python -m pip install build` (CI installs only `pytest` today) → `python -m build` → `python -m venv smoke && smoke/bin/pip install dist/*.whl` → in the venv, `dirtywork contract > contract.md && grep -q '^# Machine contract' contract.md`, `dirtywork init --stdout > skill.md && grep -q '^name: dirtywork' skill.md && grep -q 'dirtywork-skill v' skill.md`, and `dirtywork --version > version.txt && grep -q '^dirtywork ' version.txt`. Every output goes to a file and is asserted with `grep -q`; nothing is piped, because a pipe's exit status is its last command's (ci.yml sets no `shell:`, so there is no `pipefail`) and a crash upstream would be masked. This is the only check that catches a missing `package-data` entry; unit tests run from the source tree and would pass anyway.
 
 ### 3.6 Self-dogfood (after release, not part of the build)
 
@@ -156,7 +182,7 @@ Full text in Appendix A. Design rules it must satisfy (tests enforce the mechani
 
 `tests/test_contract.py` (new), driven through `m.main([...])` with `capsys`/`monkeypatch` like `tests/test_main.py`; `init` resolves `~` with `Path.home()` at call time (not at import, unlike `rundir.DIRTYWORK_HOME`), so tests redirect it with `monkeypatch.setenv("HOME", str(tmp_path))`, which `Path.home()` honours on POSIX.
 
-1. `test_contract_prints_packaged_reference_verbatim` — stdout == packaged file bytes, stderr empty, rc 0.
+1. `test_contract_prints_packaged_reference_verbatim` — `capsys` stdout == packaged file text, byte for byte (no extra newline — `sys.stdout.write`), stderr empty, rc 0.
 2. `test_contract_first_line_is_heading` — `# Machine contract`.
 3. `test_init_writes_user_skill_by_default` — file exists, stdout `wrote: <path>`, rc 0.
 4. `test_init_with_repo_writes_both` — two files, identical bytes, two stdout lines user-then-project.
@@ -167,15 +193,19 @@ Full text in Appendix A. Design rules it must satisfy (tests enforce the mechani
 9. `test_init_skips_locally_modified_without_force` — append a line; `skipped (locally modified):`, file untouched, rc 1.
 10. `test_init_force_overwrites_modified` — `overwrote:`, rc 0.
 11. `test_init_unstamped_existing_file_is_treated_as_modified` — rc 1 without `--force`.
-12. `test_init_stdout_prints_and_writes_nothing` — stdout == `render_skill(__version__)`, no files, rc 0.
-13. `test_init_repo_not_a_directory_exits_2`.
+12. `test_init_stdout_prints_and_writes_nothing` — stdout == `render_skill(__version__)` exactly, no files, rc 0.
+12b. `test_init_stdout_with_no_user_still_prints` — `init --stdout --no-user` → same stdout, no files, rc 0; `init --stdout --repo <not a dir>` → rc 2, nothing printed on stdout.
+13. `test_init_repo_not_a_directory_exits_2` — and asserts the user copy was **not** written (validation precedes writes).
 14. `test_skill_frontmatter_and_size` — starts with `---`, has `name: dirtywork` and a non-empty `description:`, ≤ 200 lines, mentions `dirtywork contract`, `resume`, `runs verdict`, `--keep-transcript`, `--allow-network`, and all three exit codes.
-15. `test_skill_stamp_hash_matches_body` — recompute the SHA-256 of the entire UTF-8 file with the stamp line removed; its first 16 hex characters equal the stamp's `HEX16`; the stamp's version equals `__version__`.
-16. `test_skill_flags_exist_in_parser` — every `--[a-z][a-z-]*` token in the rendered skill is an option string somewhere in the argparse tree (walk subparsers via `_subparsers._group_actions[*].choices`).
-17. `test_worker_prompt_does_not_inject_skill_file` — a repo whose base commit contains `.claude/skills/dirtywork/SKILL.md` and no `CLAUDE.md`: the injected conventions are empty (model it on the `CLAUDE.md`/`AGENTS.md` tests in `tests/test_workspace.py`; the reader is `workspace.py:243-270`). This pins "not injected", nothing more.
+15. `test_skill_stamp_hash_matches_body` — recompute the SHA-256 of the rendered bytes with the stamp line and its newline deleted; its first 16 hex characters equal the stamp's `HEX16`; the stamp's version equals `__version__`; the text contains `(v{__version__})` and neither `{{` nor `{VERSION}`.
+16. `test_skill_flags_exist_in_parser` — start from `m._build_parser()`; recursively collect every option string from each parser's `_actions`, descending into `_SubParsersAction.choices`; assert every `--[a-z][a-z-]*` token in the rendered skill is in that set.
+17. `test_worker_prompt_does_not_inject_skill_file` — a repo whose base commit contains `.claude/skills/dirtywork/SKILL.md` and no `CLAUDE.md`: the injected conventions are empty. Build the repo with a local copy of `tests/test_workspace.py`'s `repo` fixture and `_commit_file` helper (they are module-local, not in `conftest.py`, and `_commit_file` does not create parent directories — `mkdir(parents=True)` first); the reader is `workspace.py:243-270`. This pins "not injected", nothing more.
 18. `test_version_flag` — `dirtywork --version` prints `dirtywork <__version__>` and exits 0 (argparse's `action="version"` raises `SystemExit(0)`; catch it with `pytest.raises`).
 19. `test_init_detects_edited_frontmatter` — plant a copy rendered with version `0.0.1`, change only its `description:` line, run `init`: `skipped (locally modified)`, rc 1, file unchanged; `--force` overwrites.
-20. `test_skill_first_paragraph_addresses_the_worker` — the first paragraph of the body after the title (the lines up to the first blank line, joined) contains both "worker" and "ignore". The prose wraps, so the test reads the paragraph, not one physical line.
+20. `test_skill_first_paragraph_addresses_the_worker` — skip blank lines after the title, take the lines up to the next blank line, join with a space, **lower-case**, and assert it contains both "worker" and "ignore" (Appendix A's sentence-initial "Ignore" must match). The prose wraps, so the test reads the paragraph, not one physical line.
+21. `test_init_destination_is_a_directory_exits_2` — a directory at `~/.claude/skills/dirtywork/SKILL.md`: `error:` on stderr naming the path, rc 2, nothing else written.
+22. `test_init_same_path_twice_is_one_destination` — `--repo` set to `$HOME`: one stdout line, one write.
+23. `test_init_same_version_template_change_updates` — plant a copy rendered from a modified template at the current version (valid stamp): `updated: <path>` with no version suffix, file replaced.
 
 CI: the `wheel-smoke` job in §3.5.
 
@@ -190,13 +220,14 @@ CI: the `wheel-smoke` job in §3.5.
 | A5 | Suite and CI green | Full suite passes; `wheel-smoke` job green on the PR |
 | A6 | Size | Rendered skill ≤ 200 lines (test 14) |
 | A7 | Nothing is injected into the worker prompt | Test 17 green (the narrowed claim; see §4) |
-| A8 | No stale contract reference | `grep -rn 'machine-contract\.md' --include='*.md' --include='*.py' --exclude-dir=superpowers --exclude-dir=.worktrees . \| grep -v 'dirtywork/contract/machine-contract.md'` prints only lines from `./docs/machine-contract.md` (the stub's own text). Matches every spelling — `docs/machine-contract.md`, bare relative `machine-contract.md#…` as in `operating.md` — and passes only when each one has become the canonical `dirtywork/contract/machine-contract.md` path or URL |
+| A8 | No stale contract reference | `grep -rn -e 'docs/machine-contract\.md' -e '](machine-contract\.md' --include='*.md' --include='*.py' --exclude-dir=superpowers --exclude-dir=.worktrees .` prints **nothing** (grep exits 1). The two patterns are the only stale spellings — today they list exactly the eleven sites of §3.1, link text included (`transcript-schema.md:277/:350` read `[docs/machine-contract.md](machine-contract.md)`); the stub, every updated reference and the new `read("machine-contract.md")` call sites match neither |
+| A9 | Image cycle consistent | `DEFAULT_IMAGE`, `ci.yml`'s docker-live tag, `tests/test_docker_args.py` and the packaged contract all name the same `:0.12` tag, `PINNED_DIGEST is None` (if the owner takes the minor; otherwise this row is void) |
 
 ## 7. Files
 
 New: `dirtywork/contract/__init__.py`, `dirtywork/contract/SKILL.md`, `dirtywork/contract/machine-contract.md` (moved), `tests/test_contract.py`.
 
-Modified: `dirtywork/__main__.py` (two subparsers, two dispatch branches, `--version`), `pyproject.toml` (packages, package-data, version), `dirtywork/__init__.py` (version), `docs/machine-contract.md` (stub), `README.md`, `docs/operating.md`, `docker/README.md`, `docs/transcript-schema.md`, `dirtywork/tools.py` and `dirtywork/workspace.py` (docstring paths), `.github/workflows/ci.yml` (`wheel-smoke` job + `gate.needs`).
+Modified: `dirtywork/__main__.py` (two subparsers, two dispatch branches, `--version`, `_build_parser` split, `_write_text_atomic`), `pyproject.toml` (packages, package-data, version), `dirtywork/__init__.py` (version), `docs/machine-contract.md` (stub), `README.md`, `docs/operating.md`, `docker/README.md`, `docs/transcript-schema.md`, `dirtywork/tools.py` and `dirtywork/workspace.py` (docstring paths only), `.github/workflows/ci.yml` (`wheel-smoke` job + `gate.needs`; docker-live tag if the minor is taken), and — if the minor is taken — `dirtywork/sandbox/docker_args.py` and `tests/test_docker_args.py`.
 
 ## 8. Open questions — resolved by the owner (2026-08-26)
 
@@ -240,7 +271,7 @@ first `run` in a session. Do not guess flags.
   running Docker; the worker image is pulled on the first run if it is
   absent (exit 2 with "Build or pull the worker image" means that failed —
   see the contract's `--image` entry). `--sandbox none` runs the worker on
-  your host: read the contract's security section first.
+  your host: read the contract's **Security** entry first.
 
 ## The loop
 
@@ -271,17 +302,20 @@ automatically: put worker-facing conventions there, not in every brief.
   failures back for up to `--verify-rounds` further attempts.
 - Progress is on **stderr**: transcript path, worktree path, `error:` lines.
   `tail -f` the transcript to watch a run.
-- **stdout is exactly one JSON object.** Parse it; do not grep it. Fields you
-  will use: `status`, `worktree`, `branch`, `base_commit`, `transcript`,
-  `run_dir`, `turns`, `files_changed`, `final_message`, `stuck_on`,
-  `last_tool_result`.
+- **Past preflight, stdout is exactly one JSON object.** Parse it; do not
+  grep it. On exit 2 stdout is empty and the reason is the `error:` line on
+  stderr. Fields you will use: `status`, `worktree`, `branch`, `base_commit`,
+  `transcript`, `run_dir` (its last path component is the slug),
+  `resumed_from`, `turns`, `files_changed`, `final_message`, `stuck_on`,
+  `last_tool_result`, `last_assistant_text`.
 - Exit codes: `0` = `completed`. `1` = any other status (`max_turns`,
   `timeout`, `stalled`, `stuck`, `verify_failed`, `context_exhausted`,
   `model_error`, `budget_exceeded`, `unchanged`, …) — the worktree and branch
   are kept for review and salvage. `2` = preflight or environment error;
   nothing was created.
-- In the **default** docker mode the container has no network and nothing
-  mounted, so the worker **cannot install dependencies**; it has what the image
+- In the **default** docker mode the container has no network and no host
+  directories mounted (only the run volume and a read-only view of the repo's
+  git objects), so the worker **cannot install dependencies**; it has what the image
   ships — git, bash, python3, node/npm, .NET, ripgrep, jq, curl, shellcheck.
   `--allow-network` gives the container bridge networking so installs work, at
   the cost of an offline sandbox — use it deliberately, and for anything
@@ -301,8 +335,13 @@ automatically: put worker-facing conventions there, not in every brief.
 
 If the work is close: `dirtywork resume <slug> --feedback "<exactly what to
 change>"` — same worktree, same branch; the worker is told to inspect its
-earlier work and apply your feedback. Two resumes without convergence means
-the brief was wrong: reject, rewrite the brief, run again from a clean base.
+earlier work and apply your feedback. A resume is a **new run** with its own
+slug and `run_dir`; its JSON's `resumed_from` names the run it continued while
+`branch` and `worktree` still carry the original slug. From here on use the
+newest slug for `runs verdict` and `runs clean` — cleaning an earlier slug in
+the chain leaves the worktree and branch in place. Two resumes without
+convergence means the brief was wrong: reject, rewrite the brief, run again
+from a clean base.
 
 ### 5. Verdict and cleanup
 
@@ -314,18 +353,19 @@ the brief was wrong: reject, rewrite the brief, run again from a clean base.
   `dirtywork runs clean <slug> --force --keep-transcript`. `--force` because a
   rejected worktree has uncommitted changes and `clean` refuses to delete
   those otherwise; `--keep-transcript` keeps `run.json` and the transcript and
-  removes the container, volume and worktree. Plain `runs clean <slug>`
+  removes the container, volume, worktree and branch. Plain `runs clean <slug>`
   deletes the receipts too.
 - `dirtywork runs list` and `dirtywork runs show <slug>` inspect earlier runs.
 
 ## Rules of thumb
 
 - Never merge unreviewed worker output. The worker ran `bash` in a sandbox;
-  a shell is a shell — see the contract's security section.
+  a shell is a shell — see the contract's **Security** entry.
 - Parallelism is processes: run independent briefs concurrently (LM Studio
   serves several requests per loaded model). Never two tasks in one brief.
-- On `stuck`/`stalled`, read `stuck_on` and `last_tool_result` before
-  resuming — the fix is usually in the brief, not the model.
+- On `stuck`, read `stuck_on` (the repeated failing command); on `stalled` or
+  `max_turns`, read `last_tool_result` and `last_assistant_text`. Either way
+  the fix is usually in the brief, not the model.
 - Keep receipts: `run.json`, the transcript and the verdict are the record of
   what the worker did and what you decided. `runs clean --keep-transcript`
   preserves them; plain `clean` does not.
