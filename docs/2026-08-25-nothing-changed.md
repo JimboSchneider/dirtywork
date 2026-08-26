@@ -206,7 +206,8 @@ Some other things the ledger says:
 | Per-task review + feedback rounds | the finish-time fingerprint taken after the sandbox notices it should have carried had already been drained |
 | A reviewer's test | the start fingerprint outside the interrupt handling |
 | C1 acceptance (13 runs, host and container) | the guard refusing a false "matches 'prior\n'" claim and the worker then fixing the byte |
-| The live suite on the branch | test 24's own premise: the docker seed drops every nested `.git`, so a host-side nested repository arrives as plain files (#75) — and twelve scripted live tests that finish without changing anything ran out of script when the guard asked for a second completion |
+| The live suite on the branch | test 24's own premise: on a macOS host the docker seed (bsdtar) drops every nested `.git`, so a host-side nested repository arrives as plain files (#75) — and twelve scripted live tests that finish without changing anything ran out of script when the guard asked for a second completion |
+| CI on the release PR, after the merge | the other half of #75: GNU tar on the Linux runner keeps the nested `.git` that bsdtar drops, so test 24 as merged had asserted my laptop; fixed in 0.11.0's own PR |
 
 Every row is something that survived the rows above it. Same lesson as the last post,
 one turn further along: the reviews outranked the spec, and then the build outranked the

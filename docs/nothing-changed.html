@@ -156,7 +156,8 @@ run_end: completed</pre>
       <tr><td>Per-task review + feedback rounds</td><td>the finish-time fingerprint taken after the sandbox notices it should have carried had already been drained</td></tr>
       <tr><td>A reviewer's test</td><td>the start fingerprint outside the interrupt handling</td></tr>
       <tr><td>C1 acceptance (13 runs, host and container)</td><td>the guard refusing a false "matches 'prior\n'" claim and the worker then fixing the byte</td></tr>
-      <tr><td>The live suite on the branch</td><td>test 24's own premise: the docker seed drops every nested <code>.git</code>, so a host-side nested repository arrives as plain files (#75) — and twelve scripted live tests that finish without changing anything ran out of script when the guard asked for a second completion</td></tr>
+      <tr><td>The live suite on the branch</td><td>test 24's own premise: on a macOS host the docker seed (bsdtar) drops every nested <code>.git</code>, so a host-side nested repository arrives as plain files (#75) — and twelve scripted live tests that finish without changing anything ran out of script when the guard asked for a second completion</td></tr>
+      <tr><td>CI on the release PR, after the merge</td><td>the other half of #75: GNU tar on the Linux runner keeps the nested <code>.git</code> that bsdtar drops, so test 24 as merged had asserted my laptop; fixed in 0.11.0's own PR</td></tr>
     </tbody></table>
     <p>Every row is something that survived the rows above it. Same lesson as the last post, one turn further along: the reviews outranked the spec, and then the build outranked the reviews — by producing the very failure the branch exists to stop, on the record, while the fix was four tasks out.</p>
     <p>PR #76 — "Closes #65, closes #66" — merged the next morning as <code>136b69d</code>, suite re-verified on main, and released as <strong>0.11.0</strong> the same hour, so the next build runs on a runtime that has the guard.</p>
