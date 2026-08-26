@@ -777,3 +777,67 @@ def test_canonical_args_normalizes_duration_strings_for_unit_params():
     assert r.canonical_args("waiter", {"delay": "2m"}) == r.canonical_args("waiter", {"delay": 120})
     assert r.canonical_args("waiter", {"delay": "2m"}) == {"delay": 120}
     assert r.canonical_args("waiter", {"delay": "junk"}) == {"delay": "junk"}  # unparseable stays as sent
+
+
+from dirtywork.builtin_tools import default_registry
+from .markers import TOOL_CALLS, TOOL_CALL_OPEN
+
+
+def test_recover_name_registered_name_is_unchanged():
+    r = default_registry()
+    assert r.recover_name("bash") == ("bash", None, 0)
+
+
+def test_recover_name_strips_prose_before_the_last_marker():
+    r = default_registry()
+    name = "exit code: 0\n1,User1" + TOOL_CALLS + "bash"
+    assert r.recover_name(name) == ("bash", TOOL_CALLS, len("exit code: 0\n1,User1"))
+
+
+def test_recover_name_uses_the_last_marker():
+    r = default_registry()
+    name = "a" + TOOL_CALLS + "b" + TOOL_CALLS + "read_file"
+    assert r.recover_name(name) == ("read_file", TOOL_CALLS, len("a" + TOOL_CALLS + "b"))
+
+
+def test_recover_name_leaves_an_unknown_suffix_alone():
+    r = default_registry()
+    name = "x" + TOOL_CALLS + "nope"
+    assert r.recover_name(name) == (name, None, 0)
+
+
+def test_recover_name_leaves_a_name_without_a_marker_alone():
+    r = default_registry()
+    assert r.recover_name("garbage") == ("garbage", None, 0)
+
+
+def test_recover_name_handles_the_xml_marker():
+    r = default_registry()
+    name = "prose " + TOOL_CALL_OPEN + "bash"
+    assert r.recover_name(name) == ("bash", TOOL_CALL_OPEN, len("prose "))
+
+
+def test_recover_name_strips_whitespace_around_the_suffix():
+    r = default_registry()
+    name = "p" + TOOL_CALLS + "  bash \n"
+    assert r.recover_name(name) == ("bash", TOOL_CALLS, 1)
+
+
+def test_recover_name_is_case_sensitive():
+    r = default_registry()
+    name = TOOL_CALLS + "Bash"
+    assert r.recover_name(name) == (name, None, 0)
+
+
+def test_unknown_tool_error_caps_the_echoed_name():
+    r = default_registry()
+    name = "q" * 150 + TOOL_CALLS + "zz" * 70
+    result = r.execute(name, {}, sandbox=None, deadline=None)
+    assert "…" in result.text
+    assert "(name truncated)" in result.text
+    assert name[-40:] in result.text
+    assert len(result.text) < 400
+
+    # 20-char unknown name should echo whole
+    result = r.execute("unknown_short", {}, sandbox=None, deadline=None)
+    assert "(name truncated)" not in result.text

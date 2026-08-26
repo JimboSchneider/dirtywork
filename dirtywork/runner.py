@@ -18,6 +18,7 @@ from .llm import LLMTimeout, MalformedResponse
 from .providers import assistant_message, tool_message
 from .sandbox import SandboxError
 from .tools import is_timeout_result, net_change, parse_exit_code
+from .toolspec import TOOL_CALL_MARKERS as _TEXT_TOOL_MARKERS
 
 MAX_ASSISTANT_TEXT_CHARS = 64_000
 # Spec §2: end-of-run evidence caps. These match the transcript's own preview
@@ -88,16 +89,12 @@ class FailureTracker:
         self.total = 0
 
 
-# These tags are built by concatenation ON PURPOSE: several local models' chat
-# templates parse these exact tags in their own output (Qwen3-coder's tool-call
-# XML, think-tag stripping), so a worker model editing this file through its
-# tool channel could not emit them literally. Keep them concatenated.
+# Concatenated ON PURPOSE — see TOOL_CALL_MARKERS in toolspec.py
 _THINK_OPEN = "<" + "think>"
 _THINK_CLOSE = "</" + "think>"
 # Aliases for backwards compatibility with tests
 _THINK_RE = re.compile(re.escape(_THINK_OPEN) + r".*?(?:" + re.escape(_THINK_CLOSE) + r"|\Z)",
                        re.DOTALL)
-_TEXT_TOOL_MARKERS = tuple("<" + m for m in ("tool_call>", "function=", "function_call>", "|tool_call|>"))
 
 NUDGES = {
     "truncated": ("Your reply was cut off at the --max-tokens cap of {cap} tokens (about "

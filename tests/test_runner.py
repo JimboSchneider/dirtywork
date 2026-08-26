@@ -47,7 +47,7 @@ from dirtywork.transcript import Transcript
 from .provider_doubles import FingerprintSandbox
 from .provider_doubles import assert_strict_template_legal
 from .provider_doubles import TimeoutThenFailingVerifySandbox as _TimeoutThenFailingVerifySandbox
-from .markers import TOOL_CALL_OPEN, TOOL_CALL_CLOSE
+from .markers import TOOL_CALL_OPEN, TOOL_CALL_CLOSE, TOOL_CALLS
 
 
 def _resp(content=None, tool_calls=None, usage=None, finish_reason=None):
@@ -951,6 +951,10 @@ _THINK_END = _tag("/think")
 ])
 def test_classify_text_reply(content, finish_reason, expected):
     assert classify_text_reply(content, finish_reason) == expected
+
+
+def test_classify_text_reply_treats_the_devstral_marker_as_a_text_tool_call():
+    assert classify_text_reply("I will run " + TOOL_CALLS + 'bash{"command": "ls"}', "stop") == "text_tool_call"
 
 
 def test_strip_think_removes_blocks():

@@ -7,6 +7,15 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 
+# These tags are built by concatenation ON PURPOSE: several local models' chat
+# templates parse these exact tags in their own output (Qwen3-coder's tool-call
+# XML, think-tag stripping), so a worker model editing this file through its
+# tool channel could not emit them literally. Keep them concatenated.
+TOOL_CALL_MARKERS = ("[" + "TOOL_CALLS]",) + tuple(
+    "<" + m for m in ("tool_call>", "function=", "function_call>", "|tool_call|>")
+)
+
+
 class _MissingType:
     """Sentinel distinguishing 'no default provided' from an explicit ``None``
     default. Falsy, so ``if param.default:`` degrades safely for callers that
@@ -406,12 +415,31 @@ class ToolRegistry:
             return text
         return text[:TRANSCRIPT_PREVIEW_CHARS]
 
+    def recover_name(self, name: str) -> "tuple[str, str | None, int]":
+        """(name, marker, cut). A registered name is returned as-is with marker None.
+        A name that is not registered but, after its LAST tool-call marker, ends in a
+        registered name is recovered to that name; `marker` is the marker found and
+        `cut` the number of characters before it (the model's stray text). Anything
+        else is returned unchanged with marker None: the unknown-tool path decides."""
+        if name in self._table:
+            return name, None, 0
+        best = max(((name.rfind(m), m) for m in TOOL_CALL_MARKERS if m in name),
+                   default=(-1, None))
+        if best[0] < 0:
+            return name, None, 0
+        pos, marker = best
+        suffix = name[pos + len(marker):].strip()
+        if suffix in self._table:
+            return suffix, marker, pos
+        return name, None, 0
+
     def execute(self, name: str, args: dict, *, sandbox, deadline) -> ToolResult:
         spec = self._table.get(name)
         if spec is None:
             available = ", ".join(self._table)
+            shown = name if len(name) <= 80 else name[:40] + "…" + name[-40:] + " (name truncated)"
             return ToolResult(
-                text=(f"ERROR: unknown tool '{name}'. Available: {available}. "
+                text=(f"ERROR: unknown tool '{shown}'. Available: {available}. "
                       f"To end the run call finish(summary=...)."),
                 kind="error", failure="unknown_tool")
         try:
