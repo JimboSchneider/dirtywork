@@ -2,7 +2,7 @@
 
 *dirtywork 1.0 roadmap item 6 (soak finding S6). Written 2026-08-26 from the #48 soak's leg B and
 the #65/#66 build's F5 Devstral rows. Owner decision recorded in §0; v2 after a four-lens
-red-team (§0.1); v3 after the owner's review (§0.2). Built by the released dirtywork 0.11.0 — the first build on a runtime that
+red-team (§0.1); v3 after the owner's review (§0.2). Built by the released dirtywork 0.11.1 — the first build on a runtime that
 refuses a zero-change finish.*
 
 ## 0. The owner's decision
