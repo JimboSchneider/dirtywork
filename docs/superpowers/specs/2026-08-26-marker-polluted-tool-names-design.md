@@ -2,7 +2,7 @@
 
 *dirtywork 1.0 roadmap item 6 (soak finding S6). Written 2026-08-26 from the #48 soak's leg B and
 the #65/#66 build's F5 Devstral rows. Owner decision recorded in §0; v2 after a four-lens
-red-team (§0.1). Built by the released dirtywork 0.11.0 — the first build on a runtime that
+red-team (§0.1); v3 after the owner's review (§0.2). Built by the released dirtywork 0.11.0 — the first build on a runtime that
 refuses a zero-change finish.*
 
 ## 0. The owner's decision
@@ -24,6 +24,15 @@ Everything else here is the designer's proposal for the owner's review: the nudg
 | **Major** the nudge text's home was unstated; a `NUDGES` entry would break `EMPTY_REPLY_NUDGE_KINDS == tuple(runner.NUDGES)` | §3.2: `NAME_RECOVERED_NUDGE` module constant, never a `NUDGES` key |
 | **Major** the acceptance referenced a plan file in the session scratchpad | §6: the six rows committed at `docs/superpowers/bench/2026-08-26-issue-67-f5-devstral-plan.jsonl` |
 | Minors (7): evidence counts recounted from the transcripts (4 of 8 aborts, marker/length buckets); the nudge text must not hard-code one marker and `n` needed a definition; the `tool` schema row becomes open; "bench's tool mix" is the harvest's; the pinned counts and enumerations named one by one; a schema test for `tool_raw` named; `runs show` does not read `tool_raw` (consistent with the operating.md entry) | folded in place |
+
+### 0.2 Owner review fold (v3, 2026-08-26 14:44 — four items, all verified against the code)
+
+| item | fold |
+|---|---|
+| `tool_raw` semantics: v2's "present when a marker was found" contradicted `recover_name`, which returns `marker=None` for a marker followed by an unknown suffix | **`tool_raw` means a successful recovery** — present iff `marker is not None`; an unrecovered polluted name is already the `tool` field itself (capped). §3.1/§3.2/§3.5/§5 aligned |
+| the acceptance asked for a `tool_raw` count the harvest cannot produce; the harvest's feature list omits S6 (and S14) | §3.5: `soak_harvest` gains a per-run `recovered` column (`PER_RUN_COLUMNS`, count of `tool_result` events with `tool_raw`), its docstring lists S6 and S14; §6 names the column and the one-line fallback |
+| §5 cited `tests/test_runner.py:348` and `tests/test_soak_tools.py:471` as concatenation examples; both are literal (the red-team's verifier was wrong) | §5: a test helper `tests/markers.py` is defined; new tests use it; the two existing lines are converted in the plan's first task and no longer cited as examples |
+| `BudgetExceeded`/`SandboxError` return at `runner.py:1108/:1110` before the `tool_result` write, so a recovered call on those paths leaves no `tool_raw` | §3.2/§4: excluded and stated — those two paths write no `tool_result` for any call today; no synthetic record |
 
 ## 1. Problem and evidence
 
@@ -158,7 +167,9 @@ applies to `assistant.tool_calls[].name` in the transcript (`arguments` were alr
 
 **The transcript records both names.** `tool_result.tool` is the recovered name (so `runs show`,
 the harvest's `_tool_mix` and its feature detection see `bash`); a **sparse** `tool_raw` field
-carries the raw name through the same `cap_name`, present only when a marker was found. An
+carries the raw name through the same `cap_name`, present **iff the name was recovered**
+(`recover_name` returned a marker) — never for an unrecovered polluted name, whose raw name is
+the `tool` field itself. An
 unrecovered garbage name goes through the unknown-tool path unchanged; its `tool` is the raw
 name through `cap_name`, and the `tool` schema row becomes open: a registered name, or on an
 `unknown_tool` error the name the model sent (capped), or `""` for a discarded malformed entry.
@@ -184,10 +195,13 @@ name through `cap_name`, and the `tool` schema row becomes open: a registered na
   `:1195-1196`), so `deliver` stamps `via: "tool_result"` on it and the text rides the turn's
   **last** tool result, exactly as `timeout` does. One nudge per turn however many calls were
   recovered.
-- **On a turn that ends the run** — a recovered `finish` whose completion is accepted, or any
-  terminal outcome — the nudge is neither delivered nor recorded (the `timeout` rule at
-  `:1140-1147`); the record of what happened is the `tool_raw` field on that call's
-  `tool_result`, which is what the ledger counts. A recovered `finish` whose completion is
+- **On a turn that ends the run** — a recovered `finish` whose completion is accepted, or a
+  stall/stuck/change-guard verdict on that turn — the nudge is neither delivered nor recorded
+  (the `timeout` rule at `:1140-1147`); the record of what happened is the `tool_raw` field on
+  that call's `tool_result`, which is what the ledger counts. **Excluded:** a recovered call
+  whose dispatch raises `BudgetExceeded` or `SandboxError` returns at `:1108`/`:1110` before
+  the `tool_result` write, as any call does today — the run ends `budget_exceeded`/
+  `sandbox_error` with no record of that call and no synthetic one is written. A recovered `finish` whose completion is
   *refused* (verify feedback, the change guard's first refusal) continues through the
   `pending_finish` branch and gets the nudge there.
 
@@ -224,7 +238,12 @@ visible to the model without the whole echo. The `Available:` list and the finis
   `tool_result` carrying `tool_raw`, or on a `tool_result` whose `result` starts with
   `ERROR: unknown tool` and whose `tool` contains a `TOOL_CALL_MARKERS` marker (the capped
   field keeps the tail, so the marker survives; a prefix so long that the head+tail cap drops
-  every marker is the stated blind spot — none observed). `_tool_mix`'s 30-char cap stays.
+  every marker is the stated blind spot — none observed). The per-run table gains a
+  **`recovered`** column (`PER_RUN_COLUMNS`, `tools/soak_harvest.py:36-37`, after `stray kills`):
+  the count of `tool_result` events carrying `tool_raw`; the existing `nudges` column already
+  sums every `bench.NUDGE_KINDS` kind (`:403`), so `name_recovered` counts there by
+  construction. The module docstring's feature list (`:6-8`) gains **S6** and the #66 **S14** it
+  also omits. `_tool_mix`'s 30-char cap stays.
 - **operating.md** — a troubleshooting entry: "`aborted after 3 consecutive unknown_tool
   failures` on Devstral — 1.0 (#67) recovers the call; the transcript's `tool_raw` shows what
   the model sent". `runs show --markdown` does not render `tool_raw` (the entry points at the
@@ -239,13 +258,29 @@ visible to the model without the whole echo. The `Available:` list and the finis
 - A marker inside a *legitimate* argument string is untouched — recovery reads the name only.
 - A polluted `finish` recovers like any tool (2 of 28): the summary is the arguments' `summary`,
   and the change guard (#66) still decides whether the run may end.
+- A recovered call whose dispatch raises `BudgetExceeded`/`SandboxError` leaves no
+  `tool_result` (the runner returns before the write, for every call) — the run's status is
+  the record; no synthetic event.
 - Nothing here changes provider behaviour; if LM Studio one day fixes the parse, `recover_name`
   simply never fires and `name_recovered` counts stay at zero on the ledger.
 
 ## 5. Tests
 
-All marker strings in tests are built by concatenation, as in `tests/test_runner.py:348` and
-`tests/test_soak_tools.py:471` — never spelled literally.
+All marker strings in tests are built by concatenation, through one helper module,
+`tests/markers.py`:
+
+```python
+# Built by concatenation ON PURPOSE: a local worker model editing tests through its tool
+# channel cannot emit its own chat template's control tags literally (see toolspec.py).
+TOOL_CALLS = "[" + "TOOL_CALLS]"          # Devstral / Mistral
+TOOL_CALL_OPEN = "<" + "tool_call>"        # Qwen-style XML
+TOOL_CALL_CLOSE = "</" + "tool_call>"
+```
+
+New tests import these; the two existing literal occurrences — `tests/test_runner.py:348`
+(`"<tool_call>{}</tool_call>"`) and `tests/test_soak_tools.py:471` (`"…[TOOL_CALLS]" + …`) —
+are converted to the helper in the plan's first task, so the repo has no literal marker in a
+test after this build.
 
 Unit (`tests/test_toolspec.py`, `tests/test_runner.py`, `tests/test_bench.py`,
 `tests/test_soak_tools.py`, `tests/test_transcript_schema.py`):
@@ -253,10 +288,11 @@ Unit (`tests/test_toolspec.py`, `tests/test_runner.py`, `tests/test_bench.py`,
 1. `recover_name`: registered name → `(name, None, 0)`; `"…" + M + "bash"` → `("bash", M, cut)`;
    `"…" + M + M + "read_file"` → `read_file` (last marker); `"…" + M + "nope"` → unchanged, marker
    `None`; `"garbage"` (no marker) → unchanged; `"<" + "tool_call>" + "bash"` → `bash` with that
-   marker; surrounding whitespace stripped; `M + "Bash"` → unchanged.
+   marker; surrounding whitespace stripped; `M + "Bash"` → unchanged. (`M` = `markers.TOOL_CALLS`.)
 2. Runner: a polluted `bash` call dispatches; the turn's **last** tool result carries the
    `follow_up` text and the `nudge` event is `name_recovered` with `via: tool_result`;
-   `tool_result.tool == "bash"` and `tool_raw` is the raw name through `cap_name`;
+   `tool_result.tool == "bash"` and `tool_raw` is the raw name through `cap_name`; an
+   unrecovered polluted name has **no** `tool_raw` (its `tool` is the capped raw name);
    **three polluted calls in a row do not abort** (no strike); two polluted calls on one turn →
    one nudge, on the second call's result; a polluted name with an unknown suffix still strikes
    `unknown_tool`; a recovered `finish` on a verify-feedback turn continues and gets the nudge
@@ -283,7 +319,9 @@ Unit (`tests/test_toolspec.py`, `tests/test_runner.py`, `tests/test_bench.py`,
   docs/superpowers/bench/2026-08-26-issue-67-f5-devstral-plan.jsonl` (the six `F5-*-dev-*` rows
   of the #65/#66 plan, committed with this spec; one driver, nothing else on the GPU): **no run
   ends `aborted after 3 consecutive unknown_tool failures`**; the ledger row per run reports
-  `name_recovered` nudges, `tool_raw` count, status, strict-check verdict and wall. Expected
+  the harvest's `nudges` and `recovered` columns (`tools/soak_harvest.py <results.jsonl>`;
+  fallback for one run: `grep -c '"tool_raw":' <run_dir>/transcript.jsonl`), status,
+  strict-check verdict and wall. Expected
   from §1.2: the 1024/2048 rows that had written their file before aborting now reach `finish`.
 - Unit and live suites green at the final code HEAD (the live suite on the pytest image).
 - Built by `pipx run dirtywork==0.11.0` with `dirtywork-worker-pytest:0.11`: the ledger's
@@ -298,4 +336,4 @@ Unit (`tests/test_toolspec.py`, `tests/test_runner.py`, `tests/test_bench.py`,
 as the import),
 `dirtywork/bench.py` (`NUDGE_KINDS`), `tools/soak_harvest.py` (S6), `docs/transcript-schema.md`,
 `docs/machine-contract.md`, `docs/operating.md`, `README.md`, tests as in §5,
-`docs/superpowers/bench/2026-08-26-issue-67-f5-devstral-plan.jsonl`, the ledger.
+`tests/markers.py` (new), `docs/superpowers/bench/2026-08-26-issue-67-f5-devstral-plan.jsonl`, the ledger.
