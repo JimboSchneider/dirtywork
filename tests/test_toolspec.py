@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from dirtywork.toolspec import Caps, MISSING, ParamSpec, ToolRegistry, ToolSpec
 
 
@@ -96,7 +98,7 @@ import time
 
 import pytest
 
-from dirtywork.toolspec import TRANSCRIPT_PREVIEW_CHARS, ToolResult
+from dirtywork.toolspec import TOOL_CALL_MARKERS, TRANSCRIPT_PREVIEW_CHARS, ToolResult
 
 
 class _RecordingTranscript:
@@ -826,6 +828,51 @@ def test_recover_name_strips_whitespace_around_the_suffix():
 def test_recover_name_is_case_sensitive():
     r = default_registry()
     name = TOOL_CALLS + "Bash"
+    assert r.recover_name(name) == (name, None, 0)
+
+
+# Spec #67 §0.3: sanitised markers (non-alphanumeric chars turned to "_")
+_SANITISED = re.sub(r"[^A-Za-z0-9_-]", "_", TOOL_CALLS)
+_TOOL_CALL_OPEN_SANITISED = re.sub(r"[^A-Za-z0-9_-]", "_", TOOL_CALL_OPEN)
+
+
+def test_tool_call_markers_include_the_sanitised_forms():
+    """Assert len(TOOL_CALL_MARKERS) == 10 and sanitised forms are present."""
+    from dirtywork.toolspec import TOOL_CALL_MARKERS as _markers
+    assert len(_markers) == 10
+    
+    # Sanitised forms should be present
+    assert _SANITISED in _markers
+    assert re.sub(r"[^A-Za-z0-9_-]", "_", TOOL_CALL_OPEN) in _markers
+    
+    # Verify the tuple equals raw five followed by their sanitised twins
+    from dirtywork.toolspec import _RAW_MARKERS as _raw_markers
+    expected = _raw_markers + tuple(re.sub(r"[^A-Za-z0-9_-]", "_", m) for m in _raw_markers)
+    assert _markers == expected
+
+
+def test_recover_name_handles_the_sanitised_marker():
+    """Test recover_name with a sanitised marker in the tool name."""
+    r = default_registry()
+    # Build sanitised marker: "exit_code_0_17285_fixtures_rows_csv" + SANITISED + "bash"
+    name = "exit_code_0_17285_fixtures_rows_csv" + _SANITISED + "bash"
+    assert r.recover_name(name) == ("bash", _SANITISED, len("exit_code_0_17285_fixtures_rows_csv"))
+
+
+def test_recover_name_sanitised_and_raw_markers_in_one_name_uses_the_last():
+    """Test that recover_name uses the LAST marker when both sanitised and raw appear."""
+    r = default_registry()
+    # name = "a" + SANITISED + "bash" + TOOL_CALLS + '{"command": "x"}' + "_Total_rows_400" + SANITISED + "bash"
+    name = "a" + _SANITISED + "bash" + TOOL_CALLS + '{"command": "x"}' + "_Total_rows_400" + _SANITISED + "bash"
+    # recovered name "bash", marker SANITISED, cut == len(name) - len(SANITISED) - len("bash")
+    expected_cut = len(name) - len(_SANITISED) - len("bash")
+    assert r.recover_name(name) == ("bash", _SANITISED, expected_cut)
+
+
+def test_recover_name_sanitised_marker_with_unknown_suffix_stays_unknown():
+    """Test that a sanitised marker with unknown suffix is not recovered."""
+    r = default_registry()
+    name = "x" + _SANITISED + "nope"
     assert r.recover_name(name) == (name, None, 0)
 
 

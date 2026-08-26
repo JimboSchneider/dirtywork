@@ -11,9 +11,14 @@ from typing import Any, Callable
 # templates parse these exact tags in their own output (Qwen3-coder's tool-call
 # XML, think-tag stripping), so a worker model editing this file through its
 # tool channel could not emit them literally. Keep them concatenated.
-TOOL_CALL_MARKERS = ("[" + "TOOL_CALLS]",) + tuple(
+
+_RAW_MARKERS = ("[" + "TOOL_CALLS]",) + tuple(
     "<" + m for m in ("tool_call>", "function=", "function_call>", "|tool_call|>")
 )
+# Spec #67 §0.3: an OpenAI-compatible server may sanitise a tool name to
+# [A-Za-z0-9_-] before it reaches us, turning every marker character into "_"
+# -- match that shape too (derived, not spelled).
+TOOL_CALL_MARKERS = _RAW_MARKERS + tuple(re.sub(r"[^A-Za-z0-9_-]", "_", m) for m in _RAW_MARKERS)
 
 
 class _MissingType:

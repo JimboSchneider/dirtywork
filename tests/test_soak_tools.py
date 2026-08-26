@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -1075,6 +1076,18 @@ def test_s6_fires_on_each_trigger(harvest):
         {"ts": _ts(3), "event": "run_end", "status": "completed"},
     ]
     assert "S6" not in harvest.detect_features(BASE_RUN_JSON, events_clean)
+
+    # S6 fires on sanitised marker with unknown tool
+    SANITISED = re.sub(r"[^A-Za-z0-9_-]", "_", TOOL_CALLS)
+    tool_result = "exit_code_0_foo" + SANITISED + "nope"
+    events_with_sanitised = [
+        {"ts": _ts(0), "event": "run_start"},
+        {"ts": _ts(1), "event": "assistant", "tool_calls": [{"name": tool_result}]},
+        {"ts": _ts(2), "event": "tool_result", "tool": tool_result,
+         "result": f"ERROR: unknown tool '{tool_result}'"},
+        {"ts": _ts(3), "event": "run_end", "status": "completed"},
+    ]
+    assert "S6" in harvest.detect_features(BASE_RUN_JSON, events_with_sanitised)
 
 
 def test_recovered_column_counts_tool_raw(harvest, tmp_path):
