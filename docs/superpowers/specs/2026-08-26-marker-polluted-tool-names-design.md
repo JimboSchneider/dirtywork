@@ -34,6 +34,21 @@ Everything else here is the designer's proposal for the owner's review: the nudg
 | §5 cited `tests/test_runner.py:348` and `tests/test_soak_tools.py:471` as concatenation examples; both are literal (the red-team's verifier was wrong) | §5: a test helper `tests/markers.py` is defined; new tests use it; the two existing lines are converted in the plan's first task and no longer cited as examples |
 | `BudgetExceeded`/`SandboxError` return at `runner.py:1108/:1110` before the `tool_result` write, so a recovered call on those paths leaves no `tool_raw` | §3.2/§4: excluded and stated — those two paths write no `tool_result` for any call today; no synthetic record |
 
+### 0.3 Build-time fold (C1, 2026-08-26 17:15): the sanitised shape
+
+C1's third row (`F5-2048-dev-r1`, branch at `43f5148`) still aborted on `unknown_tool` ×3
+after recovering four calls. The three names were the same pollution **after an
+OpenAI-compatible server's tool-name sanitiser had run**: names must match
+`[A-Za-z0-9_-]`, so every other character became `_` — `exit code: 0\n17285 fixtures/rows.csv[TOOL_CALLS]bash`
+arrives as `exit_code_0_17285_fixtures_rows_csv_TOOL_CALLS_bash`, and no marker in the tuple
+matches `_TOOL_CALLS_`. (Why some names are sanitised and others reach the runner raw is the
+server's business; both shapes occur in one run.) **Fold:** `TOOL_CALL_MARKERS` also carries the
+sanitised twin of every marker, derived by one rule — `re.sub(r"[^A-Za-z0-9_-]", "_", marker)`
+— so `[TOOL_CALLS]` → `_TOOL_CALLS_`, `<tool_call>` → `_tool_call_`, `<function=` →
+`_function_`, `<function_call>` → `_function_call_`, `<|tool_call|>` → `__tool_call__`; the
+last-marker rule and everything else are unchanged. The harvest's S6 third trigger sees the
+sanitised marker through the same tuple. Task T4; the failed C1 rows rerun after it.
+
 ## 1. Problem and evidence
 
 ### 1.1 What happens
@@ -114,8 +129,11 @@ worker model editing this file through its tool channel cannot emit them literal
 
 ```python
 # Built by concatenation ON PURPOSE -- see the comment above (moved from runner.py).
-TOOL_CALL_MARKERS = ("[" + "TOOL_CALLS]",) + tuple(
+_RAW_MARKERS = ("[" + "TOOL_CALLS]",) + tuple(
     "<" + m for m in ("tool_call>", "function=", "function_call>", "|tool_call|>"))
+# §0.3: an OpenAI-compatible server may sanitise a tool name to [A-Za-z0-9_-] before it
+# reaches us, turning every marker character into "_" -- match that shape too.
+TOOL_CALL_MARKERS = _RAW_MARKERS + tuple(re.sub(r"[^A-Za-z0-9_-]", "_", m) for m in _RAW_MARKERS)
 
 class ToolRegistry:
     def recover_name(self, name: str) -> tuple[str, str | None, int]:
