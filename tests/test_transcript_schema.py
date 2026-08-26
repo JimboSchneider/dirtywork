@@ -18,7 +18,7 @@ DOC = Path(__file__).parent.parent / "docs" / "transcript-schema.md"
 EVENT_NAMES = ["run_start", "assistant", "tool_result", "guardrail_block", "nudge",
                "stray_kill", "sandbox_reset", "verify", "run_end"]
 NUDGE_KINDS = ["truncated", "empty", "text_tool_call", "stall", "timeout", "malformed_entry",
-               "stray_kill", "sandbox_reset", "no_change", "unchanged_finish"]
+               "stray_kill", "sandbox_reset", "no_change", "unchanged_finish", "name_recovered"]
 STATUSES = ["completed", "max_turns", "timeout", "context_exhausted", "model_error",
             "interrupted", "stalled", "stuck", "verify_failed", "budget_exceeded",
             "sandbox_error", "export_failed", "unchanged"]
@@ -64,12 +64,13 @@ def test_doc_documents_the_finish_tool_and_the_eleven_tools():
 
 
 class _NudgingProvider(DictProvider):
-    """Turn 1 calls a tool, turn 2 replies with nothing (→ `empty` nudge),
+    """Turn 1 calls a tool with a name_recovered scenario, turn 2 replies with nothing (→ `empty` nudge),
     turn 3 answers."""
 
     def reply(self, model, history, tools):
         if self.calls == 1:
-            return tool_call_body("read_file", {"path": "f.txt"})
+            from .markers import TOOL_CALLS
+            return tool_call_body("read_file " + TOOL_CALLS + "bash", {"command": "echo hi"}, call_id="cX")
         if self.calls == 2:
             return text_body("")
         return text_body("done")

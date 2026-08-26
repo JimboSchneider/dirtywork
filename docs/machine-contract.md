@@ -459,12 +459,12 @@ config, `schema_version: 2`, plus provenance: `worktree`, `base_commit`,
 `context_window`, `context_window_source`, `resumed_from`),
 `assistant` (text + tool calls — text capped at 64 000 chars in the
 transcript only, the full text is still sent to the model), `tool_result`
-(truncated), `guardrail_block`, `nudge` (`{"event": "nudge", "kind":
-"truncated|empty|text_tool_call|stall|timeout|malformed_entry|stray_kill|sandbox_reset|no_change|unchanged_finish", "turn": N,
-"via": "tool_result|user"}` — ten kinds; `no_change` (every ten turns, the
+(truncated; tool names capped head-and-tail at 200 chars, 1.0/#67), `guardrail_block`, `nudge` (`{"event": "nudge", "kind":
+"truncated|empty|text_tool_call|stall|timeout|malformed_entry|stray_kill|sandbox_reset|no_change|unchanged_finish|name_recovered", "turn": N,
+"via": "tool_result|user"}` — eleven kinds; `no_change` (every ten turns, the
 worktree fingerprint equals the previous check's) and `unchanged_finish` (a
 completion rejected because nothing changed, see below) are 1.0 (#66)
-additions — since 1.0 a nudge on a tool-call turn rides on
+additions; `name_recovered` (1.0, #67) is a tool call whose name carried stray text and a marker before a real tool name — the harness ran that tool and says so once per turn. Since 1.0 a nudge on a tool-call turn rides on
 the turn's last `tool_result` (its `follow_up` field) and never as a user
 message after a tool result; the history never carries two consecutive user
 messages), `sandbox_reset`
