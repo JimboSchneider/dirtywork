@@ -20,6 +20,7 @@ from dirtywork.runner import (
     FINISH_PROVISIONAL,
     MAX_TOTAL_CONSECUTIVE_FAILURES,
     NUDGES,
+    NAME_RECOVERED_NUDGE,
     ProgressTracker,
     RunResult,
     Runner,
@@ -1941,6 +1942,206 @@ def test_a_verify_timeout_is_not_counted(parts):
     assert [c for c in box.commands if c != FINGERPRINT_SCRIPT] == ["npm test"]        # it DID run, and it DID time out
     assert result.extra["timeouts"] == 0       # spec §4.3: worker tool calls only
     assert [e for e in _events(tmp) if e["event"] == "nudge"] == []
+
+
+def test_recovered_name_nudge_rides_the_turns_last_tool_result(parts):
+    # One turn with a polluted bash call and then a clean bash call in the
+    # SAME response, then finish → name_recovered nudge via last tool_result.
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[
+            _call("c1", "exit code: 0" + TOOL_CALLS + "bash", {"command": "echo hi"}),
+            _call("c2", "bash", {"command": "echo two"}),
+        ]),
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+
+    events = _events(tmp)
+    # Exactly one name_recovered nudge for the turn
+    nudges = [e for e in events if e["event"] == "nudge" and e["kind"] == "name_recovered"]
+    assert len(nudges) == 1
+    assert nudges[0]["turn"] == 1
+    assert nudges[0]["via"] == "tool_result"
+
+    # The follow_up text is on the LAST tool result of that turn (c2)
+    second_request = provider.requests[1]
+    c2_msg = next(m for m in second_request if m["role"] == "tool" and m["tool_call_id"] == "c2")
+    assert "The harness ran `bash`" in c2_msg["content"]
+    # The polluted call's own tool_result has no follow_up
+    c1_msg = next(m for m in second_request if m["role"] == "tool" and m["tool_call_id"] == "c1")
+    assert "The harness ran `bash`" not in c1_msg["content"]
+    # The name_recovered nudge text (key phrases from the message)
+    assert "tool call's name was" in c2_msg["content"]
+    assert "characters of text before the tool-call marker" in c2_msg["content"]
+
+
+def test_two_polluted_calls_on_one_turn_produce_one_nudge(parts):
+    # Two polluted calls in one response → one name_recovered nudge.
+    # The follow_up names the FIRST call's head (make prefixes differ).
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[
+            _call("c1", "prefix1" + TOOL_CALLS + "bash", {"command": "echo one"}),
+            _call("c2", "prefix2" + TOOL_CALLS + "bash", {"command": "echo two"}),
+        ]),
+        _resp(content="done"),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+
+    events = _events(tmp)
+    nudges = [e for e in events if e["event"] == "nudge" and e["kind"] == "name_recovered"]
+    assert len(nudges) == 1
+    assert nudges[0]["turn"] == 1
+
+    # The follow_up names the FIRST call's head (prefix1)
+    second_request = provider.requests[1]
+    # The last tool call carries the nudge
+    c2_msg = next(m for m in second_request if m["role"] == "tool" and m["tool_call_id"] == "c2")
+    # The raw_head should be the first polluted name's prefix (prefix1)
+    assert "prefix1" in c2_msg["content"]
+    # Check the text mentions bash was run
+    assert "The harness ran `bash`" in c2_msg["content"]
+    # Key phrase from the nudge
+    assert "tool call's name was" in c2_msg["content"]
+
+
+def test_recovered_name_nudge_orders_after_timeout(parts):
+    # Response 1: only the polluted bash call whose command times out (keep _TimeoutSandbox scripting)
+    # Response 2: plain answer completes the run under parts
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("c1", "exit code: 0" + TOOL_CALLS + "bash", {"command": "sleep 999"})]),
+        _resp(content="done"),
+    ])
+    box = _TimeoutSandbox()
+    r = Runner(provider, registry, box, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+
+    events = _events(tmp)
+    # The nudge events for the run are ["timeout", "name_recovered"]
+    nudges = [e for e in events if e["event"] == "nudge"]
+    assert [n["kind"] for n in nudges] == ["timeout", "name_recovered"]
+
+    # The last tool_result's follow_up contains timeout before name_recovered
+    second_request = provider.requests[1]
+    c1_msg = next(m for m in second_request if m["role"] == "tool" and m["tool_call_id"] == "c1")
+    content = c1_msg["content"]
+    # Timeout comes before name_recovered in the message
+    assert TIMEOUT_NUDGE in content
+    assert "tool call's name was" in content
+
+
+def test_recovered_finish_that_completes_writes_no_nudge(git_parts):
+    # A write_file turn (so guard accepts), then a polluted finish completes.
+    wt, registry, sandbox, transcript, tmp = git_parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("w1", "write_file", {"path": "f.txt", "content": "new\n"})]),
+        _resp(tool_calls=[_call("f1", "prose" + TOOL_CALLS + "finish", {"summary": "done"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+
+    events = _events(tmp)
+    # No nudge event of kind name_recovered
+    nudges = [e for e in events if e["event"] == "nudge" and e["kind"] == "name_recovered"]
+    assert len(nudges) == 0
+    assert result.status == "completed"
+
+    # The finish's tool_result has tool == "finish" and tool_raw == polluted name
+    finish_events = [e for e in events if e["event"] == "tool_result" and e["tool"] == "finish"]
+    assert len(finish_events) == 1
+    f1 = finish_events[0]
+    assert f1["tool"] == "finish"
+    assert f1.get("tool_raw") == "prose" + TOOL_CALLS + "finish"
+
+
+def test_recovered_finish_refused_by_the_change_guard_gets_the_nudge(git_parts):
+    # A fresh run whose first response is the polluted finish with no prior change.
+    wt, registry, sandbox, transcript, tmp = git_parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("f1", "prose" + TOOL_CALLS + "finish", {"summary": "done"})]),
+        _resp(tool_calls=[_call("f2", "finish", {"summary": "done"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+
+    events = _events(tmp)
+    # First finish is refused with UNCHANGED_PLAIN
+    finish_events = [e for e in events if e["event"] == "tool_result" and e["tool"] == "finish"]
+    assert len(finish_events) == 2
+    assert finish_events[0]["result"] == UNCHANGED_PLAIN
+    # That same tool_result carries a follow_up containing "The harness ran `finish`"
+    assert "The harness ran `finish`" in finish_events[0].get("follow_up", "")
+    # And a name_recovered nudge event via tool_result
+    nudges = [e for e in events if e["event"] == "nudge" and e["kind"] == "name_recovered"]
+    assert len(nudges) == 1
+    assert nudges[0]["via"] == "tool_result"
+
+    # Second clean finish completes the run
+    assert result.status == "completed"
+
+
+def test_three_polluted_calls_over_three_turns_nudge_each_turn(parts):
+    # Three turns each with one polluted bash call → three name_recovered nudge events.
+    # Fourth turn: clean finish completes the run.
+    wt, registry, sandbox, transcript, tmp = parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("c1", "p1" + TOOL_CALLS + "bash", {"command": "echo 1"})]),
+        _resp(tool_calls=[_call("c2", "p2" + TOOL_CALLS + "bash", {"command": "echo 2"})]),
+        _resp(tool_calls=[_call("c3", "p3" + TOOL_CALLS + "bash", {"command": "echo 3"})]),
+        _resp(tool_calls=[_call("f1", "finish", {"summary": "done"})]),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m")
+    result = r.run("s", "t")
+    transcript.close()
+
+    events = _events(tmp)
+    # Three name_recovered nudge events, one per turn
+    nudges = [e for e in events if e["event"] == "nudge" and e["kind"] == "name_recovered"]
+    assert len(nudges) == 3
+    assert nudges[0]["turn"] == 1
+    assert nudges[1]["turn"] == 2
+    assert nudges[2]["turn"] == 3
+
+    # result.status == "completed" after finish
+    assert result.status == "completed"
+
+
+def test_recovered_finish_on_a_verify_feedback_turn_gets_the_nudge(git_parts):
+    # Build Runner with verify="echo boom; exit 3", verify_rounds=1
+    wt, registry, sandbox, transcript, tmp = git_parts
+    provider = FakeProvider([
+        _resp(tool_calls=[_call("w1", "write_file", {"path": "f.txt", "content": "new\n"})]),
+        _resp(tool_calls=[_call("f1", "prose" + TOOL_CALLS + "finish", {"summary": "done"})]),
+        _resp(content="ok now"),
+    ])
+    r = Runner(provider, registry, sandbox, transcript, model="m",
+               verify="echo boom; exit 3", verify_rounds=1)
+    result = r.run("s", "t")
+    transcript.close()
+
+    events = _events(tmp)
+    # Finish's tool_result result is the verify feedback
+    finish_events = [e for e in events if e["event"] == "tool_result" and e["tool"] == "finish"]
+    assert len(finish_events) >= 1
+    f1 = finish_events[0]
+    assert "VERIFY FAILED" in f1["result"]
+    # And its follow_up contains "The harness ran `finish`"
+    assert "The harness ran `finish`" in f1.get("follow_up", "")
+
+    # Run ends verify_failed (verify_rounds exhausted)
+    assert result.status == "verify_failed"
+    # Exactly one name_recovered nudge
+    nudges = [e for e in events if e["event"] == "nudge" and e["kind"] == "name_recovered"]
+    assert len(nudges) == 1
 
 
 def _finish_results(events):

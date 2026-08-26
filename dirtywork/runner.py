@@ -295,6 +295,11 @@ STALL_NUDGE = ("No progress in the last {n} turns: no file changed and no comman
 TIMEOUT_NUDGE = ("A command timed out and did not finish; its result is unknown. Re-run it "
                  "with a larger timeout (up to 600 seconds) or split it into smaller "
                  "commands. Do not report it as passed.")
+NAME_RECOVERED_NUDGE = (
+    "Your tool call's name was `{raw_head}…{marker}{tool}` — {cut} characters of text "
+    "before the tool-call marker. The harness ran `{tool}` with the arguments you gave. "
+    "Emit tool calls only through the tools API: the name field holds the tool name and "
+    "nothing else.")
 _MUTATING_TOOLS = ("write_file", "append_file", "edit_file", "apply_edits",
                    "insert_before", "insert_after")
 # Tokens that change between otherwise-identical runs of the same command:
@@ -1165,24 +1170,31 @@ class Runner:
             # below without reaching either write) -- spec §4.3: the nudge
             # is emitted on turns that continue.
             timeout_text = TIMEOUT_NUDGE if timed_out_this_turn else None
+            name_recovered_text = None
+            if first_recovered is not None:
+                raw_name, marker, tool, cut = first_recovered
+                name_recovered_text = NAME_RECOVERED_NUDGE.format(
+                    raw_head=raw_name[:40].replace("\n", "⏎"), marker=marker, tool=tool, cut=cut)
 
             if pending_finish is not None:
                 ended, feedback = check_verify(pending_finish, via="finish_result")
                 if ended is not None:
                     return ended
                 # The feedback is already the finish result (resolve_finish);
-                # only the timeout nudge still needs delivering.
+                # only the timeout and name_recovered nudges still need delivering.
                 sandbox_text, sandbox_records = drain_sandbox()
+                extra_records = []
+                timeout_record = None
                 if timed_out_this_turn:
                     timeout_record = self.transcript.write("nudge", kind="timeout", turn=turns)
-                    text = _join_nudges(sandbox_text, timeout_text)
-                    if text:
-                        deliver(text, [*sandbox_records, timeout_record])
-                else:
-                    # no timeout but there may be sandbox notices
-                    text = _join_nudges(sandbox_text)
-                    if text:
-                        deliver(text, sandbox_records)
+                    extra_records.append(timeout_record)
+                recovered_record = None
+                if name_recovered_text is not None:
+                    recovered_record = self.transcript.write("nudge", kind="name_recovered", turn=turns)
+                    extra_records.append(recovered_record)
+                text = _join_nudges(sandbox_text, timeout_text, name_recovered_text)
+                if text:
+                    deliver(text, [*sandbox_records, *extra_records])
                 return None
 
             # Same rule as `finish` in a mixed turn: the turn's remaining
@@ -1212,9 +1224,12 @@ class Runner:
             if timed_out_this_turn:
                 # Once per turn, however many commands timed out in it.
                 timeout_record = self.transcript.write("nudge", kind="timeout", turn=turns)
+            recovered_record = None
+            if name_recovered_text is not None:
+                recovered_record = self.transcript.write("nudge", kind="name_recovered", turn=turns)
             sandbox_text, sandbox_records = drain_sandbox()
-            deliver(_join_nudges(malformed_text, sandbox_text, timeout_text, stall_text, nc_text),
-                    [r for r in (malformed_record, *sandbox_records, timeout_record, stall_record, nc_record) if r is not None])
+            deliver(_join_nudges(malformed_text, sandbox_text, timeout_text, name_recovered_text, stall_text, nc_text),
+                    [r for r in (malformed_record, *sandbox_records, timeout_record, recovered_record, stall_record, nc_record) if r is not None])
             return None
         try:
             # Spec #66 §4.1 (1): the start fingerprint, INSIDE this try so a
