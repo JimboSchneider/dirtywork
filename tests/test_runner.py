@@ -119,8 +119,9 @@ def parts(tmp_path: Path):
 
 
 @pytest.fixture()
-@pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
 def git_parts(tmp_path: Path):
+    if shutil.which("git") is None:   # a mark on a fixture is a no-op (PytestRemovedIn9Warning)
+        pytest.skip("git not on PATH")
     wt = tmp_path / "wt"
     wt.mkdir()
     (wt / "f.txt").write_text("data\n")
