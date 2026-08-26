@@ -4,7 +4,7 @@
 copied verbatim from `docs/superpowers/bench/2026-08-18-ops-worker-scoreboard.md`
 (main, per-run metrics, model-vs-tool time), with one column added to the
 main table -- **Feature fired** -- computed per the matrix's Feature -> signal
-table (F1/F2/F3/F4/F5/F7/F8/F9/F10; F6 and the "no *.tmp left behind" half of F9 have no
+table (F1/F2/F3/F4/F5/F7/F8/F9/F10, S6, S14; F6 and the "no *.tmp left behind" half of F9 have no
 run-local signal and are out of scope for this tool).
 
 Takes run directories directly, and/or a `soak_driver.py --out` JSONL (every
@@ -30,11 +30,12 @@ from dirtywork.runs import _last_event  # noqa: E402  (DRY: reuse, don't re-copy
 from dirtywork.runner import _recovered_path  # noqa: E402  (same regex scan runner.py itself
 # uses to recover a truncated write_file/append_file call's "path" argument out of raw,
 # possibly-incomplete JSON bytes -- reused here for F5 path matching, not re-copied)
+from dirtywork.toolspec import TOOL_CALL_MARKERS  # noqa: E402
 
 MAIN_COLUMNS = ("Run", "Model", "Status", "Turns", "Wall", "Prompt tok", "Compl tok",
                 "Harness failures", "Review verdict", "Notes", "Feature fired")
 PER_RUN_COLUMNS = ("Run", "Status", "Turns", "Wall", "s/turn", "Prompt tok", "Compl tok",
-                   "prompt tok/s", "compl tok/s", "nudges", "guardrail blocks", "stray kills", "tool mix")
+                   "prompt tok/s", "compl tok/s", "nudges", "guardrail blocks", "stray kills", "recovered", "tool mix")
 MODEL_TOOL_COLUMNS = ("Run", "Status", "Turns", "Wall", "Model time", "Tool time",
                       "model s/turn", "tool s/turn", "prompt tok/s (model time)",
                       "compl tok/s (model time)", "slowest tool call")
@@ -239,6 +240,26 @@ def detect_features(run_json: dict, events: list) -> list:
     if run_json.get("provider") == "ollama":
         fired.append("F7")
 
+    # S6: a nudge event with kind "name_recovered"; OR a tool_result with "tool_raw"; OR
+    # a tool_result whose result starts with "ERROR: unknown tool" and whose tool contains a marker.
+    has_name_recovered_nudge = any(e.get("event") == "nudge" and e.get("kind") == "name_recovered"
+                                    for e in events)
+    has_tool_raw = any(e.get("event") == "tool_result" and "tool_raw" in e
+                       for e in events)
+    has_unknown_tool_with_marker = False
+    for e in events:
+        if e.get("event") == "tool_result":
+            result = e.get("result")
+            tool = e.get("tool")
+            if isinstance(result, str) and result.startswith("ERROR: unknown tool"):
+                # Check if any marker is in the tool name
+                for marker in TOOL_CALL_MARKERS:
+                    if marker in tool:
+                        has_unknown_tool_with_marker = True
+                        break
+    if has_name_recovered_nudge or has_tool_raw or has_unknown_tool_with_marker:
+        fired.append("S6")
+
     # F8: a "stall" nudge, or terminal status "stalled".
     has_stall_nudge = any(e.get("event") == "nudge" and e.get("kind") == "stall"
                           for e in events)
@@ -394,6 +415,9 @@ def harvest_run(label: str, run_dir: Path, driver_row: dict = None) -> dict:
             bits.append(f"error={driver_row['error']}")
         notes = "; ".join(bits) if bits else "-"
 
+    # Count tool_result events with "tool_raw" key (S6 signal)
+    recovered = sum(1 for e in events if e.get("event") == "tool_result" and "tool_raw" in e)
+
     return {
         "label": label, "run_dir": run_dir, "model": run_json.get("model"),
         "status": status, "turns": turns, "wall_s": wall_s,
@@ -403,6 +427,7 @@ def harvest_run(label: str, run_dir: Path, driver_row: dict = None) -> dict:
         "nudges": sum(counts[f"nudge_{k}"] for k in bench.NUDGE_KINDS),
         "guardrail_blocks": counts["guardrail_block"],
         "stray_kills": counts.get("stray_kill", 0),
+        "recovered": recovered,
         "tool_mix": _tool_mix(events),
         "model_tool": model_tool_time(events),
     }
@@ -466,7 +491,8 @@ def _per_run_row(h: dict) -> dict:
         "prompt tok/s": _fmt_rate(h.get("prompt_tok"), wall_s),
         "compl tok/s": _fmt_rate(h.get("compl_tok"), wall_s),
         "nudges": h.get("nudges", 0), "guardrail blocks": h.get("guardrail_blocks", 0),
-        "stray kills": h.get("stray_kills", 0), "tool mix": h.get("tool_mix") or "-",
+        "stray kills": h.get("stray_kills", 0), "recovered": h.get("recovered", 0),
+        "tool mix": h.get("tool_mix") or "-",
     }
 
 

@@ -851,11 +851,11 @@ def test_unchanged_status_counts_in_harness_failures():
 def test_empty_reply_nudge_kinds_match_the_runner():
     from dirtywork import runner
     assert bench.EMPTY_REPLY_NUDGE_KINDS == tuple(runner.NUDGES)
-    assert bench.NUDGE_KINDS[-2:] == ("no_change", "unchanged_finish")
-    assert len(bench.NUDGE_KINDS) == 10
+    assert bench.NUDGE_KINDS[-3:] == ("no_change", "unchanged_finish", "name_recovered")
+    assert len(bench.NUDGE_KINDS) == 11
 
 
-def test_summarize_legend_and_detail_cell_list_ten_kinds(tmp_path, monkeypatch, capsys):
+def test_summarize_legend_and_detail_cell_list_eleven_kinds(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(bench.rundir, "RUNS_DIR", tmp_path / "runs")
     results = tmp_path / "results.jsonl"
     harness = {f"nudge_{k}": 0 for k in bench.NUDGE_KINDS}
@@ -872,12 +872,12 @@ def test_summarize_legend_and_detail_cell_list_ten_kinds(tmp_path, monkeypatch, 
     assert rc == 0
     assert "nudges: " + "/".join(bench.NUDGE_KINDS) in out
     # The detail row for s1, cell by cell (format_table pads with spaces and no
-    # cell here contains one): the nudges cell is the full ten-wide value and
+    # cell here contains one): the nudges cell is the full eleven-wide value and
     # the failures cell names the new status -- exact values, not substrings,
     # so a widened or narrowed column is caught. `"unchanged" in out` would be
     # vacuous: the legend line already contains "unchanged_finish".
     (row,) = [line for line in out.splitlines() if line.startswith("m1 ")]
     cells = row.split()
     assert len(cells) == len(bench.DETAIL_COLUMNS)
-    assert cells[bench.DETAIL_COLUMNS.index("nudges")] == "0/0/0/0/0/0/3/0/0/0"
+    assert cells[bench.DETAIL_COLUMNS.index("nudges")] == "0/0/0/0/0/0/3/0/0/0/0"
     assert cells[bench.DETAIL_COLUMNS.index("failures")] == "unchanged"

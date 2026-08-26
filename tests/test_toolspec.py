@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from dirtywork.toolspec import Caps, MISSING, ParamSpec, ToolRegistry, ToolSpec
 
 
@@ -96,7 +98,7 @@ import time
 
 import pytest
 
-from dirtywork.toolspec import TRANSCRIPT_PREVIEW_CHARS, ToolResult
+from dirtywork.toolspec import TOOL_CALL_MARKERS, TRANSCRIPT_PREVIEW_CHARS, ToolResult
 
 
 class _RecordingTranscript:
@@ -777,3 +779,123 @@ def test_canonical_args_normalizes_duration_strings_for_unit_params():
     assert r.canonical_args("waiter", {"delay": "2m"}) == r.canonical_args("waiter", {"delay": 120})
     assert r.canonical_args("waiter", {"delay": "2m"}) == {"delay": 120}
     assert r.canonical_args("waiter", {"delay": "junk"}) == {"delay": "junk"}  # unparseable stays as sent
+
+
+from dirtywork.builtin_tools import default_registry
+from .markers import TOOL_CALLS, TOOL_CALL_OPEN
+
+
+def test_recover_name_registered_name_is_unchanged():
+    r = default_registry()
+    assert r.recover_name("bash") == ("bash", None, 0)
+
+
+def test_recover_name_strips_prose_before_the_last_marker():
+    r = default_registry()
+    name = "exit code: 0\n1,User1" + TOOL_CALLS + "bash"
+    assert r.recover_name(name) == ("bash", TOOL_CALLS, len("exit code: 0\n1,User1"))
+
+
+def test_recover_name_uses_the_last_marker():
+    r = default_registry()
+    name = "a" + TOOL_CALLS + "b" + TOOL_CALLS + "read_file"
+    assert r.recover_name(name) == ("read_file", TOOL_CALLS, len("a" + TOOL_CALLS + "b"))
+
+
+def test_recover_name_leaves_an_unknown_suffix_alone():
+    r = default_registry()
+    name = "x" + TOOL_CALLS + "nope"
+    assert r.recover_name(name) == (name, None, 0)
+
+
+def test_recover_name_leaves_a_name_without_a_marker_alone():
+    r = default_registry()
+    assert r.recover_name("garbage") == ("garbage", None, 0)
+
+
+def test_recover_name_handles_the_xml_marker():
+    r = default_registry()
+    name = "prose " + TOOL_CALL_OPEN + "bash"
+    assert r.recover_name(name) == ("bash", TOOL_CALL_OPEN, len("prose "))
+
+
+def test_recover_name_strips_whitespace_around_the_suffix():
+    r = default_registry()
+    name = "p" + TOOL_CALLS + "  bash \n"
+    assert r.recover_name(name) == ("bash", TOOL_CALLS, 1)
+
+
+def test_recover_name_is_case_sensitive():
+    r = default_registry()
+    name = TOOL_CALLS + "Bash"
+    assert r.recover_name(name) == (name, None, 0)
+
+
+# Spec #67 §0.3: sanitised markers (non-alphanumeric chars turned to "_")
+_SANITISED = re.sub(r"[^A-Za-z0-9_-]", "_", TOOL_CALLS)
+_TOOL_CALL_OPEN_SANITISED = re.sub(r"[^A-Za-z0-9_-]", "_", TOOL_CALL_OPEN)
+
+
+def test_tool_call_markers_include_the_sanitised_forms():
+    """Assert len(TOOL_CALL_MARKERS) == 10 and sanitised forms are present."""
+    from dirtywork.toolspec import TOOL_CALL_MARKERS as _markers
+    assert len(_markers) == 10
+
+    # Sanitised forms should be present
+    assert _SANITISED in _markers
+    assert re.sub(r"[^A-Za-z0-9_-]", "_", TOOL_CALL_OPEN) in _markers
+
+    # Verify the tuple equals raw five followed by their sanitised twins
+    from dirtywork.toolspec import _RAW_MARKERS as _raw_markers
+    expected = _raw_markers + tuple(re.sub(r"[^A-Za-z0-9_-]", "_", m) for m in _raw_markers)
+    assert _markers == expected
+
+
+def test_recover_name_handles_the_sanitised_marker():
+    """Test recover_name with a sanitised marker in the tool name."""
+    r = default_registry()
+    # Build sanitised marker: "exit_code_0_17285_fixtures_rows_csv" + SANITISED + "bash"
+    name = "exit_code_0_17285_fixtures_rows_csv" + _SANITISED + "bash"
+    assert r.recover_name(name) == ("bash", _SANITISED, len("exit_code_0_17285_fixtures_rows_csv"))
+
+
+def test_recover_name_sanitised_and_raw_markers_in_one_name_uses_the_last():
+    """Test that recover_name uses the LAST marker when both sanitised and raw appear."""
+    r = default_registry()
+    # name = "a" + SANITISED + "bash" + TOOL_CALLS + '{"command": "x"}' + "_Total_rows_400" + SANITISED + "bash"
+    name = "a" + _SANITISED + "bash" + TOOL_CALLS + '{"command": "x"}' + "_Total_rows_400" + _SANITISED + "bash"
+    # recovered name "bash", marker SANITISED, cut == len(name) - len(SANITISED) - len("bash")
+    expected_cut = len(name) - len(_SANITISED) - len("bash")
+    assert r.recover_name(name) == ("bash", _SANITISED, expected_cut)
+
+
+def test_recover_name_prefers_the_marker_whose_match_ends_latest():
+    # Review of #85: the sanitised "<|tool_call|>" contains the sanitised
+    # "<tool_call>" one character in; keyed on the start, the shorter marker
+    # won and left "_bash" behind. Keyed on the end, the longer one wins.
+    r = default_registry()
+    pipe = re.sub(r"[^A-Za-z0-9_-]", "_", "<" + "|tool_call|>")
+    assert pipe == "__tool_call__"
+    assert r.recover_name(pipe + "bash") == ("bash", pipe, 0)
+    assert r.recover_name("prose " + pipe + "read_file") == ("read_file", pipe, len("prose "))
+
+
+def test_recover_name_sanitised_marker_with_unknown_suffix_stays_unknown():
+    """Test that a sanitised marker with unknown suffix is not recovered."""
+    r = default_registry()
+    name = "x" + _SANITISED + "nope"
+    assert r.recover_name(name) == (name, None, 0)
+
+
+def test_unknown_tool_error_caps_the_echoed_name():
+    r = default_registry()
+    name = "q" * 150 + TOOL_CALLS + "zz" * 70
+    result = r.execute(name, {}, sandbox=None, deadline=None)
+    assert "…" in result.text
+    assert "(name truncated)" in result.text
+    assert name[-40:] in result.text
+    assert len(result.text) < 400
+
+    # 20-char unknown name should echo whole
+    result = r.execute("unknown_short", {}, sandbox=None, deadline=None)
+    assert "(name truncated)" not in result.text

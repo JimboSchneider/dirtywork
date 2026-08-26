@@ -1,0 +1,6 @@
+{"task": "py-big-fixture", "model": "mistralai/devstral-small-2-2512", "provider": "openai", "base_url": "http://localhost:1234/v1", "flags": ["--max-tokens", "1024", "--max-turns", "60"], "label": "F5-1024-dev-r1"}
+{"task": "py-big-fixture", "model": "mistralai/devstral-small-2-2512", "provider": "openai", "base_url": "http://localhost:1234/v1", "flags": ["--max-tokens", "1024", "--max-turns", "60"], "label": "F5-1024-dev-r2"}
+{"task": "py-big-fixture", "model": "mistralai/devstral-small-2-2512", "provider": "openai", "base_url": "http://localhost:1234/v1", "flags": ["--max-tokens", "2048", "--max-turns", "60"], "label": "F5-2048-dev-r1"}
+{"task": "py-big-fixture", "model": "mistralai/devstral-small-2-2512", "provider": "openai", "base_url": "http://localhost:1234/v1", "flags": ["--max-tokens", "2048", "--max-turns", "60"], "label": "F5-2048-dev-r2"}
+{"task": "py-big-fixture", "model": "mistralai/devstral-small-2-2512", "provider": "openai", "base_url": "http://localhost:1234/v1", "flags": ["--max-tokens", "4096", "--max-turns", "60"], "label": "F5-4096-dev-r1"}
+{"task": "py-big-fixture", "model": "mistralai/devstral-small-2-2512", "provider": "openai", "base_url": "http://localhost:1234/v1", "flags": ["--max-tokens", "4096", "--max-turns", "60"], "label": "F5-4096-dev-r2"}

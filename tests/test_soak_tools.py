@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import pytest
+
+from .markers import TOOL_CALLS
 
 TOOLS = Path(__file__).resolve().parent.parent / "tools"
 
@@ -466,9 +469,9 @@ def test_truncate_leaves_short_text_alone(harvest):
 
 def test_slowest_tool_call_cell_is_capped_and_whitespace_collapsed(harvest):
     # Simulates the real devstral finding: tool holds ~200 chars of runaway
-    # text (e.g. the previous result plus a stray "[TOOL_CALLS]bash"), args
+    # text (e.g. the previous result plus a stray Devstral marker + "bash"), args
     # holds a multi-line blob well past 120 chars.
-    long_tool = "resultofpreviouscall[TOOL_CALLS]" + ("bash" * 40)
+    long_tool = "resultofpreviouscall" + TOOL_CALLS + ("bash" * 40)
     long_args = "line one\n\nline   two\r\n" + ("z" * 300)
     events = [
         {"ts": _ts(0), "event": "assistant"},
@@ -1031,3 +1034,87 @@ def test_per_run_row_reports_stray_kills(harvest):
     assert row["stray kills"] == 3
     assert "stray kills" in harvest.PER_RUN_COLUMNS
     assert harvest._per_run_row({"label": "r"})["stray kills"] == 0
+
+
+def test_s6_fires_on_each_trigger(harvest):
+    # S6 fires on name_recovered nudge
+    events_with_nudge = [
+        {"ts": _ts(0), "event": "run_start"},
+        {"ts": _ts(1), "event": "nudge", "kind": "name_recovered"},
+        {"ts": _ts(2), "event": "run_end", "status": "completed"},
+    ]
+    assert "S6" in harvest.detect_features(BASE_RUN_JSON, events_with_nudge)
+
+    # S6 fires on tool_result with tool_raw
+    events_with_tool_raw = [
+        {"ts": _ts(0), "event": "run_start"},
+        {"ts": _ts(1), "event": "assistant", "tool_calls": [{"name": "bash"}]},
+        {"ts": _ts(2), "event": "tool_result", "tool": "bash",
+         "result": "hello", "tool_raw": "bash" + TOOL_CALLS + "echo test"},
+        {"ts": _ts(3), "event": "run_end", "status": "completed"},
+    ]
+    assert "S6" in harvest.detect_features(BASE_RUN_JSON, events_with_tool_raw)
+
+    # S6 fires on tool_result with ERROR: unknown tool and marker in tool name
+    raw = "p" * 300 + TOOL_CALLS + "nope"
+    tool = raw[:120] + "…" + raw[-80:]
+    events_with_unknown_tool = [
+        {"ts": _ts(0), "event": "run_start"},
+        {"ts": _ts(1), "event": "assistant", "tool_calls": [{"name": tool}]},
+        {"ts": _ts(2), "event": "tool_result", "tool": tool,
+         "result": "ERROR: unknown tool '" + raw[:120] + "…'"},
+        {"ts": _ts(3), "event": "run_end", "status": "completed"},
+    ]
+    assert "S6" in harvest.detect_features(BASE_RUN_JSON, events_with_unknown_tool)
+
+    # S6 does NOT fire on clean run (bash tool_result, no tool_raw, no nudge)
+    events_clean = [
+        {"ts": _ts(0), "event": "run_start"},
+        {"ts": _ts(1), "event": "assistant", "tool_calls": [{"name": "bash"}]},
+        {"ts": _ts(2), "event": "tool_result", "tool": "bash",
+         "result": "hello world"},
+        {"ts": _ts(3), "event": "run_end", "status": "completed"},
+    ]
+    assert "S6" not in harvest.detect_features(BASE_RUN_JSON, events_clean)
+
+    # S6 fires on sanitised marker with unknown tool
+    SANITISED = re.sub(r"[^A-Za-z0-9_-]", "_", TOOL_CALLS)
+    tool_result = "exit_code_0_foo" + SANITISED + "nope"
+    events_with_sanitised = [
+        {"ts": _ts(0), "event": "run_start"},
+        {"ts": _ts(1), "event": "assistant", "tool_calls": [{"name": tool_result}]},
+        {"ts": _ts(2), "event": "tool_result", "tool": tool_result,
+         "result": f"ERROR: unknown tool '{tool_result}'"},
+        {"ts": _ts(3), "event": "run_end", "status": "completed"},
+    ]
+    assert "S6" in harvest.detect_features(BASE_RUN_JSON, events_with_sanitised)
+
+
+def test_recovered_column_counts_tool_raw(harvest, tmp_path):
+    # Write a run with two tool_results carrying tool_raw and one without
+
+    events_with_tool_raw = [
+        {"ts": _ts(0), "event": "run_start"},
+        {"ts": _ts(1), "event": "assistant", "tool_calls": [{"name": "bash"}]},
+        {"ts": _ts(2), "event": "tool_result", "tool": "bash",
+         "result": "hello", "tool_raw": "bash " + TOOL_CALLS + "echo test1"},
+        {"ts": _ts(3), "event": "assistant", "tool_calls": [{"name": "bash"}]},
+        {"ts": _ts(4), "event": "tool_result", "tool": "bash",
+         "result": "world", "tool_raw": "bash " + TOOL_CALLS + "echo test2"},
+        {"ts": _ts(5), "event": "assistant", "tool_calls": [{"name": "bash"}]},
+        {"ts": _ts(6), "event": "tool_result", "tool": "bash",
+         "result": "clean"},
+        {"ts": _ts(7), "event": "run_end", "status": "completed"},
+    ]
+
+    run_dir = _write_run(tmp_path, "test_recovered", BASE_RUN_JSON, events_with_tool_raw)
+    harvested = harvest.harvest_run("test_recovered", run_dir)
+
+    assert harvested["recovered"] == 2
+
+    row = harvest._per_run_row(harvested)
+    assert row["recovered"] == 2
+    assert "recovered" in harvest.PER_RUN_COLUMNS
+
+    row_empty = harvest._per_run_row({"label": "r"})
+    assert row_empty["recovered"] == 0

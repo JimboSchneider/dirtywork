@@ -18,8 +18,21 @@ from .llm import LLMTimeout, MalformedResponse
 from .providers import assistant_message, tool_message
 from .sandbox import SandboxError
 from .tools import is_timeout_result, net_change, parse_exit_code
+from .toolspec import TOOL_CALL_MARKERS as _TEXT_TOOL_MARKERS
 
 MAX_ASSISTANT_TEXT_CHARS = 64_000
+TOOL_NAME_TRANSCRIPT_CHARS = 200
+
+
+def cap_name(name: str) -> str:
+    """Transcript/run.json cap for a tool name, head AND tail so a marker-polluted
+    name keeps its diagnostic end (spec #67 §3.2): 200 chars pass through; longer
+    names become the first 120 + "…" + the last 80 (201 chars)."""
+    if len(name) <= TOOL_NAME_TRANSCRIPT_CHARS:
+        return name
+    return name[:120] + "…" + name[-80:]
+
+
 # Spec §2: end-of-run evidence caps. These match the transcript's own preview
 # caps on purpose — the values are taken from the very same variables the
 # transcript records, so a payload and a transcript can never disagree.
@@ -88,16 +101,12 @@ class FailureTracker:
         self.total = 0
 
 
-# These tags are built by concatenation ON PURPOSE: several local models' chat
-# templates parse these exact tags in their own output (Qwen3-coder's tool-call
-# XML, think-tag stripping), so a worker model editing this file through its
-# tool channel could not emit them literally. Keep them concatenated.
+# Concatenated ON PURPOSE — see TOOL_CALL_MARKERS in toolspec.py
 _THINK_OPEN = "<" + "think>"
 _THINK_CLOSE = "</" + "think>"
 # Aliases for backwards compatibility with tests
 _THINK_RE = re.compile(re.escape(_THINK_OPEN) + r".*?(?:" + re.escape(_THINK_CLOSE) + r"|\Z)",
                        re.DOTALL)
-_TEXT_TOOL_MARKERS = tuple("<" + m for m in ("tool_call>", "function=", "function_call>", "|tool_call|>"))
 
 NUDGES = {
     "truncated": ("Your reply was cut off at the --max-tokens cap of {cap} tokens (about "
@@ -286,6 +295,11 @@ STALL_NUDGE = ("No progress in the last {n} turns: no file changed and no comman
 TIMEOUT_NUDGE = ("A command timed out and did not finish; its result is unknown. Re-run it "
                  "with a larger timeout (up to 600 seconds) or split it into smaller "
                  "commands. Do not report it as passed.")
+NAME_RECOVERED_NUDGE = (
+    "Your tool call's name was `{raw_head}…{marker}{tool}` — {cut} characters of text "
+    "before the tool-call marker. The harness ran `{tool}` with the arguments you gave. "
+    "Emit tool calls only through the tools API: the name field holds the tool name and "
+    "nothing else.")
 _MUTATING_TOOLS = ("write_file", "append_file", "edit_file", "apply_edits",
                    "insert_before", "insert_after")
 # Tokens that change between otherwise-identical runs of the same command:
@@ -694,7 +708,7 @@ class Runner:
                 fields["placeholder"] = EMPTY_REPLY_PLACEHOLDER
             self.transcript.write(
                 "assistant", text=transcript_text,
-                tool_calls=[{"name": tc.name, "arguments": (tc.raw_arguments or "")[:2000]}
+                tool_calls=[{"name": cap_name(tc.name), "arguments": (tc.raw_arguments or "")[:2000]}
                             for tc in tool_calls],
                 # Spec §1.5: an OPEN enum. Adapters do not guarantee a
                 # string (Anthropic passes an unknown stop reason through
@@ -1062,10 +1076,17 @@ class Runner:
 
             pending_finish = None
             timed_out_this_turn = False   # spec §4.3: at most ONE nudge per turn
+            first_recovered = None
             for tc in tool_calls:
                 name = tc.name
                 raw_args = tc.raw_arguments or "{}"
                 args = tc.arguments
+
+                raw_name = name
+                name, marker, cut = self.registry.recover_name(name)
+                if marker is not None and first_recovered is None:
+                    first_recovered = (raw_name, marker, name, cut)
+
                 abort_reason = None
                 terminal = False
                 if tc.error is not None:
@@ -1122,12 +1143,15 @@ class Runner:
                         timeouts += 1
                         timed_out_this_turn = True
                         timed_out_fields["timed_out"] = True
-                record = self.transcript.write("tool_result", tool=name,
+                transcript_name = cap_name(name)
+                raw_fields = {"tool_raw": cap_name(raw_name)} if marker is not None else {}
+                record = self.transcript.write("tool_result", tool=transcript_name,
                                                args=raw_args[:500],
                                                result=self.registry.transcript_preview(name, result),
-                                               **timed_out_fields)
+                                               **timed_out_fields,
+                                               **raw_fields)
                 if name != FINISH_TOOL:
-                    note_last_tool_result(name, raw_args, result)
+                    note_last_tool_result(transcript_name, raw_args, result)
                 msg = tool_message(tc.id, result)
                 messages.append(msg)
                 turn_tool_msgs.append((msg, record))
@@ -1146,24 +1170,31 @@ class Runner:
             # below without reaching either write) -- spec §4.3: the nudge
             # is emitted on turns that continue.
             timeout_text = TIMEOUT_NUDGE if timed_out_this_turn else None
+            name_recovered_text = None
+            if first_recovered is not None:
+                raw_name, marker, tool, cut = first_recovered
+                name_recovered_text = NAME_RECOVERED_NUDGE.format(
+                    raw_head=raw_name[:40].replace("\n", "⏎"), marker=marker, tool=tool, cut=cut)
 
             if pending_finish is not None:
                 ended, feedback = check_verify(pending_finish, via="finish_result")
                 if ended is not None:
                     return ended
                 # The feedback is already the finish result (resolve_finish);
-                # only the timeout nudge still needs delivering.
+                # only the timeout and name_recovered nudges still need delivering.
                 sandbox_text, sandbox_records = drain_sandbox()
+                extra_records = []
+                timeout_record = None
                 if timed_out_this_turn:
                     timeout_record = self.transcript.write("nudge", kind="timeout", turn=turns)
-                    text = _join_nudges(sandbox_text, timeout_text)
-                    if text:
-                        deliver(text, [*sandbox_records, timeout_record])
-                else:
-                    # no timeout but there may be sandbox notices
-                    text = _join_nudges(sandbox_text)
-                    if text:
-                        deliver(text, sandbox_records)
+                    extra_records.append(timeout_record)
+                recovered_record = None
+                if name_recovered_text is not None:
+                    recovered_record = self.transcript.write("nudge", kind="name_recovered", turn=turns)
+                    extra_records.append(recovered_record)
+                text = _join_nudges(sandbox_text, timeout_text, name_recovered_text)
+                if text:
+                    deliver(text, [*sandbox_records, *extra_records])
                 return None
 
             # Same rule as `finish` in a mixed turn: the turn's remaining
@@ -1193,9 +1224,12 @@ class Runner:
             if timed_out_this_turn:
                 # Once per turn, however many commands timed out in it.
                 timeout_record = self.transcript.write("nudge", kind="timeout", turn=turns)
+            recovered_record = None
+            if name_recovered_text is not None:
+                recovered_record = self.transcript.write("nudge", kind="name_recovered", turn=turns)
             sandbox_text, sandbox_records = drain_sandbox()
-            deliver(_join_nudges(malformed_text, sandbox_text, timeout_text, stall_text, nc_text),
-                    [r for r in (malformed_record, *sandbox_records, timeout_record, stall_record, nc_record) if r is not None])
+            deliver(_join_nudges(malformed_text, sandbox_text, timeout_text, name_recovered_text, stall_text, nc_text),
+                    [r for r in (malformed_record, *sandbox_records, timeout_record, recovered_record, stall_record, nc_record) if r is not None])
             return None
         try:
             # Spec #66 §4.1 (1): the start fingerprint, INSIDE this try so a
