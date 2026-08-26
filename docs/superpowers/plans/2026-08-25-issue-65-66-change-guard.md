@@ -9,12 +9,14 @@
 > A Claude implementer touches code only after a worker resume-with-feedback has failed, and the
 > PR says so. Owner approval is needed for the merge and the release, never assumed.
 
-**Plan v1** (2026-08-25 18:45 CDT), written from spec v4 (owner-reviewed 18:31 CDT, approved for
-this step). Calibration from #61: a ~190-line change took one 60-turn run plus one to three
-resumes; a feedback resume that reads a `completed` tail finishes with zero change about one time
-in three (the S14 shape this build removes — every such resume is an A/B data point, §8 of the
-spec). Tasks are therefore sized for one run each, and the two largest (`runner.py`'s guard, the
-CLI/resume half) are split.
+**Plan v2** (2026-08-25 19:15 CDT). v1 was reviewed against the spec and the code (three lenses +
+one refuter per Blocker/Important, 27 agents: 43 findings — 7 Blocker, 23 Important, 13 Minor;
+24 verified, 0 refuted; all folded). The Blockers: W3b scripted non-hex hashes that the parser
+would drop (guard off, no nudge possible); `take_fingerprint` kept a stale `changed` on a failed
+measurement while the brief's own test expected `null`; the `test_main` two-turn consequence was
+assigned two tasks after the runner change that causes it; W4b pointed at a `DockerSandbox`
+construction no live test contains. Three tasks were split to the #61 calibration (~150–250 changed
+lines per 60-turn run, 1–3 resumes): W1a → W1a-1/W1a-2, W2b → W2b-1/W2b-2, W3a → W3a-1/W3a-2.
 
 **Goal:** Every truncation message tells the model the cap, what arrived and a per-call target;
 six cut-off replies end a run; a byte-identical write is not progress; and a completion that
@@ -38,9 +40,12 @@ host, 5.x in the image); git 2.39 in `dirtywork-worker-pytest:0.10`; pytest; the
 `tests/test_runner.py` / `tests/provider_doubles.py`; `tools/soak_driver.py` for the F5 reruns.
 
 **Spec:** `docs/superpowers/specs/2026-08-25-cap-aware-truncation-and-change-guard-design.md`
-(v4, `14f6e35`). Section numbers below refer to it. The spec is committed on the integration
-branch, so the worker can `read_file` it; every brief still carries the exact code and text it
-needs.
+(v4, `14f6e35`; one sentence of §4.3 aligned with this plan's v2: a failed measurement *anywhere*
+sets `changed = None` and stores its reason until the next successful measurement clears both —
+that is what keeps §5.1's "`changed_reason` present exactly when `changed` is `null` for a failed
+measurement" true on every run end). Section numbers below refer to it. The spec is committed on
+the integration branch, so the worker can `read_file` it; every brief still carries the exact code
+and text it needs.
 
 ## Global Constraints
 
@@ -57,11 +62,15 @@ needs.
 - The change check runs **before** verify on both completion paths; a rejected completion never
   runs the verify command; the finish record keeps its call position and only its `result` text is
   rewritten (#60) — §4.3, §5.1.
-- Every `changed: null` produced by an attempted-and-failed or raising measurement carries
-  `changed_reason`; the CLI (never the `Runner`) prints `dirtywork: change guard off: <reason>` —
-  §4.1, §5.2.
+- **One rule for `changed`:** every successful measurement after the start one sets `changed =
+  fp != fp_start` and clears `changed_reason`; every failed or raising measurement — start, K
+  check, completion check, `finish()` — sets `changed = None` and stores its reason; so
+  `changed_reason` is present exactly when `changed` is `null` for that reason — §4.3, §5.1.
+- The CLI (never the `Runner`) prints `dirtywork: change guard off: <reason>` once — §5.2.
 - `finish()` measures first (before `drain_sandbox()`), and not for `interrupted`, `timeout`,
   `budget_exceeded`, `sandbox_error`, nor when this turn already measured — §4.1 (4).
+- Scripted fingerprints in tests are **40 lowercase hex characters** (`"a" * 40`): they go through
+  `parse_fingerprint`, which drops anything else.
 - Texts are constants; wording is not contract but the **numbers** are (invariant 1); the
   `no_change` text never names `finish` when `require_changes` and the tree equals `fp_start` —
   §3.2, §4.4.
@@ -69,7 +78,8 @@ needs.
   (`take_fingerprint`), one `net_change` parser next to `describe_change`; nothing duplicated
   between the two truncation texts beyond the numbers.
 - The worker never edits `docs/**`; prose docs are Claude's (D1 first, D2 last). The worker
-  edits `tests/**`, `dirtywork/**`, `tools/soak_harvest.py`.
+  edits `tests/**`, `dirtywork/**`, `tools/soak_harvest.py`. The worker cannot reach docker from
+  inside the sandbox: live tests are written by the worker and run by Claude.
 - Host pytest interpreter is `/usr/bin/python3` (3.9, pytest 8.4); Homebrew pythons lack pytest.
 
 ## Execution model (every W task)
@@ -77,8 +87,8 @@ needs.
 - **Scratchpad** (absolute; pin it in a new session):
   `SCRATCH=/private/tmp/claude-501/-Users-jimschneider-repos-dirtywork/d9da59a0-7dac-4aaa-9697-28e33a342e2b/scratchpad`
   — holds `run6566.sh`, the briefs `brief-6566-<task>.md` (extracted verbatim from this plan's
-  fenced blocks), `feedback-6566-<task>-r<n>.md`, `metrics-6566.csv`, `f5-plan.jsonl` (C5),
-  `redteam6566.json` (the spec's red-team, for reference).
+  fenced blocks), `feedback-6566-<task>-r<n>.md`, `metrics-6566.csv` (+ `.pid`), `f5-plan.jsonl`
+  (C5), `redteam6566.json` / `planreview6566.json` (for reference).
 - **Run command** (`$SCRATCH/run6566.sh $SCRATCH/brief-6566-<task>.md`), which is:
 
   ```bash
@@ -115,10 +125,11 @@ needs.
   --feedback-file <file> --max-turns 40` (verify inherited), feedback that names a file, a line
   and a shell check per item, at most two resumes; then Claude finishes leftovers and says so in
   the ledger and the PR.
-- **Metrics:** `tools/soak_sampler.sh $SCRATCH/metrics-6566.csv` started in C0 and stopped in
-  C5; one ledger row per run (status, turns, wall, s/turn, prompt/completion tokens, tok/s,
-  nudges, guardrail blocks, resets, tool mix, verify outcome) appended to a new `## #65/#66`
-  section of `docs/superpowers/bench/2026-08-23-v1-soak-sdd-ledger.md`.
+- **Metrics:** `tools/soak_sampler.sh $SCRATCH/metrics-6566.csv` (started in C0, detached with
+  `nohup … >/dev/null 2>&1 &` — piping its stdout hangs the shell; stopped in C5 with `--stop`);
+  one ledger row per run (status, turns, wall, s/turn, prompt/completion tokens, tok/s, nudges,
+  guardrail blocks, resets, tool mix, verify outcome) appended to the `## #65/#66` section of
+  `docs/superpowers/bench/2026-08-23-v1-soak-sdd-ledger.md`.
 - Give qwen ≥ 60 turns; resumes burn turns on `read_file`, so feedback names files and lines;
   escape `.` in grep checks.
 
@@ -126,74 +137,52 @@ needs.
 
 | file | responsibility after this plan |
 |---|---|
-| `dirtywork/runner.py` | `reply_size`, `call_size`, `chunk_target`, the truncation texts and dict, `truncations` + abort (W1a/W1b); `take_fingerprint`, the change check in `check_verify`, `check_no_change`, `finish()` measurement, `require_changes` / `no_change_turns` (W3a/W3b); `ProgressTracker` net-change rule (W2a) |
-| `dirtywork/changes.py` (new) | `FINGERPRINT_SCRIPT`, `FINGERPRINT_TIMEOUT`, `parse_fingerprint`, `fingerprint`, the four guard texts, `DEFAULT_NO_CHANGE_TURNS` (W2b) |
+| `dirtywork/runner.py` | `reply_size`, `call_size`, `chunk_target`, the truncation texts and dict, `truncations` (W1a-1) + abort (W1b); `take_fingerprint`, the change check in `check_verify`, `finish()` measurement, `require_changes` (W3a-1); `check_no_change`, `no_change_turns` (W3b); `ProgressTracker` net-change rule (W2a) |
+| `dirtywork/changes.py` (new) | `FINGERPRINT_SCRIPT`, `FINGERPRINT_TIMEOUT`, `parse_fingerprint`, `fingerprint`, the five guard texts, `DEFAULT_NO_CHANGE_TURNS` (W2b-1) |
 | `dirtywork/tools.py` | `parse_exit_code` (moved), `parse_change_head`, `net_change` (W2a) |
 | `dirtywork/resume.py` | block order + texts (W3c) |
-| `dirtywork/__main__.py` | `truncations` seed/contract field (W1a); `require_changes`, `changed`/`changed_reason` seeds, stderr line, `unchanged` resume gate (W3c) |
+| `dirtywork/__main__.py` | `truncations` seed/contract field (W1a-1); `require_changes`, `changed`/`changed_reason` seeds, stderr line, `unchanged` resume gate (W3c) |
 | `dirtywork/bench.py` | `_abort_kind` cut-off form (W1b); `NUDGE_KINDS`, status tuples (W4a) |
 | `tools/soak_harvest.py` | `_TRUNCATED_CALL_RESULT_RE` (W1b); `S14` feature (W4a) |
 | `dirtywork/runs.py` | `MD_RESULT_FIELDS` (W4a) |
-| `tests/provider_doubles.py`, `tests/test_runner.py` | `FingerprintSandbox`, `git_parts` (W2b); pins and doubles (W1a, W3a) |
-| `tests/test_changes.py` (new) | tests 10, 11, 11b (W2b) |
-| `tests/test_transcript_schema.py` | `RUN_END_FIELDS` (W1a, W3a), `STATUSES`, `NUDGE_KINDS` (W3a) |
-| `tests/test_main.py`, `tests/test_resume.py` | CLI/resume tests and the two-turn consequence (W3c) |
-| `tests/test_bench.py`, `tests/test_soak_tools.py`, `tests/test_runs.py` | evidence tests (W1b, W4a) |
+| `tests/provider_doubles.py`, `tests/test_runner.py` | `FingerprintSandbox`, `git_parts` (W2b-1); pins and doubles (W1a-1, W3a-1) |
+| `tests/test_changes.py` (new) | tests 10, 11 (W2b-1), 11b (W2b-2) |
+| `tests/test_transcript_schema.py` | `RUN_END_FIELDS` (W1a-1, W3a-1), `STATUSES`, `NUDGE_KINDS` (W3a-1) |
+| `tests/test_main.py` | `_DEFAULT_EVIDENCE` (W1a-1, W3c); the two-turn consequence (W3a-1); CLI/resume tests (W3c) |
+| `tests/test_resume.py` | the block shapes (W3c) |
+| `tests/test_bench.py`, `tests/test_soak_tools.py`, `tests/test_runs.py` | evidence tests (W1a-1, W1b, W4a) |
 | `tests/test_docker_live.py` | test 24 (W4b) |
-| `docs/transcript-schema.md` | D1 (Claude, before any code lands) |
+| `docs/transcript-schema.md` | D1 (Claude) — DONE `0092287` |
 | `docs/machine-contract.md`, `docs/operating.md`, `README.md`, the ledger | D2 (Claude) |
 
 ---
 
-### Task C0: Baseline and instrumentation (Claude)
+### Task C0: Baseline and instrumentation (Claude) — DONE 2026-08-25 18:55
 
-- [ ] Baseline suite in `.worktrees/issue-65-66-change-guard` (`/usr/bin/python3 -m pytest -q -p
-  no:cacheprovider`); record the count in the ledger header.
-- [ ] `dirtywork-worker-pytest:0.10` present (`docker images`); `qwen/qwen3-coder-next` loaded
-  (`curl -s http://localhost:1234/v1/models`); `pipx run --spec 'dirtywork==0.10.1' dirtywork
-  --version` answers.
-- [ ] Write `$SCRATCH/run6566.sh` (the script above), `chmod +x`; start the sampler
-  (`tools/soak_sampler.sh $SCRATCH/metrics-6566.csv`, pid file beside it).
-- [ ] Open the ledger section `## #65/#66 — cap-aware truncation, truncation budget, change guard
-  (2026-08-25)` with the same run-row table header as the `#61` section, plus an "S14 A/B" line
-  (feedback resumes: first completion zero-change yes/no, counted as they happen).
-- [ ] Extract every brief below into `$SCRATCH/brief-6566-<task>.md` verbatim.
+- [x] Baseline suite in `.worktrees/issue-65-66-change-guard`: **1505 passed, 1 skipped, 37 deselected**.
+- [x] `dirtywork-worker-pytest:0.10` present; `qwen/qwen3-coder-next` and Devstral loaded; `pipx run --spec 'dirtywork==0.10.1'` answers.
+- [x] `$SCRATCH/run6566.sh` written; sampler running (`metrics-6566.csv.pid` = 44429).
+- [x] Ledger section `## #65/#66` opened (`8e34173`) with the run-row header and the S14 A/B line.
+- [ ] Extract every brief below into `$SCRATCH/brief-6566-<task>.md` verbatim (after this plan's v2 commit).
 
 ---
 
-### Task D1: Docs — the transcript schema first (Claude)
+### Task D1: Docs — the transcript schema first (Claude) — DONE 2026-08-25 18:58 (`0092287`)
 
-**Files:**
-- Modify: `docs/transcript-schema.md` — the `nudge.kind` row (`:101-119`): `no_change`,
-  `unchanged_finish` with §5.1's carrier note; the `follow_up` row (`:84`) and the nudge prose
-  (`:104-111`): `no_change` inserted in the joined-text orders of §5.1; the forward-compat
-  paragraph (`:22-31`): "#65/#66 add two `nudge.kind` values, one status and three `run_end`
-  fields"; `run_end` rows `truncations` (integer, always), `changed` (boolean or null, always),
-  `changed_reason` (string, sparse) beside `timeouts` (`:239-241`) with §5.1's definitions; the
-  Statuses table (`:243-258`): `unchanged`; the `run.json` field table (`:325-332`) and the
-  stdout-JSON key list (`:269`): the three fields; the `tool_result` prose for `finish`: the four
-  new `result` texts (`Not accepted as the end of the run: …` ×2, `run not finished: nothing
-  changed`, `run not finished: change check could not run (…)`).
-
-- [ ] **Step 1:** write the rows exactly per spec §5.1/§6; every new token backticked (the
-  doc-token tests read backticked identifiers).
-- [ ] **Step 2:** `/usr/bin/python3 -m pytest -q tests/test_transcript_schema.py` still green (the
-  lists are unchanged until W1a/W3a; documenting a field before it is emitted breaks nothing).
-- [ ] **Step 3:** commit on `issue-65-66-change-guard`: `docs(schema): #65/#66 fields, kinds and
-  status (spec §5.1)`.
+- [x] `docs/transcript-schema.md`: `nudge.kind` row (`no_change`, `unchanged_finish`), the `follow_up` row and nudge prose merge orders, the forward-compat sentence, `run_end` rows `truncations` / `changed` / `changed_reason`, the `unchanged` status row, the `run.json` table and stdout key list, the four new `finish` result texts. `tests/test_transcript_schema.py`: 12 passed.
 
 ---
 
-### Task W1a: #65 — the numbers, the texts, the counter (spec §3.1–§3.3 minus the abort)
+### Task W1a-1: #65 — the numbers, the texts, the counter (spec §3.1–§3.3 minus the abort)
 
 **Files:**
 - Modify: `dirtywork/runner.py:89-99` (`NUDGES`), `:146-160` (`truncated_call_result`),
   `:546-549` (run-scoped counters), `:671-704` (`finish()` extra), `:841-860` (text path),
   `:877-898` (tool loop cases a/b); `dirtywork/__main__.py:590-591` (`_seed_payload`), `:609`
   (`_contract_fields`); `tests/test_transcript_schema.py:26-31` (`RUN_END_FIELDS`);
-  `tests/test_soak_tools.py:939`.
-- Test: `tests/test_runner.py` (pins at `:283-299`, `:361-373`, `:440-461`, `:473`, `:487`,
-  `:501`, `:573-577`, `:667-671`, `:921-930`; new tests 1–5).
+  `tests/test_main.py:19-28` (`_DEFAULT_EVIDENCE`); `tests/test_soak_tools.py:939`.
+- Test: `tests/test_runner.py` pins at `:283-299`, `:361-373`, `:440-461`, `:473`, `:487`, `:501`,
+  `:573-577`, `:667-671`, `:921-930` (rewritten; the five new tests are W1a-2).
 
 **Interfaces:**
 - Produces (`dirtywork.runner`): `MIN_CHUNK_CHARS = 200`, `MIN_CHUNK_LINES = 5`,
@@ -204,10 +193,10 @@ needs.
   as a `str.format` template with fields `cap cap_chars received cut_chars cut_lines target_chars
   target_lines n max`; `run_end.truncations` (int, always); `RunResult.extra["truncations"]`.
 
-- [ ] **Step 1: Brief** `$SCRATCH/brief-6566-w1a.md`:
+- [ ] **Step 1: Brief** `$SCRATCH/brief-6566-w1a-1.md`:
 
 ```
-Issue #65 (cap-aware truncation), task W1a of 9. Make every truncation message carry the --max-tokens cap, what the harness received, a per-call target and a running count, and count truncations per run. No abort yet (that is W1b). Spec: docs/superpowers/specs/2026-08-25-cap-aware-truncation-and-change-guard-design.md §3.1-§3.3 (read §3.1 and §3.2 first; the code below is exact).
+Issue #65 (cap-aware truncation), task W1a-1 of 12. Make every truncation message carry the --max-tokens cap, what the harness received, a per-call target and a running count, and count truncations per run. No abort yet (that is W1b) and no new tests yet (that is W1a-2) — this task is the code plus the existing pins that the new wording breaks. Spec: docs/superpowers/specs/2026-08-25-cap-aware-truncation-and-change-guard-design.md §3.1-§3.3 (read §3.1 and §3.2 first; the code below is exact).
 
 1. dirtywork/runner.py, next to CHARS_PER_TOKEN (line ~46), add:
 MIN_CHUNK_CHARS = 200
@@ -302,33 +291,56 @@ def truncated_call_result(tool: str, raw_arguments, trunc: dict) -> str:
                               "cut_chars": cut_chars, "cut_lines": cut_lines,
                               "target_chars": tc_chars, "target_lines": tc_lines,
                               "n": truncations, "max": MAX_TRUNCATED_REPLIES})
+   (`resp` is the local of one_turn assigned just above — the nested function closes over it.)
 
 7. Text path (line ~841-860): after `kind = classify_text_reply(content, finish_reason)` and the `if kind == "answer":` block, before `kind_record = self.transcript.write("nudge", kind=kind, turn=turns)`, add `if kind == "truncated": note_truncation()`. Change the delivery line to format the template: `deliver(_join_nudges(NUDGES[kind].format(**trunc), sandbox_text, stall_text), [kind_record, *sandbox_records, stall_record])` (str.format with an empty dict is a no-op for the two texts without fields).
 
 8. Tool loop (line ~877-898): in case (a) — `if tc.error is not None:` … `if finish_reason == "length":` — call `note_truncation(tc)` then `result = truncated_call_result(name, tc.raw_arguments, trunc)`; in case (b) — `elif finish_reason == "length" and self._missing_required(name, args):` — the same two lines. Nothing else in the loop changes; a `length` turn whose calls all parsed completely is NOT a truncation (tests/test_runner.py:537-554 stays as is).
 
-9. dirtywork/__main__.py: `_seed_payload` (line ~590) adds `"truncations": 0,` after `"timeouts": 0,`; `_contract_fields` (line ~609) returns `"truncations": extra.get("truncations", 0),` beside `"timeouts"`. tests/test_transcript_schema.py: append "truncations" to RUN_END_FIELDS (docs/transcript-schema.md already documents it).
+9. dirtywork/__main__.py: `_seed_payload` (line ~590) adds `"truncations": 0,` after `"timeouts": 0,`; `_contract_fields` (line ~609) returns `"truncations": extra.get("truncations", 0),` beside `"timeouts"`. tests/test_transcript_schema.py: append "truncations" to RUN_END_FIELDS (docs/transcript-schema.md already documents it). tests/test_main.py line ~27: add `"truncations": 0,` after `"timeouts": 0,` in `_DEFAULT_EVIDENCE` (that dict is the only seeded-key assertion in the file).
 
 10. tests/test_soak_tools.py line ~939 calls `truncated_call_result("write_file", raw)`: pass a third argument `dict(cap=1024, cap_chars=4096, received=3000, cut_chars=3000, cut_lines=55, target_chars=750, target_lines=13, n=1, max=6)` (the harvest regex is widened in W1b; this call must only keep the module importable and the write_file branch matching).
 
-11. Rewrite the pins in tests/test_runner.py that compare the old wording: lines ~283-299 and ~921-930 compare `NUDGES["truncated"]` by identity — build the same dict the runner builds and compare against `NUDGES["truncated"].format(**d)` (for a text-only reply of N characters: cap=8192 by default, cap_chars=32768, received=N, cut_chars=0, cut_lines=0, target_chars=8192, target_lines=136, n=1, max=6); line ~361-373 (`NUDGES["truncated"] not in …`) → assert "cut off at the --max-tokens cap" not in the message; lines ~440-461 (the write_file hint and `_GENERIC_TRUNCATION`) and ~473/~487/~501 → the new texts formatted with the dict the runner would build (compute cut_chars/cut_lines with call_size on the same ToolCall the test sends); line ~573-577 (`test_truncated_nudge_names_write_file_and_append_file`) → assert the template contains "{cap}", "{received}", "{target_lines}", "cut-off reply {n} of {max}", "write_file the first part and append_file the rest"; line ~667-671 (exact `result.extra == {...}`) adds `"truncations": 0`.
+11. Rewrite the pins in tests/test_runner.py that compare the old wording: lines ~283-299 and ~921-930 compare `NUDGES["truncated"]` by identity — build the same dict the runner builds and compare against `NUDGES["truncated"].format(**d)` (for a text-only reply of N characters with the default max_tokens 8192: cap=8192, cap_chars=32768, received=N, cut_chars=0, cut_lines=0, target_chars=8192, target_lines=136, n=1, max=6); line ~361-373 (`NUDGES["truncated"] not in …`) → assert "cut off at the --max-tokens cap" not in the message; lines ~440-461 (the write_file hint and `_GENERIC_TRUNCATION`) and ~473/~487/~501 → the new texts formatted with the dict the runner would build (compute cut_chars/cut_lines with call_size on the same ToolCall the test sends, received = len(text) + the raw args length); line ~573-577 (`test_truncated_nudge_names_write_file_and_append_file`) → assert the template contains "{cap}", "{received}", "{target_lines}", "cut-off reply {n} of {max}", "write_file the first part and append_file the rest"; line ~667-671 (exact `result.extra == {...}`) adds `"truncations": 0`.
 
-12. New tests in tests/test_runner.py (names as given):
-   test_chunk_target_cap_basis_and_floors: chunk_target(1024, 0, 0) == (1024, 17); (2048, 0, 0) == (2048, 34); (4096, 0, 0) == (4096, 68); (8192, 0, 0) == (8192, 136); (1024, 3000, 55) == (750, 13); (1024, 100, 2) == (200, 5) (floors); (1024, 300, 10) == (200, 6) (per-line from the call: 300/10 = 30 chars/line → 200/30 = 6).
-   test_reply_size_and_call_size: reply_size of a response with text "abc" and two calls with raw_arguments '{"path":"x","content":"a\\nb"}' and '{}' == (3, sum of the two lengths); call_size of the first == (its length, 2); call_size of ToolCall(raw_arguments="") == (0, 0); a call with arguments but no newline → lines == 1.
-   test_truncated_text_nudge_carries_the_numbers: FakeProvider([_resp(content="I will now", finish_reason="length"), _resp(content="ok")]), Runner(..., max_tokens=1234): the second request's last user message == NUDGES["truncated"].format(cap=1234, cap_chars=4936, received=10, cut_chars=0, cut_lines=0, target_chars=1234, target_lines=20, n=1, max=6); an empty `length` reply renders "received only 0 characters".
-   test_truncated_call_results_carry_the_cut_calls_numbers: a `length` turn with `_bad_args("c", "write_file", raw='{"path": "x", "content": "a\\nb\\nc')` → the tool message equals truncated_call_result("write_file", raw, d) where d has cut_chars == len(raw) and cut_lines == 3 (2 escaped newlines + 1); the generic form for `_bad_args(name="read_file")`; two cut calls in one turn get the same `n` and the same dict; a turn with one complete call and one cut call sizes the target from the cut call.
-   test_truncations_counts_once_per_turn: text path → truncations 1; a turn with two cut calls → +1 only; a `length` turn with a complete valid call → +0; run_end and result.extra carry `truncations`; `_seed_payload`/`_contract_fields` seed 0 (tests/test_main.py already checks the seeded keys — add "truncations" wherever "timeouts" is asserted there).
-
-13. Run `env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider` until green, then call finish with a summary. Do not add the abort; do not touch docs/.
+12. Run `env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider` until green, then call finish with a summary. Do not add the abort; do not add new tests; do not touch docs/.
 ```
 
-- [ ] **Step 2: Run** `$SCRATCH/run6566.sh $SCRATCH/brief-6566-w1a.md`.
+- [ ] **Step 2: Run** `$SCRATCH/run6566.sh $SCRATCH/brief-6566-w1a-1.md`.
 - [ ] **Step 3: Review** (texts byte-exact vs §3.2; `note_truncation` once per turn; both tool-loop
   cases call it with `tc`; the text path with `None`; `truncations` in `extra`; no abort added;
-  the seven pins rewritten as described, not weakened; `test_soak_tools.py:939` still passes).
+  the pins rewritten as described, not weakened; `_DEFAULT_EVIDENCE` gained the key;
+  `test_soak_tools.py:939` still passes).
 - [ ] **Step 4: Host suite** green in the run worktree; **Step 5:** commit export verbatim + Claude
   nits, ff-merge, ledger row (+ S14 A/B line for any resume).
+
+---
+
+### Task W1a-2: #65 — the five tests for the numbers (spec §7 tests 1–5)
+
+**Files:**
+- Test: `tests/test_runner.py` (five new tests); `tests/test_main.py` (the seeded-key assertion
+  already covers `truncations` via `_DEFAULT_EVIDENCE`).
+
+**Interfaces:**
+- Consumes: everything W1a-1 produces.
+
+- [ ] **Step 1: Brief** `$SCRATCH/brief-6566-w1a-2.md`:
+
+```
+Issue #65, task W1a-2 of 12: five new tests in tests/test_runner.py for the cap-aware truncation numbers that W1a-1 added to dirtywork/runner.py (reply_size, call_size, chunk_target, the NUDGES["truncated"] template, truncated_call_result(tool, raw_arguments, trunc), the per-turn note_truncation() and the `truncations` counter). Read those functions first (grep -n "def chunk_target\|def call_size\|def reply_size\|def note_truncation" dirtywork/runner.py). Spec §3.1-§3.3, §7 tests 1-5. Test helpers that already exist in tests/test_runner.py: `_resp(content, tool_calls, usage, finish_reason)`, `_call(id, name, args)`, `_bad_args(id, name, raw)`, `FakeProvider(responses)`, the `parts` fixture (wt, registry, sandbox, transcript, tmp_path), `_events(tmp_path)`.
+
+   test_chunk_target_cap_basis_and_floors: chunk_target(1024, 0, 0) == (1024, 17); (2048, 0, 0) == (2048, 34); (4096, 0, 0) == (4096, 68); (8192, 0, 0) == (8192, 136); (1024, 3000, 55) == (750, 13); (1024, 100, 2) == (200, 5) (floors); (1024, 300, 10) == (200, 6) (per-line from the call: 300/10 = 30 chars/line → 200/30 = 6).
+   test_reply_size_and_call_size: build two calls with `_bad_args("c1", "write_file", raw='{"path":"x","content":"a\\nb"}')` and `_bad_args("c2", "read_file", raw="{}")` and a response `_resp(content="abc", tool_calls=[…])`: reply_size(resp) == (3, len(raw1) + len(raw2)); call_size(first) == (len(raw1), 2) (one escaped newline + 1); call_size(`_bad_args("c3", "write_file", raw="")`) == (0, 0); a call whose raw has no newline → lines == 1.
+   test_truncated_text_nudge_carries_the_numbers: FakeProvider([_resp(content="I will now", finish_reason="length"), _resp(content="ok")]), Runner(..., max_tokens=1234): the second request's last user message == NUDGES["truncated"].format(cap=1234, cap_chars=4936, received=10, cut_chars=0, cut_lines=0, target_chars=1234, target_lines=20, n=1, max=6); a second run with `_resp(content="", finish_reason="length")` renders "received only 0 characters".
+   test_truncated_call_results_carry_the_cut_calls_numbers: a `length` turn with `_bad_args("c", "write_file", raw='{"path": "x", "content": "a\\nb\\nc')` → the tool message equals truncated_call_result("write_file", raw, d) where d has cap=8192, cap_chars=32768, received=len(raw), cut_chars=len(raw), cut_lines=3 (2 escaped newlines + 1), target_chars=chunk_target(8192, len(raw), 3)[0], target_lines=chunk_target(8192, len(raw), 3)[1], n=1, max=6; the generic form for `_bad_args("c", "read_file", raw="{")`; two cut calls in one turn (two `_bad_args` in one `_resp(..., finish_reason="length")`) both get the text with the same `n` and a target sized by the FIRST call; a turn with one complete call (`_call`) and one cut call sizes the target from the cut one only (received counts both).
+   test_truncations_counts_once_per_turn: text path → run_end.truncations == 1 after one truncated reply then "ok"; a turn with two cut calls → +1 only; a `length` turn with a complete valid call (the shape of the existing test at line ~537-554) → +0; result.extra["truncations"] equals the run_end value.
+
+Run `env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider` until green, then call finish with a summary. Do not change dirtywork/ (if a test cannot pass without a code change, the test is wrong — re-read the function); do not touch docs/.
+```
+
+- [ ] **Step 2: Run**; **Step 3: Review** (every number in the brief appears in an assertion; no
+  code change); **Step 4: Host suite**; **Step 5:** merge, ledger row.
 
 ---
 
@@ -341,14 +353,14 @@ def truncated_call_result(tool: str, raw_arguments, trunc: dict) -> str:
   (both generic wordings).
 
 **Interfaces:**
-- Consumes: `truncations`, `trunc`, `note_truncation` (W1a).
+- Consumes: `truncations`, `trunc`, `note_truncation` (W1a-1).
 - Produces: `TRUNCATION_ABORT` (`dirtywork.runner`); `bench._abort_kind(...) == "truncated"` for
   the cut-off form; `soak_harvest._TRUNCATED_CALL_RESULT_RE` matching both wordings.
 
 - [ ] **Step 1: Brief** `$SCRATCH/brief-6566-w1b.md`:
 
 ```
-Issue #65, task W1b of 9. Six cut-off replies end a run; bench and the soak harvester understand the new wording. W1a already added reply_size/call_size/chunk_target, the texts, the per-turn note_truncation() and the `truncations` counter in dirtywork/runner.py. Spec §3.3, §5.2.
+Issue #65, task W1b of 12. Six cut-off replies end a run; bench and the soak harvester understand the new wording. W1a-1 already added reply_size/call_size/chunk_target, the texts, the per-turn note_truncation() and the `truncations` counter in dirtywork/runner.py. Spec §3.3, §5.2.
 
 1. dirtywork/runner.py, next to MAX_TRUNCATED_REPLIES, add:
 TRUNCATION_ABORT = ("aborted after {n} cut-off replies at --max-tokens {cap}: raise --max-tokens "
@@ -365,7 +377,7 @@ TRUNCATION_ABORT = ("aborted after {n} cut-off replies at --max-tokens {cap}: ra
                                   TRUNCATION_ABORT.format(n=truncations, cap=self.max_tokens))
    (The nudge record was already written; it stays without `via`, exactly like the third strike.)
 
-3. Tool loop: in both places W1a calls note_truncation(tc) — case (a) `if tc.error is not None:` and case (b) `elif finish_reason == "length" and self._missing_required(name, args):` — after `abort_reason = failures.record("malformed_args")` and the note_truncation/truncated_call_result lines, add:
+3. Tool loop: in both places W1a-1 calls note_truncation(tc) — case (a) `if tc.error is not None:` and case (b) `elif finish_reason == "length" and self._missing_required(name, args):` — after `abort_reason = failures.record("malformed_args")` and the note_truncation/truncated_call_result lines, add:
                     if abort_reason is None and truncations >= MAX_TRUNCATED_REPLIES:
                         abort_reason = TRUNCATION_ABORT.format(n=truncations, cap=self.max_tokens)
    The truncated result is still produced, recorded in the transcript and appended to messages; the loop's existing `if abort_reason is not None: return finish("model_error", abort_reason)` ends the run after that.
@@ -378,16 +390,16 @@ _TRUNCATED_CALL_RESULT_RE = re.compile(
    and update the comment above it (lines ~92-99): the harvester reads historical run dirs whose results carry the 0.10 wording ("…at the token limit before it completed.") as well as 1.0's ("…at the --max-tokens cap of N tokens after about …"), so both must match; the write_file branch is unchanged.
 
 6. Tests:
-   tests/test_runner.py test_six_cutoff_replies_end_the_run (the S3 shape): responses alternating `_resp(content="header", finish_reason="length")` and `_resp(tool_calls=[_call(f"w{i}", "write_file", {"path": "rows.csv", "content": f"row{i}\n"})])`, six truncations interleaved with five successful writes, Runner(max_tokens=1024): result.status == "model_error", result.final_message == TRUNCATION_ABORT.format(n=6, cap=1024), result.extra["truncations"] == 6, the run_end event has truncations 6, the last nudge event (kind "truncated") has no "via" key, the FailureTracker never reached 3 (each write reset it). Variant: three consecutive `length` text replies as the 4th-6th truncations → final_message == "aborted after 3 consecutive empty_reply failures" (the consecutive rule wins). Variant: the sixth truncation on the tool path (`_bad_args(...)` with finish_reason="length") → the transcript has that call's tool_result with the truncated text, then run_end model_error with TRUNCATION_ABORT.
+   tests/test_runner.py test_six_cutoff_replies_end_the_run (the S3 shape): responses alternating `_resp(content="header", finish_reason="length")` and `_resp(tool_calls=[_call(f"w{i}", "write_file", {"path": "rows.csv", "content": f"row{i}\n"})])`, six truncations interleaved with five successful writes, Runner(max_tokens=1024): result.status == "model_error", result.final_message == TRUNCATION_ABORT.format(n=6, cap=1024), result.extra["truncations"] == 6, the run_end event has truncations 6, the last nudge event (kind "truncated") has no "via" key, and the run never hit the consecutive rule (each write reset FailureTracker). Variant: three consecutive `length` text replies as the 4th-6th truncations → final_message == "aborted after 3 consecutive empty_reply failures" (the consecutive rule wins). Variant: the sixth truncation on the tool path (`_bad_args(...)` in a `_resp(finish_reason="length")`) → the transcript has that call's tool_result with the truncated text, then run_end model_error with TRUNCATION_ABORT.
    tests/test_bench.py: `bench._abort_kind(TRUNCATION_ABORT.format(n=6, cap=1024)) == "truncated"`; the existing `_abort_kind` assertions unchanged.
-   tests/test_soak_tools.py: `detect_features` fires F5 for a run whose tool_result is the NEW generic text (build it with runner.truncated_call_result("read_file", "{", dict(cap=1024, cap_chars=4096, received=10, cut_chars=1, cut_lines=1, target_chars=1024, target_lines=17, n=1, max=6))) followed by a successful append_file, and still fires for the OLD generic text "ERROR: your read_file call was cut off at the token limit before it completed." kept verbatim in the existing fixtures at lines ~215/~294/~316 (do not rewrite those fixtures — they are the historical wording).
+   tests/test_soak_tools.py: add test_f5_fires_on_the_new_generic_truncation_wording — F5 fires only when a later append_file's path equals the truncated call's recovered path or a path an earlier successful write_file wrote, so the fixture must contain that write: events = [assistant(finish_reason="length", tool_calls=[write_file, read_file]), tool_result(tool="write_file", args='{"path": "big.txt", "text": "a"}', result="Wrote 1 bytes to big.txt (new file, 1 line)"), tool_result(tool="read_file", args="{", result=runner.truncated_call_result("read_file", "{", dict(cap=1024, cap_chars=4096, received=10, cut_chars=0, cut_lines=0, target_chars=1024, target_lines=17, n=1, max=6))), assistant(tool_calls=[append_file]), tool_result(tool="append_file", args='{"path": "big.txt", "text": "b"}', result="Appended to big.txt: +1 -0")] (copy the exact event shapes from the existing F5 test at lines ~288-302) → detect_features fires F5; the OLD generic wording "ERROR: your read_file call was cut off at the token limit before it completed." kept verbatim in the existing fixtures at lines ~215/~294/~316 still fires (do not rewrite those fixtures — they are the historical wording).
 
 7. Run `env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider` until green, then call finish with a summary. Do not touch docs/.
 ```
 
 - [ ] **Step 2: Run**; **Step 3: Review** (abort placement after the consecutive check on both
-  paths; the tool-path result is recorded before the abort; `_ABORT_RE` untouched; harvest regex
-  matches both wordings — run `grep -c "cut off at the token limit" ~/.dirtywork/runs/*/transcript.jsonl | head`
+  paths; the tool-path result is recorded before the abort; `_ABORT_RE` untouched; the harvest
+  regex matches both wordings — `grep -c "cut off at the token limit" ~/.dirtywork/runs/*/transcript.jsonl | head`
   as a sanity check on old data); **Step 4: Host suite**; **Step 5:** merge, ledger row.
 
 ---
@@ -395,9 +407,10 @@ _TRUNCATED_CALL_RESULT_RE = re.compile(
 ### Task W2a: `tools.py` — `parse_exit_code` moves, `parse_change_head`/`net_change`; `ProgressTracker` (spec §4.2)
 
 **Files:**
-- Modify: `dirtywork/tools.py:421-451` (below `describe_change`), `:995-1000`
-  (`is_timeout_result` neighbourhood — `parse_exit_code` lands here); `dirtywork/runner.py:261-275`
-  (remove `parse_exit_code`, import it), `:294-310` (`ProgressTracker.note_call`).
+- Modify: `dirtywork/tools.py:421-451` (below `describe_change`), `:994-1000`
+  (`is_timeout_result` neighbourhood — `parse_exit_code` lands here); `dirtywork/runner.py:14`
+  (the `from .tools import is_timeout_result` line), `:261-275` (remove `parse_exit_code`),
+  `:294-310` (`ProgressTracker.note_call`).
 - Test: `tests/test_tools_files.py` (test 8), `tests/test_runner.py` (test 9).
 
 **Interfaces:**
@@ -408,9 +421,9 @@ _TRUNCATED_CALL_RESULT_RE = re.compile(
 - [ ] **Step 1: Brief** `$SCRATCH/brief-6566-w2a.md`:
 
 ```
-Issue #66, task W2a of 9: a byte-identical write is not progress. Spec §4.2. Two small moves in dirtywork/tools.py and dirtywork/runner.py.
+Issue #66, task W2a of 12: a byte-identical write is not progress. Spec §4.2. Two small moves in dirtywork/tools.py and dirtywork/runner.py.
 
-1. Move `parse_exit_code` from dirtywork/runner.py (line ~261, the function with the docstring "The integer after 'exit code: ' on a bash result's first line…") to dirtywork/tools.py, directly below `is_timeout_result` (line ~994), body unchanged. In runner.py delete the definition and add `parse_exit_code` to the existing `from .tools import (...)` import; its two call sites (RepeatTracker.note_bash line ~362, run_verify line ~731) are unchanged. grep -rn "parse_exit_code" tests/ dirtywork/ must show only tools.py's definition and runner.py's import + two uses.
+1. Move `parse_exit_code` from dirtywork/runner.py (line ~261, the function with the docstring "The integer after 'exit code: ' on a bash result's first line…") to dirtywork/tools.py, directly below `is_timeout_result` (line ~994), body unchanged. In runner.py delete the definition and change line 14 `from .tools import is_timeout_result` to `from .tools import is_timeout_result, net_change, parse_exit_code`; its two call sites (RepeatTracker.note_bash line ~362, run_verify line ~731) are unchanged. `grep -rn "parse_exit_code" tests/ dirtywork/` must then show only tools.py's definition and runner.py's import + two uses.
 
 2. dirtywork/tools.py, directly below `describe_change` (line ~421-451; keep them adjacent — the parser must track the producer), add:
 _CHANGE_HEAD_RE = re.compile(
@@ -459,9 +472,9 @@ def net_change(result: str) -> bool | None:
             if net_change(result) is not False:
                 self._progressed = True
             return
-   (import net_change from .tools). Update the class docstring sentence about mutating tools accordingly.
+   Update the class docstring sentence about mutating tools accordingly.
 
-4. Tests. tests/test_tools_files.py: test_parse_change_head_and_net_change_round_trip — for every verb the tools produce, build the result through the real producer: describe_change(path, old, new, verb=v) for v in ("Wrote", "Edited", "Appended to", "Inserted into", "Applied 1 edit to", "Applied 2 edits to") with (old="a\nb\n", new="a\nc\n") → parse_change_head returns (v, path, 1, 1) and net_change is True; with old == new → (v, path, 0, 0) and net_change is False; with a removal that yields the "(removed N non-blank line(s))" suffix (old="a\nb\n", new="a\n") → parsed and True; describe_write(path, None, "x\n", 2) (the new-file form) → parse_change_head None, net_change True; the "(diff omitted: file too large)" head (build it through describe_change with a new text longer than the diff cap — find the constant next to describe_change) → parse_change_head None, net_change None; "ERROR: no such file", "BLOCKED: …", "[output truncated at 10000 chars]" and "hello" → None/None.
+4. Tests. tests/test_tools_files.py: test_parse_change_head_and_net_change_round_trip — for every verb the tools produce, build the result through the real producer: describe_change(path, old, new, verb=v) for v in ("Wrote", "Edited", "Appended to", "Inserted into", "Applied 1 edit to", "Applied 2 edits to") with (old="a\nb\n", new="a\nc\n") → parse_change_head returns (v, path, 1, 1) and net_change is True; with old == new → (v, path, 0, 0) and net_change is False; with a removal that yields the "(removed N non-blank line(s))" suffix (old="a\nb\n", new="a\n") → parsed and True; describe_write(path, None, "x\n", 2) (the new-file form) → parse_change_head None, net_change True; the "(diff omitted: file too large)" head (build it through describe_change with a new text of DESCRIBE_DIFF_MAX_LINES + 1 lines — the constant is at tools.py line ~24) → parse_change_head None, net_change None; "ERROR: no such file", "BLOCKED: …", "[output truncated at 10000 chars]" and "hello" → None/None.
    tests/test_runner.py: test_progress_tracker_ignores_noop_writes — t = ProgressTracker(stall_turns=4); t.note_call("write_file", {"path": "a"}, "Wrote a: +0 -0"); t.end_turn() is None and t.idle_turns == 1; t.note_call("write_file", {"path": "a"}, "Wrote a: +1 -0"); t.end_turn() is None and t.idle_turns == 0; the new-file form is progress; a result "weird" (unknown shape) is progress. test_identical_rewrites_stall — a Runner with stall_turns=4 and a provider that rewrites f.txt with its existing content ("data\n") every turn ends status "stalled" (the same call key repeats and the write is +0 -0); the existing ProgressTracker tests at lines ~982-1065 still pass.
 
 5. Run `env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider` until green, then call finish with a summary. Do not touch docs/.
@@ -473,7 +486,7 @@ def net_change(result: str) -> bool | None:
 
 ---
 
-### Task W2b: `changes.py` — the fingerprint script, parser, texts; the doubles (spec §4.1, §4.3–§4.4 texts)
+### Task W2b-1: `changes.py` — the fingerprint script, parser, texts; the doubles (spec §4.1, §4.3–§4.4 texts)
 
 **Files:**
 - Create: `dirtywork/changes.py`, `tests/test_changes.py`.
@@ -486,14 +499,15 @@ def net_change(result: str) -> bool | None:
   `fingerprint(sandbox) -> tuple[str | None, str | None]`, `UNCHANGED_REQUIRED`, `UNCHANGED_PLAIN`,
   `NO_CHANGE_SINCE_START_REQUIRED`, `NO_CHANGE_SINCE_START_PLAIN`, `NO_CHANGE_RECENT` (the last
   three `str.format` templates with `{k}`); `tests.provider_doubles.FingerprintSandbox(worktree,
-  hashes, *, max_worktree_mb=..., ...)`; the `git_parts` fixture.
+  hashes=None, **HostSandbox kwargs)` — `hashes=None` means "real bash for everything, just
+  record"; the `git_parts` fixture.
 
-- [ ] **Step 1: Brief** `$SCRATCH/brief-6566-w2b.md`:
+- [ ] **Step 1: Brief** `$SCRATCH/brief-6566-w2b-1.md`:
 
 ```
-Issue #66, task W2b of 9: the worktree fingerprint primitives and the test doubles the guard tasks (W3a/W3b) will use. Spec §4.1 (the script is byte-exact and probed; do not "improve" it), §4.3 and §4.4 for the texts. Nothing in the runner changes in this task.
+Issue #66, task W2b-1 of 12: the worktree fingerprint primitives and the test doubles the guard tasks (W3a/W3b) will use. Spec §4.1 (the script is byte-exact and probed; do not "improve" it), §4.3 and §4.4 for the texts. Nothing in the runner changes in this task; the host test that exercises the real script on nested repositories is W2b-2.
 
-1. Create dirtywork/changes.py:
+1. Create dirtywork/changes.py with exactly this content:
 """The change guard's primitives (spec #66 §4.1): the worktree fingerprint
 script, its parser, and the texts the runner delivers. The script runs
 through `Sandbox.bash` -- the seam `--verify` uses -- in both sandbox modes.
@@ -625,22 +639,29 @@ NO_CHANGE_RECENT = (
     "task needs more changes, stop reading whole files — grep -n for the line you need, then edit "
     "it; if the task is complete, call finish(summary=...).")
 
-2. tests/provider_doubles.py: add
+   Self-check before finishing (the script must be byte-exact): `python3 -c 'from dirtywork.changes import FINGERPRINT_SCRIPT; print(FINGERPRINT_SCRIPT)' > /tmp/s1; sed -n '/^FINGERPRINT_SCRIPT = r"""/,/^git rev-parse HEAD"""/p' docs/superpowers/specs/2026-08-25-cap-aware-truncation-and-change-guard-design.md | sed '1s/^FINGERPRINT_SCRIPT = r"""//; $s/"""$//' > /tmp/s2; diff /tmp/s1 /tmp/s2 && echo SCRIPT-OK`.
+
+2. tests/provider_doubles.py: add (import FINGERPRINT_SCRIPT from dirtywork.changes and HostSandbox from dirtywork.sandbox.host at the top of the file):
 class FingerprintSandbox(HostSandbox):
     """A HostSandbox whose `bash` answers FINGERPRINT_SCRIPT from a scripted
-    list and delegates everything else (verify commands, file tools stay
-    real). Entries: a str hash -> "exit code: 0\n<hash>\n<40 zeros>" (two
-    lines, as the real script prints a tree and HEAD); None -> "exit code:
-    1\nerror: boom"; an Exception instance -> raised. The last entry repeats.
-    `commands` records every (command, timeout) the runner sends."""
-    def __init__(self, worktree, hashes, **kwargs):
+    list and delegates everything else (verify commands and the file tools
+    stay real). Entries: a str hash -> "exit code: 0\n<hash>\n<40 zeros>" (two
+    lines, as the real script prints a tree and HEAD) -- str entries MUST be
+    40 lowercase hex chars (e.g. "a" * 40): they go through
+    parse_fingerprint, which drops anything else; None -> "exit code:
+    1\nerror: boom"; an exception instance -> raised. The last entry repeats.
+    hashes=None -> the real script runs for the fingerprint too (a recording
+    HostSandbox). `commands` records every (command, timeout) the runner sends."""
+    def __init__(self, worktree, hashes=None, **kwargs):
         super().__init__(worktree, **kwargs)
-        self.hashes = list(hashes)
+        self.hashes = None if hashes is None else list(hashes)
+        for h in self.hashes or []:
+            assert h is None or isinstance(h, BaseException) or (len(h) == 40 and all(c in "0123456789abcdef" for c in h)), h
         self.commands = []
 
     def bash(self, command, timeout=120):
         self.commands.append((command, timeout))
-        if command != FINGERPRINT_SCRIPT:
+        if command != FINGERPRINT_SCRIPT or self.hashes is None:
             return super().bash(command, timeout)
         entry = self.hashes.pop(0) if len(self.hashes) > 1 else self.hashes[0]
         if isinstance(entry, BaseException):
@@ -648,9 +669,8 @@ class FingerprintSandbox(HostSandbox):
         if entry is None:
             return "exit code: 1\nerror: boom"
         return f"exit code: 0\n{entry}\n{'0' * 40}"
-   (import FINGERPRINT_SCRIPT from dirtywork.changes and HostSandbox from dirtywork.sandbox.host; the constructor kwargs are HostSandbox's.)
 
-3. tests/test_runner.py: beside the `parts` fixture (line ~95) add a `git_parts` fixture identical to `parts` except that `wt` is a real repository: after writing f.txt run `git -C wt init -q`, `git -C wt -c user.email=t@t -c user.name=t add -A`, `git -C wt -c user.email=t@t -c user.name=t commit -qm init` via subprocess.run(check=True). Skip both new fixtures' tests with pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH").
+3. tests/test_runner.py: beside the `parts` fixture (line ~95) add a `git_parts` fixture identical to `parts` except that `wt` is a real repository: after writing f.txt run `git -C wt init -q`, `git -C wt -c user.email=t@t -c user.name=t add -A`, `git -C wt -c user.email=t@t -c user.name=t commit -qm init` via subprocess.run(check=True); mark the fixture's tests with pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH"). The sandbox it returns is a FingerprintSandbox(wt) with hashes=None (real fingerprints, recorded commands), imported from tests.provider_doubles.
 
 4. tests/test_changes.py (new; import from dirtywork.changes):
    test_parse_fingerprint_sorts_and_requires_two_hashes: two hex lines → the sorted join; the same four lines given in two different orders → equal fingerprints; "exit code: 0\n" + one hex line → (None, "fewer than two hash lines"); "" → (None, "no output").
@@ -658,40 +678,67 @@ class FingerprintSandbox(HostSandbox):
    test_parse_fingerprint_fails_open_with_a_reason: "exit code: 1\nerror: 'vendor/x/' does not have a commit checked out\n<h1>" → (None, "error: 'vendor/x/' does not have a commit checked out"); "exit code: 128\n" → (None, "exit code: 128"); tools.timeout_result(60) → (None, a string starting with "ERROR: command timed out after"); "ERROR: bash failed: no such container" → (None, that line); "BLOCKED: sudo is not allowed…" → (None, that line); "exit code: 0\n" + 240 hex lines + "\n[output truncated at 10000 chars — bash output capped]" → (None, "[output truncated at 10000 chars — bash output capped]"); a 500-char diagnostic → reason of length 200.
    test_fingerprint_without_bash: fingerprint(object()) == (None, "sandbox has no bash").
    test_script_shape_and_guardrails: FINGERPRINT_SCRIPT contains each of "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", ":(exclude,literal)", "trap 'rm -rf \"$tmp\"' EXIT", "git -c core.fsmonitor=false add -A -- .", "git write-tree", "git rev-parse HEAD", "GIT_CONFIG_GLOBAL=/dev/null"; guardrails.check_bash_command(FINGERPRINT_SCRIPT, worktree=tmp_path) is None and check_bash_command(FINGERPRINT_SCRIPT, sandboxed=True) is None.
-   test_real_script_on_the_host (skip without git): build a repo in tmp_path with one committed file; HostSandbox(tmp_path).bash(FINGERPRINT_SCRIPT, FINGERPRINT_TIMEOUT) parses to a fingerprint (rc 0, two lines); then create: a committed nested repo vendor/inner (init, a file, commit), an UNBORN nested repo vendor/unborn (init + a file, no commit), a nested-in-nested vendor/inner/deeper (init + commit), nested roots named "vendor/café" and "vendor/sp ace" (init + commit each) — run again: rc 0, exactly 6 hash lines + HEAD (count the 40-hex lines in the raw result: repositories + 1), fingerprint not None; write a file inside vendor/unborn → only that repository's line changes (compare the raw hex line sets: exactly one line differs); rewrite the root file byte-identically → fingerprint unchanged; count files under `git rev-parse --git-path objects` before and after a run with a new 100 KB untracked file present → equal; count entries of tempfile.gettempdir() before and after → equal.
+   test_fingerprint_sandbox_double: FingerprintSandbox(tmp_path, ["a"*40, None, RuntimeError("x")]).bash(FINGERPRINT_SCRIPT, 60) returns "exit code: 0\n" + "a"*40 + "\n" + "0"*40 the first time, "exit code: 1\nerror: boom" the second, raises RuntimeError the third and every time after; a non-hex str entry raises AssertionError at construction; commands records (FINGERPRINT_SCRIPT, 60).
 
-5. Run `env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider` until green, then call finish with a summary. Do not modify dirtywork/runner.py in this task; do not touch docs/.
+5. Run `env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider` until green, run the self-check of item 1 (it must print SCRIPT-OK), then call finish with a summary. Do not modify dirtywork/runner.py in this task; do not touch docs/.
 ```
 
-- [ ] **Step 2: Run**; **Step 3: Review** (script byte-exact vs spec §4.1 — `diff <(sed -n
-  '/^FINGERPRINT_SCRIPT = r"""/,/^git rev-parse HEAD"""/p' dirtywork/changes.py) <(the spec's
-  block)`; parser cases; the doubles' shapes; the host test actually exercises unborn + non-ASCII);
-  **Step 4: Host suite**; **Step 5:** merge, ledger row.
+- [ ] **Step 2: Run**; **Step 3: Review** (script byte-exact — run the item-1 self-check on the host;
+  parser cases; the double's hex assertion; `git_parts` returns a recording sandbox); **Step 4: Host
+  suite**; **Step 5:** merge, ledger row.
 
 ---
 
-### Task W3a: The guard in the runner — start, completion paths, `finish()`, `require_changes` (spec §4.1 When/Failure, §4.3)
+### Task W2b-2: The real script on the host — nested, unborn, non-ASCII (spec §7 test 11b)
+
+**Files:**
+- Test: `tests/test_changes.py` (one test).
+
+- [ ] **Step 1: Brief** `$SCRATCH/brief-6566-w2b-2.md`:
+
+```
+Issue #66, task W2b-2 of 12: one host test that runs the real fingerprint script (dirtywork.changes.FINGERPRINT_SCRIPT, added in W2b-1) on a repository with nested repositories. Spec §7 test 11b. Add to tests/test_changes.py:
+
+test_real_script_on_the_host (skip with pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")):
+  1. Build a repo in tmp_path: `git init -q`, write README.md, `git -c user.email=t@t -c user.name=t add -A`, `git … commit -qm init` (use a helper `_git(*args, cwd)` that calls subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *args], cwd=cwd, check=True, capture_output=True)).
+  2. `from dirtywork.sandbox.host import HostSandbox`; `raw = HostSandbox(tmp_path).bash(FINGERPRINT_SCRIPT, FINGERPRINT_TIMEOUT)`; `fp, reason = parse_fingerprint(raw)`; assert reason is None and fp is not None and the raw result has exactly 2 lines matching ^[0-9a-f]{40}$ (a tree and HEAD).
+  3. Create, each with its own commit unless stated: a nested repo vendor/inner (init, a file, commit); an UNBORN nested repo vendor/unborn (init + a file x.txt, NO commit); a nested-in-nested vendor/inner/deeper (init + file + commit); nested roots named "vendor/café" and "vendor/sp ace" (init + file + commit each). Run again: rc 0 (parse_exit_code(raw) == 0), exactly 6 hash lines + HEAD = 7 lines matching the hex regex, fp not None.
+  4. Write a new file inside vendor/unborn → run again → exactly ONE hex line differs between the two raw results (compare the sets of hex lines: symmetric difference has 2 elements) and the parsed fingerprints differ.
+  5. Rewrite README.md byte-identically (read it, write it back) → the parsed fingerprint equals the previous one.
+  6. Count files under the real object store (`git rev-parse --git-path objects` → walk it with os.walk) before and after a run with a new 100 KB untracked file (os.urandom) present at the root → equal counts (the scratch object directory).
+  7. Count entries of tempfile.gettempdir() before and after a run → equal (no leaked scratch dir).
+
+Run `env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider` until green, then call finish with a summary. Do not change dirtywork/changes.py (if the script misbehaves, say so in the summary rather than editing it); do not touch docs/.
+```
+
+- [ ] **Step 2: Run**; **Step 3: Review** (the seven checks present; no script edit); **Step 4: Host
+  suite**; **Step 5:** merge, ledger row.
+
+---
+
+### Task W3a-1: The guard in the runner — start, completion paths, `finish()`, `require_changes`; the tests it breaks (spec §4.1 When/Failure, §4.3)
 
 **Files:**
 - Modify: `dirtywork/runner.py:474-533` (`Runner.__init__`), `:546-560` (state), `:671-704`
   (`finish()`), `:746-786` (`check_verify`), `:1005-1020` (the loop's `try:`);
   `tests/test_transcript_schema.py:18-31` (`NUDGE_KINDS`, `STATUSES`, `RUN_END_FIELDS`);
-  `tests/test_runner.py` doubles (`:667-671`, `:1562`, `:1804`, `:1857-1876`, `:1891`, `:1922`).
-- Test: `tests/test_runner.py` (tests 12–17 and the non-K parts of 19).
+  `tests/test_runner.py` doubles (`:667-671`, `:1562`, `:1804`, `:1857-1876`, `:1891`, `:1922`,
+  `:1943`); `tests/test_main.py` host runs (`_first_run` `:1365-1369` and the single-turn runs).
+- Test: `tests/test_runner.py` (tests 12–14).
 
 **Interfaces:**
-- Consumes: `changes.fingerprint`, `UNCHANGED_REQUIRED`, `UNCHANGED_PLAIN` (W2b);
-  `FingerprintSandbox`, `git_parts` (W2b).
+- Consumes: `changes.fingerprint`, `UNCHANGED_REQUIRED`, `UNCHANGED_PLAIN` (W2b-1);
+  `FingerprintSandbox`, `git_parts` (W2b-1).
 - Produces: `Runner(..., require_changes: bool = False)`; run-scoped `fp_start`, `fp_check`,
   `fp_turn`, `fp_value`, `changed`, `changed_reason`, `unchanged_finishes`; `take_fingerprint()`
   closure; status `unchanged`; `run_end.changed` (bool | None, always), `run_end.changed_reason`
   (str, sparse), `RunResult.extra` the same; finish results `run not finished: nothing changed`
   and `run not finished: change check could not run (…)`; nudge kind `unchanged_finish`.
 
-- [ ] **Step 1: Brief** `$SCRATCH/brief-6566-w3a.md`:
+- [ ] **Step 1: Brief** `$SCRATCH/brief-6566-w3a-1.md`:
 
 ```
-Issue #66, task W3a of 9: the change guard in dirtywork/runner.py — fingerprint at run start, on both completion paths (before verify) and in finish(); reject a completion that changed nothing once; end a feedback resume `unchanged` on the second. Spec §4.1 ("When" and "Failure"), §4.3 — read them; the code below is exact where it is code. The every-K-turns check is W3b (not here); the CLI is W3c (not here).
+Issue #66, task W3a-1 of 12: the change guard in dirtywork/runner.py — fingerprint at run start, on both completion paths (before verify) and in finish(); reject a completion that changed nothing once; end a feedback resume `unchanged` on the second. Spec §4.1 ("When" and "Failure"), §4.3 — read them; the code below is exact where it is code. The every-K-turns check is W3b (not here); the CLI is W3c (not here); more tests are W3a-2.
 
 1. Imports: `from .changes import fingerprint as _fingerprint, UNCHANGED_REQUIRED, UNCHANGED_PLAIN`.
 
@@ -709,9 +756,11 @@ Issue #66, task W3a of 9: the change guard in dirtywork/runner.py — fingerprin
 4. A closure in Runner.run, defined next to run_verify:
         def take_fingerprint():
             """Spec #66 §4.1/§4.3: one measurement. Returns the fingerprint or
-            None; sets the run's `changed`/`changed_reason` by the one rule.
-            BudgetExceeded/SandboxError are stored as the reason, then
-            re-raised for the caller to map (finish() catches them)."""
+            None. One rule: a successful measurement sets changed/clears the
+            reason; a failed or raising one sets changed = None and stores
+            the reason (so changed_reason is present exactly when changed is
+            null for that reason). BudgetExceeded/SandboxError are stored,
+            then re-raised for the caller to map (finish() catches them)."""
             nonlocal fp_turn, fp_value, changed, changed_reason
             try:
                 fp, reason = _fingerprint(self.sandbox)
@@ -722,7 +771,7 @@ Issue #66, task W3a of 9: the change guard in dirtywork/runner.py — fingerprin
                 changed, changed_reason = None, f"sandbox: {e}"
                 raise
             if fp is None:
-                changed_reason = reason
+                changed, changed_reason = None, reason
                 return None
             fp_turn, fp_value = turns, fp
             if fp_start is not None:
@@ -733,34 +782,29 @@ Issue #66, task W3a of 9: the change guard in dirtywork/runner.py — fingerprin
 5. Run start: the loop today is (line ~1005)
         try:
             while True:
-                ...
-   Insert, inside that `try:` and immediately before `while True:`:
-            fp_start = take_fingerprint()          # spec #66 §4.1 (1); None = guard off for this run
-            if fp_start is None and changed_reason is not None:
-                pass                                # the CLI reports changed_reason (W3c); the Runner never writes stderr
-            fp_check = fp_start
-   BudgetExceeded/SandboxError raised there must end the run through finish(): wrap that one call as
+   Insert, inside that `try:` and immediately before `while True:`, this one block (BudgetExceeded/SandboxError end the run through finish(); a KeyboardInterrupt during the exec reaches the existing outer `except KeyboardInterrupt: return finish("interrupted", "")` with turns == 0 and one run_end):
             try:
-                fp_start = take_fingerprint()
+                fp_start = take_fingerprint()      # spec #66 §4.1 (1); None = guard off for this run
             except BudgetExceeded as e:
                 return finish("budget_exceeded", e.reason)
             except SandboxError as e:
                 return finish("sandbox_error", str(e))
-   and keep it inside the outer `try:` so a KeyboardInterrupt during the exec reaches the existing `except KeyboardInterrupt: return finish("interrupted", "")` (turns == 0, one run_end).
+            fp_check = fp_start
+   (`fp_start` and `fp_check` need `nonlocal` only if assigned inside a nested function — here they are assigned in Runner.run itself, so no declaration is needed; the CLI, not the Runner, reports changed_reason — W3c.)
 
-6. finish(status, final): as its FIRST statements (before `drain_sandbox()`):
+6. finish(status, final): add `changed` to its nonlocal declaration if it has one (it must read the run's `changed` and `changed_reason`; nothing in finish assigns them — take_fingerprint does). As its FIRST statements (before `drain_sandbox()`):
             if (status not in ("interrupted", "timeout", "budget_exceeded", "sandbox_error")
                     and fp_start is not None and fp_turn != turns):
                 try:
-                    take_fingerprint()              # §4.1 (4): run_end.changed for max_turns/stalled/stuck/model_error/verify_failed/context_exhausted
+                    take_fingerprint()              # §4.1 (4): run_end.changed for max_turns/stalled/stuck/model_error/verify_failed/context_exhausted; a failure sets changed None + reason
                 except (BudgetExceeded, SandboxError):
-                    pass                            # reason already stored by take_fingerprint
-   Then, in the `extra` dict, add `"changed": changed,` and, only when changed_reason is not None, `"changed_reason": changed_reason` (sparse — build the dict then `if changed_reason is not None: extra["changed_reason"] = changed_reason`). After `extra.update(finalize_state["result"])` (the finalize merge that already exists), add:
+                    pass                            # reason and changed=None already stored by take_fingerprint
+   Then, in the `extra` dict, add `"changed": changed,` and, only when changed_reason is not None, `"changed_reason": changed_reason` (sparse — build the dict then `if changed_reason is not None: extra["changed_reason"] = changed_reason`). AFTER the whole `if self.finalize is not None:` block (i.e. after its last line `extra["finalize_error"] = finalize_state["error"]`, dedented to the same level as the `if not run_end_written:` that follows — so it runs with or without a finalize callable), add:
                 if changed_reason is not None and changed_reason.startswith("budget: ") \
                         and not extra.get("watchdog_violation"):
                     extra["watchdog_violation"] = changed_reason[len("budget: "):]
                     extra["watchdog_violation_kind"] = "budget"
-   (the docker budget sample consumed the violation before raising; never overwrite a value finalize() set).
+   (the docker budget sample consumed the violation before raising; never overwrite a value finalize() set — the `not extra.get(...)` guard is that rule).
 
 7. check_verify(final, via): today it starts with `nonlocal stuck` then `if not self.verify:`. Insert at the top (after nonlocal, which gains `unchanged_finishes`):
             if fp_start is not None:
@@ -786,30 +830,58 @@ Issue #66, task W3a of 9: the change guard in dirtywork/runner.py — fingerprin
                     if self.require_changes:
                         resolve_finish("run not finished: nothing changed")
                         return finish("unchanged", final), None
-   Everything after (the `if not self.verify:` branch and the verify logic) is unchanged. On the finish-tool path the caller already treats a returned text as the finish result (resolve_finish did it) and only delivers the turn's timeout/sandbox nudges; on the plain-answer path (via="user") the caller delivers the returned text as the user message — check the two call sites (line ~843-850 and ~958-975) and make sure the plain path sends `text` exactly as it sends verify feedback today.
+   Everything after (the `if not self.verify:` branch and the verify logic) is unchanged. The two call sites of check_verify (the plain-answer path at line ~843-850 and the finish path at ~958-975) need NO change: a returned text is delivered there exactly as verify feedback is today (the finish path treats it as the already-resolved finish result; the plain path sends it as the user message).
 
 8. tests/test_transcript_schema.py: NUDGE_KINDS += ["no_change", "unchanged_finish"]; STATUSES += ["unchanged"]; RUN_END_FIELDS += ["changed", "changed_reason"] (docs/transcript-schema.md already documents them).
 
-9. Existing tests to adjust (the start fingerprint is one more `bash` call; doubles without `bash` are guard-off automatically): tests/test_runner.py line ~667-671 exact `extra` gains `"changed": None`; line ~1804 `box.commands == ["npm test"]` → compare `[c for c in box.commands if c != FINGERPRINT_SCRIPT]`; the doubles whose `bash` raises or asserts unconditionally — `Raising` (~1857-1876), `InterruptingSandbox` (~1891), the ones at ~1562 and ~1922 — gain `if command == FINGERPRINT_SCRIPT: return "exit code: 1\nerror: test double"` as their first line so the scripted behaviour still fires on the turn the test targets; `ExplodingSandbox` (~2613) has no bash → unchanged. Import FINGERPRINT_SCRIPT from dirtywork.changes where needed. `parts` (a non-repo tmp dir) runs guard-off: `changed` is None and `changed_reason` is set on every run_end there — adjust any test that asserts the exact run_end key set.
+9. Existing tests/test_runner.py tests to adjust — the start fingerprint is one more `bash` call, doubles without `bash` (BudgetBustingSandbox ~726/~1887, _GrepTimeoutSandbox ~1666, ExplodingSandbox ~2613) are guard-off automatically; `parts` (a non-repo tmp dir) runs guard-off with `changed` None and `changed_reason` starting with "fatal: not a git repository" on every run_end:
+   a. line ~667-671 (test_finalize_merges_into_run_end_and_result_extra, on `parts`): before the exact comparison add `assert result.extra.pop("changed_reason").startswith("fatal: not a git repository")`, and the exact dict gains `"changed": None` (beside W1a-1's `"truncations": 0`). Do not pin git's full diagnostic — its wording is git-version dependent.
+   b. line ~1804 `box.commands == ["npm test"]` → compare `[c for c in box.commands if c != FINGERPRINT_SCRIPT]` (import FINGERPRINT_SCRIPT from dirtywork.changes).
+   c. the doubles whose `bash` raises or asserts unconditionally — `Raising` (~1857-1876), `InterruptingSandbox` (~1891, raises KeyboardInterrupt — without this line the interrupt would fire on the start fingerprint before turn 1), `Exploding` (~1943, raises RuntimeError — the test needs it to fire on the turn-1 bash after the finish call), and the ones at ~1562 and ~1922 — gain `if command == FINGERPRINT_SCRIPT: return "exit code: 1\nerror: test double"` as the first line of their `bash`, so the scripted behaviour still fires on the turn the test targets.
 
-10. New tests (tests/test_runner.py; use FingerprintSandbox from tests.provider_doubles with `parts`' wt, and `git_parts` for real fingerprints):
-   test_start_fingerprint_before_first_chat: FingerprintSandbox(wt, ["a"*40]) — commands[0] == (FINGERPRINT_SCRIPT, 60) and the provider's first request happened after it (record order with a provider that appends to a shared list); a run that finishes → the finish-time fingerprint equals → run_end.changed is False; hashes ["a"*40, "b"*40] → True.
-   test_start_fingerprint_failure_turns_guard_off: hashes [None] → run_end.changed is None, changed_reason == "error: boom", and exactly ONE FINGERPRINT_SCRIPT command for the whole run even though the model calls finish twice (no rejection: both finishes accepted; the first ends the run).
-   test_zero_change_finish_rejected_once_then_completed (git_parts, real script, require_changes False, verify="test -e f.txt"): responses [finish, finish] → the first finish's transcript tool_result.result == UNCHANGED_PLAIN, a nudge event kind "unchanged_finish" via "tool_result", the verify command not in the sandbox's bash calls before the second finish; the second finish → status "completed", verify ran once, run_end.changed is False, result.extra["changed"] is False.
-   test_zero_change_finish_ends_unchanged_when_required (git_parts, require_changes=True, verify set): [finish, finish] → status "unchanged", final_message == the second summary, the finish results == [UNCHANGED_REQUIRED, "run not finished: nothing changed"], verify never ran, finalize called (use the existing finalize-recording pattern), changed False. Variant with a write_file between the finishes → "completed", changed True. Variant: finalize raises → status still "unchanged", extra["finalize_error"] set.
-   test_plain_answer_rejection_is_a_user_message (git_parts): responses [_resp(content="all done"), _resp(content="all done")] → the second request's last message is {"role": "user", "content": UNCHANGED_PLAIN}; nudge via "user"; then "completed" with changed False; with require_changes → "unchanged". A rejection on the last allowed turn (max_turns=1) → status "max_turns".
-   test_mixed_turn_rejection (git_parts): a turn with [read_file call, finish call] → the read_file result is a normal tool message, the finish tool message's content == UNCHANGED_PLAIN at its own position (index order preserved), and a timed-out command's TIMEOUT_NUDGE of the same turn is still delivered (reuse the existing timeout test shape).
-   test_fingerprint_exceptions_map_like_verify: FingerprintSandbox(wt, [BudgetExceeded("disk")]) → status "budget_exceeded" with a run_end whose changed is None and changed_reason == "budget: disk"; [SandboxError("gone")] → "sandbox_error", changed_reason "sandbox: gone"; on a completion path (hashes ["a"*40, BudgetExceeded("disk")]) → "budget_exceeded" and the finish result == "run not finished: change check could not run (disk)"; a KeyboardInterrupt raised by the double on the START fingerprint → status "interrupted", turns == 0, exactly one run_end.
-   test_finish_time_fingerprint (FingerprintSandbox): a max_turns run (max_turns=2, reads only) → run_end.changed set from the finish-time measurement and the FINGERPRINT_SCRIPT command was sent before any `drain_notices` call (give the double a drain_notices that records its call order); a double whose finalize() flips a flag after which bash returns "ERROR: bash failed: gone" → changed is not None on max_turns; a double whose fingerprint bash queues a notice into drain_notices → that nudge record precedes run_end in the transcript; hashes ["a"*40, "a"*40, None] with a rejection on turn 2 then max_turns → changed None and changed_reason "error: boom" (not the stale False); BudgetExceeded("disk") on the finish-time measurement of a max_turns run → status "max_turns" preserved, changed None, changed_reason "budget: disk", run_end.watchdog_violation == "disk" and watchdog_violation_kind == "budget"; a rejection on turn 2 then KeyboardInterrupt on turn 3 → "interrupted" with changed False and no changed_reason key; statuses interrupted/timeout/budget_exceeded/sandbox_error take no finish-time fingerprint (count the commands).
+10. tests/test_main.py host runs (`--sandbox none` on a real linked worktree, guard ON): a run whose model completes with a single plain "done" answer now takes TWO turns — the first completion is rejected with UNCHANGED_PLAIN, the second completes — so: `_first_run` (line ~1365-1369) passes `--max-turns 2`; the inline `--max-turns 1` host runs (grep -n '"--max-turns", "1"' tests/test_main.py — around lines ~1725, ~1823, ~1850, ~1883, ~2016) pass `--max-turns 2`; `turns == 1` assertions on those runs (e.g. ~1320) become 2, and any text assertion on the prior run's turn count (e.g. ~1410 "after 1 turns") follows; `_resume_responses` (line ~1372-1380, a bash body then a finish body) gets a write_file tool-call body (path "resumed.txt", text "x\n") inserted before its finish body so a resumed run changes something and completes. Keep every assertion's meaning; do not loosen `status == "completed"` checks. (Docker-mode tests in the file use fakes whose bash returns "" or "exit code: 0\n" — they run guard-off and need no change.)
 
-11. Run `env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider` until green, then call finish with a summary. Do not implement the every-K check; do not touch dirtywork/__main__.py, dirtywork/resume.py or docs/.
+11. New tests (tests/test_runner.py; FingerprintSandbox from tests.provider_doubles with `parts`' wt; `git_parts` for real fingerprints; scripted hashes are 40 lowercase hex chars):
+   test_start_fingerprint_before_first_chat (parts wt, require_changes False): FingerprintSandbox(wt, ["a"*40]) with responses [finish, finish] — commands[0] == (FINGERPRINT_SCRIPT, 60) and the provider's first request happened after it (record order with a provider that appends to a shared list); the first finish is rejected (its tool_result == UNCHANGED_PLAIN, since every measurement equals the start), the second → status "completed", run_end.changed is False. The same with hashes ["a"*40, "b"*40] and a single finish response → "completed" on the first finish, run_end.changed is True.
+   test_start_fingerprint_failure_turns_guard_off: hashes [None] with responses [finish] → status "completed" on the first finish (no rejection), run_end.changed is None, run_end.changed_reason == "error: boom", and exactly ONE FINGERPRINT_SCRIPT command for the whole run (no completion measurement, no finish() measurement).
+   test_zero_change_finish_rejected_once_then_completed (git_parts — its sandbox records commands; require_changes False; verify="test -e f.txt"): responses [finish, finish] → the first finish's transcript tool_result.result == UNCHANGED_PLAIN, a nudge event kind "unchanged_finish" via "tool_result", the verify command does not appear in sandbox.commands before the second finish's request; a bash call that failed twice before the first finish (`_bash_call` with "false", the RepeatTracker shape at ~1308) is not counted on after the rejection (repeats were reset: a third identical failing "false" after the rejection does not end the run "stuck" with stuck_repeats=3); the second finish → status "completed", the verify command appears exactly once in sandbox.commands, run_end.changed is False, result.extra["changed"] is False.
+   test_zero_change_finish_ends_unchanged_when_required (git_parts, require_changes=True, verify="test -e f.txt"): [finish, finish] → status "unchanged", final_message == the second summary, the finish results == [UNCHANGED_REQUIRED, "run not finished: nothing changed"], the verify command never appears in sandbox.commands, finalize called (use the existing finalize-recording pattern at ~660), run_end.changed False. Variant with a write_file between the finishes → "completed", changed True. Variant: finalize raises → status still "unchanged", extra["finalize_error"] set.
+
+12. Run `env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider` until green, then call finish with a summary. Do not implement the every-K check; do not touch dirtywork/__main__.py, dirtywork/resume.py or docs/.
 ```
 
 - [ ] **Step 2: Run**; **Step 3: Review** (the finish-time block is the first statement of
   `finish()`; the skip set is exactly the four statuses; `check_verify`'s check precedes `if not
-  self.verify`; `resolve_finish` texts exact; `changed_reason` sparse; the doubles discriminate on
-  the command rather than weakening assertions; schema lists updated); **Step 4: Host suite**;
-  **Step 5:** merge, ledger row.
+  self.verify`; `resolve_finish` texts exact; `changed_reason` sparse; the watchdog block sits
+  outside the finalize branch; the doubles discriminate on the command rather than weakening
+  assertions; the `test_main` two-turn edits keep every `completed` assertion; schema lists
+  updated); **Step 4: Host suite**; **Step 5:** merge, ledger row.
+
+---
+
+### Task W3a-2: The guard's remaining runner tests (spec §7 tests 15–17, 19 minus the K cases)
+
+**Files:**
+- Test: `tests/test_runner.py`.
+
+**Interfaces:**
+- Consumes: everything W3a-1 produces; `FingerprintSandbox`, `git_parts` (W2b-1).
+
+- [ ] **Step 1: Brief** `$SCRATCH/brief-6566-w3a-2.md`:
+
+```
+Issue #66, task W3a-2 of 12: more tests for the change guard W3a-1 added to dirtywork/runner.py (take_fingerprint, the check in check_verify, the finish()-time measurement). Read those first (grep -n "def take_fingerprint\|unchanged_finishes\|def check_verify\|def finish" dirtywork/runner.py). Helpers: FingerprintSandbox(wt, hashes) from tests.provider_doubles (scripted hashes are 40 lowercase hex chars, e.g. "a"*40; None → a failed measurement; an exception instance → raised; the first entry answers the START fingerprint; the last entry repeats), the `git_parts` fixture (real repo, real fingerprints, recorded commands), `_resp`, `_call`, `_bash_call`, FakeProvider, `_events`. Spec §4.1, §4.3, §7 tests 15-17 and 19.
+
+   test_plain_answer_rejection_is_a_user_message (git_parts): responses [_resp(content="all done"), _resp(content="all done")] → the second request's last message is {"role": "user", "content": UNCHANGED_PLAIN}; the nudge event kind "unchanged_finish" has via "user"; then "completed" with run_end.changed False; with Runner(require_changes=True) the second answer → status "unchanged". A rejection on the last allowed turn (max_turns=1, one "all done") → status "max_turns".
+   test_mixed_turn_rejection (git_parts): one response with [_call("r", "read_file", {"path": "f.txt"}), _call("f", "finish", {"summary": "s"})] then a second finish → in the second request the read_file tool message keeps index order before the finish tool message, the finish tool message's content == UNCHANGED_PLAIN at its own position; a bash call in the same first turn whose command sleeps past its timeout (the shape of the existing timeout tests, `_bash_call("c", "sleep 999")` with a small timeout) still gets TIMEOUT_NUDGE delivered that turn.
+   test_fingerprint_exceptions_map_like_verify (parts wt): FingerprintSandbox(wt, [BudgetExceeded("disk")]) → status "budget_exceeded", one run_end with changed None and changed_reason == "budget: disk"; [SandboxError("gone")] → "sandbox_error", changed_reason "sandbox: gone"; on a completion path — hashes ["a"*40, BudgetExceeded("disk")], responses [finish] → "budget_exceeded" and the finish tool_result == "run not finished: change check could not run (disk)"; a KeyboardInterrupt instance as the START entry → status "interrupted", turns == 0, exactly one run_end event. (Build BudgetExceeded the way the existing tests at ~726 do; SandboxError from dirtywork.sandbox.)
+   test_finish_time_fingerprint (parts wt, FingerprintSandbox): (a) a max_turns run (max_turns=2, two read_file turns, hashes ["a"*40, "b"*40]) → run_end.changed is True from the finish-time measurement, and the last FINGERPRINT_SCRIPT command is recorded after the last chat request and before the last drain_notices call (give the double a `drain_notices` that appends a marker to the same `commands` list); (b) a subclass whose finalize() flips a flag after which bash returns "ERROR: bash failed: gone" → changed is not None on max_turns (the measurement precedes finalize); (c) a subclass whose fingerprint bash queues a notice ("stray_kill", "text") returned by drain_notices → that nudge record precedes run_end in the transcript; (d) hashes ["a"*40, "a"*40, None] with responses [finish, read_file] and max_turns=2: the finish on turn 1 is rejected (changed False), turn 2 ends max_turns and the finish-time measurement fails → run_end.changed is None (not the stale False) and changed_reason == "error: boom"; (e) BudgetExceeded("disk") as the finish-time entry of a max_turns run → status "max_turns" preserved, changed None, changed_reason "budget: disk", run_end.watchdog_violation == "disk" and watchdog_violation_kind == "budget" (no finalize on this Runner) — and with a finalize that returns {"watchdog_violation": "other", "watchdog_violation_kind": "sandbox_error"} those two keep finalize's values; (f) a rejection on turn 1 then a KeyboardInterrupt raised by the double's bash on turn 2 (the entry after the two "a"*40s) → "interrupted" with run_end.changed False and no "changed_reason" key; (g) count FINGERPRINT_SCRIPT commands: statuses interrupted / timeout / budget_exceeded / sandbox_error take no finish-time fingerprint (for timeout use Runner(timeout=0) with one read turn; for budget/sandbox raise from a TOOL call via the double's bash, not from the fingerprint).
+
+Run `env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider` until green, then call finish with a summary. Do not change dirtywork/ (a failing assertion means the test is wrong — re-read the runner); do not touch docs/.
+```
+
+- [ ] **Step 2: Run**; **Step 3: Review** (every sub-case present and asserted on the transcript or
+  the sandbox's command list; no code change); **Step 4: Host suite**; **Step 5:** merge, ledger row.
 
 ---
 
@@ -821,30 +893,29 @@ Issue #66, task W3a of 9: the change guard in dirtywork/runner.py — fingerprin
 - Test: `tests/test_runner.py` (test 18, the K cases of 19).
 
 **Interfaces:**
-- Consumes: `fp_start`, `fp_check`, `take_fingerprint()` (W3a); `NO_CHANGE_SINCE_START_REQUIRED`,
-  `NO_CHANGE_SINCE_START_PLAIN`, `NO_CHANGE_RECENT`, `DEFAULT_NO_CHANGE_TURNS` (W2b).
+- Consumes: `fp_start`, `fp_check`, `take_fingerprint()` (W3a-1); `NO_CHANGE_SINCE_START_REQUIRED`,
+  `NO_CHANGE_SINCE_START_PLAIN`, `NO_CHANGE_RECENT`, `DEFAULT_NO_CHANGE_TURNS` (W2b-1).
 - Produces: `Runner(..., no_change_turns: int = DEFAULT_NO_CHANGE_TURNS)`; `check_no_change() ->
   (RunResult | None, str | None, dict | None)`; nudge kind `no_change`.
 
 - [ ] **Step 1: Brief** `$SCRATCH/brief-6566-w3b.md`:
 
 ```
-Issue #66, task W3b of 9: every K turns, if the worktree fingerprint has not changed since the last check, nudge the model (never abort). Spec §4.4; W3a already added the fingerprint state and take_fingerprint() to dirtywork/runner.py.
+Issue #66, task W3b of 12: every K turns, if the worktree fingerprint has not changed since the last check, nudge the model (never abort). Spec §4.4; W3a-1 already added the fingerprint state and take_fingerprint() to dirtywork/runner.py.
 
 1. Import `DEFAULT_NO_CHANGE_TURNS, NO_CHANGE_SINCE_START_REQUIRED, NO_CHANGE_SINCE_START_PLAIN, NO_CHANGE_RECENT` from .changes. Runner.__init__ gains `no_change_turns: int = DEFAULT_NO_CHANGE_TURNS` (after require_changes), stored as `self.no_change_turns` with the comment "# Spec #66 §4.4: every K turns a fingerprint; equal to the last check's -> a nudge, never an abort; 0 disables. Not a CLI flag."
 
-2. A closure in Runner.run next to check_progress, with the same return shape:
+2. A closure in Runner.run next to check_progress, with the same return shape (no parameter: a turn with a pending finish never reaches this call — both turn-end sites return from check_verify's path first, so the finish check has already measured that turn):
         def check_no_change():
             """(RunResult to end the run with, or None; nudge text, or None;
             the nudge record, or None) -- spec #66 §4.4. Fires on turns that
-            are a multiple of no_change_turns when the guard is on and the
-            turn carried no pending finish (the finish check already
-            measured). Equal to the last check's fingerprint -> nudge and
-            reset the baseline; different -> reset the baseline silently;
-            unmeasurable -> keep the baseline."""
+            are a multiple of no_change_turns when the guard is on. Equal to
+            the last check's fingerprint -> nudge and reset the baseline;
+            different -> reset the baseline silently; unmeasurable -> keep
+            the baseline (take_fingerprint stored the reason)."""
             nonlocal fp_check
             if (fp_start is None or self.no_change_turns <= 0
-                    or turns % self.no_change_turns != 0 or pending_finish is not None):
+                    or turns % self.no_change_turns != 0):
                 return None, None, None
             try:
                 fp = take_fingerprint()
@@ -865,48 +936,47 @@ Issue #66, task W3b of 9: every K turns, if the worktree fingerprint has not cha
             else:
                 text = NO_CHANGE_RECENT
             return None, text.format(k=self.no_change_turns), record
-   `pending_finish` must be readable there: it is a local of one_turn today — make it visible by passing it in (`check_no_change(pending_finish)`) rather than widening scope.
 
 3. Call it at both turn-end sites, right after `check_progress()`:
-   text path (line ~855): after `stalled, stall_text, stall_record = check_progress()` / `if stalled is not None: return stalled`, add `ended, nc_text, nc_record = check_no_change(None)` / `if ended is not None: return ended`, and join nc_text after stall_text in the deliver call: `deliver(_join_nudges(NUDGES[kind].format(**trunc), sandbox_text, stall_text, nc_text), [kind_record, *sandbox_records, stall_record, nc_record])` (deliver already skips None records — check; if not, filter them).
-   tool path (line ~985): the same after the existing check_progress() call, with `check_no_change(pending_finish)` — pending_finish is None at that point on a continuing turn, but pass the local anyway — and nc_text/nc_record appended after stall_text/stall_record in that site's `_join_nudges`/records lists (the order becomes: malformed, sandbox, timeout, stall, no_change for the text; transcript records: stall, no_change, malformed_entry, timeout, sandbox — write the no_change record right after check_progress wrote the stall record, which the call order above gives you).
+   text path (line ~855): after `stalled, stall_text, stall_record = check_progress()` / `if stalled is not None: return stalled`, add `ended, nc_text, nc_record = check_no_change()` / `if ended is not None: return ended`, and join nc_text after stall_text in the deliver call: `deliver(_join_nudges(NUDGES[kind].format(**trunc), sandbox_text, stall_text, nc_text), [kind_record, *sandbox_records, stall_record, nc_record])` — check whether deliver() skips None records; if it does not, filter them (`[r for r in (...) if r is not None]`).
+   tool path (line ~985): the same after that site's check_progress() call — this site is reached only when pending_finish is None (the `if pending_finish is not None:` block above it returns) — with nc_text/nc_record appended after stall_text/stall_record in that site's `_join_nudges`/records lists (text order becomes malformed, sandbox, timeout, stall, no_change; transcript records: stall, no_change, malformed_entry, timeout, sandbox — writing the no_change record right after check_progress wrote the stall record gives that order).
 
-4. Tests (tests/test_runner.py, FingerprintSandbox with `parts`' wt so hashes are scripted; note the double's first entry answers the START fingerprint):
-   test_no_change_nudge_since_start: Runner(no_change_turns=3, require_changes=True), hashes ["s"*40] (every measurement equal), three read-only turns then finish → a nudge event kind "no_change" turn 3 via "tool_result", the third tool result's follow_up == NO_CHANGE_SINCE_START_REQUIRED.format(k=3) (and "finish" not in it); the same without require_changes → NO_CHANGE_SINCE_START_PLAIN.format(k=3).
-   test_no_change_nudge_recent_after_a_change: hashes ["s"*40, "t"*40, "t"*40, "t"*40] (start s; K=3 check t → changed, silent; 6 → equal → nudge) → no nudge at turn 3, NO_CHANGE_RECENT.format(k=3) at turn 6 (it names finish).
-   test_no_change_check_skips: a None entry at turn K → no nudge, the next window still compares against the old baseline (hashes ["s", None, "s"] → nudge at 6 since start == s); a turn with pending_finish at K → no K measurement (count FINGERPRINT_SCRIPT commands); no_change_turns=0 → only the start fingerprint is ever sent; a guard-off run (start None) → none; on a no-tool turn (an empty reply at turn K) the nudge rides the user message after the empty text and after the stall text when both fire (assert the join order NUDGES["empty"] + "\n\n" + STALL_NUDGE... + "\n\n" + no_change text with stall_turns chosen so both fire on the same turn); transcript order on that turn: nudge{empty} → nudge{stall} → nudge{no_change}.
-   test_run_ending_on_a_k_check_turn_reuses_it: no_change_turns=2, require_changes False, hashes ["s"*40, "s"*40, "u"*40]: turn 1 finish (rejected: s == s), turn 3 write_file, max_turns=4 → the K check at turn 4 measures "u" (changed True) and finish() sends no further FINGERPRINT_SCRIPT (exactly three sent: start, turn 1, turn 4... count them against the scripted turns); run_end.changed is True.
+4. Tests (tests/test_runner.py; FingerprintSandbox from tests.provider_doubles with `parts`' wt so hashes are scripted — 40 lowercase hex chars; the double's first entry answers the START fingerprint; the last entry repeats; FakeProvider pops responses and raises IndexError when it runs out, so script every turn):
+   test_no_change_nudge_since_start: Runner(no_change_turns=3, require_changes=True), hashes ["a"*40] (every measurement equal), responses [read_file, read_file, read_file, finish, finish] → a nudge event kind "no_change" turn 3 via "tool_result", the third tool result's follow_up == NO_CHANGE_SINCE_START_REQUIRED.format(k=3) (and "finish" not in that text); the finish on turn 4 is rejected (UNCHANGED_REQUIRED), the finish on turn 5 ends the run "unchanged". The same without require_changes → NO_CHANGE_SINCE_START_PLAIN.format(k=3) and the run ends "completed" with changed False.
+   test_no_change_nudge_recent_after_a_change: hashes ["a"*40, "b"*40, "b"*40] (start a; the K=3 check measures b → changed, silent; the turn-6 check measures b == fp_check → nudge), six read_file responses then [finish] → no nudge at turn 3, a nudge at turn 6 with NO_CHANGE_RECENT.format(k=3) (it names finish); the finish on turn 7 → "completed", changed True.
+   test_no_change_check_skips: (a) hashes ["a"*40, None, "a"*40] with six reads → no nudge at 3 (failed measurement, baseline kept, changed_reason "error: boom" set until turn 6 clears it), a nudge at 6 (a == the start baseline); (b) a finish on turn K → no K measurement that turn (count FINGERPRINT_SCRIPT commands: start + the completion check only); (c) no_change_turns=0 → only the start fingerprint is ever sent; (d) a guard-off run (start None) → no FINGERPRINT_SCRIPT after the start one; (e) BudgetExceeded("disk") as the entry the turn-K check pops → status "budget_exceeded", run_end.changed None, changed_reason "budget: disk"; SandboxError("gone") likewise → "sandbox_error", "sandbox: gone"; (f) stall + no_change on one turn: Runner(stall_turns=4, no_change_turns=3), hashes ["a"*40], responses [read_file f.txt, the identical read_file f.txt (idle 1), _resp(content="") (an empty reply: idle 2 and the stall nudge fires at stall_turns // 2 == 2), finish, finish] → the fourth request's last user message == NUDGES["empty"] + "\n\n" + STALL_NUDGE.format(n=2) + "\n\n" + NO_CHANGE_SINCE_START_PLAIN.format(k=3), and the transcript order on turn 3 is nudge{empty} → nudge{stall} → nudge{no_change}.
+   test_run_ending_on_a_k_check_turn_reuses_it: Runner(no_change_turns=4, require_changes=False, max_turns=4), hashes ["a"*40, "a"*40, "c"*40], responses [finish, read_file, write_file (path "g.txt"), read_file] → turn 1's finish is rejected (a == a), turn 4's K check measures "c" (changed, no nudge because c != a), then max_turns ends the run and finish() takes no further fingerprint because fp_turn == turns: exactly THREE FINGERPRINT_SCRIPT commands (start, turn 1's completion check, turn 4's K check), no nudge event with kind "no_change", run_end.changed is True.
 
 5. Run `env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider` until green, then call finish with a summary. Do not touch dirtywork/__main__.py, dirtywork/resume.py or docs/.
 ```
 
 - [ ] **Step 2: Run**; **Step 3: Review** (both sites call it; the skip conditions; the three
-  texts; baseline handling on `None`; the record order); **Step 4: Host suite**; **Step 5:**
-  merge, ledger row.
+  texts; baseline handling on `None`; the record order; the response scripts in the tests match
+  the turn counts); **Step 4: Host suite**; **Step 5:** merge, ledger row.
 
 ---
 
-### Task W3c: CLI wiring, the resume block, the `unchanged` gate, the `test_main` consequence (spec §4.5, §5.2 `__main__`)
+### Task W3c: CLI wiring, the resume block, the `unchanged` gate, the end-to-end tests (spec §4.5, §5.2 `__main__`)
 
 **Files:**
 - Modify: `dirtywork/__main__.py:590-591` (`_seed_payload`), `:609` (`_contract_fields`),
   `:842-847` (resume gate), `:929-941` (`Runner(...)`), `:954` (after `runner.run()`);
-  `dirtywork/resume.py:224-256` (`build_resume_task`).
-- Test: `tests/test_resume.py:148-156`, `:272-303` (test 20), `tests/test_main.py` (tests 21–22,
-  the `--max-turns 2` consequence).
+  `dirtywork/resume.py:224-256` (`build_resume_task`); `tests/test_main.py:19-28`
+  (`_DEFAULT_EVIDENCE`), `:1627-1634` (`test_resume_inherits_the_prior_provider`).
+- Test: `tests/test_resume.py:148-156`, `:272-303` (test 20), `tests/test_main.py` (tests 21–22).
 
 **Interfaces:**
-- Consumes: `Runner(require_changes=...)`, `run_end.changed` / `changed_reason` (W3a).
+- Consumes: `Runner(require_changes=...)`, `run_end.changed` / `changed_reason` (W3a-1).
 - Produces: `dirtywork: change guard off: <reason>` on stderr; stdout JSON / `run.json` keys
   `changed`, `changed_reason` (sparse); the resume gate message; the two resume block shapes.
 
 - [ ] **Step 1: Brief** `$SCRATCH/brief-6566-w3c.md`:
 
 ```
-Issue #66, task W3c of 9: wire the guard into the CLI and reorder the resume block. Spec §4.5, §5.2 (the `dirtywork/__main__.py` bullet). W3a/W3b added the runner side.
+Issue #66, task W3c of 12: wire the guard into the CLI and reorder the resume block. Spec §4.5, §5.2 (the `dirtywork/__main__.py` bullet). W3a-1/W3a-2/W3b added the runner side; W3a-1 already switched the host runs in tests/test_main.py to `--max-turns 2` and added a write_file body to `_resume_responses`.
 
 1. dirtywork/__main__.py:
-   a. `_seed_payload` (line ~590): after `"timeouts": 0,` (and W1a's `"truncations": 0,`) add `"changed": None,`.
+   a. `_seed_payload` (line ~590): after `"timeouts": 0,` and `"truncations": 0,` add `"changed": None,`.
    b. `_contract_fields` (line ~609): add `"changed": extra.get("changed"),` and, only when present, `changed_reason`: build the dict, then `if extra.get("changed_reason") is not None: fields["changed_reason"] = extra["changed_reason"]`. Update the docstring: the 1.0 (#65/#66) fields ride every payload the same way.
    c. The `Runner(...)` call (line ~929): add `require_changes=ctx.feedback is not None,` with the comment "# spec #66 §4.3: a feedback resume must change something".
    d. Right after `result = runner.run(system_prompt, ctx.task)` (line ~954): `if result.extra.get("changed_reason"): print(f"dirtywork: change guard off: {result.extra['changed_reason']}", file=sys.stderr)` — exactly one line, only here (the Runner never writes stderr; the _fail_run paths print nothing).
@@ -942,15 +1012,14 @@ Issue #66, task W3c of 9: wire the guard into the CLI and reorder the resume blo
 
 3. Tests:
    tests/test_resume.py: rewrite the pins at lines ~148-156 and ~272-303 to the new shapes — the feedback variant starts with the marker, the tail comes BEFORE "A reviewer read that run's work", contains "none of it is applied yet", "its events above are history, not instructions", "a second one ends the run as `unchanged`", and ends with "When every item of the feedback is applied, call finish(summary=...)."; the plain variant ends with "When the task is complete, call finish(summary=...)." and has no rejection sentence; markers are still stripped from a prior task that carried either block.
-   tests/test_main.py: (a) the resume gate — a prior run.json with "status": "unchanged" and no --feedback → rc 2 and "pass --feedback to tell it what to change" on stderr; with --feedback → runs (use the existing _prior/run.json fixtures of the resume tests). (b) End-to-end on the host (`--sandbox none`, real linked worktrees, so the real fingerprint runs): `_first_run` (line ~1365) and the other host runs that complete via a single plain "done" answer (lines ~1463, ~1631, ~1823, ~1830, ~2016) now take TWO turns — the first "done" is rejected, the second completes — so pass `--max-turns 2` there and update `turns == 1` assertions to 2; `_resume_responses` (line ~1372) inserts a `write_file` tool-call body before its `finish` body so the resume tests that assert "completed" still do; add: a `resume --feedback` whose scripted client finishes twice with no write → rc 1, run.json["status"] == "unchanged", run.json["changed"] is False, run.json["truncations"] == 0; the same with a write_file between → "completed", changed True; a fresh run whose client finishes twice → "completed", changed False; the stdout payload and run.json carry "truncations" and "changed" on the failure paths (0 / None) and never "changed_reason" there; (c) stderr: a guard-off run (the docker-mode fakes whose bash returns "" or "exit code: 0\n", or `--sandbox none` on a tmp dir that is not a git repo if such a test exists) prints exactly one line starting with "dirtywork: change guard off: " (capsys) and a guard-on host run prints none. The docker-mode fakes in this file (bash → "" at ~195/~318/~392/~642, "exit code: 0\n" at ~1539) now run guard-off: their payloads have "changed": None plus a "changed_reason" — adjust exact-payload assertions accordingly.
+   tests/test_main.py: (a) `_DEFAULT_EVIDENCE` (line ~19-28) gains `"changed": None,` (not `changed_reason` — it is sparse); there is no other exact-payload assertion in the file. (b) test_resume_inherits_the_prior_provider (~1627-1634) resumes with `--feedback "keep going"` and the default plain-"done" client — with require_changes now wired that run would end "unchanged": before its resume call add `patch_provider(monkeypatch, m2, lambda base_url=None: _ScriptedClient(base_url, _resume_responses()))` (the same pattern as line ~1462) so it writes a file and still completes with rc 0. (c) The resume gate: a prior run.json with "status": "unchanged" and no --feedback → rc 2 and "pass --feedback to tell it what to change" on stderr; with --feedback → runs (use the existing _prior/run.json fixtures of the resume tests). (d) End-to-end on the host (`--sandbox none`, real linked worktrees, so the real fingerprint runs; the `_first_run` helper already uses `--max-turns 2`): a `resume --feedback` whose scripted client finishes twice with no write (two finish bodies) → rc 1, run.json["status"] == "unchanged", run.json["changed"] is False, run.json["truncations"] == 0, "changed_reason" not in run.json; the same with a write_file body between the finishes → "completed", changed True; a fresh run whose client finishes twice → "completed", changed False; the stdout payload and run.json carry "truncations" and "changed" on the failure paths (`_fail_setup`/`_fail_run`: 0 / None) and never "changed_reason" there. (e) stderr: a guard-off run prints exactly one line starting with "dirtywork: change guard off: " (capsys) — use a docker-mode test whose fake bash returns "" (e.g. the shape at ~195) — and a guard-on host run prints no such line.
 
 4. Run `env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider` until green, then call finish with a summary. Do not touch docs/.
 ```
 
 - [ ] **Step 2: Run**; **Step 3: Review** (block shapes byte-exact vs §4.5; the gate message; the
   stderr line printed once and only by `__main__`; `_contract_fields` sparse rule; no weakened
-  `test_main` assertions — the two-turn shape is asserted, not skipped); **Step 4: Host suite**;
-  **Step 5:** merge, ledger row.
+  `test_main` assertions); **Step 4: Host suite**; **Step 5:** merge, ledger row.
 
 ---
 
@@ -998,7 +1067,7 @@ runtime), host **and** docker (`--sandbox docker --image dirtywork-worker-pytest
 - [ ] **Step 1: Brief** `$SCRATCH/brief-6566-w4a.md`:
 
 ```
-Issue #65/#66, task W4a of 9: bench, the soak harvester and `runs show` learn the two nudge kinds, the status and the three run.json fields. Spec §5.2. Consequences are stated there; do not hide a widened cell behind a looser assertion.
+Issue #65/#66, task W4a of 12: bench, the soak harvester and `runs show` learn the two nudge kinds, the status and the three run.json fields. Spec §5.2. Consequences are stated there; do not hide a widened cell behind a looser assertion.
 
 1. dirtywork/bench.py: NUDGE_KINDS (line ~48) gains "no_change", "unchanged_finish" APPENDED AT THE END (order is the column order; EMPTY_REPLY_NUDGE_KINDS is unchanged — these are harness nudges, not model failures). `_harness_failures` (line ~268-275) and `_failure_cell` (line ~425-433): the status tuple ("stalled", "max_turns", "sandbox_error") becomes ("stalled", "max_turns", "sandbox_error", "unchanged") in both (one constant if they share one; introduce `_STATUS_FAILURES` next to NUDGE_KINDS if they do not). The summarize legend (line ~783) derives from NUDGE_KINDS — verify it prints ten names.
    tests/test_bench.py: the pins at ~841-848 → `len(bench.NUDGE_KINDS) == 10`, `bench.NUDGE_KINDS[-2:] == ("no_change", "unchanged_finish")`, EMPTY_REPLY_NUDGE_KINDS == tuple(runner.NUDGES) unchanged; the literal at ~863-864 "0/0/0/0/0/0/3/0" → the full ten-wide cell "0/0/0/0/0/0/3/0/0/0" asserted as an exact column value (not a substring); rename the test whose name says eight kinds to say ten; a new assertion that a run whose run_end status is "unchanged" counts under the new status column in `_harness_failures`.
@@ -1007,7 +1076,7 @@ Issue #65/#66, task W4a of 9: bench, the soak harvester and `runs show` learn th
    tests/test_soak_tools.py: detect_features fires S14 for each of the three triggers separately and not for a run with changed True and no guard nudges; F8 unaffected by an unchanged_finish nudge.
 
 3. dirtywork/runs.py MD_RESULT_FIELDS (line ~331) gains "truncations", "changed", "changed_reason" after "timeouts". The markdown renderer skips None values (check the loop at the render site; if it does not, make it skip None for these three so a null `changed` does not print "None").
-   tests/test_runs.py: `runs show --markdown` on a run.json with truncations 2, changed False → both rendered; with changed None and no changed_reason → neither line; `_tool_result_outcome` returns "not finished" for the four texts: UNCHANGED_REQUIRED, UNCHANGED_PLAIN (import from dirtywork.changes), "run not finished: nothing changed", "run not finished: change check could not run (x)".
+   tests/test_runs.py: `runs show --markdown` on a run.json with truncations 2, changed False → both rendered; with changed None and no changed_reason → neither line; `_tool_result_outcome(text, tool="finish")` returns "not finished" for the four texts: UNCHANGED_REQUIRED, UNCHANGED_PLAIN (import from dirtywork.changes), "run not finished: nothing changed", "run not finished: change check could not run (x)" (no change to the classifier is needed: it already returns "not finished" for any finish result other than "run finished").
 
 4. Run `env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider` until green, then call finish with a summary. Do not touch docs/.
 ```
@@ -1021,22 +1090,62 @@ Issue #65/#66, task W4a of 9: bench, the soak harvester and `runs show` learn th
 ### Task W4b: Live docker test 24 (spec §7.24)
 
 **Files:**
-- Modify: `tests/test_docker_live.py` (docker-marked; the `_image_kwargs()` / `_events` helpers
-  from #61).
+- Modify: `tests/test_docker_live.py` (docker-marked; helpers `_make_live_repo` in
+  `tests/docker_live_helpers.py`, `_image_kwargs()` in the file).
 
 - [ ] **Step 1: Brief** `$SCRATCH/brief-6566-w4b.md`:
 
 ```
-Issue #66, task W4b of 9: one docker-marked live test in tests/test_docker_live.py (follow the file's existing helpers: `_image_kwargs()`, the DockerSandbox construction the other live tests use, `pytest.mark.docker`). Spec §7 test 24.
+Issue #66, task W4b of 12: one docker-marked live test in tests/test_docker_live.py. Spec §7 test 24. No live test in the file constructs a DockerSandbox by hand — this one does, modelled on the CLI (dirtywork/__main__.py lines ~466-486) and on the hand-built setup in test_docker_live_export_refused_into_nonempty_worktree (tests/test_docker_live.py ~371-397). You cannot reach docker from inside your sandbox: write the test, make sure the module imports and the non-docker suite is green, and call finish saying the live run is the reviewer's.
 
-test_docker_live_fingerprint_matches_host_and_leaves_the_store_alone:
-  1. Build a host repo in tmp_path with one committed file (git init/add/commit with -c user.email/-c user.name), plus a nested committed repo `vendor/inner` and an unborn `vendor/unborn` with a file.
-  2. Host fingerprint: dirtywork.changes.fingerprint(HostSandbox(tmp_path)) → (fp_host, None).
-  3. Start a DockerSandbox for that repo the way the resume-seeding live test does (the worktree seeded into /work with the #61 gitfile layout), then `dirtywork.changes.fingerprint(sandbox)` → (fp_docker, None) and assert fp_docker == fp_host (the parser sorts the lines; hashes are content-addressed).
-  4. Count files under /gitdir/objects via sandbox.bash("find /gitdir/objects -type f | wc -l") before and after a fingerprint taken with a new untracked 100 KB file written through the sandbox's write_file tool → equal counts (the scratch object directory), and the second fingerprint differs from the first.
-  5. A byte-identical rewrite of the committed file through write_file → the fingerprint equals the previous one.
-  6. Stop the sandbox in a finally block as the other live tests do.
-Run the docker-marked suite for this test (`env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider -m docker -k fingerprint`) if docker is reachable from the sandbox — it is NOT (the worker runs inside a container without the docker socket), so: write the test, make sure the module still imports and the non-docker suite is green, and call finish saying the live run is the reviewer's. Do not touch docs/.
+@pytest.mark.docker
+def test_docker_live_fingerprint_matches_host_and_leaves_the_store_alone(tmp_path):
+    import os, subprocess
+    from dirtywork.changes import FINGERPRINT_SCRIPT, FINGERPRINT_TIMEOUT, fingerprint
+    from dirtywork.sandbox import docker_args
+    from dirtywork.sandbox.docker import DockerSandbox
+    from dirtywork.sandbox.docker_cli import resolve_image
+    from dirtywork.sandbox.host import HostSandbox
+    from dirtywork.workspace import create_worktree, ensure_worktrees_excluded, worktree_base_commit
+
+    def git(*args, cwd):
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *args], cwd=cwd, check=True, capture_output=True)
+
+    repo = _make_live_repo(tmp_path)              # README.md committed on main
+    ensure_worktrees_excluded(repo)
+    worktree = create_worktree(repo, "livefp", None)   # checked out: README.md present
+    base_commit = worktree_base_commit(worktree)
+    # nested repositories inside the worktree: a committed one and an unborn one
+    inner = worktree / "vendor" / "inner"; inner.mkdir(parents=True)
+    git("init", "-q", cwd=inner); (inner / "a.txt").write_text("a\n"); git("add", "-A", cwd=inner); git("commit", "-qm", "init", cwd=inner)
+    unborn = worktree / "vendor" / "unborn"; unborn.mkdir()
+    git("init", "-q", cwd=unborn); (unborn / "x.txt").write_text("x\n")
+
+    fp_host, reason = fingerprint(HostSandbox(worktree))
+    assert reason is None and fp_host is not None
+
+    cfg = docker_args.DockerConfig(**_image_kwargs())   # the file's helper: image override via DIRTYWORK_LIVE_IMAGE if set; check its return shape and adapt (it may return {"image": ...} or {})
+    run_dir = tmp_path / "rundir"; run_dir.mkdir()
+    sb = DockerSandbox(cfg, run_dir=run_dir, image_ref=resolve_image(cfg.image))
+    try:
+        sb.start(worktree, repo, "livefp", base_commit, branch=None, seed_from_worktree=True)
+        fp_docker, reason = fingerprint(sb)
+        assert reason is None
+        assert fp_docker == fp_host              # content-addressed, sorted: identical on host and in the container
+        count_cmd = "find /gitdir/objects -type f | wc -l"
+        before = sb.bash(count_cmd, 60).split("\n")[1].strip()
+        sb.bash("head -c 102400 /dev/urandom > big.bin", 60)     # a new untracked 100 KB file
+        fp2, reason = fingerprint(sb)
+        assert reason is None and fp2 != fp_docker
+        after = sb.bash(count_cmd, 60).split("\n")[1].strip()
+        assert before == after                    # the scratch object directory: the real store did not grow
+        sb.bash("cp README.md /tmp/r && cp /tmp/r README.md", 60)   # byte-identical rewrite
+        fp3, reason = fingerprint(sb)
+        assert reason is None and fp3 == fp2
+    finally:
+        sb.stop()
+
+Notes: `sb.bash` returns "exit code: N\n<output>", hence the split; keep the `import os` if `_image_kwargs` needs os.environ; if `_image_kwargs()` returns keys DockerConfig does not accept, pass only `image=`. Run `env -u GIT_DIR -u GIT_WORK_TREE python3 -m pytest -q -p no:cacheprovider` (the docker-marked test is deselected there) until green, then call finish with a summary saying the live run is the reviewer's. Do not touch docs/.
 ```
 
 - [ ] **Step 2: Run**; **Step 3: Review + live run on the host** (`DIRTYWORK_LIVE_SLOW=1
@@ -1080,11 +1189,12 @@ Run the docker-marked suite for this test (`env -u GIT_DIR -u GIT_WORK_TREE pyth
   `tools/soak_driver.py $SCRATCH/f5-plan.jsonl --out $SCRATCH/f5-results.jsonl` from
   `.worktrees/issue-65-66-change-guard` (the branch runtime).
 - [ ] **Step 2: Score** per spec §8: recovery = `completed` ∧ `truncations ≥ 1` ∧ 401 lines in
-  `fixtures/rows.csv`; 1024 may instead abort `truncated` with `truncations == 6` in ≤ 16 turns;
-  fail = 60 turns / 1800 s / `stalled` / `stuck` / `verify_failed` / `abort_kind == empty_reply` /
-  any truncation text with `target_lines` below 13 / 25 / 50 at 1024 / 2048 / 4096 (grep the
-  transcripts); other abort kinds → one tie-break rerun. Table in the ledger with per-run
-  `truncations` and the first `target_lines`.
+  `fixtures/rows.csv`; 1024 may instead abort `truncated` with `truncations == 6` in ≤ 16 turns
+  (a mixed pair passes there); fail = 60 turns / 1800 s / `stalled` / `stuck` / `verify_failed` /
+  `abort_kind == empty_reply` / any truncation text with `target_lines` below 13 / 25 / 50 at
+  1024 / 2048 / 4096 (grep the transcripts); other abort kinds → one tie-break rerun, a second
+  inconclusive = fail. Table in the ledger with per-run `truncations` and the first
+  `target_lines`.
 - [ ] **Step 3: Full suites** on the integration branch: unit (`/usr/bin/python3 -m pytest -q -p
   no:cacheprovider`) and live (`-m docker`, `DIRTYWORK_LIVE_SLOW=1`, both images) green; counts
   recorded.
@@ -1097,20 +1207,23 @@ Run the docker-marked suite for this test (`env -u GIT_DIR -u GIT_WORK_TREE pyth
 
 ## Self-review
 
-- **Spec coverage:** §3.1–§3.2 → W1a; §3.3 → W1b (abort, bench, harvest) + W1a (counter, field);
-  §4.1 script/parser/texts → W2b, When/Failure → W3a; §4.2 → W2a; §4.3 → W3a (+ W3c for
-  `require_changes` wiring); §4.4 → W3b; §4.5 → W3c; §5.1 → D1 (doc) + W1a/W3a (fields, kinds,
-  status emitted) + W3a (schema-test lists); §5.2 → W1a/W1b/W3c (`__main__`, bench abort,
-  harvest regex) + W4a (kinds, status tuples, `S14`, `runs show`); §6 → D1, D2; §7 tests 1–5 →
-  W1a, 6–7 → W1b, 8–9 → W2a, 10–11b → W2b, 12–17 + 19 → W3a, 18 + 19's K cases → W3b, 20–22 →
-  W3c, 23a → W1a/W3a, 23b/23c → W4a, 24 → W4b; §8 C1 → C1, F5/suites/PR → C5; §9 nothing.
-- **Placeholders:** none — every brief carries the code, texts, regexes and assertions; the only
-  "as today" references point at code the worker can read at the cited lines.
-- **Type consistency:** `chunk_target(max_tokens, cut_chars, cut_lines)` (W1a) is what the
-  brief's `note_truncation` calls; `truncated_call_result(tool, raw_arguments, trunc)` (W1a) is
-  what W1b's tests and `test_soak_tools.py:939` call; `parse_fingerprint -> (str | None, str |
-  None)` and `fingerprint(sandbox)` (W2b) are what `take_fingerprint` (W3a) unpacks;
-  `check_no_change(pending_finish) -> (ended, text, record)` (W3b) mirrors `check_progress`;
-  `FingerprintSandbox(worktree, hashes)` (W2b) is what W3a/W3b tests construct; `net_change`
-  (W2a) is what `ProgressTracker.note_call` reads; the nudge kinds and status strings are spelled
-  identically in W3a, W3b, W4a and D1.
+- **Spec coverage:** §3.1–§3.2 → W1a-1 (+ tests W1a-2); §3.3 → W1b (abort, bench, harvest) +
+  W1a-1 (counter, field); §4.1 script/parser/texts → W2b-1, the real-script test → W2b-2,
+  When/Failure → W3a-1; §4.2 → W2a; §4.3 → W3a-1 (+ W3c for `require_changes` wiring); §4.4 →
+  W3b; §4.5 → W3c; §5.1 → D1 (doc) + W1a-1/W3a-1 (fields, kinds, status emitted; schema-test
+  lists); §5.2 → W1a-1/W1b/W3c (`__main__`, bench abort, harvest regex) + W4a (kinds, status
+  tuples, `S14`, `runs show`); §6 → D1, D2; §7 tests 1–5 → W1a-1/W1a-2, 6–7 → W1b, 8–9 → W2a,
+  10–11 → W2b-1, 11b → W2b-2, 12–14 → W3a-1, 15–17 + 19 → W3a-2 (K cases → W3b), 18 → W3b,
+  20–22 → W3c, 23a → W1a-1/W3a-1, 23b/23c → W4a, 24 → W4b; §8 C1 → C1, F5/suites/PR → C5; §9
+  nothing.
+- **Placeholders:** none — every brief carries the code, texts, regexes, response scripts and
+  assertions; the only "as today" references point at code the worker can read at the cited
+  lines.
+- **Type consistency:** `chunk_target(max_tokens, cut_chars, cut_lines)` (W1a-1) is what the
+  brief's `note_truncation` calls and W1a-2 asserts; `truncated_call_result(tool, raw_arguments,
+  trunc)` (W1a-1) is what W1b's tests and `test_soak_tools.py:939` call; `parse_fingerprint ->
+  (str | None, str | None)` and `fingerprint(sandbox)` (W2b-1) are what `take_fingerprint` (W3a-1)
+  unpacks; `check_no_change() -> (ended, text, record)` (W3b) mirrors `check_progress`;
+  `FingerprintSandbox(worktree, hashes=None, **kw)` (W2b-1) is what `git_parts`, W3a-1, W3a-2
+  and W3b construct — hex hashes everywhere; `net_change` (W2a) is what `ProgressTracker.note_call`
+  reads; the nudge kinds and status strings are spelled identically in W3a-1, W3b, W4a and D1.

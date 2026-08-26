@@ -683,14 +683,17 @@ on), `changed = None`, `changed_reason = None`, `unchanged_finishes = 0`.
 
 **One rule for `changed`:** every successful fingerprint after the start one — completion check,
 K check, `finish()` — sets `fp_turn`, `fp_value`, `changed = fp != fp_start` **and
-`changed_reason = None`**; a failed K-check or completion-check measurement stores its reason
-until the next measurement (so a failure at turn 10 followed by a successful `finish()`
-measurement reports `changed` with no reason); a measurement that **raises**
-`BudgetExceeded` / `SandboxError` — anywhere — sets `changed = None` and `changed_reason` before
-the exception ends the run; a failed measurement in `finish()` sets the same two; `interrupted`,
-`timeout`, and a `budget_exceeded` / `sandbox_error` caused by a *tool call* or verify report the
-newest known value (`null` only if none was taken — a run ending on a K-check turn reuses that
-turn's measurement). `changed` is therefore never a stale verdict from an
+`changed_reason = None`**; every failed or raising measurement — start, K check, completion
+check, `finish()` — sets **`changed = None` and stores its reason** until the next successful
+measurement clears both (so a failure at turn 10 followed by a successful `finish()` measurement
+reports `changed` with no reason, and a failure that nothing follows reports `null` with its
+reason — `changed_reason` is therefore present exactly when `changed` is `null` for a failed
+measurement, §5.1, on every run end); a measurement that raises `BudgetExceeded` /
+`SandboxError` stores the two before the exception ends the run; `interrupted`, `timeout`, and a
+`budget_exceeded` / `sandbox_error` caused by a *tool call* or verify report the newest known
+value (`null` only if none was taken — a run ending on a K-check turn reuses that turn's
+measurement). *(v4.1, plan v2: the K/completion-check failure case previously read "stores its
+reason" without saying what `changed` does; it nulls it, as every failed measurement does.)* `changed` is therefore never a stale verdict from an
 earlier completion: `finish()` re-measures unless this turn already did.
 
 `check_verify(final, via)` (`runner.py:746-786`) — the one function both completion paths go
