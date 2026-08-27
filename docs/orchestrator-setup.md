@@ -135,5 +135,5 @@ contract into a user-level file (`~/.claude/CLAUDE.md`, or a hand-made
 `~/.claude/skills/dirtywork/SKILL.md`), keep it in step with each release by
 hand, and remember not to put it in the project's `CLAUDE.md`, where the
 worker would read it on every run. That is how I ran it for the first
-eleven releases, with the details living in one machine's memory. None of
+eleven minor versions, with the details living in one machine's memory. None of
 it is needed any more; `dirtywork init` is the product's copy of that file.
