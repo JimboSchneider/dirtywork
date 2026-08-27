@@ -10,7 +10,7 @@
 > resume-with-feedback has failed, and the PR says so. Owner approval is needed for the merge and the
 > release, never assumed. **Nothing in this plan runs until the owner says the checkout is free.**
 
-**Plan v1** (2026-08-26 17:40 CDT) against spec v3.1 (`bd17e9a`). Tasks are sized to the #61/#65
+**Plan v1.1** (2026-08-26 20:25 CDT; v1 17:40) against spec v3.1 (`a2f39ca` after the rebase onto `main` at `7e6f775`, which carries #67 — the contract D1 moves is the #67-updated one). Tasks are sized to the #61/#65
 calibration (~150–250 changed lines per 60-turn run, 1–3 resumes): the `init` command is split into
 W2a (the command and its happy paths) and W2b (the edge mechanics and the injection test).
 
@@ -37,7 +37,7 @@ the worker-image cycle (`DEFAULT_IMAGE` → `:0.12`, unpinned; docker-live tag; 
 `os.replace`); setuptools package-data; pytest with `capsys`/`monkeypatch`/`tmp_path` as in
 `tests/test_main.py`; GitHub Actions (`ci.yml`, pinned action SHAs already in the file).
 
-**Spec:** `docs/superpowers/specs/2026-08-26-operator-contract-init-design.md` (v3.1, `bd17e9a`) —
+**Spec:** `docs/superpowers/specs/2026-08-26-operator-contract-init-design.md` (v3.1, `a2f39ca`) —
 section numbers below refer to it. It is committed on the integration branch, so the worker can
 `read_file` it; every brief still carries the exact code and text it needs.
 
