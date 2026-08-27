@@ -99,7 +99,7 @@
   </header>
 
   <p>This morning I asked Claude a question I should have been able to answer already: how does someone else get the setup I have? Claude Code doing the thinking, a local model doing the typing, the harness in between. I've been running it that way for weeks. I build dirtywork with it.</p>
-  <p>The honest answer had four layers, and three of them were fine. LM Studio and Docker: in the README. dirtywork itself: <code>pipx install</code>. The loop — brief, run, review, resume, verdict: in the operating guide and the machine contract. The fourth layer was the instructions to the orchestrator. How to write a brief a small model can execute. That stdout is one JSON object and stderr is everything else. What exit 1 means (kept for review) versus exit 2 (nothing was created). That the worker can't install anything in docker mode. That a resume mints a new slug. Where to put your verdict.</p>
+  <p>The honest answer had four layers, and three of them were fine. LM Studio and Docker: in the README. dirtywork itself: <code>pipx install</code>. The loop — brief, run, review, resume, verdict: in the operating guide and the machine contract. The fourth layer was the instructions to the orchestrator. How to write a brief a small model can execute. That stdout is one JSON object and stderr is everything else. What exit 1 means (kept for review) versus exit 2 (nothing was created). That the worker can't install anything in the default, offline docker mode (<code>--allow-network</code> is the deliberate exception). That a resume mints a new slug. Where to put your verdict.</p>
   <p>Those lived in two places: my head, and the auto-memory of one Claude Code install on one machine. Nothing in the wheel. Someone who installed dirtywork and opened Claude Code got a tool Claude had never heard of.</p>
   <p>That's not a 1.0.</p>
 
@@ -123,7 +123,7 @@
   <section>
     <h2>The build</h2>
     <p>Same rule as the last few releases: dirtywork builds dirtywork. The released 0.11.1, from PyPI, drove qwen3-coder-next on LM Studio inside the Docker sandbox against this checkout. Claude wrote the spec, the plan and the briefs, reviewed every run, and wrote the docs. I approved the merge and cut the release. Every run is a row in the ledger.</p>
-    <p>The plan had eight tasks. Four were worker tasks; four were Claude's — the move, the docs, acceptance. The worker's four:</p>
+    <p>The plan had eight tasks. Four were worker tasks; four were Claude's — the move, the docs, acceptance. The worker's four, plus the follow-up run that repaired my brief — the last row; more on it below:</p>
     <table>
       <tr><th>Task</th><th>Turns</th><th>Wall</th><th>Prompt / completion tokens</th><th>Verify</th><th>Result</th></tr>
       <tr><td>W1 — <code>contract</code>, <code>--version</code>, the render, 7 tests</td><td>25</td><td>211 s</td><td>280,950 / 3,896</td><td>pass, round 1</td><td>exact to brief</td></tr>
@@ -132,7 +132,7 @@
       <tr><td>W3 — 0.12.0, the <code>:0.12</code> image cycle, a <code>wheel-smoke</code> CI job</td><td>12</td><td>168 s</td><td>171,489 / 3,106</td><td>pass, round 1</td><td>five files, as briefed</td></tr>
       <tr><td>W3-fix — three YAML lines</td><td>4</td><td>63 s</td><td>20,563 / 375</td><td>pass, round 1</td><td>verbatim</td></tr>
     </table>
-    <p>Five runs, five first-try completions, zero resumes, zero second verify rounds. Eighty turns, fourteen minutes of worker wall clock, about 951,000 prompt tokens and 14,000 completion tokens, $0. The four runs of the second session went from first launch to a pull request with its ledger row in twenty-nine minutes, including review. Two-thirds of every run's wall clock is the test suite running inside the container — fifty-two seconds, every time — which is the price of <code>--verify</code> and worth every second of it. The suite went from 1,579 tests to 1,603.</p>
+    <p>Five runs, five first-try completions, zero resumes, zero second verify rounds. Eighty turns, fourteen minutes of worker wall clock, about 951,000 prompt tokens and 14,000 completion tokens, $0. The second session's four runs went from the first launch (09:05) to pull request #86 with its ledger row (09:34) in twenty-nine minutes, including review. About a third of the worker's wall clock — fifty-two seconds of every run, and most of the short ones — is the test suite running inside the container, which is the price of <code>--verify</code> and worth every second of it. The suite went from 1,579 tests to 1,603.</p>
     <p>"Verbatim" in that table is checked, not felt. After each run Claude ran the plan's shell checks and then a stricter one: every line the worker added has to appear in the brief. It did, all five times. On issue #61 the local model inverted a rule and wrote the test to match; that's why the check exists.</p>
   </section>
 

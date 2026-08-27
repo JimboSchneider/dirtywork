@@ -15,7 +15,8 @@ brief, run, review, resume, verdict: in the operating guide and the machine
 contract. The fourth layer was the instructions to the orchestrator. How to
 write a brief a small model can execute. That stdout is one JSON object and
 stderr is everything else. What exit 1 means (kept for review) versus exit 2
-(nothing was created). That the worker can't install anything in docker mode.
+(nothing was created). That the worker can't install anything in the default, offline docker mode
+(`--allow-network` is the deliberate exception).
 That a resume mints a new slug. Where to put your verdict.
 
 Those lived in two places: my head, and the auto-memory of one Claude Code
@@ -93,7 +94,8 @@ reviewed every run, and wrote the docs. I approved the merge and cut the
 release. Every run is a row in the ledger.
 
 The plan had eight tasks. Four were worker tasks; four were Claude's — the
-move, the docs, acceptance. The worker's four:
+move, the docs, acceptance. The worker's four, plus the follow-up run that repaired my brief — the last
+row; more on it below:
 
 | Task | Turns | Wall | Prompt / completion tokens | Verify | Result |
 |---|---|---|---|---|---|
@@ -105,11 +107,12 @@ move, the docs, acceptance. The worker's four:
 
 Five runs, five first-try completions, zero resumes, zero second verify
 rounds. Eighty turns, fourteen minutes of worker wall clock, about 951,000
-prompt tokens and 14,000 completion tokens, $0. The four runs of the second
-session went from first launch to a pull request with its ledger row in
-twenty-nine minutes, including review. Two-thirds of every run's wall clock
-is the test suite running inside the container — fifty-two seconds, every
-time — which is the price of `--verify` and worth every second of it. The
+prompt tokens and 14,000 completion tokens, $0. The second session's four
+runs went from the first launch (09:05) to pull request #86 with its ledger
+row (09:34) in twenty-nine minutes, including review. About a third of the
+worker's wall clock — fifty-two seconds of every run, and most of the short
+ones — is the test suite running inside the container, which is the price of
+`--verify` and worth every second of it. The
 suite went from 1,579 tests to 1,603.
 
 "Verbatim" in that table is checked, not felt. After each run Claude ran the

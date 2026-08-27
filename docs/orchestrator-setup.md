@@ -19,7 +19,8 @@ machine can hold rather than two small ones — the difference is measured in
 [the operating guide](operating.md#sizing-the-context-window).
 
 **Docker.** Docker Desktop or `dockerd`, running. That is where the worker
-lives: no network, no access to your home directory, just the repo. The
+lives: no network (unless you pass `--allow-network` on purpose), no access
+to your home directory, just the repo. The
 worker image downloads itself the first time you run.
 
 **dirtywork.**
@@ -112,7 +113,8 @@ None of this is required, but it's what makes the setup stick for me.
 - **Other agents.** `dirtywork init --stdout` prints the skill without
   writing anything. Together with `dirtywork contract`, anything that can run
   a shell command has what Claude has.
-- **The worker can't install things.** The sandbox is offline by design. If
+- **The worker can't install things.** The sandbox is offline by default
+  (`--allow-network` is the deliberate exception). If
   your tests need a tool the image lacks — pytest, say — build a derived image
   once (a five-line Dockerfile in the
   [worker image guide](https://github.com/JimboSchneider/dirtywork/blob/main/docker/README.md#derived-images-extra-packages))
