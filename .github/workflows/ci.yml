@@ -116,9 +116,12 @@ jobs:
       - run: python -m venv smoke && smoke/bin/pip install dist/*.whl
       # Each output goes to a file and is asserted with grep -q: a pipe's exit
       # status is its last command's, so a crash upstream would be masked.
-      - run: smoke/bin/dirtywork contract > contract.md && grep -q '^# Machine contract' contract.md
-      - run: smoke/bin/dirtywork init --stdout > skill.md && grep -q '^name: dirtywork' skill.md && grep -q 'dirtywork-skill v' skill.md
-      - run: smoke/bin/dirtywork --version > version.txt && grep -q '^dirtywork ' version.txt
+      - run: |
+          smoke/bin/dirtywork contract > contract.md && grep -q '^# Machine contract' contract.md
+      - run: |
+          smoke/bin/dirtywork init --stdout > skill.md && grep -q '^name: dirtywork' skill.md && grep -q 'dirtywork-skill v' skill.md
+      - run: |
+          smoke/bin/dirtywork --version > version.txt && grep -q '^dirtywork ' version.txt
 
   gate:
     # Single stable name for branch protection to require, regardless of
