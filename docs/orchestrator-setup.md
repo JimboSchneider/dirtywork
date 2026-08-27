@@ -112,6 +112,16 @@ None of this is required, but it's what makes the setup stick for me.
   `init` refreshes a copy you haven't touched, leaves a current one alone, and
   won't overwrite one you edited unless you pass `--force`. It tells you
   which happened, one line per file.
+- **Other providers.** The skill assumes LM Studio on `localhost:1234`: its
+  run template passes only `--model`, and its first-run check curls that
+  port. dirtywork itself takes more — `--provider ollama` for Ollama,
+  `--base-url <url>` for any other OpenAI-compatible server, `--provider
+  anthropic` (needs `ANTHROPIC_API_KEY`) — but the skill doesn't say so, so
+  Claude won't pass those flags unless you make it: say it in the request
+  ("delegate this with `--provider ollama`"), or add the flag to the run
+  template in your `SKILL.md` (`init` preserves an edited copy). A
+  provider-neutral skill is part of
+  [#87](https://github.com/JimboSchneider/dirtywork/issues/87).
 - **Other agents.** `dirtywork init --stdout` prints the skill without
   writing anything. Together with `dirtywork contract`, anything that can run
   a shell command has what Claude has.
