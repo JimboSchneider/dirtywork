@@ -177,8 +177,8 @@ six Devstral rows that used to abort, none abort. That one was built the
 same way, last night, and merged before this build started.
 
 **The `:0.12` worker image.** Same Dockerfile as `:0.11`, published by this
-release, unpinned on first publish; 0.12.1 pins the digest, as 0.11.1
-did.
+release, unpinned on first publish; 0.12.1, cut the same afternoon, pins
+it, as 0.11.1 did.
 
 **The repo's `CLAUDE.md` now says the dogfood rule out loud** (#81), which is
 why the nine-second fix above went through a run.

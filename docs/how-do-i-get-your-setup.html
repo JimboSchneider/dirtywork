@@ -156,7 +156,7 @@
   <section>
     <h2>Also in 0.12.0</h2>
     <p><strong>Marker-polluted tool names are recovered (#67).</strong> Devstral sometimes puts its <code>[TOOL_CALLS]</code> token inside the tool <em>name</em> — prose, the marker, then <code>bash</code>. Two releases counted each as an unknown tool and aborted after three, after the file was already written. Now the harness finds the tool after the last marker, dispatches the call, and nudges the model once per turn. On the six Devstral rows that used to abort, none abort. That one was built the same way, last night, and merged before this build started.</p>
-    <p><strong>The <code>:0.12</code> worker image.</strong> Same Dockerfile as <code>:0.11</code>, published by this release, unpinned on first publish; 0.12.1 pins the digest, as 0.11.1 did.</p>
+    <p><strong>The <code>:0.12</code> worker image.</strong> Same Dockerfile as <code>:0.11</code>, published by this release, unpinned on first publish; 0.12.1, cut the same afternoon, pins it, as 0.11.1 did.</p>
     <p><strong>The repo's <code>CLAUDE.md</code> now says the dogfood rule out loud</strong> (#81), which is why the nine-second fix above went through a run.</p>
   </section>
 
