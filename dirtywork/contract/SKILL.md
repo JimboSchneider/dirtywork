@@ -72,8 +72,8 @@ automatically: put worker-facing conventions there, not in every brief.
   directories mounted (only the run volume and a read-only view of the repo's
   git objects), so the worker **cannot install dependencies**; it has what the image
   ships — git, bash, python3, node/npm, .NET, ripgrep, jq, curl, shellcheck.
-  `--allow-network` gives the container bridge networking so installs work, at
-  the cost of an offline sandbox — use it deliberately, and for anything
+  `--allow-network` gives the container bridge networking so installs work and
+  the offline guarantee is gone — use it deliberately, and for anything
   permanent build a derived image instead (see the contract). Run any richer
   gate yourself, on the host, against the exported worktree.
 
