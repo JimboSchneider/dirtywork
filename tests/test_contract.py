@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from dirtywork import __main__ as m
 from dirtywork import __version__
 from dirtywork import contract
+from dirtywork.workspace import load_repo_context
 
 
 def test_contract_prints_packaged_reference_verbatim(capsys):
@@ -211,3 +213,74 @@ def test_init_repo_not_a_directory_exits_2(home, tmp_path, capsys):
     assert rc == 2 and out == ""
     assert err.startswith("error: --repo")
     assert not _user_skill(home).exists()
+
+
+def test_init_detects_edited_frontmatter(home, capsys):
+    path = _user_skill(home)
+    path.parent.mkdir(parents=True)
+    old = contract.render_skill("0.0.1")
+    head, rest = contract._split_frontmatter(old)
+    edited = head.replace("description: ", "description: MINE — ", 1) + rest
+    assert edited != old
+    path.write_text(edited, encoding="utf-8")
+    rc = m.main(["init"])
+    assert rc == 1
+    assert capsys.readouterr().out == f"skipped (locally modified): {path}\n"
+    assert path.read_text(encoding="utf-8") == edited
+    assert m.main(["init", "--force"]) == 0
+    assert path.read_text(encoding="utf-8") == contract.render_skill(__version__)
+
+
+def test_init_destination_is_a_directory_exits_2(home, capsys):
+    path = _user_skill(home)
+    path.mkdir(parents=True)
+    rc = m.main(["init"])
+    out, err = capsys.readouterr()
+    assert rc == 2 and out == ""
+    assert err.startswith("error: ") and str(path) in err
+    assert path.is_dir() and not any(path.iterdir())
+
+
+def test_init_same_path_twice_is_one_destination(home, capsys):
+    rc = m.main(["init", "--repo", str(home)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out == f"wrote: {_user_skill(home)}\n"
+
+
+def test_init_same_version_template_change_updates(home, capsys):
+    path = _user_skill(home)
+    path.parent.mkdir(parents=True)
+    current = contract.render_skill(__version__)
+    head, rest = contract._split_frontmatter(current)
+    _, _, body = rest.partition("\n")
+    changed_body = body.replace("Rules of thumb", "Rules of thumbs", 1)
+    assert changed_body != body
+    stamp = f"<!-- dirtywork-skill v{__version__} sha256:{contract._digest(head + changed_body)} -->\n"
+    path.write_text(head + stamp + changed_body, encoding="utf-8")
+    rc = m.main(["init"])
+    assert rc == 0
+    assert capsys.readouterr().out == f"updated: {path}\n"
+    assert path.read_text(encoding="utf-8") == current
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                          capture_output=True, text=True).stdout
+
+
+def test_worker_prompt_does_not_inject_skill_file(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    skill = repo / ".claude" / "skills" / "dirtywork" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(contract.render_skill(__version__), encoding="utf-8")
+    (repo / "f.txt").write_text("hello")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "init")
+    base = _git(repo, "rev-parse", "HEAD").strip()
+    assert load_repo_context(repo, base) is None
+
