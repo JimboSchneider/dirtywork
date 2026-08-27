@@ -63,10 +63,10 @@ Full model, known exposures and the host-mode caveats:
 | Developed & benchmarked | macOS on Apple Silicon (M-series, unified memory) with LM Studio | all worker/bench numbers and model-sizing guidance in `docs/superpowers/bench/` were measured here |
 | CI-tested | Linux x86_64 (Ubuntu, Python 3.9 + 3.13) and macOS | unit suite on every push; the Docker sandbox live tests run on Linux in CI |
 | Unsupported | Windows | the unit suite also runs on `windows-latest` in CI as an advisory (allowed-to-fail) job that publishes a per-file pass/fail/error/skip table; Windows remains unsupported until an integration suite passes (see the note in [Security & trust](https://github.com/JimboSchneider/dirtywork/blob/main/docs/security.md#security--trust)); the plan is [#96](https://github.com/JimboSchneider/dirtywork/issues/96); **WSL2 is the way in — note below** |
-**Windows: use WSL2** *(untested by us — first report welcome)*. Native Windows crashes
-today on two POSIX-only calls; the plan to fix that is
+**Windows: use WSL2** *(one report so far, 2026-08-27: runs cleanly — more welcome)*. Native
+Windows crashes today on two POSIX-only calls; the plan to fix that is
 [#96](https://github.com/JimboSchneider/dirtywork/issues/96). Inside WSL2 it's the CI-tested
-Linux path. What to get right:
+Linux path. What to get right — the first report hit the third and fourth:
 
 - Keep the repo and `~/.dirtywork` on the distro's own filesystem (`~/repos/…`), not `/mnt/c/…`
   — drvfs is slow for git and its permission and symlink semantics differ.
@@ -77,9 +77,21 @@ Linux path. What to get right:
   make the server listen on all interfaces (LM Studio: enable serving on the local network in its
   server settings; Ollama: `OLLAMA_HOST=0.0.0.0`).
 - Docker: Docker Desktop with WSL integration turned on for that distro, or Docker Engine
-  installed inside it.
+  installed inside it. `docker info` must succeed *inside the distro* before you start; if it
+  doesn't, that is the whole problem.
+- Load the model with enough context. dirtywork reads the loaded context length from the server
+  and refuses to start (exit 2) when it is too small for a run — reload the model with a larger
+  context in LM Studio rather than working around the check.
 - Run Claude Code inside WSL too, so `dirtywork init`, the skill and the `dirtywork` command are
   all on the same side.
+
+**Pick a worker with a record.** `qwen/qwen3-coder-next` (the default) and
+`mistralai/devstral-small-2-2512` are the benchmarked workers. gpt-oss models on LM Studio have
+known tool-call parser issues — empty replies and partial file writes are the symptom, not a scope
+problem — see the
+[local-model research note](https://github.com/JimboSchneider/dirtywork/blob/main/docs/superpowers/bench/2026-08-16-local-model-research.md).
+`dirtywork bench` measures any model before you trust it with a task. And run with `--verify`: the
+worker's summary is never the receipt; the verify command and the diff are.
 
 Other OpenAI-compatible servers (vLLM, llama.cpp) should work via
 `--base-url`/`--provider`. LM Studio (`--provider openai`) and Ollama
