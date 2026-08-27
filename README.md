@@ -107,9 +107,10 @@ actually exercised by the test suites. Reports welcome.
 
     pipx install dirtywork
 
-Update later with `pipx upgrade dirtywork`. pipx keeps dirtywork in its own
-venv and puts a `dirtywork` shim on your PATH, so it can't collide with your
-projects' dependencies. If you don't have pipx, see the
+Update later with `pipx upgrade dirtywork`, then run `dirtywork init` again
+(why: below). pipx keeps dirtywork in its own venv and puts a `dirtywork`
+shim on your PATH, so it can't collide with your projects' dependencies. If
+you don't have pipx, see the
 [pipx install docs](https://pipx.pypa.io/stable/how-to/install-pipx.html) (macOS:
 `brew install pipx && pipx ensurepath`).
 
@@ -121,8 +122,17 @@ installs the `dirtywork` skill for Claude Code — in your home (`~/.claude/skil
 with `--repo`, in the project — so Claude knows how to brief a run, read its JSON, review the
 worktree, resume with feedback and record a verdict. Ask it to delegate a task to dirtywork. Any
 other agent can read the same instructions with `dirtywork init --stdout`, and the full reference
-with `dirtywork contract`. The walkthrough, from LM Studio to the first delegated task:
+with `dirtywork contract`. The skill assumes LM Studio on `localhost:1234`; on Ollama or another
+endpoint, tell Claude to pass `--provider`/`--base-url` (the guide's *Other providers* note says
+how). The walkthrough, from LM Studio to the first delegated task:
 [Orchestrator setup](https://github.com/JimboSchneider/dirtywork/blob/main/docs/orchestrator-setup.md).
+
+**Re-run `dirtywork init` after every upgrade.** The skill is a file on disk, written by the
+version that installed it. `pipx upgrade` replaces the wheel and leaves that file alone, so until
+you re-run `init`, Claude is driving the new release with the old release's instructions — flags,
+JSON fields and exit codes it describes may no longer match. `init` is safe to repeat: it refreshes
+a copy you haven't edited, leaves a current one alone, and refuses to overwrite one you changed
+unless you pass `--force`; it prints one line per file saying which.
 
 **pipx (straight from GitHub, unreleased `main`):**
 

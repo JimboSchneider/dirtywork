@@ -107,9 +107,28 @@ None of this is required, but it's what makes the setup stick for me.
 ## Good to know
 
 - **Upgrades.** After `pipx upgrade dirtywork`, run `dirtywork init` again.
-  It refreshes a copy you haven't touched, leaves a current one alone, and
+  The upgrade replaces the wheel, not the skill file it wrote, so until you
+  do, Claude is driving the new release with the old release's instructions.
+  `init` refreshes a copy you haven't touched, leaves a current one alone, and
   won't overwrite one you edited unless you pass `--force`. It tells you
   which happened, one line per file.
+- **Other providers.** The skill assumes LM Studio on `localhost:1234`: its
+  run template passes only `--model`, and its first-run check curls that
+  port. dirtywork itself takes more — `--provider ollama` for Ollama,
+  `--base-url <url>` for any other OpenAI-compatible server, `--provider
+  anthropic` (needs `ANTHROPIC_API_KEY`) — but the skill doesn't say so, so
+  Claude won't pass those flags unless you make it: say it in the request
+  ("delegate this with `--provider ollama`"), or add the flag to the run
+  template in your **personal** copy. In a shared repo that means `dirtywork
+  init` without `--repo`, then edit `~/.claude/skills/dirtywork/SKILL.md` —
+  not the committed project copy, which is the team's baseline. Claude Code
+  loads a personal skill over a project skill of the same name, so your
+  flags win in that repo and nobody else's setup changes. Two costs: `init`
+  after an upgrade will skip your edited copy (`skipped (locally
+  modified)`), so diff it against `dirtywork init --stdout` and carry your
+  line forward; and the project copy keeps its own stamp, so refresh it
+  separately. A provider-neutral skill is part of
+  [#87](https://github.com/JimboSchneider/dirtywork/issues/87).
 - **Other agents.** `dirtywork init --stdout` prints the skill without
   writing anything. Together with `dirtywork contract`, anything that can run
   a shell command has what Claude has.
