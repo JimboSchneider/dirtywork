@@ -176,7 +176,7 @@ the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
   cannot see, since every `edit_file` counts as progress. No nudge is sent:
   the point is to stop paying for turns. `0` disables.
 - `--verify CMD` / `--verify-rounds N` / `--verify-timeout S` — see
-  [Verifying a run](operating.md#verifying-a-run). In docker mode the gate runs
+  [Verifying a run](https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md#verifying-a-run). In docker mode the gate runs
   like a worker `bash` call — without `GIT_DIR`/`GIT_WORK_TREE` in its
   environment since 1.0 (#61), so a suite that shells out to git in temp dirs
   can pass. `--verify-rounds` counts **fix rounds
@@ -205,7 +205,7 @@ the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
   not loaded yet. Run `ollama run <model>` before the run, or pass
   `--context-window`, or Ollama will quietly serve its own smaller `num_ctx`.
   See
-  [Sizing the context window](operating.md#sizing-the-context-window).
+  [Sizing the context window](https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md#sizing-the-context-window).
 
 - `--max-tokens` (default 8192) — the per-reply output cap sent to the provider
   on every request, and subtracted from the context window before the prompt
@@ -477,7 +477,7 @@ All progress (transcript path, worktree path, `error:`-prefixed messages) is
 written to stderr; watch a live run with `tail -f` on the transcript path (events land one turn at a time since 1.0).
 
 Full field-by-field schema, including every v1→v2 addition and the
-`run.json` field list: [`docs/transcript-schema.md`](transcript-schema.md).
+`run.json` field list: [`docs/transcript-schema.md`](https://github.com/JimboSchneider/dirtywork/blob/main/docs/transcript-schema.md).
 
 **Transcript events** (JSONL, one per line): `run_start` (task, repo, model,
 config, `schema_version: 2`, plus provenance: `worktree`, `base_commit`,
