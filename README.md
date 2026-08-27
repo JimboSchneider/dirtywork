@@ -62,7 +62,24 @@ Full model, known exposures and the host-mode caveats:
 |---|---|---|
 | Developed & benchmarked | macOS on Apple Silicon (M-series, unified memory) with LM Studio | all worker/bench numbers and model-sizing guidance in `docs/superpowers/bench/` were measured here |
 | CI-tested | Linux x86_64 (Ubuntu, Python 3.9 + 3.13) and macOS | unit suite on every push; the Docker sandbox live tests run on Linux in CI |
-| Unsupported | Windows | the unit suite also runs on `windows-latest` in CI as an advisory (allowed-to-fail) job that publishes a per-file pass/fail/error/skip table; Windows remains unsupported until an integration suite passes (see the note in [Security & trust](https://github.com/JimboSchneider/dirtywork/blob/main/docs/security.md#security--trust)) |
+| Unsupported | Windows | the unit suite also runs on `windows-latest` in CI as an advisory (allowed-to-fail) job that publishes a per-file pass/fail/error/skip table; Windows remains unsupported until an integration suite passes (see the note in [Security & trust](https://github.com/JimboSchneider/dirtywork/blob/main/docs/security.md#security--trust)); the plan is [#96](https://github.com/JimboSchneider/dirtywork/issues/96); **WSL2 is the way in — note below** |
+**Windows: use WSL2** *(untested by us — first report welcome)*. Native Windows crashes
+today on two POSIX-only calls; the plan to fix that is
+[#96](https://github.com/JimboSchneider/dirtywork/issues/96). Inside WSL2 it's the CI-tested
+Linux path. What to get right:
+
+- Keep the repo and `~/.dirtywork` on the distro's own filesystem (`~/repos/…`), not `/mnt/c/…`
+  — drvfs is slow for git and its permission and symlink semantics differ.
+- Your model server is on the Windows side. Either enable
+  [mirrored networking](https://learn.microsoft.com/windows/wsl/networking#mirrored-mode-networking)
+  (`networkingMode=mirrored` under `[wsl2]` in `%UserProfile%\.wslconfig`, Windows 11 22H2+) so
+  `localhost` reaches it, or pass `--base-url` with the Windows host's IP on the WSL network — and
+  make the server listen on all interfaces (LM Studio: enable serving on the local network in its
+  server settings; Ollama: `OLLAMA_HOST=0.0.0.0`).
+- Docker: Docker Desktop with WSL integration turned on for that distro, or Docker Engine
+  installed inside it.
+- Run Claude Code inside WSL too, so `dirtywork init`, the skill and the `dirtywork` command are
+  all on the same side.
 
 Other OpenAI-compatible servers (vLLM, llama.cpp) should work via
 `--base-url`/`--provider`. LM Studio (`--provider openai`) and Ollama
