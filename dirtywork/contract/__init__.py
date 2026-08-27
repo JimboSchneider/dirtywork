@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import sys
+import tempfile
 from importlib import resources
+from pathlib import Path
 
 from .. import __version__
 
@@ -47,8 +50,105 @@ def render_skill(version: str) -> str:
     return head + stamp + body
 
 
+def inspect_existing(data: bytes) -> tuple[str | None, bool]:
+    """(the stamp's version, whether the stamp's hash matches the rest of the
+    file). (None, False) when the bytes are not UTF-8, have no frontmatter, or
+    carry no parseable stamp -- never an exception."""
+    try:
+        text = data.decode("utf-8")
+        head, rest = _split_frontmatter(text)
+    except (UnicodeDecodeError, ValueError):
+        return None, False
+    stamp, _, body = rest.partition("\n")
+    match = STAMP_RE.match(stamp)
+    if not match:
+        return None, False
+    return match.group("version"), _digest(head + body) == match.group("hash")
+
+
+def destinations(args) -> list[Path]:
+    """User copy unless --no-user, then the project copy if --repo; the same
+    path twice (a --repo that resolves to $HOME) is one destination."""
+    wanted = []
+    if not args.no_user:
+        wanted.append(Path.home() / ".claude" / "skills" / SKILL_DIRNAME / "SKILL.md")
+    if args.repo is not None:
+        wanted.append(Path(args.repo) / ".claude" / "skills" / SKILL_DIRNAME / "SKILL.md")
+    seen, out = set(), []
+    for dest in wanted:
+        key = dest.resolve()
+        if key not in seen:
+            seen.add(key)
+            out.append(dest)
+    return out
+
+
+def decide(dest: Path, rendered: str, force: bool) -> tuple[str, str]:
+    """What to do at `dest`: ("write" | "skip" | "none", the stdout line).
+    Raises OSError for a destination that exists but is not a regular file."""
+    if not dest.exists():
+        return "write", f"wrote: {dest}"
+    if not dest.is_file():
+        raise OSError(f"{dest}: exists and is not a regular file")
+    data = dest.read_bytes()
+    version, unmodified = inspect_existing(data)
+    if version is not None and unmodified:
+        if data == rendered.encode("utf-8"):
+            return "none", f"up to date: {dest}"
+        suffix = f" (v{version} -> v{__version__})" if version != __version__ else ""
+        return "write", f"updated: {dest}{suffix}"
+    if force:
+        return "write", f"overwrote: {dest}"
+    return "skip", f"skipped (locally modified): {dest}"
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    """Temp file beside the target, then os.replace. A symlink is written
+    through (the link survives); parents are created."""
+    target = path.resolve() if path.is_symlink() else path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".SKILL.", dir=str(target.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        os.replace(tmp, str(target))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _err(msg: str) -> None:
+    print(f"error: {msg}", file=sys.stderr)
+
+
 def dispatch(args) -> int:
     if args.cmd == "contract":
         sys.stdout.write(read(CONTRACT_NAME))
         return 0
-    raise NotImplementedError("init")  # W2a
+    rendered = render_skill(__version__)
+    if args.repo is not None and not Path(args.repo).is_dir():
+        _err(f"--repo {args.repo}: not a directory")
+        return 2
+    if args.stdout:
+        sys.stdout.write(rendered)
+        return 0
+    dests = destinations(args)
+    if not dests:
+        _err("nothing to write: --no-user without --repo")
+        return 2
+    rc = 0
+    for dest in dests:
+        try:
+            action, message = decide(dest, rendered, args.force)
+            if action == "write":
+                _write_text_atomic(dest, rendered)
+        except OSError as exc:
+            _err(f"{dest}: {exc.strerror or exc}")
+            return 2
+        print(message)
+        if action == "skip":
+            rc = 1
+    return rc

@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import re
+from pathlib import Path
 
 import pytest
 
@@ -84,3 +85,129 @@ def test_skill_first_paragraph_addresses_the_worker():
         paragraph.append(after.pop(0))
     joined = " ".join(paragraph).lower()
     assert "worker" in joined and "ignore" in joined, joined
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return tmp_path
+
+
+def _user_skill(home: Path) -> Path:
+    return home / ".claude" / "skills" / "dirtywork" / "SKILL.md"
+
+
+def test_init_writes_user_skill_by_default(home, capsys):
+    rc = m.main(["init"])
+    out, err = capsys.readouterr()
+    assert rc == 0 and err == ""
+    assert out == f"wrote: {_user_skill(home)}\n"
+    assert _user_skill(home).read_text(encoding="utf-8") == contract.render_skill(__version__)
+
+
+def test_init_with_repo_writes_both(home, tmp_path, capsys):
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    rc = m.main(["init", "--repo", str(repo)])
+    out = capsys.readouterr().out
+    project = repo / ".claude" / "skills" / "dirtywork" / "SKILL.md"
+    assert rc == 0
+    assert out == f"wrote: {_user_skill(home)}\nwrote: {project}\n"
+    assert _user_skill(home).read_bytes() == project.read_bytes()
+
+
+def test_init_no_user_writes_project_only(home, tmp_path, capsys):
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    rc = m.main(["init", "--repo", str(repo), "--no-user"])
+    assert rc == 0
+    assert not _user_skill(home).exists()
+    assert (repo / ".claude" / "skills" / "dirtywork" / "SKILL.md").is_file()
+
+
+def test_init_no_user_without_repo_exits_2(home, capsys):
+    rc = m.main(["init", "--no-user"])
+    out, err = capsys.readouterr()
+    assert rc == 2 and out == ""
+    assert err.startswith("error: nothing to write")
+    assert not _user_skill(home).exists()
+
+
+def test_init_is_idempotent(home, capsys):
+    m.main(["init"])
+    first = _user_skill(home).read_bytes()
+    capsys.readouterr()
+    rc = m.main(["init"])
+    assert rc == 0
+    assert capsys.readouterr().out == f"up to date: {_user_skill(home)}\n"
+    assert _user_skill(home).read_bytes() == first
+
+
+def test_init_updates_older_stamped_copy(home, capsys):
+    path = _user_skill(home)
+    path.parent.mkdir(parents=True)
+    path.write_text(contract.render_skill("0.0.1"), encoding="utf-8")
+    rc = m.main(["init"])
+    assert rc == 0
+    assert capsys.readouterr().out == f"updated: {path} (v0.0.1 -> v{__version__})\n"
+    assert path.read_text(encoding="utf-8") == contract.render_skill(__version__)
+
+
+def test_init_skips_locally_modified_without_force(home, capsys):
+    m.main(["init"])
+    path = _user_skill(home)
+    edited = path.read_text(encoding="utf-8") + "\nMy own rule.\n"
+    path.write_text(edited, encoding="utf-8")
+    capsys.readouterr()
+    rc = m.main(["init"])
+    assert rc == 1
+    assert capsys.readouterr().out == f"skipped (locally modified): {path}\n"
+    assert path.read_text(encoding="utf-8") == edited
+
+
+def test_init_force_overwrites_modified(home, capsys):
+    m.main(["init"])
+    path = _user_skill(home)
+    path.write_text(path.read_text(encoding="utf-8") + "\nMy own rule.\n", encoding="utf-8")
+    capsys.readouterr()
+    rc = m.main(["init", "--force"])
+    assert rc == 0
+    assert capsys.readouterr().out == f"overwrote: {path}\n"
+    assert path.read_text(encoding="utf-8") == contract.render_skill(__version__)
+
+
+def test_init_unstamped_existing_file_is_treated_as_modified(home, capsys):
+    path = _user_skill(home)
+    path.parent.mkdir(parents=True)
+    path.write_text("hello\n", encoding="utf-8")
+    assert m.main(["init"]) == 1
+    assert path.read_text(encoding="utf-8") == "hello\n"
+    capsys.readouterr()
+    assert m.main(["init", "--force"]) == 0
+    assert path.read_text(encoding="utf-8") == contract.render_skill(__version__)
+
+
+def test_init_stdout_prints_and_writes_nothing(home, capsys):
+    rc = m.main(["init", "--stdout"])
+    out, err = capsys.readouterr()
+    assert rc == 0 and err == ""
+    assert out == contract.render_skill(__version__)
+    assert not (home / ".claude").exists()
+
+
+def test_init_stdout_with_no_user_still_prints(home, tmp_path, capsys):
+    rc = m.main(["init", "--stdout", "--no-user"])
+    out, _ = capsys.readouterr()
+    assert rc == 0 and out == contract.render_skill(__version__)
+    assert not (home / ".claude").exists()
+    rc = m.main(["init", "--stdout", "--repo", str(tmp_path / "missing")])
+    out, err = capsys.readouterr()
+    assert rc == 2 and out == "" and err.startswith("error: --repo")
+
+
+def test_init_repo_not_a_directory_exits_2(home, tmp_path, capsys):
+    rc = m.main(["init", "--repo", str(tmp_path / "missing")])
+    out, err = capsys.readouterr()
+    assert rc == 2 and out == ""
+    assert err.startswith("error: --repo")
+    assert not _user_skill(home).exists()
