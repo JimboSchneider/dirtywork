@@ -395,3 +395,10 @@ Built by the released **dirtywork 0.11.1** (`pipx run --spec 'dirtywork==0.11.1'
 | `create-fixturesrowscsv-with-a-header-0826174944-40a3dd16` | **C1 F5-2048-dev-r1-rerun** (final code b19fea4 = 8c41b8a + ledger, alone on the GPU) | **PASS** (no `unknown_tool` abort) | `stuck` — the pre-existing repeat guard (the same failing `bash` command four times), not #67's; recovered 8, unknown-tool errors 0; the sanitised shape did not recur in this run | 755 s | 28 | 27.0 | 817,643 | 20,447 | ≈1.1k | 4 (name_recovered×4) | 0 | 0 | append_file 73 / bash 21 / list_dir 2 / read_file 1 | C1 rerun |
 | **C1 verdict (#67, spec §6)** | **PASS — 6/6 rows without an `unknown_tool` abort** (5 on `43f5148`, the sixth rerun on the final code) | across the seven acceptance runs: 30 polluted calls recovered (`tool_raw`), 12 `name_recovered` nudges, 0 unknown-tool errors, 0 `unknown_tool` aborts — against last night's 5 aborts in 8 Devstral runs. The first pass surfaced the sanitised shape (§0.3, T4), whose fix is pinned by tests and not yet observed live. Devstral's strict content checks remain false, as before | — | — | — | — | — | — | — | — | — | — | C1 verdict |
 | (**sampler**, `metrics-67.csv`) | 2 228 samples, 14:51–18:03 CDT | free RAM min 0.01 GB, median 6.0 GB, 225 samples under 1 GB — the periods with a worker run and the C1 driver sharing the GPU (T4 + rows 3–5); Devstral and qwen both resident | — | — | — | — | — | — | — | — | — | — | metrics |
+
+## #82 — operator contract in the wheel (plan v1.1)
+
+Baseline 2026-08-26 20:30 CDT on `issue-82-operator-contract` (rebased onto main @7e6f775): `/usr/bin/python3 -m pytest -q -p no:cacheprovider` → 1579 passed, 1 skipped, 38 deselected in 91.14s (0:01:31). Runtime: released dirtywork 0.11.1 via `pipx run`, worker `qwen/qwen3-coder-next` (LM Studio, 65,536 ctx), image `dirtywork-worker-pytest:0.11`, sampler `metrics-82.csv` from 20:29.
+
+| Task | Slug | Status | Turns | Wall | s/turn | Prompt tok | Compl tok | tok/s | Nudges | Guardrail | Tool mix | Verify | Resumes | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
