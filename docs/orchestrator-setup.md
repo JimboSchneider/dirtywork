@@ -119,8 +119,15 @@ None of this is required, but it's what makes the setup stick for me.
   anthropic` (needs `ANTHROPIC_API_KEY`) — but the skill doesn't say so, so
   Claude won't pass those flags unless you make it: say it in the request
   ("delegate this with `--provider ollama`"), or add the flag to the run
-  template in your `SKILL.md` (`init` preserves an edited copy). A
-  provider-neutral skill is part of
+  template in your **personal** copy. In a shared repo that means `dirtywork
+  init` without `--repo`, then edit `~/.claude/skills/dirtywork/SKILL.md` —
+  not the committed project copy, which is the team's baseline. Claude Code
+  loads a personal skill over a project skill of the same name, so your
+  flags win in that repo and nobody else's setup changes. Two costs: `init`
+  after an upgrade will skip your edited copy (`skipped (locally
+  modified)`), so diff it against `dirtywork init --stdout` and carry your
+  line forward; and the project copy keeps its own stamp, so refresh it
+  separately. A provider-neutral skill is part of
   [#87](https://github.com/JimboSchneider/dirtywork/issues/87).
 - **Other agents.** `dirtywork init --stdout` prints the skill without
   writing anything. Together with `dirtywork contract`, anything that can run
