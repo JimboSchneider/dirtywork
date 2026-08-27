@@ -370,6 +370,17 @@ without being cut.
   A run with a non-zero count paid the cache-miss tax on that many turns; a run
   with a large one wanted a bigger window or a smaller brief.
 
+## Setting up an orchestrator
+
+`dirtywork init` writes the Claude Code skill that teaches an agent to drive dirtywork to
+`~/.claude/skills/dirtywork/SKILL.md`; `--repo PATH` writes a project copy too (commit it so the
+whole team's Claude gets it); `--no-user` skips the home copy. The file is stamped, so re-running
+`init` after an upgrade refreshes an unmodified copy and leaves one you edited alone unless you pass
+`--force` (`skipped (locally modified)` and exit 1 tell you which). `dirtywork init --stdout` prints
+the skill for any other agent; `dirtywork contract` prints the machine contract — every flag, the
+stdout JSON, exit codes — for the installed version. The end-to-end walkthrough, from LM Studio
+to the first delegated task, is [Orchestrator setup](orchestrator-setup.md).
+
 ## Benchmarking
 
     dirtywork bench --models 'model[@provider][=base_url],...' \

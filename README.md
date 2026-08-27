@@ -35,7 +35,7 @@ macOS (Windows unsupported — see below).
 - **[Operating guide](https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md)** — running a task, resuming,
   reviewing, the `runs` subcommands, benchmarking, troubleshooting.
 - **[Machine contract](https://github.com/JimboSchneider/dirtywork/blob/main/dirtywork/contract/machine-contract.md)** — every flag, the stdout
-  JSON schema, exit codes, transcript events.
+  JSON schema, exit codes, transcript events; `dirtywork contract` prints the installed version's copy.
 - **[Security](https://github.com/JimboSchneider/dirtywork/blob/main/docs/security.md)** — the Docker containment model, known
   exposures, and `--sandbox none`'s host-mode caveats.
 - **[Transcript schema](https://github.com/JimboSchneider/dirtywork/blob/main/docs/transcript-schema.md)** — the full
@@ -112,6 +112,17 @@ venv and puts a `dirtywork` shim on your PATH, so it can't collide with your
 projects' dependencies. If you don't have pipx, see the
 [pipx install docs](https://pipx.pypa.io/stable/how-to/install-pipx.html) (macOS:
 `brew install pipx && pipx ensurepath`).
+
+### Use it from Claude Code
+
+    dirtywork init --repo .
+
+installs the `dirtywork` skill for Claude Code — in your home (`~/.claude/skills/dirtywork/`) and,
+with `--repo`, in the project — so Claude knows how to brief a run, read its JSON, review the
+worktree, resume with feedback and record a verdict. Ask it to delegate a task to dirtywork. Any
+other agent can read the same instructions with `dirtywork init --stdout`, and the full reference
+with `dirtywork contract`. The walkthrough, from LM Studio to the first delegated task:
+[Orchestrator setup](https://github.com/JimboSchneider/dirtywork/blob/main/docs/orchestrator-setup.md).
 
 **pipx (straight from GitHub, unreleased `main`):**
 
