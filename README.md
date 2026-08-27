@@ -30,6 +30,8 @@ macOS (Windows unsupported — see below).
 
 ## Documentation
 
+- **[Orchestrator setup](https://github.com/JimboSchneider/dirtywork/blob/main/docs/orchestrator-setup.md)** — put Claude Code (or any
+  agent) in the driver's seat: LM Studio, Docker, `pipx install`, `dirtywork init`, the review loop.
 - **[Operating guide](https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md)** — running a task, resuming,
   reviewing, the `runs` subcommands, benchmarking, troubleshooting.
 - **[Machine contract](https://github.com/JimboSchneider/dirtywork/blob/main/dirtywork/contract/machine-contract.md)** — every flag, the stdout
