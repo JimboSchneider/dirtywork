@@ -144,8 +144,7 @@ section numbers below refer to it. It is committed on the integration branch, so
   prints the image; `curl -s http://localhost:1234/v1/models | grep -c qwen3-coder-next` prints ≥ 1.
 - [ ] **Step 2: Baseline.** In a worktree of `issue-82-operator-contract`
   (`git worktree add .worktrees/issue-82-operator-contract issue-82-operator-contract`), run
-  `python3 -m pytest -q -p no:cacheprovider 2>&1 | tail -1` — record the count (1,312 passed on
-  2026-08-26 at `bd17e9a`) in the ledger.
+  `python3 -m pytest -q -p no:cacheprovider 2>&1 | tail -1` — record the count (1,579 passed, 1 skipped on 2026-08-26 at `7e6f775`) in the ledger.
 - [ ] **Step 3: Sampler + scratch.** `mkdir -p $SCRATCH`; write `run82.sh` (above), `chmod +x`;
   `nohup tools/soak_sampler.sh $SCRATCH/metrics-82.csv >/dev/null 2>&1 &`.
 - [ ] **Step 4: Ledger.** Append `## #82 — operator contract in the wheel (plan v1)` to
@@ -955,8 +954,7 @@ stdout JSON, exit codes — for the installed version.
   `wc -l < dirtywork/contract/SKILL.md` ≤ 200; test 17 green; the A8 grep prints nothing; the A9
   grep prints nothing and `python3 -c "from dirtywork.sandbox.docker_args import DEFAULT_IMAGE, PINNED_DIGEST; print(DEFAULT_IMAGE, PINNED_DIGEST)"`
   prints `…:0.12 None`.
-- [ ] **Step 4: Suites.** `python3 -m pytest -q -p no:cacheprovider` (expect ≥ 1,335 passed: 1,312 +
-  23); the live docker suite against the locally tagged `:0.12` (`python3 -m pytest -q -m live tests/test_docker_live.py`);
+- [ ] **Step 4: Suites.** `python3 -m pytest -q -p no:cacheprovider` (expect ≥ 1,602 passed: 1,579 + 23); the live docker suite against the locally tagged `:0.12` (`python3 -m pytest -q -m live tests/test_docker_live.py`);
   stop the sampler (`tools/soak_sampler.sh --stop`), fill the ledger's metrics, tok/s and RAM lines.
 - [ ] **Step 5: PR.** `gh pr create --base main --head issue-82-operator-contract` titled
   `0.12.0: the operator contract in the wheel — dirtywork contract, dirtywork init, --version (#82)`;
