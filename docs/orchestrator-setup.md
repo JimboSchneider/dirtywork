@@ -125,3 +125,15 @@ None of this is required, but it's what makes the setup stick for me.
   `~/.claude/skills/dirtywork/SKILL.md` exists, then start a fresh Claude Code
   session and ask it to delegate something.
 - Everything else: the [operating guide](operating.md).
+
+## Before 0.12.0
+
+Kept for the record. Until 0.12.0 there was no `dirtywork init` and no
+skill in the wheel. To get Claude Code driving dirtywork you had to write
+the instructions yourself — condense the operating guide and the machine
+contract into a user-level file (`~/.claude/CLAUDE.md`, or a hand-made
+`~/.claude/skills/dirtywork/SKILL.md`), keep it in step with each release by
+hand, and remember not to put it in the project's `CLAUDE.md`, where the
+worker would read it on every run. That is how I ran it for the first
+eleven releases, with the details living in one machine's memory. None of
+it is needed any more; `dirtywork init` is the product's copy of that file.
