@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How Do I Get Your Setup? · dirtywork</title>
+<meta name="description" content="Three of the four layers were public; the fourth lived in one machine's memory. dirtywork 0.12.0 ships the operator contract in the wheel — dirtywork contract, dirtywork init — and this is the build record.">
+<link rel="canonical" href="https://dirtywork.run/how-do-i-get-your-setup.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="How Do I Get Your Setup?">
+<meta property="og:description" content="Three of the four layers were public; the fourth lived in one machine's memory. dirtywork 0.12.0 ships the operator contract in the wheel — dirtywork contract, dirtywork init — and this is the build record.">
+<meta property="og:url" content="https://dirtywork.run/how-do-i-get-your-setup.html">
+<meta property="og:image" content="https://dirtywork.run/assets/dirtywork-system.png">
+<meta property="og:image:alt" content="dirtywork’s division of labor: frontier architecture, local execution, and review before merge.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="How Do I Get Your Setup?">
+<meta name="twitter:description" content="Three of the four layers were public; the fourth lived in one machine's memory. dirtywork 0.12.0 ships the operator contract in the wheel — dirtywork contract, dirtywork init — and this is the build record.">
+<meta name="twitter:image" content="https://dirtywork.run/assets/dirtywork-system.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "headline": "How Do I Get Your Setup?",
+  "description": "Three of the four layers were public; the fourth lived in one machine's memory. dirtywork 0.12.0 ships the operator contract in the wheel — dirtywork contract, dirtywork init — and this is the build record.",
+  "datePublished": "2026-08-27",
+  "dateModified": "2026-08-27",
+  "url": "https://dirtywork.run/how-do-i-get-your-setup.html",
+  "image": "https://dirtywork.run/assets/dirtywork-system.png",
+  "author": { "@type": "Organization", "name": "Dirt Simple Solutions" },
+  "publisher": { "@type": "Organization", "name": "Dirt Simple Solutions" }
+}
+</script>
+<style>
+  :root {
+    --bg: #F7F8F6;
+    --bg-raise: #FFFFFF;
+    --bg-inset: #EEF1ED;
+    --ink: #1B221D;
+    --ink-soft: #4A544D;
+    --ink-faint: #657069;
+    --line: #D9DFDA;
+    --local: #0E7A4E;
+    --frontier: #A66A1E;
+    --code-bg: #10150F;
+    --code-ink: #D6E2D6;
+    --code-dim: #7C8A7D;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111611; --bg-raise: #171D17; --bg-inset: #1C231C;
+      --ink: #E4EAE4; --ink-soft: #A7B2A8; --ink-faint: #828E84;
+      --line: #2A322A; --local: #4EC58C; --frontier: #D9A468;
+      --code-bg: #0B0F0B; --code-ink: #CFDCCF; --code-dim: #6E7B6F;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Charter", "Iowan Old Style", Georgia, "Times New Roman", serif;
+    font-size: 1.0625rem; line-height: 1.65;
+  }
+  .wrap { max-width: 46rem; margin: 0 auto; padding: 0 1.25rem 6rem; }
+  .display, h1, h2, h3 { font-family: "Avenir Next", "Avenir", "Segoe UI", "Helvetica Neue", sans-serif; }
+  .mono, code, pre { font-family: ui-monospace, "SF Mono", "Menlo", "Cascadia Mono", monospace; }
+  header { padding: 4.5rem 0 2.4rem; }
+  .eyebrow { color: var(--local); font-family: ui-monospace, "SF Mono", monospace; font-size: .72rem; letter-spacing: .14em; text-transform: uppercase; margin: 0 0 1.1rem; }
+  h1 { font-size: clamp(2.2rem, 6vw, 3.4rem); font-weight: 700; line-height: 1.06; letter-spacing: -.02em; margin: 0 0 1.25rem; text-wrap: balance; }
+  .standfirst { color: var(--ink-soft); font-size: 1.2rem; line-height: 1.55; max-width: 40rem; margin: 0; }
+  .standfirst strong { color: var(--ink); }
+  section { margin-top: 3.5rem; }
+  h2 { border-top: 1px solid var(--line); font-size: 1.5rem; font-weight: 600; line-height: 1.2; margin: 0 0 1.2rem; padding-top: 1.5rem; text-wrap: balance; }
+  h3 { font-size: 1.08rem; margin: 2rem 0 .6rem; }
+  p { margin: 1rem 0; }
+  a { color: var(--local); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--local); outline-offset: 2px; border-radius: 2px; }
+  ul { margin: 1rem 0; padding-left: 1.4rem; }
+  li { margin: .45rem 0; }
+  blockquote { border-left: 3px solid var(--frontier); color: var(--ink); font-size: 1.22rem; margin: 1.8rem 0; padding: .1rem 0 .1rem 1.2rem; }
+  blockquote p { margin: .45rem 0; }
+  pre { background: var(--code-bg); border-radius: 9px; color: var(--code-ink); font-size: .86rem; line-height: 1.65; overflow-x: auto; padding: 1.15rem 1.25rem; }
+  code { font-size: .88em; }
+  table { border-collapse: collapse; display: block; margin: 1.4rem 0; overflow-x: auto; width: 100%; }
+  th, td { border-bottom: 1px solid var(--line); padding: .7rem .85rem; text-align: left; vertical-align: top; }
+  th { color: var(--ink-faint); font-family: ui-monospace, "SF Mono", monospace; font-size: .75rem; letter-spacing: .08em; text-transform: uppercase; }
+  figure { margin: 2.4rem -3.5rem 2.8rem; }
+  figure img { background: var(--bg-raise); border: 1px solid var(--line); border-radius: 12px; display: block; height: auto; width: 100%; }
+  figcaption { color: var(--ink-faint); font-size: .82rem; margin: .7rem .2rem 0; text-align: center; }
+  .closing { border-top: 1px solid var(--line); color: var(--ink-soft); margin-top: 3.5rem; padding-top: 1.3rem; }
+  .footnote { color: var(--ink-faint); font-size: .9rem; margin-top: 2.5rem; }
+  @media (max-width: 760px) { figure { margin-left: 0; margin-right: 0; } }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header>
+    <p class="eyebrow">Build record · 2026-08-27</p>
+    <h1>How Do I Get Your Setup?</h1>
+    <p class="standfirst">This morning I asked Claude how someone else gets the setup I have. Three of the four layers were already public. <strong>dirtywork 0.12.0 ships the fourth, and this is the build record.</strong></p>
+  </header>
+
+  <p>This morning I asked Claude a question I should have been able to answer already: how does someone else get the setup I have? Claude Code doing the thinking, a local model doing the typing, the harness in between. I've been running it that way for weeks. I build dirtywork with it.</p>
+  <p>The honest answer had four layers, and three of them were fine. LM Studio and Docker: in the README. dirtywork itself: <code>pipx install</code>. The loop — brief, run, review, resume, verdict: in the operating guide and the machine contract. The fourth layer was the instructions to the orchestrator. How to write a brief a small model can execute. That stdout is one JSON object and stderr is everything else. What exit 1 means (kept for review) versus exit 2 (nothing was created). That the worker can't install anything in the default, offline docker mode (<code>--allow-network</code> is the deliberate exception). That a resume mints a new slug. Where to put your verdict.</p>
+  <p>Those lived in two places: my head, and the auto-memory of one Claude Code install on one machine. Nothing in the wheel. Someone who installed dirtywork and opened Claude Code got a tool Claude had never heard of.</p>
+  <p>That's not a 1.0.</p>
+
+  <section>
+    <h2>Where the instructions couldn't go</h2>
+    <p>The obvious fix was the wrong one, and it took the spec's first review to see why. Every Claude Code user has a <code>CLAUDE.md</code>. Append the orchestrator instructions there — done.</p>
+    <p>Except dirtywork reads the target repo's <code>CLAUDE.md</code> and <code>AGENTS.md</code> at the base commit and injects them into the <em>worker's</em> system prompt. That's a feature: your project conventions reach the local model without you repeating them in every brief. It also means anything you write there is handed to the worker on every run. Orchestrator instructions in <code>CLAUDE.md</code> would tell the local model how to review its own work and record a verdict on itself. Not a security hole, exactly. Just the two roles, briefed as one.</p>
+    <p>So the instructions had to live somewhere the harness doesn't read. Claude Code has a place for that: a <em>skill</em> — a <code>SKILL.md</code> under <code>~/.claude/skills/</code> or the project's <code>.claude/skills/</code>, picked up on its own when a task looks like the description. The spec was verified against the Claude Code docs the day it was written: those two paths, one required frontmatter field, and no mechanism for an installed CLI to register instructions without writing a file. A subcommand that writes the file is the sanctioned path.</p>
+  </section>
+
+  <section>
+    <h2>What 0.12.0 ships</h2>
+    <p>Three additions, one moved file.</p>
+    <p><strong><code>dirtywork contract</code></strong> prints the machine contract for the version you installed — every flag, the stdout schema, exit codes, transcript events. The file moved out of <code>docs/</code> and into the package so that's possible; the old path is a stub pointing at the new one. The skill's first instruction is to run this before the first <code>run</code> of a session and not guess flags.</p>
+    <p><strong><code>dirtywork init</code></strong> writes the skill. <code>dirtywork init --repo .</code> puts one copy in your home and one in the project; commit the project copy and every clone gets a Claude that already knows how to drive. The file carries a stamp — version and a hash of its own contents — so <code>init</code> after an upgrade refreshes a copy you haven't touched, leaves a current one alone, and refuses to overwrite one you edited unless you say <code>--force</code>. It says which, one line per file. <code>--stdout</code> prints the rendered text for any other agent.</p>
+    <p><strong><code>dirtywork --version</code></strong> exists now. It didn't. The version was only ever emitted inside the run JSON, and the skill's first prerequisite check needed it.</p>
+    <p>The skill itself is 127 lines and project-neutral: no paths, no image names, no model beyond <code>--model &lt;model&gt;</code>. It says: check the prerequisites; read the contract; one run, one task; name the files and the tests; stdout is JSON, parse it; review the diff before the transcript; two resumes without convergence means the brief was wrong; record a verdict; never merge unreviewed. Its first paragraph is addressed to the worker, because a committed project copy is a file in the tree like any other and a worker exploring the repo can read it. The paragraph says: this is for the orchestrator that launched you; ignore it. That's a polite request, not a wall. Hiding <code>.claude/</code> from the worker for real is its own design, filed as <a href="https://github.com/JimboSchneider/dirtywork/issues/84">#84</a>.</p>
+    <p>There's a guide on the site now — <a href="orchestrator-setup.html">Set Up Claude Code as Your dirtywork Orchestrator</a> — from LM Studio to the first delegated task. It ends with the manual process, kept for the record.</p>
+  </section>
+
+  <section>
+    <h2>The build</h2>
+    <p>Same rule as the last few releases: dirtywork builds dirtywork. The released 0.11.1, from PyPI, drove qwen3-coder-next on LM Studio inside the Docker sandbox against this checkout. Claude wrote the spec, the plan and the briefs, reviewed every run, and wrote the docs. I approved the merge and cut the release. Every run is a row in the ledger.</p>
+    <p>The plan had eight tasks. Four were worker tasks; four were Claude's — the move, the docs, acceptance. The worker's four, plus the follow-up run that repaired my brief — the last row; more on it below:</p>
+    <table>
+      <tr><th>Task</th><th>Turns</th><th>Wall</th><th>Prompt / completion tokens</th><th>Verify</th><th>Result</th></tr>
+      <tr><td>W1 — <code>contract</code>, <code>--version</code>, the render, 7 tests</td><td>25</td><td>211 s</td><td>280,950 / 3,896</td><td>pass, round 1</td><td>exact to brief</td></tr>
+      <tr><td>W2a — <code>init</code>: destinations, decision table, atomic write, 12 tests</td><td>16</td><td>172 s</td><td>181,570 / 4,175</td><td>pass, round 1</td><td>verbatim</td></tr>
+      <tr><td>W2b — 5 edge tests + the worker-prompt injection test</td><td>23</td><td>225 s</td><td>296,456 / 2,774</td><td>pass, round 1</td><td>verbatim, tests only</td></tr>
+      <tr><td>W3 — 0.12.0, the <code>:0.12</code> image cycle, a <code>wheel-smoke</code> CI job</td><td>12</td><td>168 s</td><td>171,489 / 3,106</td><td>pass, round 1</td><td>five files, as briefed</td></tr>
+      <tr><td>W3-fix — three YAML lines</td><td>4</td><td>63 s</td><td>20,563 / 375</td><td>pass, round 1</td><td>verbatim</td></tr>
+    </table>
+    <p>Five runs, five first-try completions, zero resumes, zero second verify rounds. Eighty turns, fourteen minutes of worker wall clock, about 951,000 prompt tokens and 14,000 completion tokens, $0. The second session's four runs went from the first launch (09:05) to pull request #86 with its ledger row (09:34) in twenty-nine minutes, including review. About a third of the worker's wall clock — fifty-two seconds of every run, and most of the short ones — is the test suite running inside the container, which is the price of <code>--verify</code> and worth every second of it. The suite went from 1,579 tests to 1,603.</p>
+    <p>"Verbatim" in that table is checked, not felt. After each run Claude ran the plan's shell checks and then a stricter one: every line the worker added has to appear in the brief. It did, all five times. On issue #61 the local model inverted a rule and wrote the test to match; that's why the check exists.</p>
+  </section>
+
+  <section>
+    <h2>The defect was mine</h2>
+    <p>The fifth row is the one I want on the record.</p>
+    <p>W3's brief included the new CI job, written out in full so the worker could copy it. One of its steps was:</p>
+<pre><code>- run: smoke/bin/dirtywork init --stdout &gt; skill.md &amp;&amp; grep -q '^name: dirtywork' skill.md</code></pre>
+    <p>That is not YAML. A plain scalar can't contain a colon followed by a space — that's the mapping indicator — and <code>'^name: dirtywork'</code> has one. Single quotes don't help; they're just characters inside a plain scalar. The worker copied my line exactly, as briefed, and the plan's own review step — parse the workflow file with Ruby's Psych before integrating — refused it: <em>mapping values are not allowed in this context, line 120, column 76</em>. The main branch's copy parsed fine. Mine didn't.</p>
+    <p>The fix was three lines: <code>run: |</code> and the command on the next line. I could have typed it in nine seconds. The rule in this repo's <code>CLAUDE.md</code> says code changes go through dirtywork, and it doesn't have a clause for nine seconds. So a follow-up brief went out — the three replacements, one <code>apply_edits</code> call, touch nothing else — and came back in four turns and sixty-three seconds. The receipt says who introduced the bug, who caught it and who fixed it, and none of those is the model.</p>
+    <p>Review found one more thing, after the PR was open: the machine contract's three relative links to <code>operating.md</code> and <code>transcript-schema.md</code> worked when it lived in <code>docs/</code> and broke when it moved into the package. That was Claude's task, not the worker's, and Claude fixed it by hand — it's documentation, and the rule is about code. Absolute links now; the only kind that works in <code>dirtywork contract</code> output anyway.</p>
+  </section>
+
+  <section>
+    <h2>One line from a transcript</h2>
+    <p>W2a's last tool call, inside the sandbox, after it had smoke-tested its own <code>init</code> implementation by running it against the container's home directory:</p>
+<pre><code>rm -rf ~/.claude</code></pre>
+    <p>Harmless. The container's <code>~</code> lives on the run's own volume, which <code>runs clean</code> deletes. But read it again with the sandbox off — <code>--sandbox none</code>, on your host — and that's your Claude Code configuration gone, because a local model was tidying up after a unit test. The worker did nothing wrong. It cleaned up its mess, which is what the brief asked. That's the argument for the default being a container, made by the model, in one line, on the record.</p>
+  </section>
+
+  <section>
+    <h2>Also in 0.12.0</h2>
+    <p><strong>Marker-polluted tool names are recovered (#67).</strong> Devstral sometimes puts its <code>[TOOL_CALLS]</code> token inside the tool <em>name</em> — prose, the marker, then <code>bash</code>. Two releases counted each as an unknown tool and aborted after three, after the file was already written. Now the harness finds the tool after the last marker, dispatches the call, and nudges the model once per turn. On the six Devstral rows that used to abort, none abort. That one was built the same way, last night, and merged before this build started.</p>
+    <p><strong>The <code>:0.12</code> worker image.</strong> Same Dockerfile as <code>:0.11</code>, published by this release, unpinned on first publish; 0.12.1, cut the same afternoon, pins it, as 0.11.1 did.</p>
+    <p><strong>The repo's <code>CLAUDE.md</code> now says the dogfood rule out loud</strong> (#81), which is why the nine-second fix above went through a run.</p>
+  </section>
+
+  <section>
+    <h2>Try it, and what's next</h2>
+<pre><code>pipx install dirtywork
+cd ~/repos/yourproject
+dirtywork init --repo .</code></pre>
+    <p>Then open Claude Code there and ask it to delegate something small. It will run <code>dirtywork contract</code> before it runs anything else. I checked: a fresh Claude Code session in a throwaway repo, asked to delegate a task, named the skill, said where it found it, and gave <code>dirtywork contract</code> as its first command, quoting "do not guess flags" back at me.</p>
+    <p>Next is the same thing for orchestrators that aren't Claude — Codex, Gemini CLI, Cursor. The skill body is already agent-neutral; what's Claude-shaped is the frontmatter and the install path. The catch is the one from the top of this post: Codex's native instruction file is <code>AGENTS.md</code>, which is exactly the file dirtywork hands to the worker. So each target needs a location the harness doesn't read, verified against that tool's current docs, not from memory. That's <a href="https://github.com/JimboSchneider/dirtywork/issues/87">#87</a>, and it's 0.13.0.</p>
+  </section>
+
+  <p class="footnote">Claude (Fable 5) wrote the plan and its worker briefs, ran and reviewed every run, wrote the guide and the docs, and drafted this post from the session record. The local model (qwen3-coder-next via LM Studio) did the typing inside the released dirtywork 0.11.1. Jim asked the question, chose the approach, reviewed the spec, asked for the guide to be rewritten for humans, approved the merge and cut the release. Same process as the earlier posts.</p>
+</main>
+</body>
+</html>
