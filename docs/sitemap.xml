@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url><loc>https://dirtywork.run/</loc><lastmod>2026-08-18</lastmod></url>
+  <url><loc>https://dirtywork.run/</loc><lastmod>2026-08-27</lastmod></url>
+  <url><loc>https://dirtywork.run/orchestrator-setup.html</loc><lastmod>2026-08-27</lastmod></url>
   <url><loc>https://dirtywork.run/ollama-claude-desktop.html</loc><lastmod>2026-08-26</lastmod></url>
   <url><loc>https://dirtywork.run/nothing-changed.html</loc><lastmod>2026-08-26</lastmod></url>
   <url><loc>https://dirtywork.run/you-dont-need-a-chainsaw.html</loc><lastmod>2026-08-24</lastmod></url>

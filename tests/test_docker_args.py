@@ -19,10 +19,10 @@ from dirtywork.sandbox.docker_args import (
 
 
 def test_default_image_and_pinned_digest():
-    assert DEFAULT_IMAGE == "ghcr.io/jimboschneider/dirtywork-worker:0.11"
-    # Pinned in 0.11.1: the multi-arch index digest of the :0.11 image the
-    # v0.11.0 release published, resolved and cross-checked per docker/README.
-    assert PINNED_DIGEST == "sha256:4e3c032e984a12fcb897159780dc7963d3887184354fcaf421d6164ece97562e"
+    assert DEFAULT_IMAGE == "ghcr.io/jimboschneider/dirtywork-worker:0.12"
+    # 0.12.0 is the first release of the minor: unpinned until 0.12.1 pins the
+    # published :0.12 digest per docker/README.
+    assert PINNED_DIGEST is None
 
 
 def test_path_env_is_standard_unix_path():

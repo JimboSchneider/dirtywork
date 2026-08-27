@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Set Up Claude Code as Your dirtywork Orchestrator · dirtywork</title>
+<meta name="description" content="Claude does the thinking, a local model does the typing, you merge what survives. LM Studio, Docker, pipx and dirtywork init — the setup I use to build dirtywork itself.">
+<link rel="canonical" href="https://dirtywork.run/orchestrator-setup.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Set Up Claude Code as Your dirtywork Orchestrator">
+<meta property="og:description" content="Claude does the thinking, a local model does the typing, you merge what survives. LM Studio, Docker, pipx and dirtywork init — the setup I use to build dirtywork itself.">
+<meta property="og:url" content="https://dirtywork.run/orchestrator-setup.html">
+<meta property="og:image" content="https://dirtywork.run/assets/dirtywork-system.png">
+<meta property="og:image:alt" content="dirtywork's division of labor: frontier architecture, local execution, and review before merge.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Set Up Claude Code as Your dirtywork Orchestrator">
+<meta name="twitter:description" content="Claude does the thinking, a local model does the typing, you merge what survives. LM Studio, Docker, pipx and dirtywork init — the setup I use to build dirtywork itself.">
+<meta name="twitter:image" content="https://dirtywork.run/assets/dirtywork-system.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Set Up Claude Code as Your dirtywork Orchestrator",
+  "description": "Claude does the thinking, a local model does the typing, you merge what survives. LM Studio, Docker, pipx and dirtywork init — the setup I use to build dirtywork itself.",
+  "datePublished": "2026-08-27",
+  "dateModified": "2026-08-27",
+  "url": "https://dirtywork.run/orchestrator-setup.html",
+  "image": "https://dirtywork.run/assets/dirtywork-system.png",
+  "author": { "@type": "Organization", "name": "Dirt Simple Solutions" },
+  "publisher": { "@type": "Organization", "name": "Dirt Simple Solutions" }
+}
+</script>
+<style>
+  :root {
+    --bg: #F7F8F6;
+    --bg-raise: #FFFFFF;
+    --bg-inset: #EEF1ED;
+    --ink: #1B221D;
+    --ink-soft: #4A544D;
+    --ink-faint: #657069;
+    --line: #D9DFDA;
+    --local: #0E7A4E;
+    --frontier: #A66A1E;
+    --code-bg: #10150F;
+    --code-ink: #D6E2D6;
+    --code-dim: #7C8A7D;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111611; --bg-raise: #171D17; --bg-inset: #1C231C;
+      --ink: #E4EAE4; --ink-soft: #A7B2A8; --ink-faint: #828E84;
+      --line: #2A322A; --local: #4EC58C; --frontier: #D9A468;
+      --code-bg: #0B0F0B; --code-ink: #CFDCCF; --code-dim: #6E7B6F;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Charter", "Iowan Old Style", Georgia, "Times New Roman", serif;
+    font-size: 1.0625rem; line-height: 1.65;
+  }
+  .wrap { max-width: 46rem; margin: 0 auto; padding: 0 1.25rem 6rem; }
+  .display, h1, h2, h3 { font-family: "Avenir Next", "Avenir", "Segoe UI", "Helvetica Neue", sans-serif; }
+  .mono, code, pre { font-family: ui-monospace, "SF Mono", "Menlo", "Cascadia Mono", monospace; }
+  header { padding: 4.5rem 0 2.4rem; }
+  .eyebrow { color: var(--local); font-family: ui-monospace, "SF Mono", monospace; font-size: .72rem; letter-spacing: .14em; text-transform: uppercase; margin: 0 0 1.1rem; }
+  h1 { font-size: clamp(2.2rem, 6vw, 3.4rem); font-weight: 700; line-height: 1.06; letter-spacing: -.02em; margin: 0 0 1.25rem; text-wrap: balance; }
+  .standfirst { color: var(--ink-soft); font-size: 1.2rem; line-height: 1.55; max-width: 40rem; margin: 0; }
+  .standfirst strong { color: var(--ink); }
+  section { margin-top: 3.5rem; }
+  h2 { border-top: 1px solid var(--line); font-size: 1.5rem; font-weight: 600; line-height: 1.2; margin: 0 0 1.2rem; padding-top: 1.5rem; text-wrap: balance; }
+  h3 { font-size: 1.08rem; margin: 2rem 0 .6rem; }
+  p { margin: 1rem 0; }
+  a { color: var(--local); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--local); outline-offset: 2px; border-radius: 2px; }
+  ul { margin: 1rem 0; padding-left: 1.4rem; }
+  li { margin: .45rem 0; }
+  blockquote { border-left: 3px solid var(--frontier); color: var(--ink); font-size: 1.22rem; margin: 1.8rem 0; padding: .1rem 0 .1rem 1.2rem; }
+  blockquote p { margin: .45rem 0; }
+  pre { background: var(--code-bg); border-radius: 9px; color: var(--code-ink); font-size: .86rem; line-height: 1.65; overflow-x: auto; padding: 1.15rem 1.25rem; }
+  code { font-size: .88em; }
+  table { border-collapse: collapse; display: block; margin: 1.4rem 0; overflow-x: auto; width: 100%; }
+  th, td { border-bottom: 1px solid var(--line); padding: .7rem .85rem; text-align: left; vertical-align: top; }
+  th { color: var(--ink-faint); font-family: ui-monospace, "SF Mono", monospace; font-size: .75rem; letter-spacing: .08em; text-transform: uppercase; }
+  figure { margin: 2.4rem -3.5rem 2.8rem; }
+  figure img { background: var(--bg-raise); border: 1px solid var(--line); border-radius: 12px; display: block; height: auto; width: 100%; }
+  figcaption { color: var(--ink-faint); font-size: .82rem; margin: .7rem .2rem 0; text-align: center; }
+  .closing { border-top: 1px solid var(--line); color: var(--ink-soft); margin-top: 3.5rem; padding-top: 1.3rem; }
+  .footnote { color: var(--ink-faint); font-size: .9rem; margin-top: 2.5rem; }
+  @media (max-width: 760px) { figure { margin-left: 0; margin-right: 0; } }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header>
+    <p class="eyebrow">Guide · 2026-08-27</p>
+    <h1>Set Up Claude Code as Your dirtywork Orchestrator</h1>
+    <p class="standfirst">Claude does the thinking, a local model does the typing, you merge what survives. A few minutes to set up — the same setup I use to build dirtywork itself.</p>
+  </header>
+
+  <p>Here is the idea in one breath: Claude Code does the thinking — picks the task, writes the brief, reviews the result — and a local model on your own machine does the typing, inside a sandbox, for free. You review the diff and merge what survives. This page gets you there.</p>
+  <p>You need dirtywork 0.12.0 or later. Not counting the model download, the whole thing takes a few minutes.</p>
+
+  <section>
+    <h2>You need three things</h2>
+    <p><strong>A local model.</strong> Install <a href="https://lmstudio.ai">LM Studio</a>, download a model that can call tools, load it, and start LM Studio's local server (it listens on port 1234 by default). I use <code>qwen/qwen3-coder-next</code>; <code>mistralai/devstral-small-2-2512</code> is the other one I test with. Load one model with as much context as your machine can hold rather than two small ones — the difference is measured in <a href="https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md#sizing-the-context-window">the operating guide</a>.</p>
+    <p><strong>Docker.</strong> Docker Desktop or <code>dockerd</code>, running. That is where the worker lives: no network, no access to your home directory, just the repo. The worker image downloads itself the first time you run.</p>
+    <p><strong>dirtywork.</strong></p>
+<pre><code>pipx install dirtywork
+dirtywork --version</code></pre>
+    <p>If the second line says <code>command not found</code>, run <code>pipx ensurepath</code> and open a new terminal.</p>
+    <p>Quick check that all three are awake:</p>
+<pre><code>curl -s http://localhost:1234/v1/models
+docker info
+dirtywork --version</code></pre>
+  </section>
+
+  <section>
+    <h2>Teach Claude the loop</h2>
+    <p>Go to a project and run:</p>
+<pre><code>cd ~/repos/yourproject
+dirtywork init --repo .</code></pre>
+    <p>You'll see two lines:</p>
+<pre><code>wrote: /Users/you/.claude/skills/dirtywork/SKILL.md
+wrote: /Users/you/repos/yourproject/.claude/skills/dirtywork/SKILL.md</code></pre>
+    <p>That file is a Claude Code <em>skill</em> — a short set of instructions Claude picks up on its own when a task looks like "hand this to dirtywork". The home copy follows you into every project; the project copy travels with the repo. Commit the project copy, and everyone who clones the repo gets a Claude that already knows how to drive.</p>
+    <p>The skill tells Claude to check that LM Studio and Docker are up, read <code>dirtywork contract</code> (the full flag reference for the version you installed) instead of guessing, write a brief that names files and tests, run, read the result, review the diff, send the worker back with feedback if it's close, and record a verdict. It's project-neutral — no paths, no model names, nothing about my machine.</p>
+    <p>One thing to know about where instructions go: your project's <code>CLAUDE.md</code> (or <code>AGENTS.md</code>) is handed to the <em>worker</em> at the start of every run so it inherits your conventions. That's the place for "we use pytest, four-space indents, no new dependencies" — not for orchestrator instructions. Leave the driving to the skill.</p>
+  </section>
+
+  <section>
+    <h2>Try it</h2>
+    <p>Open Claude Code in the repo and ask for something small:</p>
+    <blockquote><p>Use dirtywork to add a unit test for <code>parse_duration</code> in <code>tests/test_config.py</code>.</p></blockquote>
+    <p>Here is what should happen. Claude checks the prerequisites, writes a brief that names the file and the test, and calls <code>dirtywork run</code>. You'll see a transcript path on the terminal; <code>tail -f</code> it if you want to watch the local model work. A few minutes later Claude reads the result, looks at the diff, runs your tests, and either sends the worker back with a note ("the test doesn't cover the negative case") or tells you it's done and there's a <code>dirtywork/&lt;slug&gt;</code> branch to look at.</p>
+    <p>Then you do the part that doesn't change: read the diff like it came from a contributor, and merge only what you'd merge from a person. Every run leaves a transcript and a verdict; <code>dirtywork runs list</code> shows them all.</p>
+  </section>
+
+  <section>
+    <h2>How I use it</h2>
+    <p>None of this is required, but it's what makes the setup stick for me.</p>
+    <ul>
+      <li>dirtywork's own <a href="https://github.com/JimboSchneider/dirtywork/blob/main/CLAUDE.md"><code>CLAUDE.md</code></a> says every code change is made by running the released dirtywork against the checkout, with Claude as planner and reviewer, never implementer. The worker sees that rule, which is fine — it's project policy. The mechanics stay in the skill.</li>
+      <li>I spend the frontier model's tokens on the spec, the plan and the review. The briefs go into the plan word for word before a single run starts, so a cheaper session can execute them later.</li>
+      <li>I keep receipts: turns, wall time, tokens per second, whether the tests passed, one row per run. That's where the numbers in the <a href="https://dirtywork.run">essays</a> come from.</li>
+      <li>Independent briefs run at the same time. LM Studio serves several requests per loaded model. Two tasks in one brief is the mistake I keep making anyway.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Good to know</h2>
+    <ul>
+      <li><strong>Upgrades.</strong> After <code>pipx upgrade dirtywork</code>, run <code>dirtywork init</code> again. It refreshes a copy you haven't touched, leaves a current one alone, and won't overwrite one you edited unless you pass <code>--force</code>. It tells you which happened, one line per file.</li>
+      <li><strong>Other agents.</strong> <code>dirtywork init --stdout</code> prints the skill without writing anything. Together with <code>dirtywork contract</code>, anything that can run a shell command has what Claude has.</li>
+      <li><strong>The worker can't install things.</strong> The sandbox is offline by design. If your tests need a tool the image lacks — pytest, say — build a derived image once (a five-line Dockerfile in the <a href="https://github.com/JimboSchneider/dirtywork/blob/main/docker/README.md#derived-images-extra-packages">worker image guide</a>) and pass it with <code>--image</code>.</li>
+      <li><strong>The project skill is a file in the repo</strong>, so a worker can read it like any other file. Its first paragraph tells a worker to ignore it. That's a polite request, not a wall; hiding <code>.claude/</code> from the worker for real is <a href="https://github.com/JimboSchneider/dirtywork/issues/84">#84</a>.</li>
+      <li><strong>Claude doesn't seem to know about dirtywork.</strong> Check that <code>~/.claude/skills/dirtywork/SKILL.md</code> exists, then start a fresh Claude Code session and ask it to delegate something.</li>
+      <li>Everything else: the <a href="https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md">operating guide</a>.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Before 0.12.0</h2>
+    <p>Kept for the record. Until 0.12.0 there was no <code>dirtywork init</code> and no skill in the wheel. To get Claude Code driving dirtywork you had to write the instructions yourself — condense the operating guide and the machine contract into a user-level file (<code>~/.claude/CLAUDE.md</code>, or a hand-made <code>~/.claude/skills/dirtywork/SKILL.md</code>), keep it in step with each release by hand, and remember not to put it in the project's <code>CLAUDE.md</code>, where the worker would read it on every run. That is how I ran it for the first eleven releases, with the details living in one machine's memory. None of it is needed any more; <code>dirtywork init</code> is the product's copy of that file.</p>
+  </section>
+
+  <p class="footnote">Written with Claude (Fable 5) from the #82 design and my own setup. The same text lives in the repo as <a href="https://github.com/JimboSchneider/dirtywork/blob/main/docs/orchestrator-setup.md">docs/orchestrator-setup.md</a>.</p>
+</main>
+</body>
+</html>

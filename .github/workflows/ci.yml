@@ -86,7 +86,7 @@ jobs:
         with:
           context: docker/
           load: true
-          tags: ghcr.io/jimboschneider/dirtywork-worker:0.11
+          tags: ghcr.io/jimboschneider/dirtywork-worker:0.12
           cache-from: type=gha
           # ignore-error: fork PRs may not have write access to the cache scope.
           cache-to: type=gha,mode=max,ignore-error=true
@@ -101,11 +101,33 @@ jobs:
           vols=$(docker volume ls -q --filter label=dirtywork.repo)
           [ -n "$vols" ] && docker volume rm $vols || true
 
+  wheel-smoke:
+    # The only check that catches a missing package-data entry: the unit suite
+    # runs from the source tree and would pass without it.
+    name: wheel smoke (build, install, contract, init, --version)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build
+      - run: python -m build
+      - run: python -m venv smoke && smoke/bin/pip install dist/*.whl
+      # Each output goes to a file and is asserted with grep -q: a pipe's exit
+      # status is its last command's, so a crash upstream would be masked.
+      - run: |
+          smoke/bin/dirtywork contract > contract.md && grep -q '^# Machine contract' contract.md
+      - run: |
+          smoke/bin/dirtywork init --stdout > skill.md && grep -q '^name: dirtywork' skill.md && grep -q 'dirtywork-skill v' skill.md
+      - run: |
+          smoke/bin/dirtywork --version > version.txt && grep -q '^dirtywork ' version.txt
+
   gate:
     # Single stable name for branch protection to require, regardless of
     # how the matrix above evolves. This is also the release gate: it now
     # requires docker-live, not just the FakeDocker-only unit suite.
-    needs: [test, docker-live]
+    needs: [test, docker-live, wheel-smoke]
     runs-on: ubuntu-latest
     steps:
       - run: echo "all matrix legs green"

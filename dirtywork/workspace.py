@@ -205,7 +205,7 @@ def host_diff_stat(worktree: Path, base_commit: str, cap: int = 64_000) -> str:
     means unstaged, staged, AND committed changes to TRACKED files all show
     up, since the model is allowed to `git add`/`git commit` in the worktree.
     A brand-new file the model wrote but never `git add`ed is still invisible
-    here (documented in docs/machine-contract.md)."""
+    here (documented in dirtywork/contract/machine-contract.md)."""
     res = _git(worktree, "diff", "--stat", base_commit)
     if res.returncode != 0:
         return f"[diff --stat failed: {res.stderr.strip()[:500]}]"

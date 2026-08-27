@@ -274,7 +274,7 @@ run-level fields that are known even when the agent loop never started).
 
 `schema_version: 2` also appears in the CLI's single stdout JSON object
 (`dirtywork run`'s machine contract — see
-[docs/machine-contract.md](machine-contract.md)). Its fields: `schema_version`, `status`, `worktree`, `branch`,
+[the machine contract](https://github.com/JimboSchneider/dirtywork/blob/main/dirtywork/contract/machine-contract.md)). Its fields: `schema_version`, `status`, `worktree`, `branch`,
 `transcript`, `turns`, `usage`, `final_message`, `run_dir`, `provider`,
 `base_commit`, `resumed_from`, `finalize_error`, `watchdog_violation`,
 `watchdog_violation_kind`, `stuck_on`, `files_changed`,
@@ -347,7 +347,7 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `truncations` | end | 1.0 (#65): turns that produced a truncation message; `0` when none did |
 | `changed` | end | 1.0 (#66): whether the worktree fingerprint changed between run start and the run's newest measurement; null when the guard could not measure |
 | `changed_reason` | end | 1.0 (#66): why the newest measurement failed, only when `changed` is null for that reason (absent otherwise) |
-| `allow_commit` | start | (bool) records whether the run's system prompt told the worker to commit as it went (`--allow-commit`, host mode only — see [docs/machine-contract.md](machine-contract.md)). A run that predates the flag has no such key. |
+| `allow_commit` | start | (bool) records whether the run's system prompt told the worker to commit as it went (`--allow-commit`, host mode only — see [the machine contract](https://github.com/JimboSchneider/dirtywork/blob/main/dirtywork/contract/machine-contract.md)). A run that predates the flag has no such key. |
 | `verdict` | verdict | written by `dirtywork runs verdict`: `"accept"` \| `"reject"` \| `"cleanup"` |
 | `note` | verdict | `--note` text, or null |
 | `verdict_at` | verdict | UTC ISO-8601 |

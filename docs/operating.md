@@ -17,7 +17,7 @@ Day-to-day usage once dirtywork is installed: running a task, reviewing and resu
   > **The worker cannot install dependencies in docker mode** (`--network none`,
   > no host directories mounted); it can only run what the image ships — git,
   > bash, coreutils, findutils, python3, node/npm, the .NET SDKs (8.0 and 10.0
-  > from the `:0.11` image; the old `:0.10` image had 8.0 only), ripgrep, jq,
+  > since the `:0.11` image; the old `:0.10` image had 8.0 only), ripgrep, jq,
   > uuid-runtime, shellcheck and curl. Always run the repo's own gate yourself
   > on the exported worktree, or pass it as [`--verify`](#verifying-a-run). For
   > a Node repo whose gate needs `node_modules`, symlink your own into the
@@ -25,13 +25,13 @@ Day-to-day usage once dirtywork is installed: running a task, reviewing and resu
   > gitignore pattern does **not** match a symlink, so a forgotten one shows up
   > as an untracked path. If the gate needs a tool the image lacks, build a
   > derived image (see the recipe next to `--image` in [Machine
-  > contract](machine-contract.md#machine-contract)).
+  > contract](https://github.com/JimboSchneider/dirtywork/blob/main/dirtywork/contract/machine-contract.md#machine-contract)).
 - **Clean up a run:** `dirtywork runs clean <slug>` — see
   [Inspecting, cleaning up and re-exporting runs](#inspecting-cleaning-up-and-re-exporting-runs)
   for the safety rules and the rest of the `runs` subcommands.
 
 - **All flags, stdout JSON, exit codes, transcript events:** see
-  [Machine contract](machine-contract.md#machine-contract).
+  [Machine contract](https://github.com/JimboSchneider/dirtywork/blob/main/dirtywork/contract/machine-contract.md#machine-contract).
 
 #### Editing files
 
@@ -370,6 +370,17 @@ without being cut.
   A run with a non-zero count paid the cache-miss tax on that many turns; a run
   with a large one wanted a bigger window or a smaller brief.
 
+## Setting up an orchestrator
+
+`dirtywork init` writes the Claude Code skill that teaches an agent to drive dirtywork to
+`~/.claude/skills/dirtywork/SKILL.md`; `--repo PATH` writes a project copy too (commit it so the
+whole team's Claude gets it); `--no-user` skips the home copy. The file is stamped, so re-running
+`init` after an upgrade refreshes an unmodified copy and leaves one you edited alone unless you pass
+`--force` (`skipped (locally modified)` and exit 1 tell you which). `dirtywork init --stdout` prints
+the skill for any other agent; `dirtywork contract` prints the machine contract — every flag, the
+stdout JSON, exit codes — for the installed version. The end-to-end walkthrough, from LM Studio
+to the first delegated task, is [Orchestrator setup](orchestrator-setup.md).
+
 ## Benchmarking
 
     dirtywork bench --models 'model[@provider][=base_url],...' \
@@ -475,12 +486,12 @@ are not part of the installed package.
   `--home-size` (and `--memory` alongside it — tmpfs writes are charged to
   the container's memory cgroup), or redirect the cache per command instead.
   See the `--tmp-size`/`--gitdir-size`/`--home-size` bullet in
-  [Machine contract](machine-contract.md#machine-contract).
+  [Machine contract](https://github.com/JimboSchneider/dirtywork/blob/main/dirtywork/contract/machine-contract.md#machine-contract).
 - **`File size limit exceeded` / exit 153 from any `dotnet` command on the
   old `:0.10` image** — a 0.10 defect, not a dirtywork bug: that image's
   .NET 8 runtime trips the sandbox's per-command file-size limit
   (`ulimit -f 524288`, 256 MiB) at startup with W^X enabled, the .NET
-  default. Use the `:0.11` image (the default since 0.11.0), or a derived
+  default. Use the `:0.12` image (the default since 0.12.0), or a derived
   image based on `:0.10` that adds `ENV DOTNET_EnableWriteXorExecute=0` — see
   [`docker/README.md`](../docker/README.md).
 - **`aborted after 3 consecutive unknown_tool failures` on Devstral, with tool names that end in `[TOOL_CALLS]bash`** — 0.10 counted each as an unknown tool. 1.0 (#67) recovers the call: the tool after the last marker runs with the arguments given, the transcript's `tool_result` shows `tool: bash` and the raw name in `tool_raw`, and the model is told once per turn (`nudge` kind `name_recovered`) to emit clean calls. If a name has a marker but no real tool after it, it is still an unknown-tool failure.
