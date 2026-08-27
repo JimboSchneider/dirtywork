@@ -107,7 +107,9 @@ None of this is required, but it's what makes the setup stick for me.
 ## Good to know
 
 - **Upgrades.** After `pipx upgrade dirtywork`, run `dirtywork init` again.
-  It refreshes a copy you haven't touched, leaves a current one alone, and
+  The upgrade replaces the wheel, not the skill file it wrote, so until you
+  do, Claude is driving the new release with the old release's instructions.
+  `init` refreshes a copy you haven't touched, leaves a current one alone, and
   won't overwrite one you edited unless you pass `--force`. It tells you
   which happened, one line per file.
 - **Other agents.** `dirtywork init --stdout` prints the skill without
