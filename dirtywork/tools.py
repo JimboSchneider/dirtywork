@@ -189,7 +189,7 @@ def _write_atomic(target: Path, data: bytes, *, path: str, verb: str = "write",
     caller that passes it.
 
     Two branches deliberately keep today's in-place, non-atomic behaviour and
-    are named in docs/machine-contract.md and docs/operating.md:
+    are named in dirtywork/contract/machine-contract.md and docs/operating.md:
       * `st_nlink > 1` -- a hardlink is MEANT to see the write, so the shared
         inode is written through rather than replaced;
       * a directory this process cannot create a temp in (0555) -- a rename is

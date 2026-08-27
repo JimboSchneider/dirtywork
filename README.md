@@ -32,7 +32,7 @@ macOS (Windows unsupported — see below).
 
 - **[Operating guide](https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md)** — running a task, resuming,
   reviewing, the `runs` subcommands, benchmarking, troubleshooting.
-- **[Machine contract](https://github.com/JimboSchneider/dirtywork/blob/main/docs/machine-contract.md)** — every flag, the stdout
+- **[Machine contract](https://github.com/JimboSchneider/dirtywork/blob/main/dirtywork/contract/machine-contract.md)** — every flag, the stdout
   JSON schema, exit codes, transcript events.
 - **[Security](https://github.com/JimboSchneider/dirtywork/blob/main/docs/security.md)** — the Docker containment model, known
   exposures, and `--sandbox none`'s host-mode caveats.
@@ -149,7 +149,7 @@ clone explicitly when testing unreleased changes.
 
 Everything else — resuming, the `runs` subcommands, benchmarking,
 troubleshooting: [docs/operating.md](https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md); every flag, the
-stdout JSON and exit codes: [docs/machine-contract.md](https://github.com/JimboSchneider/dirtywork/blob/main/docs/machine-contract.md).
+stdout JSON and exit codes: [the machine contract](https://github.com/JimboSchneider/dirtywork/blob/main/dirtywork/contract/machine-contract.md).
 
 ## How a run works
 

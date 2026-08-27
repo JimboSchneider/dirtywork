@@ -232,7 +232,7 @@ no per-command redirect once the cache is baked in this way.
 
 A live restore instead of a baked one needs `--allow-network` (docker
 mode's `--network none` default blocks NuGet/npm/pip) plus a `--home-size`
-large enough for it — see `docs/machine-contract.md`'s `--tmp-size` /
+large enough for it — see `dirtywork/contract/machine-contract.md`'s `--tmp-size` /
 `--gitdir-size` / `--home-size` bullet for the tmpfs caps, the default
 package-cache locations under `$HOME`, and why `HOME` can't be redirected
 once for a whole run (only per command).
@@ -250,7 +250,7 @@ This Dockerfile (SDK 8.0 + 10.0, `DOTNET_EnableWriteXorExecute=0`, the four
 .NET stray-process variables) was planned as the 1.0 image (#59) and shipped
 early as `:0.11` with the 0.11.0 release, following the same steps every new
 minor takes: `DEFAULT_IMAGE` bumped, the `:0.10` literals swept here, in
-`docs/machine-contract.md` and in `.github/workflows/ci.yml` (the live job
+`dirtywork/contract/machine-contract.md` and in `.github/workflows/ci.yml` (the live job
 tags its local build as the default image), `publish-image.yml` pushing the tag on the
 `v0.11.0` release with `PINNED_DIGEST = None`, the pin in 0.11.1, and the
 built image verified with `--list-sdks` (both `8.0.x` and `10.0.x`) and

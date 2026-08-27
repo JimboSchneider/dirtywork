@@ -25,13 +25,13 @@ Day-to-day usage once dirtywork is installed: running a task, reviewing and resu
   > gitignore pattern does **not** match a symlink, so a forgotten one shows up
   > as an untracked path. If the gate needs a tool the image lacks, build a
   > derived image (see the recipe next to `--image` in [Machine
-  > contract](machine-contract.md#machine-contract)).
+  > contract](https://github.com/JimboSchneider/dirtywork/blob/main/dirtywork/contract/machine-contract.md#machine-contract)).
 - **Clean up a run:** `dirtywork runs clean <slug>` — see
   [Inspecting, cleaning up and re-exporting runs](#inspecting-cleaning-up-and-re-exporting-runs)
   for the safety rules and the rest of the `runs` subcommands.
 
 - **All flags, stdout JSON, exit codes, transcript events:** see
-  [Machine contract](machine-contract.md#machine-contract).
+  [Machine contract](https://github.com/JimboSchneider/dirtywork/blob/main/dirtywork/contract/machine-contract.md#machine-contract).
 
 #### Editing files
 
@@ -475,7 +475,7 @@ are not part of the installed package.
   `--home-size` (and `--memory` alongside it — tmpfs writes are charged to
   the container's memory cgroup), or redirect the cache per command instead.
   See the `--tmp-size`/`--gitdir-size`/`--home-size` bullet in
-  [Machine contract](machine-contract.md#machine-contract).
+  [Machine contract](https://github.com/JimboSchneider/dirtywork/blob/main/dirtywork/contract/machine-contract.md#machine-contract).
 - **`File size limit exceeded` / exit 153 from any `dotnet` command on the
   old `:0.10` image** — a 0.10 defect, not a dirtywork bug: that image's
   .NET 8 runtime trips the sandbox's per-command file-size limit
