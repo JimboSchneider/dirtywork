@@ -6,12 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.12"
-# 0.12.0 ships unpinned -- the first release of a minor publishes the :0.12
-# image, and 0.12.1 pins its multi-arch index digest, resolved with
+# Pinned for 0.12.1: the multi-arch index digest of the :0.12 image published
+# by the v0.12.0 release, resolved with
 # `docker pull ghcr.io/jimboschneider/dirtywork-worker:0.12` and cross-checked
 # against `docker image inspect --format '{{json .RepoDigests}}'` and
-# `docker buildx imagetools inspect` (docker/README.md documents the
-# procedure). This only ever pins a REGISTRY digest -- resolve_image()
+# `docker buildx imagetools inspect` (all agree); docker/README.md documents
+# the procedure. MUST be re-resolved whenever the :0.12 tag is re-pushed.
+# This only ever pins a REGISTRY digest -- resolve_image()
 # enforces it against a *pulled* DEFAULT_IMAGE only; a locally built/loaded
 # image warns instead of refusing, and a user-supplied --image is never
 # checked. (0.11.x pinned :0.11 at
@@ -26,7 +27,7 @@ DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.12"
 # sha256:1f7b98898001b7064d8db396a8a5a1a324df4ce48692597fcd4381ea90e4354a;
 # 0.5.x pinned :0.5 at
 # sha256:3b8d019a2f20a9df55a72ed51139076f02f2feb597243a69519bc41db1029648.)
-PINNED_DIGEST: str | None = None
+PINNED_DIGEST: str | None = "sha256:edcf3a4718392bfe169a078b08ce35cc1e320f2b85231a87439e4ea24d78fe3c"
 # Always passed explicitly on every docker create/run/exec so an image's own
 # ENTRYPOINT/CMD/ENV can never substitute a different PATH for the tether,
 # chown, or an export step (spec §3 "Entrypoint and PATH are always explicit").

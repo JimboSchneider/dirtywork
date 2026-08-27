@@ -116,7 +116,7 @@ The first release of a minor (0.4.0, 0.5.0, 0.6.0, 0.7.0, 0.8.0, 0.9.0, 0.10.0, 
 against on the very first release, so `resolve_image()` performs no pin
 check and trusts whatever `docker image inspect` currently reports for
 `ghcr.io/jimboschneider/dirtywork-worker:0.12`. The next patch release
-(0.4.1 for 0.4; 0.5.1 for 0.5; 0.6.1 for 0.6; 0.8.1 for 0.8; 0.9.1 for 0.9; 0.10.1 for 0.10; 0.11.1 for 0.11 — 0.7.x shipped unpinned) pins — once `publish-image.yml` has run, take the
+(0.4.1 for 0.4; 0.5.1 for 0.5; 0.6.1 for 0.6; 0.8.1 for 0.8; 0.9.1 for 0.9; 0.10.1 for 0.10; 0.11.1 for 0.11; 0.12.1 for 0.12 — 0.7.x shipped unpinned) pins — once `publish-image.yml` has run, take the
 digest from its job summary (or resolve it yourself below) and commit it
 as `PINNED_DIGEST` ahead of the next release.
 
