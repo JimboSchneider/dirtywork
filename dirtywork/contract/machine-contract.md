@@ -26,7 +26,7 @@ dirtywork run --repo <path> "<task>"
     [--max-worktree-mb 2048]
     [--max-worktree-files 200000]
     [--sandbox docker|none]           # default: docker
-    [--image ghcr.io/jimboschneider/dirtywork-worker:0.11]  # docker mode only
+    [--image ghcr.io/jimboschneider/dirtywork-worker:0.12]  # docker mode only
     [--allow-network]                 # docker mode only; default --network none
     [--memory 4g]                     # docker mode only
     [--cpus 2]                        # docker mode only
@@ -71,19 +71,19 @@ the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
   the same worktree.
 
 - `--image REF` (docker mode) — the worker image, default
-  `ghcr.io/jimboschneider/dirtywork-worker:0.11`. The image is the worker's
+  `ghcr.io/jimboschneider/dirtywork-worker:0.12`. The image is the worker's
   whole toolchain: with `--network none` and no host mounts, nothing can be
   installed during a run. To add a tool, derive an image once:
 
   ```Dockerfile
-  FROM ghcr.io/jimboschneider/dirtywork-worker:0.11
+  FROM ghcr.io/jimboschneider/dirtywork-worker:0.12
   USER root
   RUN apt-get update && apt-get install -y --no-install-recommends <packages> \
       && rm -rf /var/lib/apt/lists/*
   USER worker
   ```
 
-  then `docker build -t my-worker:0.11 .` and `--image my-worker:0.11`. A custom
+  then `docker build -t my-worker:0.12 .` and `--image my-worker:0.12`. A custom
   `--image` is never digest-pinned — `PINNED_DIGEST` protects the maintained
   default image only.
 
@@ -106,7 +106,7 @@ the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
   (`docker/README.md`'s Derived images section has the fuller version):
 
   ```Dockerfile
-  FROM ghcr.io/jimboschneider/dirtywork-worker:0.11
+  FROM ghcr.io/jimboschneider/dirtywork-worker:0.12
   USER root
   ENV DOTNET_EnableWriteXorExecute=0
   # until the 1.0 base image bakes these in — see the 0.10 defect note below;
@@ -117,13 +117,13 @@ the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
   USER worker
   ```
 
-  The `:0.11` image ships .NET SDK 8.0 and 10.0 and sets
+  The `:0.12` image ships .NET SDK 8.0 and 10.0 and sets
   `DOTNET_EnableWriteXorExecute=0`, so `dotnet restore`/`build`/`test` work
   for both runtimes under the sandbox's per-command file-size limit (`bash`
   runs everything under `ulimit -f 524288`, 256 MiB; verified offline: new,
   build and run of net8.0 and net10.0 apps under the limit). The old `:0.10`
   image had SDK 8.0 only and its .NET 8 runtime died at startup with `File
-  size limit exceeded` (a 0.10 defect); a derived image `FROM :0.11` inherits
+  size limit exceeded` (a 0.10 defect); a derived image `FROM :0.12` inherits
   the fix and needs no `ENV` line of its own.
   Restoring anything not vendored this way needs `--allow-network`.
 

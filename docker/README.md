@@ -9,7 +9,7 @@ arm64 packages for Debian 12). 8.0 stays alongside 10.0 because the sandbox
 runs `--network none`: an SDK-10-only image can't build `net8.0` projects
 offline, since SDK 10 doesn't bundle the 8.0 targeting packs and a restore
 that can't reach NuGet fails with `NETSDK1145`. The
-`ghcr.io/jimboschneider/dirtywork-worker:0.11` image predated this change
+`ghcr.io/jimboschneider/dirtywork-worker:0.10` image predated this change
 and had SDK 8.0 only; 10.0 arrived with the `:0.11` image (0.11.0, the
 image #59 asked for): that release bumped `DEFAULT_IMAGE` to `:0.11` and
 shipped `PINNED_DIGEST = None` (first publish of the minor); the pin lands
@@ -25,7 +25,7 @@ trips that limit at startup (even at 8 GiB — consistent with the size of its
 double-mapping file), so on the old `:0.10` image every .NET 8 process
 — `dotnet build`, `dotnet test`, a built app — died with `File size limit
 exceeded` (exit 153); the .NET 10 runtime does not. Verified 2026-08-24; the
-variable fixes both and `:0.11` bakes it, so a derived image `FROM :0.11`
+variable fixes both and `:0.12` bakes it, so a derived image `FROM :0.12`
 does not need to repeat it.
 No `ENTRYPOINT`/`CMD` — every `docker create`/`run`/`exec` in dirtywork
 passes its own explicit `--entrypoint` or absolute binary path.
@@ -37,14 +37,14 @@ installs) and by `dirtywork runs export` for re-exports.
 
 ## Build
 
-    docker build -t ghcr.io/jimboschneider/dirtywork-worker:0.11 docker/
+    docker build -t ghcr.io/jimboschneider/dirtywork-worker:0.12 docker/
 
 ## Verify locally
 
-    docker run --rm --entrypoint /usr/bin/git ghcr.io/jimboschneider/dirtywork-worker:0.11 --version
-    docker run --rm --entrypoint /usr/bin/rg ghcr.io/jimboschneider/dirtywork-worker:0.11 --version
-    docker run --rm --entrypoint /usr/bin/python3 ghcr.io/jimboschneider/dirtywork-worker:0.11 --version
-    docker run --rm --entrypoint /usr/bin/dotnet ghcr.io/jimboschneider/dirtywork-worker:0.11 --list-sdks
+    docker run --rm --entrypoint /usr/bin/git ghcr.io/jimboschneider/dirtywork-worker:0.12 --version
+    docker run --rm --entrypoint /usr/bin/rg ghcr.io/jimboschneider/dirtywork-worker:0.12 --version
+    docker run --rm --entrypoint /usr/bin/python3 ghcr.io/jimboschneider/dirtywork-worker:0.12 --version
+    docker run --rm --entrypoint /usr/bin/dotnet ghcr.io/jimboschneider/dirtywork-worker:0.12 --list-sdks
 
 `dotnet --version` prints only the highest-resolved SDK (`10.0.400`); use
 `--list-sdks` instead and check that both an `8.0.x` and a `10.0.x` line
@@ -102,7 +102,7 @@ trigger a network pull.
 
 A *locally built or loaded* default image (no `RepoDigests` entry — it was
 never pushed to or pulled from a registry, e.g. `docker build -t
-ghcr.io/jimboschneider/dirtywork-worker:0.11 docker/` run by hand, or the CI
+ghcr.io/jimboschneider/dirtywork-worker:0.12 docker/` run by hand, or the CI
 gate that builds this same image locally) has nothing for the pin to
 compare against. `resolve_image()` does not refuse it: it returns the
 local Id and prints a one-line warning to stderr instead
@@ -112,18 +112,18 @@ though `PINNED_DIGEST` is set — the pin was not enforced). A `--image
 `PINNED_DIGEST` at all, pinned or not — that pin protects the *maintained
 default image only*.
 
-The first release of a minor (0.4.0, 0.5.0, 0.6.0, 0.7.0, 0.8.0, 0.9.0, 0.10.0) ships with `PINNED_DIGEST = None`: there is no prior publish to pin
+The first release of a minor (0.4.0, 0.5.0, 0.6.0, 0.7.0, 0.8.0, 0.9.0, 0.10.0, 0.11.0, 0.12.0) ships with `PINNED_DIGEST = None`: there is no prior publish to pin
 against on the very first release, so `resolve_image()` performs no pin
 check and trusts whatever `docker image inspect` currently reports for
-`ghcr.io/jimboschneider/dirtywork-worker:0.11`. The next patch release
-(0.4.1 for 0.4; 0.5.1 for 0.5; 0.6.1 for 0.6; 0.8.1 for 0.8; 0.9.1 for 0.9; 0.10.1 for 0.10 — 0.7.x shipped unpinned) pins — once `publish-image.yml` has run, take the
+`ghcr.io/jimboschneider/dirtywork-worker:0.12`. The next patch release
+(0.4.1 for 0.4; 0.5.1 for 0.5; 0.6.1 for 0.6; 0.8.1 for 0.8; 0.9.1 for 0.9; 0.10.1 for 0.10; 0.11.1 for 0.11 — 0.7.x shipped unpinned) pins — once `publish-image.yml` has run, take the
 digest from its job summary (or resolve it yourself below) and commit it
 as `PINNED_DIGEST` ahead of the next release.
 
 1. Resolve the published digest:
 
-       docker pull ghcr.io/jimboschneider/dirtywork-worker:0.11
-       docker image inspect --format '{{json .RepoDigests}}' ghcr.io/jimboschneider/dirtywork-worker:0.11
+       docker pull ghcr.io/jimboschneider/dirtywork-worker:0.12
+       docker image inspect --format '{{json .RepoDigests}}' ghcr.io/jimboschneider/dirtywork-worker:0.12
 
    This prints a JSON array like
    `["ghcr.io/jimboschneider/dirtywork-worker@sha256:<64 hex chars>"]`.
@@ -138,8 +138,8 @@ as `PINNED_DIGEST` ahead of the next release.
 `publish-image.yml` is the normal path; a manual push is only needed to
 recover from a broken automated run:
 
-    docker build -t ghcr.io/jimboschneider/dirtywork-worker:0.11 docker/
-    docker push ghcr.io/jimboschneider/dirtywork-worker:0.11
+    docker build -t ghcr.io/jimboschneider/dirtywork-worker:0.12 docker/
+    docker push ghcr.io/jimboschneider/dirtywork-worker:0.12
 
 then resolve/pin the digest as above.
 
@@ -151,15 +151,15 @@ inside a run will always fail. If your gate needs a tool this image does not
 ship, build a derived image once and point `--image` at it:
 
 ```Dockerfile
-FROM ghcr.io/jimboschneider/dirtywork-worker:0.11
+FROM ghcr.io/jimboschneider/dirtywork-worker:0.12
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends <packages> \
     && rm -rf /var/lib/apt/lists/*
 USER worker
 ```
 
-    docker build -t my-worker:0.11 .
-    dirtywork run --repo ~/repos/thing --image my-worker:0.11 "..."
+    docker build -t my-worker:0.12 .
+    dirtywork run --repo ~/repos/thing --image my-worker:0.12 "..."
 
 Keep `USER worker` as the last instruction and add no `ENTRYPOINT`/`CMD`:
 dirtywork always passes its own `--entrypoint` and `--user` explicitly at
@@ -194,7 +194,7 @@ build time (run the restore as root — `/opt` is root-owned — then open the
 result up to the host uid):
 
 ```Dockerfile
-FROM ghcr.io/jimboschneider/dirtywork-worker:0.11
+FROM ghcr.io/jimboschneider/dirtywork-worker:0.12
 USER root
 ENV DOTNET_EnableWriteXorExecute=0
 # until the 1.0 base image bakes these in — see the 0.10 defect note above;
@@ -209,8 +209,8 @@ RUN dotnet restore /tmp/restore/MyProject.csproj --packages /opt/nuget \
 USER worker
 ```
 
-    docker build -t my-worker:0.11 .
-    dirtywork run --repo ~/repos/thing --image my-worker:0.11 "..."
+    docker build -t my-worker:0.12 .
+    dirtywork run --repo ~/repos/thing --image my-worker:0.12 "..."
 
 Issue #63 also considered defaulting the image to redirect
 `NUGET_PACKAGES`/`DOTNET_CLI_HOME` off `$HOME`; the owner declined it — a
