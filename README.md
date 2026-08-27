@@ -127,6 +127,12 @@ endpoint, tell Claude to pass `--provider`/`--base-url` (the guide's *Other prov
 how). The walkthrough, from LM Studio to the first delegated task:
 [Orchestrator setup](https://github.com/JimboSchneider/dirtywork/blob/main/docs/orchestrator-setup.md).
 
+**`init` configures nothing.** It writes one Markdown file that Claude Code loads by name;
+`contract` only prints. Which model, provider, sandbox and image a run uses are flags on
+`dirtywork run`, every time — there is no config file. If both a personal and a project copy exist,
+Claude Code loads the personal one, so put your own tweaks (a `--provider` line, say) in
+`~/.claude/skills/dirtywork/SKILL.md`, not the committed copy.
+
 **Re-run `dirtywork init` after every upgrade.** The skill is a file on disk, written by the
 version that installed it. `pipx upgrade` replaces the wheel and leaves that file alone, so until
 you re-run `init`, Claude is driving the new release with the old release's instructions — flags,
