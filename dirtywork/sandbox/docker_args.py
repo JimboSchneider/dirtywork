@@ -5,17 +5,18 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.11"
-# Pinned for 0.11.1: the multi-arch index digest of the :0.11 image published
-# by the v0.11.0 release, resolved with
-# `docker pull ghcr.io/jimboschneider/dirtywork-worker:0.11` and cross-checked
+DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.12"
+# 0.12.0 ships unpinned -- the first release of a minor publishes the :0.12
+# image, and 0.12.1 pins its multi-arch index digest, resolved with
+# `docker pull ghcr.io/jimboschneider/dirtywork-worker:0.12` and cross-checked
 # against `docker image inspect --format '{{json .RepoDigests}}'` and
-# `docker buildx imagetools inspect` (all agree); docker/README.md documents
-# the procedure. MUST be re-resolved whenever the :0.11 tag is re-pushed.
-# This only ever pins a
-# REGISTRY digest -- resolve_image() enforces it against a *pulled*
-# DEFAULT_IMAGE only; a locally built/loaded image warns instead of refusing,
-# and a user-supplied --image is never checked. (0.10.x pinned :0.10 at
+# `docker buildx imagetools inspect` (docker/README.md documents the
+# procedure). This only ever pins a REGISTRY digest -- resolve_image()
+# enforces it against a *pulled* DEFAULT_IMAGE only; a locally built/loaded
+# image warns instead of refusing, and a user-supplied --image is never
+# checked. (0.11.x pinned :0.11 at
+# sha256:4e3c032e984a12fcb897159780dc7963d3887184354fcaf421d6164ece97562e;
+# 0.10.x pinned :0.10 at
 # sha256:4fc400ca48dc98474003f6f00eaf7a49a7b063364dc6aad488187710db225a30;
 # 0.9.x pinned :0.9 at
 # sha256:7f73656478d37a9f08769a51ba6b7bca5fceca53f914bdd4b9ef48ec11b6a172;
@@ -25,7 +26,7 @@ DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.11"
 # sha256:1f7b98898001b7064d8db396a8a5a1a324df4ce48692597fcd4381ea90e4354a;
 # 0.5.x pinned :0.5 at
 # sha256:3b8d019a2f20a9df55a72ed51139076f02f2feb597243a69519bc41db1029648.)
-PINNED_DIGEST: str | None = "sha256:4e3c032e984a12fcb897159780dc7963d3887184354fcaf421d6164ece97562e"
+PINNED_DIGEST: str | None = None
 # Always passed explicitly on every docker create/run/exec so an image's own
 # ENTRYPOINT/CMD/ENV can never substitute a different PATH for the tether,
 # chown, or an export step (spec §3 "Entrypoint and PATH are always explicit").
