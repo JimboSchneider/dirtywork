@@ -402,3 +402,4 @@ Baseline 2026-08-26 20:30 CDT on `issue-82-operator-contract` (rebased onto main
 
 | Task | Slug | Status | Turns | Wall | s/turn | Prompt tok | Compl tok | tok/s | Nudges | Guardrail | Tool mix | Verify | Resumes | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| W1 | `issue-82-operator-contract-in-0826203153-3e27a2e0` | completed | 25 | 210.7s | 8.4 | 280,950 | 3,896 | ~18.5 compl | 1 | - | 25 tool results (see transcript) | pass (round 1, exit 0) | 0 | first try; all 7 plan checks exact; host suite 1586 passed (1579+7); ff-merged 224f6bb |
