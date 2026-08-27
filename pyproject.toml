@@ -31,7 +31,10 @@ Homepage = "https://dirtywork.run"
 dirtywork = "dirtywork.__main__:main"
 
 [tool.setuptools]
-packages = ["dirtywork", "dirtywork.providers", "dirtywork.sandbox"]
+packages = ["dirtywork", "dirtywork.providers", "dirtywork.sandbox", "dirtywork.contract"]
+
+[tool.setuptools.package-data]
+"dirtywork.contract" = ["*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

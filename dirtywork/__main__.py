@@ -1163,8 +1163,12 @@ def _add_bench_parsers(sub) -> None:
                                   "table and the paired per-model summary")
 
 
-def _parse_args(argv):
-    parser = argparse.ArgumentParser(prog="dirtywork")
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="dirtywork",
+        description="Driving it from an agent? `dirtywork init` installs the Claude Code skill; "
+                    "`dirtywork contract` prints the reference.")
+    parser.add_argument("--version", action="version", version=f"dirtywork {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
     run_p = sub.add_parser("run", help="run one task in an isolated worktree")
     run_p.add_argument("task")
@@ -1187,7 +1191,21 @@ def _parse_args(argv):
     _add_run_flags(resume_p, resume=True)
     _add_runs_parsers(sub)
     _add_bench_parsers(sub)
-    return parser.parse_args(argv)
+    contract_p = sub.add_parser("contract", help="print the machine contract (the operator reference) to stdout")
+    init_p = sub.add_parser("init", help="install the Claude Code skill that teaches an agent to drive dirtywork")
+    init_p.add_argument("--repo", type=Path, default=None,
+                        help="also write the skill into this project (<PATH>/.claude/skills/dirtywork/SKILL.md)")
+    init_p.add_argument("--no-user", action="store_true", default=False,
+                        help="do not write ~/.claude/skills/dirtywork/SKILL.md")
+    init_p.add_argument("--force", action="store_true", default=False,
+                        help="overwrite a locally modified copy")
+    init_p.add_argument("--stdout", action="store_true", default=False,
+                        help="print the rendered skill to stdout instead of writing files")
+    return parser
+
+
+def _parse_args(argv):
+    return _build_parser().parse_args(argv)
 
 
 def run_once(argv: list) -> dict:
@@ -1216,6 +1234,9 @@ def run_once(argv: list) -> dict:
 
 def main(argv: list | None = None) -> int:
     args = _parse_args(argv)
+    if args.cmd in ("contract", "init"):
+        from . import contract as contract_mod
+        return contract_mod.dispatch(args)
     if args.cmd == "runs":
         from . import runs as runs_mod
         return runs_mod.dispatch(args)
