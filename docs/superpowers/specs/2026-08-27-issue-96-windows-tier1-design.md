@@ -1,7 +1,7 @@
 # Windows tier 1: stop crashing on three POSIX-only calls (#96) — design
 
-v3, 2026-08-27. Status: **§8 decisions approved by the owner (§0.2); second-review edits folded
-(§0.2); implementation-ready pending the owner's read of v3. Sequenced behind #87 (0.13.0).**
+v3.1, 2026-08-27. Status: **implementation-ready; plan v1 at
+`docs/superpowers/plans/2026-08-27-issue-96-windows-tier1.md`. Sequenced behind #87 (0.13.0).**
 Target: 0.13.x.
 
 ## 0. The owner's decision
@@ -266,7 +266,7 @@ itself, never the target, and it may not be combined with `CREATE_ALWAYS` — so
 | site flags | sequence |
 |---|---|
 | `O_CREAT\|O_EXCL[\|O_APPEND]` — `tools.py:256`, `transcript.py:37`, `export.py:255` | `CREATE_NEW`. Anything existing at the path, symlink included → `ERROR_FILE_EXISTS` (80) → `EEXIST`, as POSIX. |
-| `O_CREAT\|O_TRUNC` — `rundir.py:105`, `tools.py:104`, `export.py:527` | (1) `CREATE_NEW`; on `ERROR_FILE_EXISTS` → (2) `OPEN_EXISTING`, **verify**, then truncate through the verified handle: `SetFilePointerEx(h, 0, NULL, FILE_BEGIN)` + `SetEndOfFile(h)`. A symlink swapped in between (1) and (2) is caught by verify. |
+| `O_CREAT\|O_TRUNC` — `rundir.py:105`, `tools.py:104`, `export.py:527` | (1) `CREATE_NEW`; on `ERROR_FILE_EXISTS` → (2) `OPEN_EXISTING`, **verify**, then truncate through the verified handle: `SetFileInformationByHandle(h, FileEndOfFileInfo, {EndOfFile: 0})`. A symlink swapped in between (1) and (2) is caught by verify. |
 | `O_CREAT\|O_APPEND` — `bench.py:394`, `workspace.py:185` | `OPEN_ALWAYS`, **verify**. (`OPEN_ALWAYS` reports `ERROR_ALREADY_EXISTS` (183) on success — not a failure.) |
 | no `O_CREAT` — `workspace.py:171` (read), `tools.py:216,856` (write probes) | `OPEN_EXISTING`, **verify**. |
 
@@ -284,7 +284,7 @@ if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT (0x400):
     CloseHandle(h); raise OSError(errno.ELOOP, "symlink at final component", path)
 if tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY (0x10):
     CloseHandle(h); raise OSError(errno.EISDIR, ...)           # belt; cannot happen without BACKUP_SEMANTICS
-if truncating: if not SetFilePointerEx(...) or not SetEndOfFile(h): err=...; CloseHandle(h); raise ctypes.WinError(err)
+if truncating: eof = FILE_END_OF_FILE_INFO(0); if not SetFileInformationByHandle(h, FileEndOfFileInfo, byref(eof), sizeof(eof)): err=...; CloseHandle(h); raise ctypes.WinError(err)
 try:
     return msvcrt.open_osfhandle(h, (os.O_APPEND if flags & os.O_APPEND else 0)
                                     | (os.O_NOINHERIT if cloexec else 0))
@@ -460,9 +460,11 @@ default `int` conversion is truncated on 64-bit and fails silently. Types are `c
 `HANDLE, DWORD, BOOL, LPVOID, LPCWSTR, LARGE_INTEGER, ULONG` plus `ctypes.c_size_t` (`SIZE_T`),
 `ctypes.c_ulonglong` (`ULONGLONG`), `ctypes.c_long` (`LONG`).
 
-Sources: Microsoft Learn pages for each function/structure, read 2026-08-27. Items marked
-**(confirm)** were not re-read today and the brief-writer confirms them against the linked page
-before the brief is issued.
+Sources: Microsoft Learn pages for each function/structure. v3.1: every value below was read from
+its page on 2026-08-27 while the plan's briefs were written; the v3 "(confirm)" marks are
+discharged. One change from v3: truncation is a single
+`SetFileInformationByHandle(h, FileEndOfFileInfo (=6), &FILE_END_OF_FILE_INFO{EndOfFile=0})`
+instead of `SetFilePointerEx` + `SetEndOfFile`.
 
 ### Functions
 
@@ -482,20 +484,19 @@ before the brief is issued.
 | `CloseHandle` | `HANDLE` | `BOOL` | `0` (ignored on cleanup paths) |
 | `CreateFileW` | `LPCWSTR, DWORD, DWORD, LPVOID, DWORD, DWORD, HANDLE` | `HANDLE` | `INVALID_HANDLE_VALUE` |
 | `GetFileInformationByHandleEx` | `HANDLE, c_int, LPVOID, DWORD` | `BOOL` | `0` |
-| `SetFilePointerEx` | `HANDLE, LARGE_INTEGER, POINTER(LARGE_INTEGER), DWORD` | `BOOL` | `0` |
-| `SetEndOfFile` | `HANDLE` | `BOOL` | `0` |
+| `SetFileInformationByHandle` | `HANDLE, c_int, LPVOID, DWORD` | `BOOL` | `0` |
 
 `msvcrt.open_osfhandle(handle, flags)` is stdlib Python (`msvcrt` module), raises `OSError`.
 
 ### Structures (member order is the ABI; do not reorder)
 
 ```
-class IO_COUNTERS(Structure):                       # winnt.h (confirm)
+class IO_COUNTERS(Structure):                       # winnt.h — read 2026-08-27
     _fields_ = [("ReadOperationCount", c_ulonglong), ("WriteOperationCount", c_ulonglong),
                 ("OtherOperationCount", c_ulonglong), ("ReadTransferCount", c_ulonglong),
                 ("WriteTransferCount", c_ulonglong), ("OtherTransferCount", c_ulonglong)]
 
-class JOBOBJECT_BASIC_LIMIT_INFORMATION(Structure):  # winnt.h (confirm member order)
+class JOBOBJECT_BASIC_LIMIT_INFORMATION(Structure):  # winnt.h — read 2026-08-27
     _fields_ = [("PerProcessUserTimeLimit", LARGE_INTEGER), ("PerJobUserTimeLimit", LARGE_INTEGER),
                 ("LimitFlags", DWORD), ("MinimumWorkingSetSize", c_size_t),
                 ("MaximumWorkingSetSize", c_size_t), ("ActiveProcessLimit", DWORD),
@@ -514,6 +515,9 @@ class THREADENTRY32(Structure):                     # tlhelp32.h — read today
 
 class FILE_ATTRIBUTE_TAG_INFO(Structure):           # winbase.h — read today
     _fields_ = [("FileAttributes", DWORD), ("ReparseTag", DWORD)]
+
+class FILE_END_OF_FILE_INFO(Structure):             # winbase.h — read 2026-08-27
+    _fields_ = [("EndOfFile", LARGE_INTEGER)]
 ```
 
 `sizeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION)` must be 144 on 64-bit (112 for the basic struct
@@ -528,17 +532,17 @@ least loud).
 | `CREATE_SUSPENDED` | `0x00000004` | Process Creation Flags — read today; **not** exposed by `subprocess` |
 | `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` | `0x00002000` | `JOBOBJECT_BASIC_LIMIT_INFORMATION` — read today |
 | `JobObjectExtendedLimitInformation` | `9` | `SetInformationJobObject` class table — read today |
-| `PROCESS_SET_QUOTA` / `PROCESS_TERMINATE` / `PROCESS_QUERY_LIMITED_INFORMATION` | `0x0100` / `0x0001` / `0x1000` | Process Security and Access Rights (confirm) |
-| `TH32CS_SNAPTHREAD` | `0x00000004` | `CreateToolhelp32Snapshot` (confirm) |
-| `THREAD_SUSPEND_RESUME` | `0x0002` | Thread Security and Access Rights (confirm) |
-| `STILL_ACTIVE` | `259` | `GetExitCodeProcess` (confirm) |
+| `PROCESS_SET_QUOTA` / `PROCESS_TERMINATE` / `PROCESS_QUERY_LIMITED_INFORMATION` | `0x0100` / `0x0001` / `0x1000` | Process Security and Access Rights — read 2026-08-27 |
+| `TH32CS_SNAPTHREAD` | `0x00000004` | `CreateToolhelp32Snapshot` — read 2026-08-27 |
+| `THREAD_SUSPEND_RESUME` | `0x0002` | Thread Security and Access Rights — read 2026-08-27 |
+| `STILL_ACTIVE` | `259` | `GetExitCodeProcess` — read 2026-08-27 |
 | `INVALID_HANDLE_VALUE` | `HANDLE(-1).value` (all bits set) | handleapi.h |
-| `ERROR_FILE_NOT_FOUND` / `ERROR_ACCESS_DENIED` / `ERROR_NO_MORE_FILES` / `ERROR_FILE_EXISTS` / `ERROR_INVALID_PARAMETER` / `ERROR_ALREADY_EXISTS` | `2` / `5` / `18` / `80` / `87` / `183` | System Error Codes (confirm) |
-| `GENERIC_READ` / `GENERIC_WRITE` / `FILE_APPEND_DATA` | `0x80000000` / `0x40000000` / `0x0004` | Generic Access Rights; File Access Rights (confirm) |
-| `FILE_SHARE_READ` / `_WRITE` / `_DELETE` | `1` / `2` / `4` | `CreateFileW` (confirm) |
-| `CREATE_NEW` / `OPEN_EXISTING` / `OPEN_ALWAYS` | `1` / `3` / `4` | `CreateFileW` (confirm) — no `CREATE_ALWAYS` (2), no `TRUNCATE_EXISTING` (5), by design |
-| `FILE_ATTRIBUTE_NORMAL` / `FILE_ATTRIBUTE_DIRECTORY` / `FILE_ATTRIBUTE_REPARSE_POINT` | `0x80` / `0x10` / `0x400` | File Attribute Constants (confirm) |
+| `ERROR_FILE_NOT_FOUND` / `ERROR_ACCESS_DENIED` / `ERROR_NO_MORE_FILES` / `ERROR_FILE_EXISTS` / `ERROR_INVALID_PARAMETER` / `ERROR_ALREADY_EXISTS` | `2` / `5` / `18` / `80` / `87` / `183` | System Error Codes — read 2026-08-27 |
+| `GENERIC_READ` / `GENERIC_WRITE` / `FILE_APPEND_DATA` | `0x80000000` / `0x40000000` / `0x0004` | Generic Access Rights; File Access Rights — read 2026-08-27 |
+| `FILE_SHARE_READ` / `_WRITE` / `_DELETE` | `1` / `2` / `4` | `CreateFileW` — read 2026-08-27 |
+| `CREATE_NEW` / `OPEN_EXISTING` / `OPEN_ALWAYS` | `1` / `3` / `4` | `CreateFileW` — read 2026-08-27 — no `CREATE_ALWAYS` (2), no `TRUNCATE_EXISTING` (5), by design |
+| `FILE_ATTRIBUTE_NORMAL` / `FILE_ATTRIBUTE_DIRECTORY` / `FILE_ATTRIBUTE_REPARSE_POINT` | `0x80` / `0x10` / `0x400` | File Attribute Constants — read 2026-08-27 |
 | `FILE_FLAG_OPEN_REPARSE_POINT` | `0x00200000` | `CreateFileW` — read today |
-| `FileAttributeTagInfo` | `9` | `FILE_INFO_BY_HANDLE_CLASS` (confirm) |
-| `FILE_BEGIN` | `0` | `SetFilePointerEx` (confirm) |
+| `FileAttributeTagInfo` | `9` | `FILE_INFO_BY_HANDLE_CLASS` — read 2026-08-27 |
+| `FileEndOfFileInfo` | `6` | `FILE_INFO_BY_HANDLE_CLASS` — read 2026-08-27 |
 | `os.O_NOINHERIT` | from `os` on Windows | CPython |
