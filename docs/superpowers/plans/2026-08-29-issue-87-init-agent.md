@@ -42,7 +42,7 @@ wheel; version and image tag roll to 0.13.
 **Tech Stack:** Python 3.9+ stdlib (`argparse`, `pathlib`); pytest as in `tests/test_contract.py`
 (`home` fixture monkeypatches `HOME`; `m.main([...])` + `capsys`); GitHub Actions `ci.yml`.
 
-**Spec:** `docs/superpowers/specs/2026-08-29-issue-87-init-agent-design.md` v1.1 (`b5a63a0`) —
+**Spec:** `docs/superpowers/specs/2026-08-29-issue-87-init-agent-design.md` v1.2 (`db3528a`) —
 §0 the owner's decisions, §1.2 the verified landscape (sources and date), §3.1 the table, §3.2 the
 three skill hunks and the hint (Appendix A is the whole template), §3.3 test 17, §3.4 the ripple
 (every site named), §4 limits, §5 tests 14/17/24–30, §6 acceptance A1–A10, §7 files.
@@ -61,8 +61,9 @@ three skill hunks and the hint (Appendix A is the whole template), §3.3 test 17
 - Stdout lines and exit codes of `init` unchanged (`wrote:` / `up to date:` / `updated:` /
   `skipped (locally modified):` / `overwrote:`; 0/1/2).
 - Image cycle: `DEFAULT_IMAGE` `:0.13`, `PINNED_DIGEST = None` (pinned in 0.13.1); no `:0.12` in
-  any spelling outside `docs/superpowers/` and the digest-history comment (A9).
-- `docs/superpowers/` is history: never swept.
+  any spelling outside `docs/superpowers/`, the dated posts `docs/2026-*.md` and the digest-history
+  comment (A9).
+- `docs/superpowers/` and the dated posts under `docs/` are history: never swept.
 - Never merge or release without the owner's explicit per-action go.
 
 ## Execution model (every W task)
