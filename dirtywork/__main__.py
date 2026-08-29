@@ -218,7 +218,7 @@ def _inherit_tmpfs_size(prior: dict, key: str, default: str) -> str:
 
 
 _ENDPOINT_HINTS = {
-    "openai": "Is the OpenAI-compatible server running? Try: lms ps",
+    "openai": "Is the OpenAI-compatible server running? Try: lms ps (LM Studio). Another server: --base-url <url>; Ollama: --provider ollama",
     "anthropic": "Check ANTHROPIC_API_KEY and that api.anthropic.com is reachable.",
     "ollama": "Is Ollama running? Try: ollama ps",
 }

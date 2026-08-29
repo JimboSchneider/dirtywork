@@ -34,8 +34,11 @@ def test_skill_frontmatter_and_size():
     assert re.search(r"\ndescription: \S", head)
     assert text.count("\n") <= 200
     for needle in ("dirtywork contract", "resume", "runs verdict", "--keep-transcript",
-                   "--allow-network", "`0`", "`1`", "`2`"):
+                   "--allow-network", "`0`", "`1`", "`2`",
+                   "[--provider openai|anthropic|ollama] [--base-url <url>]", "ollama ps",
+                   "curl -s <base-url>/models", "not restore a custom `--base-url`"):
         assert needle in text, needle
+    assert "Other providers: see the contract" not in text
 
 
 def test_skill_stamp_hash_matches_body():
@@ -87,6 +90,11 @@ def test_skill_first_paragraph_addresses_the_worker():
         paragraph.append(after.pop(0))
     joined = " ".join(paragraph).lower()
     assert "worker" in joined and "ignore" in joined, joined
+
+
+def test_endpoint_hint_names_the_flags():
+    hint = m._ENDPOINT_HINTS["openai"]
+    assert "lms ps" in hint and "--base-url" in hint and "--provider ollama" in hint
 
 
 @pytest.fixture
