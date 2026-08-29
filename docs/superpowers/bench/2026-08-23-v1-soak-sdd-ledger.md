@@ -470,3 +470,22 @@ bash), 3 ✘ as a number — the "~25" estimate was made blind to 558 tests; the
 in expected strings, 28 ownership/uid checks, 15 sharing violations, 9 symlink privilege, 7 rejected filenames, 4
 `mkfifo`, ~50 bash-driven, ~7 uncategorized; zero crashes, zero errors), 4 ✔, 5 ✔, 6 ✔, 7 pending a person. All seven
 PR checks green including `gate`. Merge is the owner's call.
+
+## #87 — `init --agent` + provider-neutral skill (plan v1.1 `816bb6e`, spec v1.2 `db3528a`)
+
+Started 2026-08-29 12:44 CDT on the owner's "Let's go". Sequenced after #96 tier 1 (main `d755222`);
+ships as 0.13.0 with it.
+
+- Runtime: released dirtywork **0.12.1** (`pipx run --spec`), worker `qwen/qwen3-coder-next` via LM
+  Studio, image `dirtywork-worker-pytest:0.12`, Docker, `--verify "python3 -m pytest -q -p
+  no:cacheprovider" --verify-rounds 2 --max-turns 60 --timeout 1800`, branch-from
+  `issue-87-init-agent`.
+- Host baseline (`816bb6e`, `PYTHONPATH=. pipx run --spec pytest pytest -q -p no:cacheprovider`):
+  **1,662 passed, 9 skipped, 38 deselected in 107.29 s**.
+- Pre-checks (plan v1.1 fold): every brief applied literally on the host by a Sonnet subagent in a
+  throwaway worktree before any run — W1+W2 → 1,681 passed; W3+W4 → 1,662 passed; six brief defects
+  fixed before the first run.
+- Sampler: `tools/soak_sampler.sh` → this session's scratchpad `metrics-87.csv`.
+
+| Task | Slug | Status | Turns | Wall | s/turn | Prompt tok | Compl tok | tok/s | Nudges | Guardrail | Tool mix | Verify | Resumes | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
