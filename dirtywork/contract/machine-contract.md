@@ -26,7 +26,7 @@ dirtywork run --repo <path> "<task>"
     [--max-worktree-mb 2048]
     [--max-worktree-files 200000]
     [--sandbox docker|none]           # default: docker
-    [--image ghcr.io/jimboschneider/dirtywork-worker:0.12]  # docker mode only
+    [--image ghcr.io/jimboschneider/dirtywork-worker:0.13]  # docker mode only
     [--allow-network]                 # docker mode only; default --network none
     [--memory 4g]                     # docker mode only
     [--cpus 2]                        # docker mode only
@@ -38,8 +38,8 @@ dirtywork run --repo <path> "<task>"
     [--max-patch-mb 10]               # docker mode only; diff.patch cap
     [--allow-commit]                  # host mode only; worker commits its own work
 dirtywork contract                          # print this document (the installed version's) to stdout; exit 0
-dirtywork init [--repo <path>] [--no-user] [--force] [--stdout]
-                                            # install the Claude Code skill — see "init" below
+dirtywork init [--agent claude|codex|gemini|cursor|copilot] [--repo <path>] [--no-user] [--force] [--stdout]
+                                            # install the orchestrator skill — see "init" below
 dirtywork --version                         # prints `dirtywork X.Y.Z`
 ```
 
@@ -71,19 +71,19 @@ the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
   the same worktree.
 
 - `--image REF` (docker mode) — the worker image, default
-  `ghcr.io/jimboschneider/dirtywork-worker:0.12`. The image is the worker's
+  `ghcr.io/jimboschneider/dirtywork-worker:0.13`. The image is the worker's
   whole toolchain: with `--network none` and no host mounts, nothing can be
   installed during a run. To add a tool, derive an image once:
 
   ```Dockerfile
-  FROM ghcr.io/jimboschneider/dirtywork-worker:0.12
+  FROM ghcr.io/jimboschneider/dirtywork-worker:0.13
   USER root
   RUN apt-get update && apt-get install -y --no-install-recommends <packages> \
       && rm -rf /var/lib/apt/lists/*
   USER worker
   ```
 
-  then `docker build -t my-worker:0.12 .` and `--image my-worker:0.12`. A custom
+  then `docker build -t my-worker:0.13 .` and `--image my-worker:0.13`. A custom
   `--image` is never digest-pinned — `PINNED_DIGEST` protects the maintained
   default image only.
 
@@ -106,7 +106,7 @@ the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
   (`docker/README.md`'s Derived images section has the fuller version):
 
   ```Dockerfile
-  FROM ghcr.io/jimboschneider/dirtywork-worker:0.12
+  FROM ghcr.io/jimboschneider/dirtywork-worker:0.13
   USER root
   ENV DOTNET_EnableWriteXorExecute=0
   # until the 1.0 base image bakes these in — see the 0.10 defect note below;
@@ -117,13 +117,13 @@ the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
   USER worker
   ```
 
-  The `:0.12` image ships .NET SDK 8.0 and 10.0 and sets
+  The `:0.13` image ships .NET SDK 8.0 and 10.0 and sets
   `DOTNET_EnableWriteXorExecute=0`, so `dotnet restore`/`build`/`test` work
   for both runtimes under the sandbox's per-command file-size limit (`bash`
   runs everything under `ulimit -f 524288`, 256 MiB; verified offline: new,
   build and run of net8.0 and net10.0 apps under the limit). The old `:0.10`
   image had SDK 8.0 only and its .NET 8 runtime died at startup with `File
-  size limit exceeded` (a 0.10 defect); a derived image `FROM :0.12` inherits
+  size limit exceeded` (a 0.10 defect); a derived image `FROM :0.13` inherits
   the fix and needs no `ENV` line of its own.
   Restoring anything not vendored this way needs `--allow-network`.
 
@@ -230,9 +230,13 @@ the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
   a container's commits could not reach the host anyway. `dirtywork resume`
   inherits the setting from the run it continues.
 
-**init:** writes the Claude Code skill that teaches an orchestrating agent to drive dirtywork
-(the text `dirtywork init --stdout` prints) to `~/.claude/skills/dirtywork/SKILL.md` and, with
-`--repo PATH`, to `<PATH>/.claude/skills/dirtywork/SKILL.md` as well; `--no-user` skips the home
+**init:** writes the skill that teaches an orchestrating agent to drive dirtywork (the text
+`dirtywork init --stdout` prints). `--agent` picks the directory: `claude` (the default) →
+`~/.claude/skills/dirtywork/SKILL.md` and, with `--repo PATH`,
+`<PATH>/.claude/skills/dirtywork/SKILL.md`; `codex`, `gemini`, `cursor` and `copilot` →
+`~/.agents/skills/dirtywork/SKILL.md` and `<PATH>/.agents/skills/dirtywork/SKILL.md`. The file is
+the same for every agent (the Agent Skills standard); only the directory differs, and the four
+non-Claude agents share it — one `init` covers all four. `--no-user` skips the home
 copy (`--no-user` without `--repo` is a usage error). The first line after the frontmatter is a
 stamp — `<!-- dirtywork-skill vX.Y.Z sha256:<16 hex> … -->` — whose hash covers the rest of the
 file, so `init` can tell its own unmodified output from a copy you edited: absent → `wrote:`;
@@ -242,8 +246,8 @@ modified):` unless `--force` (`overwrote:`). One stdout line per destination, us
 project. Exit 0 when every destination was written or current, 1 when any was skipped, 2 on a
 usage or environment error (`error: …` on stderr; nothing further is written). `--stdout`
 prints the rendered skill and writes nothing. The skill is never injected into the worker's
-prompt; a project copy committed to the target repo is visible to the worker like any other
-file (its first paragraph tells a worker to ignore it).
+prompt; a project copy committed to the target repo — under `.claude/` or `.agents/` — is
+visible to the worker like any other file (its first paragraph tells a worker to ignore it).
 
 **Security:** Docker mode (the default) protects host integrity and host execution, not
 repository-history confidentiality — the worker can read the *entire* parent object store (every

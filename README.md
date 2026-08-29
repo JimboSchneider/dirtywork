@@ -149,17 +149,18 @@ you don't have pipx, see the
 
 installs the `dirtywork` skill for Claude Code — in your home (`~/.claude/skills/dirtywork/`) and,
 with `--repo`, in the project — so Claude knows how to brief a run, read its JSON, review the
-worktree, resume with feedback and record a verdict. Ask it to delegate a task to dirtywork. Any
-other agent can read the same instructions with `dirtywork init --stdout`, and the full reference
-with `dirtywork contract`. The skill assumes LM Studio on `localhost:1234`; on Ollama or another
-endpoint, tell Claude to pass `--provider`/`--base-url` (the guide's *Other providers* note says
-how). The walkthrough, from LM Studio to the first delegated task:
+worktree, resume with feedback and record a verdict. Ask it to delegate a task to dirtywork. Codex
+CLI, Gemini CLI, Cursor and Copilot read the same file from one shared directory:
+`dirtywork init --agent codex --repo .` writes it to `.agents/skills/dirtywork/` (home and project),
+and `--agent gemini|cursor|copilot` write those same two files. The full reference is
+`dirtywork contract`. The skill's run template carries `--provider`/`--base-url`, so Ollama and
+other endpoints need no hand edits. The walkthrough, from LM Studio to the first delegated task:
 [Orchestrator setup](https://github.com/JimboSchneider/dirtywork/blob/main/docs/orchestrator-setup.md).
 
 **`init` configures nothing.** It writes one Markdown file that Claude Code loads by name;
 `contract` only prints. Which model, provider, sandbox and image a run uses are flags on
 `dirtywork run`, every time — there is no config file. If both a personal and a project copy exist,
-Claude Code loads the personal one, so put your own tweaks (a `--provider` line, say) in
+Claude Code loads the personal one, so put your own tweaks (a default `--model`, say) in
 `~/.claude/skills/dirtywork/SKILL.md`, not the committed copy.
 
 **Re-run `dirtywork init` after every upgrade.** The skill is a file on disk, written by the

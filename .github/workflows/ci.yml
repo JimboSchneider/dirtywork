@@ -95,7 +95,7 @@ jobs:
         with:
           context: docker/
           load: true
-          tags: ghcr.io/jimboschneider/dirtywork-worker:0.12
+          tags: ghcr.io/jimboschneider/dirtywork-worker:0.13
           cache-from: type=gha
           # ignore-error: fork PRs may not have write access to the cache scope.
           cache-to: type=gha,mode=max,ignore-error=true
@@ -129,6 +129,8 @@ jobs:
           smoke/bin/dirtywork contract > contract.md && grep -q '^# Machine contract' contract.md
       - run: |
           smoke/bin/dirtywork init --stdout > skill.md && grep -q '^name: dirtywork' skill.md && grep -q 'dirtywork-skill v' skill.md
+      - run: |
+          mkdir smoke-repo && smoke/bin/dirtywork init --agent codex --no-user --repo smoke-repo && test -f smoke-repo/.agents/skills/dirtywork/SKILL.md && smoke/bin/dirtywork init --agent gemini --stdout > skill2.md && cmp skill.md skill2.md
       - run: |
           smoke/bin/dirtywork --version > version.txt && grep -q '^dirtywork ' version.txt
 

@@ -34,8 +34,11 @@ def test_skill_frontmatter_and_size():
     assert re.search(r"\ndescription: \S", head)
     assert text.count("\n") <= 200
     for needle in ("dirtywork contract", "resume", "runs verdict", "--keep-transcript",
-                   "--allow-network", "`0`", "`1`", "`2`"):
+                   "--allow-network", "`0`", "`1`", "`2`",
+                   "[--provider openai|anthropic|ollama] [--base-url <url>]", "ollama ps",
+                   "curl -s <base-url>/models", "not restore a custom `--base-url`"):
         assert needle in text, needle
+    assert "Other providers: see the contract" not in text
 
 
 def test_skill_stamp_hash_matches_body():
@@ -87,6 +90,11 @@ def test_skill_first_paragraph_addresses_the_worker():
         paragraph.append(after.pop(0))
     joined = " ".join(paragraph).lower()
     assert "worker" in joined and "ignore" in joined, joined
+
+
+def test_endpoint_hint_names_the_flags():
+    hint = m._ENDPOINT_HINTS["openai"]
+    assert "lms ps" in hint and "--base-url" in hint and "--provider ollama" in hint
 
 
 @pytest.fixture
@@ -264,18 +272,79 @@ def test_init_same_version_template_change_updates(home, capsys):
     assert path.read_text(encoding="utf-8") == current
 
 
+def _skill_at(base: Path, agent: str) -> Path:
+    return base / contract.AGENT_DIRS[agent] / "skills" / "dirtywork" / "SKILL.md"
+
+
+@pytest.mark.parametrize("agent", contract.AGENTS)
+def test_init_agent_writes_that_agents_paths(home, tmp_path, agent, capsys):
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    rc = m.main(["init", "--agent", agent, "--repo", str(repo)])
+    out = capsys.readouterr().out
+    user, project = _skill_at(home, agent), _skill_at(repo, agent)
+    assert rc == 0
+    assert out == f"wrote: {user}\nwrote: {project}\n"
+    expected = contract.render_skill(__version__).encode("utf-8")
+    assert user.read_bytes() == expected and project.read_bytes() == expected
+
+
+def test_init_default_agent_is_claude(home, capsys):
+    assert m.main(["init"]) == 0
+    assert m.main(["init", "--agent", "claude"]) == 0
+    assert capsys.readouterr().out == f"wrote: {_user_skill(home)}\nup to date: {_user_skill(home)}\n"
+
+
+@pytest.mark.parametrize("agent", contract.AGENTS)
+def test_init_stdout_is_identical_across_agents(home, agent, capsys):
+    assert m.main(["init", "--agent", agent, "--stdout"]) == 0
+    assert capsys.readouterr().out == contract.render_skill(__version__)
+    assert not (home / contract.AGENT_DIRS[agent]).exists()
+
+
+def test_init_unknown_agent_is_a_usage_error(home, capsys):
+    with pytest.raises(SystemExit) as exc:
+        m.main(["init", "--agent", "emacs"])
+    assert exc.value.code == 2
+    assert not (home / ".claude").exists() and not (home / ".agents").exists()
+
+
+def test_init_agents_share_or_split_destinations(home, capsys):
+    assert m.main(["init", "--agent", "claude"]) == 0
+    assert m.main(["init", "--agent", "codex"]) == 0
+    assert m.main(["init", "--agent", "gemini"]) == 0
+    shared = _skill_at(home, "codex")
+    assert capsys.readouterr().out == (
+        f"wrote: {_user_skill(home)}\nwrote: {shared}\nup to date: {shared}\n")
+    with open(_user_skill(home), "a", encoding="utf-8") as fh:
+        fh.write("\nlocal edit\n")
+    assert m.main(["init", "--agent", "cursor"]) == 0
+    assert capsys.readouterr().out == f"up to date: {shared}\n"
+    assert _user_skill(home).read_text(encoding="utf-8").endswith("local edit\n")
+
+
+def test_agent_dirs_table():
+    assert contract.AGENT_DIRS["claude"] == ".claude"
+    assert {contract.AGENT_DIRS[a] for a in contract.AGENTS if a != "claude"} == {".agents"}
+    assert contract.AGENTS == tuple(contract.AGENT_DIRS)
+    sub = next(a for a in m._build_parser()._actions if isinstance(a, argparse._SubParsersAction))
+    action = next(a for a in sub.choices["init"]._actions if "--agent" in a.option_strings)
+    assert tuple(action.choices) == contract.AGENTS and action.default == "claude"
+
+
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], check=True,
                           capture_output=True, text=True).stdout
 
 
-def test_worker_prompt_does_not_inject_skill_file(tmp_path):
+@pytest.mark.parametrize("agent", contract.AGENTS)
+def test_worker_prompt_does_not_inject_skill_file(tmp_path, agent):
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-b", "main")
     _git(repo, "config", "user.email", "t@t")
     _git(repo, "config", "user.name", "t")
-    skill = repo / ".claude" / "skills" / "dirtywork" / "SKILL.md"
+    skill = repo / contract.AGENT_DIRS[agent] / "skills" / "dirtywork" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text(contract.render_skill(__version__), encoding="utf-8")
     (repo / "f.txt").write_text("hello")

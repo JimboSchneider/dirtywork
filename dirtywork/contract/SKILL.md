@@ -20,8 +20,12 @@ first `run` in a session. Do not guess flags.
 ## Before the first run
 
 - `dirtywork --version` — installed and on PATH (`pipx install dirtywork` if not).
-- `curl -s http://localhost:1234/v1/models` — LM Studio is serving and the model
-  you will pass as `--model` is loaded. Other providers: see the contract.
+- The endpoint you will pass is serving and the model you will pass as `--model`
+  is loaded (LM Studio `curl -s http://localhost:1234/v1/models`; Ollama
+  `ollama ps`) or available (another OpenAI-compatible server:
+  `curl -s <base-url>/models`). If the request does not say which provider,
+  find out; if more than one is running, ask — never pick one silently, and
+  never assume LM Studio. `--provider anthropic` needs `ANTHROPIC_API_KEY`.
 - `docker info` — docker mode (the default, and the contained one) needs a
   running Docker; the worker image is pulled on the first run if it is
   absent (exit 2 with "Build or pull the worker image" means that failed —
@@ -50,9 +54,14 @@ automatically: put worker-facing conventions there, not in every brief.
 
     dirtywork run --repo <path> "<brief>" \
       --model <model> \
+      [--provider openai|anthropic|ollama] [--base-url <url>] \
       --verify "<test command>" --verify-rounds 2 \
       --max-turns 60 --timeout 1800
 
+- `--provider`/`--base-url`: omit both for LM Studio on `localhost:1234` (the
+  default). Use `--provider ollama` for Ollama; for another OpenAI-compatible
+  server, pass `--base-url <url>`. `resume` inherits `--provider`, but it does
+  not restore a custom `--base-url` — repeat that custom URL on every resume.
 - `--verify` runs your gate in the sandbox after the worker finishes and feeds
   failures back for up to `--verify-rounds` further attempts.
 - Progress is on **stderr**: transcript path, worktree path, `error:` lines.

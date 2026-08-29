@@ -374,10 +374,12 @@ without being cut.
 
 `dirtywork init` writes the Claude Code skill that teaches an agent to drive dirtywork to
 `~/.claude/skills/dirtywork/SKILL.md`; `--repo PATH` writes a project copy too (commit it so the
-whole team's Claude gets it); `--no-user` skips the home copy. The file is stamped, so re-running
+whole team's Claude gets it); `--no-user` skips the home copy;
+`--agent codex` (or `gemini`, `cursor`, `copilot`) writes the same file to `.agents/skills/` instead —
+the directory those four tools share. The file is stamped, so re-running
 `init` after an upgrade refreshes an unmodified copy and leaves one you edited alone unless you pass
 `--force` (`skipped (locally modified)` and exit 1 tell you which). `dirtywork init --stdout` prints
-the skill for any other agent; `dirtywork contract` prints the machine contract — every flag, the
+the skill; `dirtywork contract` prints the machine contract — every flag, the
 stdout JSON, exit codes — for the installed version. The end-to-end walkthrough, from LM Studio
 to the first delegated task, is [Orchestrator setup](orchestrator-setup.md).
 
@@ -418,10 +420,14 @@ are not part of the installed package.
 
 ## Troubleshooting
 
-- **exit 2, "cannot reach LM Studio"** — server not running; check `lms ps`
-  and `curl -s localhost:1234/v1/models`.
-- **exit 2, "model not loaded"** — `lms load <model>` (the error names the
-  loaded models).
+- **exit 2, "Is the OpenAI-compatible server running?" / "Is Ollama
+  running?"** — the model server is not up. LM Studio: `lms ps`, then
+  `curl -s localhost:1234/v1/models`; Ollama: `ollama ps`; another server:
+  curl the `--base-url` you pass. If you meant a different provider, the hint
+  says which flag: `--provider ollama`, or `--base-url <url>`.
+- **exit 2, "model not loaded"** (Ollama says "not available") — LM Studio:
+  `lms load <model>`; Ollama: `ollama run <model>` (ids carry the tag, e.g.
+  `gemma4:latest`). The error lists what the server has.
 - **exit 2, "ANTHROPIC_API_KEY is not set"** — set that environment variable
   before running with `--provider anthropic`.
 - **status `max_turns` / `timeout`** — the worktree is kept; read the
@@ -491,7 +497,7 @@ are not part of the installed package.
   old `:0.10` image** — a 0.10 defect, not a dirtywork bug: that image's
   .NET 8 runtime trips the sandbox's per-command file-size limit
   (`ulimit -f 524288`, 256 MiB) at startup with W^X enabled, the .NET
-  default. Use the `:0.12` image (the default since 0.12.0), or a derived
+  default. Use the `:0.13` image (the default since 0.13.0), or a derived
   image based on `:0.10` that adds `ENV DOTNET_EnableWriteXorExecute=0` — see
   [`docker/README.md`](../docker/README.md).
 - **`aborted after 3 consecutive unknown_tool failures` on Devstral, with tool names that end in `[TOOL_CALLS]bash`** — 0.10 counted each as an unknown tool. 1.0 (#67) recovers the call: the tool after the last marker runs with the arguments given, the transcript's `tool_result` shows `tool: bash` and the raw name in `tool_raw`, and the model is told once per turn (`nudge` kind `name_recovered`) to emit clean calls. If a name has a marker but no real tool after it, it is still an unknown-tool failure.

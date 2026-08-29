@@ -24,6 +24,7 @@ from pathlib import Path
 
 from . import __version__
 from .budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB
+from .contract import AGENTS
 from .llm import LLMError
 from .providers import DEFAULT_BASE_URLS, PROVIDER_NAMES, get_provider
 from .rundir import (RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json,
@@ -217,7 +218,7 @@ def _inherit_tmpfs_size(prior: dict, key: str, default: str) -> str:
 
 
 _ENDPOINT_HINTS = {
-    "openai": "Is the OpenAI-compatible server running? Try: lms ps",
+    "openai": "Is the OpenAI-compatible server running? Try: lms ps (LM Studio). Another server: --base-url <url>; Ollama: --provider ollama",
     "anthropic": "Check ANTHROPIC_API_KEY and that api.anthropic.com is reachable.",
     "ollama": "Is Ollama running? Try: ollama ps",
 }
@@ -1166,7 +1167,7 @@ def _add_bench_parsers(sub) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dirtywork",
-        description="Driving it from an agent? `dirtywork init` installs the Claude Code skill; "
+        description="Driving it from an agent? `dirtywork init` installs the orchestrator skill (Claude Code by default; --agent for Codex, Gemini CLI, Cursor, Copilot); "
                     "`dirtywork contract` prints the reference.")
     parser.add_argument("--version", action="version", version=f"dirtywork {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -1192,11 +1193,13 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_runs_parsers(sub)
     _add_bench_parsers(sub)
     contract_p = sub.add_parser("contract", help="print the machine contract (the operator reference) to stdout")
-    init_p = sub.add_parser("init", help="install the Claude Code skill that teaches an agent to drive dirtywork")
+    init_p = sub.add_parser("init", help="install the skill that teaches an orchestrating agent to drive dirtywork (Claude Code by default; --agent for Codex, Gemini CLI, Cursor, Copilot)")
+    init_p.add_argument("--agent", choices=AGENTS, default="claude",
+                        help="whose skills directory to write: claude -> .claude/skills (default); codex, gemini, cursor, copilot -> .agents/skills")
     init_p.add_argument("--repo", type=Path, default=None,
-                        help="also write the skill into this project (<PATH>/.claude/skills/dirtywork/SKILL.md)")
+                        help="also write the skill into this project (<PATH>/<agent dir>/skills/dirtywork/SKILL.md)")
     init_p.add_argument("--no-user", action="store_true", default=False,
-                        help="do not write ~/.claude/skills/dirtywork/SKILL.md")
+                        help="do not write the home copy (~/<agent dir>/skills/dirtywork/SKILL.md)")
     init_p.add_argument("--force", action="store_true", default=False,
                         help="overwrite a locally modified copy")
     init_p.add_argument("--stdout", action="store_true", default=False,

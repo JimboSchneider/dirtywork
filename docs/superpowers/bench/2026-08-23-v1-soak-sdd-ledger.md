@@ -470,3 +470,46 @@ bash), 3 ✘ as a number — the "~25" estimate was made blind to 558 tests; the
 in expected strings, 28 ownership/uid checks, 15 sharing violations, 9 symlink privilege, 7 rejected filenames, 4
 `mkfifo`, ~50 bash-driven, ~7 uncategorized; zero crashes, zero errors), 4 ✔, 5 ✔, 6 ✔, 7 pending a person. All seven
 PR checks green including `gate`. Merge is the owner's call.
+
+## #87 — `init --agent` + provider-neutral skill (plan v1.1 `816bb6e`, spec v1.2 `db3528a`)
+
+Started 2026-08-29 12:44 CDT on the owner's "Let's go". Sequenced after #96 tier 1 (main `d755222`);
+ships as 0.13.0 with it.
+
+- Runtime: released dirtywork **0.12.1** (`pipx run --spec`), worker `qwen/qwen3-coder-next` via LM
+  Studio, image `dirtywork-worker-pytest:0.12`, Docker, `--verify "python3 -m pytest -q -p
+  no:cacheprovider" --verify-rounds 2 --max-turns 60 --timeout 1800`, branch-from
+  `issue-87-init-agent`.
+- Host baseline (`816bb6e`, `PYTHONPATH=. pipx run --spec pytest pytest -q -p no:cacheprovider`):
+  **1,662 passed, 9 skipped, 38 deselected in 107.29 s**.
+- Pre-checks (plan v1.1 fold): every brief applied literally on the host by a Sonnet subagent in a
+  throwaway worktree before any run — W1+W2 → 1,681 passed; W3+W4 → 1,662 passed; six brief defects
+  fixed before the first run.
+- Sampler: `tools/soak_sampler.sh` → this session's scratchpad `metrics-87.csv`.
+
+| Task | Slug | Status | Turns | Wall | s/turn | Prompt tok | Compl tok | tok/s | Nudges | Guardrail | Tool mix | Verify | Resumes | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| W1 | `issue-87-dirtywork-init-agent-0829124432-da8ab231` | completed | 32 | 261.9 s | 8.2 | 628,525 | 5,443 | 20.8 | 1 (`no_change`, turn 30) | 0 | read_file×6, grep×1, edit_file×9, bash×17, finish×1 | pass (round 1; sandbox 1,681/8 skipped, 51 s) | 1 | 3 files as briefed (+90/−11); code verbatim except a docstring `;` for `,`; tests verbatim except one test name (`share_split` for `share_or_split`); host `test_contract.py` 42 passed, full suite **1,680 passed / 9 skipped** (+18 = W1's share) |
+| W1-r1 | `issue-87-dirtywork-init-agent-0829125141-ab5d2de9` | completed | 8 | 69.4 s | 8.7 | 72,733 | 440 | 6.3 | 0 | 0 | bash×5, edit_file×2, finish×1 | pass (round 1; 1,681/8) | — | resume with a two-item feedback file (rename the test, comma in the docstring); both applied, nothing else touched; verdict **accept**; export `9472f36` ff'd into `issue-87-init-agent`; `runs clean --keep-transcript` |
+| W2 | `issue-87-dirtywork-init-agent-0829125022-7796a798` | completed | 19 | 163.0 s | 8.6 | 268,837 | 2,876 | 17.6 | 0 | 0 | read_file×6, grep×1, bash×8, edit_file×5, finish×1 | pass (round 1; 1,664/8, 52 s) | 1 | 3 files as briefed (+19/−4); `SKILL.md` **byte-identical to spec Appendix A** (135 lines); hint string exact; tests as briefed but the four new needles on one 170-column line; host `test_contract.py` 25 passed, full suite **1,663 passed / 9 skipped** (+1 = test 30) |
+| W2-r1 | `issue-87-dirtywork-init-agent-0829125721-50ffd95c` | completed | 7 | 78.5 s | 11.2 | 49,330 | 542 | 6.9 | 0 | 0 | read_file×1, edit_file×1, bash×4, finish×1 | pass (round 1; 1,664/8) | — | one-item feedback (wrap the tuple ≤ 100 cols, needles byte-identical): applied exactly; verdict **accept**; export `f0912ef` ff'd; `runs clean --force --keep-transcript` (`--force` because the export commit sits beyond the run's base — expected) |
+| W3 | `issue-87-dirtywork-init-agent-0829125413-aecbfd58` | **max_turns** | 60 | 230.8 s | 3.8 | 1,419,439 | 13,293 | 57.6 | 0 | 0 | read_file×4, edit_file×5, bash×51 | none (max_turns) | 2 | Worktree at the end: CI step present and YAML valid; contract synopsis re-wrapped onto two lines; the new **init** text *merged into* the old paragraph (the old "to `~/.claude/…` … as well;" fragment survived); one trailing space. The 51 `bash` calls were `sed -n … \| cat -A` / `git checkout ci.yml` / re-edit cycles on the `\|` block scalar — 3.8 s/turn, no nudge fired (`no_change` needs edits to stop; these were edits that kept reverting) |
+| W3-r1 | `issue-87-dirtywork-init-agent-0829130024-d88420fb` | completed | 29 | 120.9 s | 4.2 | 396,631 | 3,303 | 27.3 | 0 | 0 | bash×20, read_file×5, edit_file×2, apply_edits×1, finish×1 | pass (round 1; 1,681/8) | — | three-item feedback (synopsis one line; delete the fragment + re-wrap; trailing space). All three applied — **but it also ran `git checkout .github/workflows/ci.yml`**, reverting the CI step the feedback said not to touch; its re-wrap left a 138- and a 109-column line and dropped `copilot`'s backticks |
+| W3-r2 | `issue-87-dirtywork-init-agent-0829130427-f7250860` | completed | 26 | 116.4 s | 4.5 | 308,517 | 3,577 | 30.7 | 0 | 0 | bash×19, read_file×3, edit_file×3, finish×1 | pass (round 1; 1,681/8) | — | feedback: the CI step's two exact lines + anchor, three exact replacement lines for the contract, and "never `git checkout`/`restore`/`stash`". Both applied exactly; paragraph words identical to the brief's; CI line byte-exact, YAML parses; host `test_contract.py` 42 passed. Verdict **accept**; export `b47e2cb` ff'd; `runs clean --force --keep-transcript`. Lesson for the brief: a prose paragraph replacement wants "replace lines N–M with these K lines", not "replace from X through Y" |
+| W4 | `issue-87-task-w4-of-0829130726-b1f9c658` | completed | 43 | 230.5 s | 5.4 | 1,340,200 | 5,917 | 25.7 | 1 | 0 | read_file×13, apply_edits×5, edit_file×11, grep×1, bash×18, finish×1 | pass (round 1; 1,682/8, 52 s) | 0 | 8 files as briefed (+44/−47): 0.13.0, `DEFAULT_IMAGE` `:0.13`, `PINNED_DIGEST = None` with the 0.12 digest in the history comment, contract 8 → `:0.13`, `docker/README.md` 19 + both release lists, `ci.yml:98`, `operating.md`; A9 sweep on the worktree returns only the history line; host full suite **1,681 passed / 9 skipped** (= baseline + 19). Verdict **accept**; export `c7e4ed7` ff'd; cleaned |
+
+**Totals (4 briefs, 8 runs incl. 4 resumes, 12:44–13:13 CDT):** 224 turns, 1,271 s of worker wall
+(21.2 min), 4,484,212 prompt / 35,391 completion tokens; verify passed round 1 on every run that
+reached it; one `max_turns` (W3's YAML block-scalar loop). **Claude touched code: none** — every
+deviation was fixed by `resume --feedback-file` (W1 ×1, W2 ×1, W3 ×2). Claude wrote the docs (D1,
+`8f80df0`) and the ledger. Host suite on the integration branch (`c7e4ed7`): **1,681 passed,
+9 skipped, 38 deselected** vs baseline 1,662 (+19: test 17 ×5 for 1, 24 ×5, 25, 26 ×5, 27–30).
+Sampler (`metrics-87.csv`, 350 rows at 5 s): LM Studio 2 models resident throughout; macOS
+`free_gb` min 0.1 / mean 4.4, `inactive_gb` mean 28.7 — the box was paging-adjacent with Docker +
+two models but no run stalled or timed out. Observations for the harness: (1) W3's first run burned
+60 turns at 3.8 s/turn without a nudge — `no_change` never fires while the worker keeps editing and
+reverting the same file; a "same file edited N times without the test changing" nudge would have
+caught it. (2) On a resume the worker twice reached for `git checkout <file>` to "reset" a file it
+didn't understand, once against an explicit instruction — worth a guardrail or a resume-prompt line.
+(3) Prose replacement briefs work when phrased "replace lines N–M with these K lines" and fail when
+phrased as a span between two quoted anchors.

@@ -99,17 +99,17 @@
   </header>
 
   <p>Here is the idea in one breath: Claude Code does the thinking — picks the task, writes the brief, reviews the result — and a local model on your own machine does the typing, inside a sandbox, for free. You review the diff and merge what survives. This page gets you there.</p>
-  <p>You need dirtywork 0.12.0 or later. Not counting the model download, the whole thing takes a few minutes.</p>
+  <p>You need dirtywork 0.12.0 or later — 0.13.0 for anything but Claude Code. Not counting the model download, the whole thing takes a few minutes.</p>
 
   <section>
     <h2>You need three things</h2>
-    <p><strong>A local model.</strong> Install <a href="https://lmstudio.ai">LM Studio</a>, download a model that can call tools, load it, and start LM Studio's local server (it listens on port 1234 by default). I use <code>qwen/qwen3-coder-next</code>; <code>mistralai/devstral-small-2-2512</code> is the other one I test with. Load one model with as much context as your machine can hold rather than two small ones — the difference is measured in <a href="https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md#sizing-the-context-window">the operating guide</a>.</p>
+    <p><strong>A local model.</strong> Install <a href="https://lmstudio.ai">LM Studio</a> or <a href="https://ollama.com">Ollama</a>, pull a model that can call tools, and have it serving. dirtywork talks to LM Studio on <code>localhost:1234</code> unless you say otherwise: <code>--provider ollama</code> for Ollama, <code>--base-url &lt;url&gt;</code> for any other OpenAI-compatible server. I use <code>qwen/qwen3-coder-next</code> on LM Studio; <code>mistralai/devstral-small-2-2512</code> is the other one I test with. Load one model with as much context as your machine can hold rather than two small ones — the difference is measured in <a href="https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md#sizing-the-context-window">the operating guide</a>.</p>
     <p><strong>Docker.</strong> Docker Desktop or <code>dockerd</code>, running. That is where the worker lives: no network (unless you pass <code>--allow-network</code> on purpose), no access to your home directory, just the repo. The worker image downloads itself the first time you run.</p>
     <p><strong>dirtywork.</strong></p>
 <pre><code>pipx install dirtywork
 dirtywork --version</code></pre>
     <p>If the second line says <code>command not found</code>, run <code>pipx ensurepath</code> and open a new terminal.</p>
-    <p>Quick check that all three are awake:</p>
+    <p>Quick check that all three are awake (the first line is LM Studio's; on Ollama it is <code>ollama ps</code>):</p>
 <pre><code>curl -s http://localhost:1234/v1/models
 docker info
 dirtywork --version</code></pre>
@@ -124,8 +124,24 @@ dirtywork init --repo .</code></pre>
 <pre><code>wrote: /Users/you/.claude/skills/dirtywork/SKILL.md
 wrote: /Users/you/repos/yourproject/.claude/skills/dirtywork/SKILL.md</code></pre>
     <p>That file is a Claude Code <em>skill</em> — a short set of instructions Claude picks up on its own when a task looks like "hand this to dirtywork". The home copy follows you into every project; the project copy travels with the repo. Commit the project copy, and everyone who clones the repo gets a Claude that already knows how to drive.</p>
-    <p>The skill tells Claude to check that LM Studio and Docker are up, read <code>dirtywork contract</code> (the full flag reference for the version you installed) instead of guessing, write a brief that names files and tests, run, read the result, review the diff, send the worker back with feedback if it's close, and record a verdict. It's project-neutral — no paths, no model names, nothing about my machine.</p>
+    <p>The skill tells Claude to check that your model server and Docker are up, read <code>dirtywork contract</code> (the full flag reference for the version you installed) instead of guessing, write a brief that names files and tests, run, read the result, review the diff, send the worker back with feedback if it's close, and record a verdict. It's project-neutral — no paths, no model names, nothing about my machine.</p>
     <p>One thing to know about where instructions go: your project's <code>CLAUDE.md</code> (or <code>AGENTS.md</code>) is handed to the <em>worker</em> at the start of every run so it inherits your conventions. That's the place for "we use pytest, four-space indents, no new dependencies" — not for orchestrator instructions. Leave the driving to the skill.</p>
+  </section>
+
+  <section>
+    <h2>Other orchestrators</h2>
+    <p>Codex CLI, Gemini CLI, Cursor and GitHub Copilot read the same kind of file Claude Code does — a <code>SKILL.md</code> in the <a href="https://agentskills.io">Agent Skills</a> layout — and all four look in one shared directory. So it's one command, not four:</p>
+<pre><code>dirtywork init --agent codex --repo .
+
+wrote: /Users/you/.agents/skills/dirtywork/SKILL.md
+wrote: /Users/you/repos/yourproject/.agents/skills/dirtywork/SKILL.md</code></pre>
+    <p><code>--agent gemini</code>, <code>--agent cursor</code> and <code>--agent copilot</code> write those same two files (<code>init</code> will say <code>up to date:</code>). The file is byte-for-byte what <code>--agent claude</code> writes; only the directory differs. What each tool does with it:</p>
+    <ul>
+      <li><strong>Codex CLI</strong> lists it as <code>$dirtywork</code> and picks it on its own when a request matches the description.</li>
+      <li><strong>Gemini CLI</strong> asks you to confirm the first time it activates the skill — you'll see the name, the description and the path. <code>/skills list</code> shows it.</li>
+      <li><strong>Cursor</strong> and <strong>Copilot</strong> show it in the <code>/</code> menu and can pick it on their own. For Copilot that means the CLI or VS Code's agent mode; the cloud agent runs on GitHub's machines and can't reach your model server or Docker.</li>
+    </ul>
+    <p>The rule is the same everywhere: the skill never goes into <code>AGENTS.md</code> or <code>CLAUDE.md</code>, because dirtywork hands those to the <em>worker</em> on every run. <code>init</code> never writes there. Needs 0.13.0 or later.</p>
   </section>
 
   <section>
@@ -151,10 +167,9 @@ wrote: /Users/you/repos/yourproject/.claude/skills/dirtywork/SKILL.md</code></pr
     <h2>Good to know</h2>
     <ul>
       <li><strong>Upgrades.</strong> After <code>pipx upgrade dirtywork</code>, run <code>dirtywork init</code> again. The upgrade replaces the wheel, not the skill file it wrote, so until you do, Claude is driving the new release with the old release's instructions. <code>init</code> refreshes a copy you haven't touched, leaves a current one alone, and won't overwrite one you edited unless you pass <code>--force</code>. It tells you which happened, one line per file.</li>
-      <li><strong>Other providers.</strong> The skill assumes LM Studio on <code>localhost:1234</code>: its run template passes only <code>--model</code>, and its first-run check curls that port. dirtywork itself takes more — <code>--provider ollama</code> for Ollama, <code>--base-url &lt;url&gt;</code> for any other OpenAI-compatible server, <code>--provider anthropic</code> (needs <code>ANTHROPIC_API_KEY</code>) — but the skill doesn't say so, so Claude won't pass those flags unless you make it: say it in the request ("delegate this with <code>--provider ollama</code>"), or add the flag to the run template in your <strong>personal</strong> copy. In a shared repo that means <code>dirtywork init</code> without <code>--repo</code>, then edit <code>~/.claude/skills/dirtywork/SKILL.md</code> — not the committed project copy, which is the team's baseline. Claude Code loads a personal skill over a project skill of the same name, so your flags win in that repo and nobody else's setup changes. Two costs: <code>init</code> after an upgrade will skip your edited copy (<code>skipped (locally modified)</code>), so diff it against <code>dirtywork init --stdout</code> and carry your line forward; and the project copy keeps its own stamp, so refresh it separately. A provider-neutral skill is part of <a href="https://github.com/JimboSchneider/dirtywork/issues/87">#87</a>.</li>
-      <li><strong>Other agents.</strong> <code>dirtywork init --stdout</code> prints the skill without writing anything. Together with <code>dirtywork contract</code>, anything that can run a shell command has what Claude has.</li>
+      <li><strong>Other providers.</strong> The skill's run template carries <code>--provider</code> and <code>--base-url</code>, and its first-run check covers LM Studio, Ollama and any other OpenAI-compatible endpoint — it asks rather than guessing when more than one is running. If you added a <code>--provider</code> line by hand under 0.12, <code>init</code> will now report your copy as locally modified; <code>--force</code> takes the new template, which has the line. One more thing the skill says, because it bit a user: <code>resume</code> inherits <code>--provider</code> but not a custom <code>--base-url</code>, so that URL goes on every resume.</li>
       <li><strong>The worker can't install things.</strong> The sandbox is offline by default (<code>--allow-network</code> is the deliberate exception). If your tests need a tool the image lacks — pytest, say — build a derived image once (a five-line Dockerfile in the <a href="https://github.com/JimboSchneider/dirtywork/blob/main/docker/README.md#derived-images-extra-packages">worker image guide</a>) and pass it with <code>--image</code>.</li>
-      <li><strong>The project skill is a file in the repo</strong>, so a worker can read it like any other file. Its first paragraph tells a worker to ignore it. That's a polite request, not a wall; hiding <code>.claude/</code> from the worker for real is <a href="https://github.com/JimboSchneider/dirtywork/issues/84">#84</a>.</li>
+      <li><strong>The project skill is a file in the repo</strong> — under <code>.claude/</code> or <code>.agents/</code> — so a worker can read it like any other file. Its first paragraph tells a worker to ignore it. That's a polite request, not a wall; hiding it from the worker for real is <a href="https://github.com/JimboSchneider/dirtywork/issues/84">#84</a>.</li>
       <li><strong>Claude doesn't seem to know about dirtywork.</strong> Check that <code>~/.claude/skills/dirtywork/SKILL.md</code> exists, then start a fresh Claude Code session and ask it to delegate something.</li>
       <li>Everything else: the <a href="https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md">operating guide</a>.</li>
     </ul>
