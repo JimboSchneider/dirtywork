@@ -420,10 +420,14 @@ are not part of the installed package.
 
 ## Troubleshooting
 
-- **exit 2, "cannot reach LM Studio"** — server not running; check `lms ps`
-  and `curl -s localhost:1234/v1/models`.
-- **exit 2, "model not loaded"** — `lms load <model>` (the error names the
-  loaded models).
+- **exit 2, "Is the OpenAI-compatible server running?" / "Is Ollama
+  running?"** — the model server is not up. LM Studio: `lms ps`, then
+  `curl -s localhost:1234/v1/models`; Ollama: `ollama ps`; another server:
+  curl the `--base-url` you pass. If you meant a different provider, the hint
+  says which flag: `--provider ollama`, or `--base-url <url>`.
+- **exit 2, "model not loaded"** (Ollama says "not available") — LM Studio:
+  `lms load <model>`; Ollama: `ollama run <model>` (ids carry the tag, e.g.
+  `gemma4:latest`). The error lists what the server has.
 - **exit 2, "ANTHROPIC_API_KEY is not set"** — set that environment variable
   before running with `--provider anthropic`.
 - **status `max_turns` / `timeout`** — the worktree is kept; read the

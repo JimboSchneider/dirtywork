@@ -12,11 +12,14 @@ whole thing takes a few minutes.
 
 ## You need three things
 
-**A local model.** Install [LM Studio](https://lmstudio.ai), download a model
-that can call tools, load it, and start LM Studio's local server (it listens
-on port 1234 by default). I use `qwen/qwen3-coder-next`; `mistralai/devstral-small-2-2512`
-is the other one I test with. Load one model with as much context as your
-machine can hold rather than two small ones — the difference is measured in
+**A local model.** Install [LM Studio](https://lmstudio.ai) or
+[Ollama](https://ollama.com), pull a model that can call tools, and have it
+serving. dirtywork talks to LM Studio on `localhost:1234` unless you say
+otherwise: `--provider ollama` for Ollama, `--base-url <url>` for any other
+OpenAI-compatible server. I use `qwen/qwen3-coder-next` on LM Studio;
+`mistralai/devstral-small-2-2512` is the other one I test with. Load one
+model with as much context as your machine can hold rather than two small
+ones — the difference is measured in
 [the operating guide](operating.md#sizing-the-context-window).
 
 **Docker.** Docker Desktop or `dockerd`, running. That is where the worker
@@ -32,7 +35,8 @@ worker image downloads itself the first time you run.
 If the second line says `command not found`, run `pipx ensurepath` and open a
 new terminal.
 
-Quick check that all three are awake:
+Quick check that all three are awake (the first line is LM Studio's; on
+Ollama it is `ollama ps`):
 
     curl -s http://localhost:1234/v1/models
     docker info
@@ -56,7 +60,7 @@ follows you into every project; the project copy travels with the repo.
 Commit the project copy, and everyone who clones the repo gets a Claude that
 already knows how to drive.
 
-The skill tells Claude to check that LM Studio and Docker are up, read
+The skill tells Claude to check that your model server and Docker are up, read
 `dirtywork contract` (the full flag reference for the version you installed)
 instead of guessing, write a brief that names files and tests, run, read the
 result, review the diff, send the worker back with feedback if it's close,
@@ -92,7 +96,7 @@ it:
   you'll see the name, the description and the path. `/skills list` shows it.
 - **Cursor** and **Copilot** show it in the `/` menu and can pick it on their
   own. For Copilot that means the CLI or VS Code's agent mode; the cloud agent
-  runs on GitHub's machines and can't reach your LM Studio or Docker.
+  runs on GitHub's machines and can't reach your model server or Docker.
 
 The rule is the same everywhere: the skill never goes into `AGENTS.md` or
 `CLAUDE.md`, because dirtywork hands those to the *worker* on every run.
