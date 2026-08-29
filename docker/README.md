@@ -27,8 +27,10 @@ double-mapping file), so on the old `:0.10` image every .NET 8 process
 exceeded` (exit 153); the .NET 10 runtime does not. Verified 2026-08-24; the
 variable fixes both and `:0.13` bakes it, so a derived image `FROM :0.13`
 does not need to repeat it.
-No `ENTRYPOINT`/`CMD` — every `docker create`/`run`/`exec` in dirtywork
-passes its own explicit `--entrypoint` or absolute binary path.
+`ENTRYPOINT []` and `CMD []` — the base image's (`docker-entrypoint.sh`, `node`) are
+cleared, so a bare `docker run` of this image starts nothing; every `docker
+create`/`run`/`exec` in dirtywork passes its own explicit `--entrypoint` or
+absolute binary path.
 
 The same image is also used by `dirtywork bench` for the post-run
 acceptance containers (hash check via `/usr/bin/sha256sum`, the acceptance
@@ -163,7 +165,7 @@ USER worker
     docker build -t my-worker:0.13 .
     dirtywork run --repo ~/repos/thing --image my-worker:0.13 "..."
 
-Keep `USER worker` as the last instruction and add no `ENTRYPOINT`/`CMD`:
+Keep `ENTRYPOINT []`, `CMD []` and `USER worker` (last) as they are and add no `ENTRYPOINT`/`CMD` of your own:
 dirtywork always passes its own `--entrypoint` and `--user` explicitly at
 `docker create` (`dirtywork/sandbox/docker.py`'s `DockerSandbox.start()`
 passes `os.getuid()`/`os.getgid()` as `--user uid:gid` on the supported

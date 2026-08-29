@@ -39,6 +39,7 @@ def test_dockerfile_installs_the_packages_the_docs_promise():
         assert f"\n        {package} \\\n" in text, f"{package} is not in the apt list"
     assert "\nFROM node:22-bookworm-slim\n" in text, "the base image must be the official Node 22 image"
     assert "\nRUN userdel -r node && useradd -u 1000 -m worker\n" in text
+    assert "\nENTRYPOINT []\nCMD []\n" in text, "the base image's ENTRYPOINT/CMD must be cleared"
     for package in ("nodejs", "npm"):
         assert f"\n        {package} \\\n" not in text, f"{package} comes from the base image, not apt"
     readme = (DOCKER_DIR / "README.md").read_text(encoding="utf-8")

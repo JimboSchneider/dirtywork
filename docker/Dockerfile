@@ -70,9 +70,16 @@ ENV DOTNET_ROOT=/usr/share/dotnet \
 # always had; nothing in the sandbox refers to the `node` user.
 RUN userdel -r node && useradd -u 1000 -m worker
 
+# The base image sets ENTRYPOINT ["docker-entrypoint.sh"] and CMD ["node"]
+# (debian:bookworm-slim set CMD ["bash"]). Clear both, so a bare `docker run`
+# of this image starts nothing rather than Node and the contract below is
+# true rather than merely unused.
+ENTRYPOINT []
+CMD []
+
 USER worker
 
-# No ENTRYPOINT and no CMD: every `docker create`/`docker run` dirtywork
+# No ENTRYPOINT and no CMD (both cleared above): every `docker create`/`docker run` dirtywork
 # issues passes an explicit --entrypoint (/bin/cat for the tether,
 # /bin/chown for the prep container, /bin/sh for compound export steps) and
 # every `docker exec` names its binary by absolute path — nothing in this
