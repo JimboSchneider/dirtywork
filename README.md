@@ -7,8 +7,8 @@
 
 *Frontier models do the thinking. Local models do the dirty work.*
 
-Runs one coding task against a local LM Studio model in an agentic tool-use
-loop, inside an isolated git worktree. Built to be driven by an orchestrating
+Runs one coding task against a local model (LM Studio or Ollama) in an agentic
+tool-use loop, inside an isolated git worktree. Built to be driven by an orchestrating
 agent (Claude Code, in our case) — the expensive frontier model orchestrates
 and reviews, the free local model grinds. Humans watch with `tail -f`.
 
@@ -64,9 +64,10 @@ Full model, known exposures and the host-mode caveats:
 | CI-tested | Linux x86_64 (Ubuntu, Python 3.9 + 3.13) and macOS | unit suite on every push; the Docker sandbox live tests run on Linux in CI |
 | Unsupported | Windows | the unit suite runs on `windows-latest` in CI as an advisory (allowed-to-fail) job with a per-file pass/fail/error/skip table and, since #96 tier 1, runs to completion — the three POSIX-only crashes (`killpg`, `O_NOFOLLOW`, `os.kill(pid, 0)`) have Windows branches; Windows remains unsupported until an integration suite passes (Docker mode there is untested) (see the note in [Security & trust](https://github.com/JimboSchneider/dirtywork/blob/main/docs/security.md#security--trust)); the plan is [#96](https://github.com/JimboSchneider/dirtywork/issues/96); **WSL2 is the way in — note below** |
 **Windows: use WSL2** *(one report so far, 2026-08-27: runs cleanly — more welcome)*. Native
-Windows crashes today on two POSIX-only calls; the plan to fix that is
-[#96](https://github.com/JimboSchneider/dirtywork/issues/96). Inside WSL2 it's the CI-tested
-Linux path. What to get right — the first report hit the third and fourth:
+Windows no longer crashes on the three POSIX-only calls (0.13.0, #96 tier 1), but the unit suite
+still fails there in ~158 places — the tier-2 list on
+[#96](https://github.com/JimboSchneider/dirtywork/issues/96) — so it stays unsupported. Inside
+WSL2 it's the CI-tested Linux path. What to get right — the first report hit the third and fourth:
 
 - Keep the repo and `~/.dirtywork` on the distro's own filesystem (`~/repos/…`), not `/mnt/c/…`
   — drvfs is slow for git and its permission and symlink semantics differ.
@@ -106,7 +107,12 @@ tool calls are unverified on Ollama.
 - **Docker Desktop or dockerd** (default sandbox as of 0.4) — `docker
   version` must succeed. Missing/unreachable Docker is a preflight error
   with a hint; pass `--sandbox none` to skip this requirement and run
-  unsandboxed on the host instead.
+  unsandboxed on the host instead. The worker image
+  (`ghcr.io/jimboschneider/dirtywork-worker:0.13`, pulled on the first run)
+  ships git, bash, Python 3, Node 22 with npm, .NET SDK 8 and 10, ripgrep, jq,
+  curl and shellcheck. Nothing can be installed at run time — the sandbox is
+  offline — so anything else means a derived image (see the
+  [worker image guide](https://github.com/JimboSchneider/dirtywork/blob/main/docker/README.md#derived-images-extra-packages)).
 - [LM Studio](https://lmstudio.ai) serving its OpenAI-compatible API at
   `localhost:1234` with a tool-calling-capable model loaded. Verified
   working: `qwen/qwen3-coder-next` (65k context, default) and
@@ -143,7 +149,7 @@ you don't have pipx, see the
 [pipx install docs](https://pipx.pypa.io/stable/how-to/install-pipx.html) (macOS:
 `brew install pipx && pipx ensurepath`).
 
-### Use it from Claude Code
+### Use it from Claude Code — or Codex
 
     dirtywork init --repo .
 
@@ -152,9 +158,12 @@ with `--repo`, in the project — so Claude knows how to brief a run, read its J
 worktree, resume with feedback and record a verdict. Ask it to delegate a task to dirtywork. Codex
 CLI, Gemini CLI, Cursor and Copilot read the same file from one shared directory:
 `dirtywork init --agent codex --repo .` writes it to `.agents/skills/dirtywork/` (home and project),
-and `--agent gemini|cursor|copilot` write those same two files. The full reference is
-`dirtywork contract`. The skill's run template carries `--provider`/`--base-url`, so Ollama and
-other endpoints need no hand edits. The walkthrough, from LM Studio to the first delegated task:
+and `--agent gemini|cursor|copilot` write those same two files. Codex CLI has driven a real run this
+way *(one report, 2026-08-29: brief → run → host verify → verdict on a Vite project; the worker image
+needed Node 22 for it, hence 0.13)*. Gemini CLI, Cursor and Copilot read the same file — not yet
+tried here; reports welcome. The full reference is `dirtywork contract`. The skill's run template
+carries `--provider`/`--base-url`, so Ollama and other endpoints need no hand edits. The
+walkthrough, from LM Studio to the first delegated task:
 [Orchestrator setup](https://github.com/JimboSchneider/dirtywork/blob/main/docs/orchestrator-setup.md).
 
 **`init` configures nothing.** It writes one Markdown file that Claude Code loads by name;
@@ -212,7 +221,7 @@ stdout JSON and exit codes: [the machine contract](https://github.com/JimboSchne
 
 ## How a run works
 
-1. **Preflight** — LM Studio reachable, model loaded, repo valid. Any
+1. **Preflight** — model server reachable, model loaded, repo valid. Any
    failure exits 2 with nothing created.
 2. **Worktree** — a fresh worktree at `<repo>/.worktrees/dw-<slug>` on new
    branch `dirtywork/<slug>`, branched from `--branch-from` (default:

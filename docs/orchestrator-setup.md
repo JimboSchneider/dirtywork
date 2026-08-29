@@ -98,6 +98,11 @@ it:
   own. For Copilot that means the CLI or VS Code's agent mode; the cloud agent
   runs on GitHub's machines and can't reach your model server or Docker.
 
+Codex CLI is the one I've watched do it (one run, 2026-08-29): it picked the
+skill up from `.agents/skills`, wrote the brief, ran, checked the result on
+the host and recorded the verdict. The other three read the same file; I
+haven't run them.
+
 The rule is the same everywhere: the skill never goes into `AGENTS.md` or
 `CLAUDE.md`, because dirtywork hands those to the *worker* on every run.
 `init` never writes there. Needs 0.13.0 or later.
