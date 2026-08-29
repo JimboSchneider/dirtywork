@@ -1,5 +1,5 @@
 """The operator contract that ships in the wheel (#82): the machine contract
-`dirtywork contract` prints, and the Claude Code skill `dirtywork init` renders."""
+`dirtywork contract` prints, and the orchestrator skill `dirtywork init` renders (Claude Code by default; --agent picks another tool's directory)."""
 from __future__ import annotations
 
 import hashlib
@@ -15,6 +15,20 @@ from .. import __version__
 CONTRACT_NAME = "machine-contract.md"
 SKILL_TEMPLATE = "SKILL.md"
 SKILL_DIRNAME = "dirtywork"
+
+# Where each orchestrator discovers skills, verified 2026-08-29 (spec §1.2). The
+# file is the same everywhere -- the Agent Skills standard -- only the directory
+# differs. Four of the five read `.agents/skills`; the entry per tool is so a
+# user names what they run and a tool that moves later is a one-line change.
+AGENT_DIRS = {
+    "claude": ".claude",
+    "codex": ".agents",
+    "gemini": ".agents",
+    "cursor": ".agents",
+    "copilot": ".agents",
+}
+AGENTS = tuple(AGENT_DIRS)
+
 # The stamp is the first line after the frontmatter; HEX16 covers the whole
 # file with this line (and its newline) deleted -- frontmatter included.
 STAMP_RE = re.compile(r"^<!-- dirtywork-skill v(?P<version>\S+) sha256:(?P<hash>[0-9a-f]{16})\b")
@@ -67,13 +81,14 @@ def inspect_existing(data: bytes) -> tuple[str | None, bool]:
 
 
 def destinations(args) -> list[Path]:
-    """User copy unless --no-user, then the project copy if --repo; the same
-    path twice (a --repo that resolves to $HOME) is one destination."""
+    """User copy unless --no-user, then the project copy if --repo, both under
+    the --agent's skills directory; the same path twice (a --repo that resolves
+    to $HOME) is one destination."""
     wanted = []
     if not args.no_user:
-        wanted.append(Path.home() / ".claude" / "skills" / SKILL_DIRNAME / "SKILL.md")
+        wanted.append(Path.home() / AGENT_DIRS[args.agent] / "skills" / SKILL_DIRNAME / "SKILL.md")
     if args.repo is not None:
-        wanted.append(Path(args.repo) / ".claude" / "skills" / SKILL_DIRNAME / "SKILL.md")
+        wanted.append(Path(args.repo) / AGENT_DIRS[args.agent] / "skills" / SKILL_DIRNAME / "SKILL.md")
     seen, out = set(), []
     for dest in wanted:
         key = dest.resolve()
