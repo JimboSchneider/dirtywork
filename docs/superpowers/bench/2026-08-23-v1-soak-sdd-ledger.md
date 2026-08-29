@@ -540,3 +540,8 @@ Multi-arch index digest — RepoDigests, `buildx imagetools inspect` and the pub
 **`sha256:6d24d6a176899f9d4e027f2519206ba24ca7752a75946c21a55323d822c4d73c`**: the value 0.13.1 pins as
 `PINNED_DIGEST`. Derived `dirtywork-worker-pytest:0.13` built per `docker/README.md` (pytest 7.2.1) for the
 next dogfood cycle; the local pre-release test tags were removed before the pull.
+
+**0.13.1 — pin the `:0.13` digest** (branch `release-0.13.1`; brief in this session's scratchpad, same shape as #90). **First runs on released dirtywork 0.13.0 with `dirtywork-worker-pytest:0.13` (Node 22).**
+
+| R131 | `0131-pin-the-013-worker-0829150917-4c4f750a` | completed | 8 | 137.7 s | 17.2 | 92,046 | 1,731 | 12.6 | 0 | 0 | read_file×5, edit_file×5, bash×5 | pass (round 1; 1,682/8, 52 s) | 1 | 4 files as briefed; `pyproject`/`__init__`/test identical to the brief; `docker_args.py` dropped one comment line ("pins a REGISTRY digest -- resolve_image() enforces it against a *pulled*"). Pre-check was behavioural: with the pin applied, `tools/ci_sandbox_smoke.py` on the host resolved the pulled `:0.13` against the digest (START OK) — a wrong digest would have refused |
+| R131-r1 | `0131-pin-the-013-worker-0829151232-f2a2eb1f` | completed | 8 | 121.5 s | 15.2 | 74,949 | 578 | 4.8 | 0 | 0 | read_file×1, insert_after×1, bash×5, finish×1 | pass (round 1; 1,682/8) | — | one-item feedback restored the line; `docker_args.py` now identical to the brief; host `--version` → 0.13.1, pin enforced on the host, full suite **1,681 / 9**; verdict **accept**; export `6532140` ff'd; cleaned |

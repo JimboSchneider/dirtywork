@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dirtywork"
-version = "0.13.0"
+version = "0.13.1"
 description = "Agentic tool-use loop harness for local LM Studio models — an expensive-model orchestrator's free local workforce"
 readme = "README.md"
 requires-python = ">=3.9"
