@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -132,3 +133,42 @@ def test_main_reports_unparseable_xml(tmp_path, capsys):
     xml.write_text("<not-xml", encoding="utf-8")
     assert module.main([str(xml)]) == 2
     assert "not valid JUnit XML" in capsys.readouterr().err
+
+
+COLLECTED = """tests/test_a.py::test_ok
+tests/test_a.py::test_bad
+tests\\test_b.py::test_err
+tests/test_b.py::test_skip
+tests/test_c.py::test_ok2
+tests/test_never_ran.py::test_one
+tests/test_never_ran.py::test_two
+
+7 tests collected in 0.10s
+"""
+
+
+def test_collected_files_reduces_to_paths():
+    m = _load()
+    assert m.collected_files(COLLECTED) == {"tests/test_a.py", "tests/test_b.py", "tests/test_c.py", "tests/test_never_ran.py"}
+
+
+def test_absent_names_collected_files_with_no_rows():
+    m = _load()
+    table = m.summarize(SAMPLE)
+    assert m.absent(table, m.collected_files(COLLECTED)) == ["tests/test_never_ran.py"]
+    assert m.render_absent(["tests/test_never_ran.py"]) == "absent from this run: 1 test files (tests/test_never_ran.py)"
+    assert m.render_absent([]) == "absent from this run: 0"
+
+
+def test_main_with_collected_prints_absent_line(tmp_path, monkeypatch, capsys):
+    m = _load()
+    xml = tmp_path / "j.xml"; xml.write_text(SAMPLE, encoding="utf-8")
+    col = tmp_path / "c.txt"; col.write_text(COLLECTED, encoding="utf-8")
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    assert m.main([str(xml), "--collected", str(col)]) == 0
+    out = capsys.readouterr().out
+    assert out.rstrip().endswith("absent from this run: 1 test files (tests/test_never_ran.py)")
+    assert m.main([str(xml)]) == 0
+    assert "absent from this run" not in capsys.readouterr().out
+    assert m.main([str(xml), "--collected", str(tmp_path / "missing.txt")]) == 2
+    assert m.main([str(xml), "--bogus", str(col)]) == 2
