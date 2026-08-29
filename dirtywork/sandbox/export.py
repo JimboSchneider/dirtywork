@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..osfs import open_nofollow
 from ..workspace import MAX_FILES_CHANGED
 from . import RunArtifacts, SandboxError, docker_args, docker_cli, lifecycle
 
@@ -251,8 +252,7 @@ def extract_validated(stream, dest: Path, *, max_files: int, max_bytes: int) -> 
                     fh = tar.extractfile(member)
                     if fh is None:
                         raise ExportError(f"export archive member '{name}' has no content stream")
-                    fd = os.open(str(target_path),
-                                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+                    fd = open_nofollow(target_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
                     try:
                         with os.fdopen(fd, "wb") as out:
                             while True:
@@ -524,7 +524,7 @@ def export_run(cfg, *, slug, base_commit, worktree: Path, run_dir: Path, objects
         # T_EXPORT_STEP so the export fails closed like every other docker call.
         diff_timer = threading.Timer(docker_cli.T_EXPORT_STEP, diff_proc.kill)
         diff_timer.start()
-        fd = os.open(str(patch_target), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        fd = open_nofollow(patch_target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
             with os.fdopen(fd, "wb") as out:
                 written = 0

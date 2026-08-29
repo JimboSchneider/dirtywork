@@ -7,7 +7,10 @@ import json
 import os
 from pathlib import Path
 
+from . import osfs
+from .osfs import PROCESS_QUERY_LIMITED_INFORMATION, ERROR_ACCESS_DENIED, STILL_ACTIVE
 from .rundir import read_run_json
+from ctypes import byref, c_uint32
 
 RESUME_TAIL_CHARS = 12_000
 RESUME_MARKER = "\n\n--- RESUMED RUN ---\n"
@@ -126,9 +129,14 @@ def load_prior_run(run_dir: Path) -> dict:
     return data
 
 
-def pid_alive(pid) -> bool:
+def pid_alive(pid, *, win=None) -> bool:
+    """Is `pid` a live process? POSIX: os.kill(pid, 0). Windows: OpenProcess +
+    GetExitCodeProcess -- never os.kill, whose signal 0 is CTRL_C_EVENT and
+    would Ctrl-C the operator's own console (#96). `win` is for tests."""
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
+    if os.name == "nt":
+        return _pid_alive_windows(pid, osfs.win32() if win is None else win)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -138,6 +146,16 @@ def pid_alive(pid) -> bool:
     except OSError:
         return False
     return True
+
+
+def _pid_alive_windows(pid: int, win) -> bool:
+    h = win.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return win.get_last_error() == ERROR_ACCESS_DENIED   # exists, not ours -- POSIX PermissionError -> True
+    code = c_uint32()
+    ok = win.GetExitCodeProcess(h, byref(code))
+    win.CloseHandle(h)
+    return bool(ok) and code.value == STILL_ACTIVE
 
 
 def _gerund(action: str) -> str:

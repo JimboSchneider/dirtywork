@@ -415,3 +415,58 @@ Release day (2026-08-27): v0.12.0 cut 10:13 CDT (PyPI + `:0.12` multi-arch image
 | W3-fix | `issue-82-w3-follow-up-githubworkflowsciy-0827092942-1b86588c` | completed | 4 | 62.6s | 15.7 | 20,563 | 375 | ~6.0 compl | 0 | - | read_file 1, apply_edits 1, bash 1 (3 tool results) | pass (round 1, exit 0; 1604 in-container) | 0 | follow-up run, not a resume (W3's worktree was already integrated): the brief's three wheel-smoke `run:` lines were plain YAML scalars containing colon-space (`'^name: dirtywork'`) — invalid YAML, caught by the plan's Psych check — rewritten as block scalars exactly as briefed, one apply_edits call; the defect was the brief's, not the worker's |
 | 0.12.1-pin (rejected) | `0121-pin-the-012-worker-image-0827102525-00abf63c` | completed | 17 | 175.9s | 10.3 | 198,398 | 2,907 | ~16.5 compl | 0 | - | read_file 11, list_dir 1, edit_file 5, bash 4, finish 1 | pass (1550 in-container) | 0 | **orchestrator error, not the worker's**: `--branch-from main` resolved to the checkout's stale local `main` (at #80, pre-#82); the worker's edits were faithful to the brief on that base and it even reconstructed the :0.12 bump, but the branch lacked 0.12.0 — rejected with that note, transcript kept, local main fast-forwarded to origin/main |
 | 0.12.1-pin | `0121-pin-the-012-worker-image-0827103109-d587c9fd` | completed | 5 | 154.8s | 31.0 | 66,985 | 2,530 | ~16.3 compl | 0 | - | read_file 5, edit_file 5, bash 2, finish 1 (13 tool results) | pass (round 1, exit 0; 1604 in-container) | 0 | first try on the right base (c933503); runtime = released **0.12.0**, image `dirtywork-worker-pytest:0.12` built from the published :0.12; five files exactly as briefed, digest `edcf3a47…78fe3c` (RepoDigests = buildx index digest, amd64+arm64); host suite 1603 passed + 1 skipped; PR release-0.12.1 |
+
+## #96 — Windows tier 1 (plan v1.1 `ea8ceb2`, spec v3.2 `ed95796`)
+
+Started 2026-08-29 09:15 CDT on the owner's "Go". Sequencing note: #87 (0.13.0) is still open with
+no PR; the owner started #96 ahead of it — the file sets do not overlap (`procs/osfs/resume/tools/
+rundir/transcript/workspace/bench/sandbox/export` vs `contract/`, `__main__.py`).
+
+- Runtime: released dirtywork **0.12.1** (`pipx run --spec`), worker `qwen/qwen3-coder-next` via LM
+  Studio, image `dirtywork-worker-pytest:0.12`, Docker 29.7.2, `--verify "python3 -m pytest -q -p
+  no:cacheprovider" --verify-rounds 2 --max-turns 60 --timeout 1800`, branch-from
+  `issue-96-windows-tier1`.
+- Host baseline (`f3e110c`, `pipx run --spec pytest pytest -q -p no:cacheprovider`, `PYTHONPATH=.`):
+  **1,603 passed, 1 skipped, 38 deselected in 92.79 s**.
+- Windows baseline (advisory leg on `f3e110c`, run 33117885789, artifact `junit-windows`):
+  **816 collected, 636 passed, 150 failed, 29 errors, 2 skipped; 17 test files absent** (4 by
+  marker: `test_docker_lifecycle`, `test_docker_runs`, `test_live`, `test_live_ollama`; **13 never
+  reached**: `test_rundir`, `test_runner`, `test_runs`, `test_sandbox_host`, `test_soak_tools`,
+  `test_strays`, `test_tools_bash`, `test_tools_files`, `test_toolspec`, `test_transcript`,
+  `test_transcript_schema`, `test_watchdog`, `test_workspace` — the `KeyboardInterrupt` from
+  `test_pid_alive`, spec §1).
+
+| Task | Slug | Status | Turns | Wall | s/turn | Prompt tok | Compl tok | tok/s | Nudges | Guardrail | Tool mix | Verify | Resumes | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| W1 | `issue-96-windows-tier-1-0829092005-534a5b1d` | completed | 5 | 194.6 s | 38.9 | 64,953 | 6,100 | 31.3 | 0 | 0 | write_file×2, bash×2 | pass (round 1; sandbox 1,623 passed/5 skipped; host 1,622/6) | 0 | osfs.py + test_osfs.py byte-identical to the brief; the brief itself was pre-run on the host and caught `THREADENTRY32` `LONG`→`c_int32` (`74ea91b`) |
+| W2 | `issue-96-windows-tier-1-0829092654-021d91a1` | completed | 44 | 216.9 s | 4.9 | 947,287 | 5,708 | 26.3 | 0 | 0 | read_file×22, edit_file×13, bash×6, grep×1, apply_edits×1 | pass (round 1; sandbox 1,635/5; host 1,634/6) | 0 | all eleven sites with the table's exact args; `set_blocking` guarded; `except FileNotFoundError` untouched; the worker read a lot (22 files) and edited precisely |
+| W3 | `issue-96-windows-tier-1-0829093316-58f40edc` | completed | 34 | 370.5 s | 10.9 | 928,975 | 15,175 | 41.0 | 0 | 0 | read_file×12, apply_edits×7, bash×6, edit_file×3, list_dir×2, insert_after×1, append_file×1, write_file×1 | pass (round 1; sandbox 1,651/7; host 1,650/8) | 0 | `_Tree`/`_fail`/`_spawn_windows`/`_spawn`/`_kill_tree` byte-identical to the brief; run_capped's three edits as instructed; POSIX Popen + `_kill_group` unchanged; only the test import line touched among the six originals |
+| W4 | `issue-96-windows-tier-1-0829094242-2a221aaa` | completed | 27 | 235.2 s | 8.7 | 466,843 | 3,486 | 14.8 | 0 | 0 | read_file×11, bash×8, grep×4, apply_edits×2, edit_file×1 | pass (round 1; sandbox 1,657/8; host 1,656/9) | 0 | `pid_alive`/`_pid_alive_windows` byte-identical to the brief; `os.kill` only in the POSIX branch; callers untouched |
+| W5 | `issue-96-windows-tier-1-0829094907-386519c7` | completed | 7 | 98.6 s | 14.1 | 57,772 | 2,486 | 25.2 | 0 | 0 | edit_file×4, read_file×2 | pass (round 1; sandbox 1,660/8; host 1,659/9) | 0 | functions byte-identical to the brief; `main()` as instructed; output byte-identical without `--collected` on the real baseline junit |
+| W2b | `issue-96-windows-tier-1-0829100350-4a373483` | completed | 31 | 162.3 s | 5.2 | 483,330 | 5,998 | 37.0 | 0 | 0 | edit_file×12, read_file×9, bash×6, apply_edits×2, insert_after×1 | pass (round 1; sandbox 1,662/8; host test_osfs 33/5) | 0 | fix round for the W2 brief's own mistake: module-level `SITES` used POSIX-only `os.O_*`; PR #99's first Windows run: 1 collection error, `absent from this run: 37 test files` — the new line working as designed |
+| W3b | `issue-96-windows-tier-1-0829101403-7db0d056` | completed | 13 | 140.6 s | 10.8 | 121,516 | 1,237 | 8.8 | 0 | 0 | bash×6, read_file×4, edit_file×1, append_file×1 | pass (round 1; sandbox 1,663/8; host test_procs 23/2) | 0 | fix round for a **review miss**: W3 left the old `_kill_group` epilogue in place above the new `_kill_tree` one — harmless double kill on POSIX (every suite green), `os.killpg` on Windows (141 failures on PR #99's second Windows run). Regression test simulates Windows anywhere and fails on the pre-fix file |
+| W3c | `issue-96-windows-tier-1-0829102239-ba323f66` | completed | 11 | 135.1 s | 12.3 | 78,369 | 1,291 | 9.6 | 0 | 0 | read_file×6, bash×2, apply_edits×1, grep×1 | pass (round 1; sandbox 1,663/8) | 0 | the two new W3/W3b tests drove `run_capped` through `bash`; on the GitHub Windows runner `bash` on PATH is the WSL launcher stub. Now `sys.executable`. The six original bash tests stay as they are (tier 2) |
+
+**Totals (eight runs incl. three fix rounds, zero resumes):** 172 turns, 1,554 s of worker wall (25.9 min),
+3,148,045 prompt + 42,481 completion tokens. Every export byte-identical to its brief where the brief carried code;
+nothing finished by hand. Sampler (`metrics-96.csv`, 464 samples, 14:17–14:57 UTC, 5 s cadence): free RAM
+min **0.06 GB** / mean 5.3 GB / max 13.5 GB, inactive mean 32.6 GB, 2 models resident throughout (qwen +
+devstral). Pre-run brief check on the host caught `THREADENTRY32` `LONG` → `c_int32` (`74ea91b`) before W1.
+
+**Suites on the integration head `3d3f400`:** host `1,659 passed, 9 skipped, 38 deselected` (baseline
+1,603 + 56 new; 8 Windows-only skips + the 1 baseline skip); docker-live (CI's invocation, local `:0.12`)
+`25 passed, 1 skipped, 1 deselected in 164 s`. PR **#99** opened 2026-08-29 10:00 CDT; the advisory
+Windows table on it is acceptance §6 — recorded below when it lands.
+
+**Windows receipt (advisory leg on PR #99, four runs):** `305135b`-1 (`b13369b` head, before W2b): 1 collection
+error, `absent from this run: 37 test files` — the new line working as designed; `305135b`: 1,356/291/0, absent 0,
+141 of the 291 = the leftover `_kill_group` epilogue; `e8b53af`: 1,488/160/0, absent 0, `test_procs` 6 failed — all
+bash-driven (the runner's `bash` is the WSL launcher stub); **`33294cd` (final): 1,490 passed, 158 failed, 0 errors,
+23 skipped, absent 0.** `test_osfs` 24/0 incl. the five Windows-only tests (junction → `EACCES`, file symlink →
+`ELOOP`, `O_CREAT|O_TRUNC` on a symlink leaves the target, missing parent → `FileNotFoundError`, truncate through the
+verified handle); `test_resume` 29/0; `test_procs` 21/4 — the four are the original bash-based tests. Spec §6: 1 ✔
+(absent 0), 2 ✔ for the branch's own tests (the two Windows-only Job Object tests pass; four originals need a real
+bash), 3 ✘ as a number — the "~25" estimate was made blind to 558 tests; the measured tail is 158 (38 backslash paths
+in expected strings, 28 ownership/uid checks, 15 sharing violations, 9 symlink privilege, 7 rejected filenames, 4
+`mkfifo`, ~50 bash-driven, ~7 uncategorized; zero crashes, zero errors), 4 ✔, 5 ✔, 6 ✔, 7 pending a person. All seven
+PR checks green including `gate`. Merge is the owner's call.

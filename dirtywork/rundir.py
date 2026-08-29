@@ -6,6 +6,8 @@ import re
 import stat
 from pathlib import Path
 
+from .osfs import open_nofollow
+
 DIRTYWORK_HOME = Path.home() / ".dirtywork"
 RUNS_DIR = DIRTYWORK_HOME / "runs"
 BENCH_HOME = DIRTYWORK_HOME / "bench"
@@ -102,7 +104,7 @@ def write_run_json(run_dir: Path, data: dict) -> None:
     over run.json. A concurrent reader (e.g. `dirtywork runs list`) never
     sees a partially-written file."""
     tmp_path = run_dir / ".run.json.tmp"
-    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    fd = open_nofollow(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=2, sort_keys=True)

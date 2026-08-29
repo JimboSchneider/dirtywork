@@ -89,11 +89,41 @@ def render(table: dict) -> str:
     return "\n".join(lines)
 
 
+def collected_files(text: str) -> set:
+    """Test files named by `pytest --collect-only -q`: every line with `::`
+    reduced to its path, backslashes normalised like _file_of. Other lines
+    (the blank line, the `N tests collected` summary, warnings) are ignored."""
+    files = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if "::" in line:
+            files.add(line.split("::", 1)[0].replace("\\", "/"))
+    return files
+
+
+def absent(table: dict, collected: set) -> list:
+    """Collected files with no testcase in the report, sorted -- the files a
+    truncated session never reached."""
+    return sorted(f for f in collected if f not in table)
+
+
+def render_absent(missing: list) -> str:
+    if not missing:
+        return "absent from this run: 0"
+    return "absent from this run: {} test files ({})".format(len(missing), ", ".join(missing))
+
+
 def main(argv=None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    if len(args) != 1:
-        print("usage: junit_summary.py <junit.xml>", file=sys.stderr)
+    collected_file = None
+    if len(args) not in (1, 3):
+        print("usage: junit_summary.py <junit.xml> [--collected <collect-only.txt>]", file=sys.stderr)
         return 2
+    if len(args) == 3:
+        if args[1] != "--collected":
+            print("usage: junit_summary.py <junit.xml> [--collected <collect-only.txt>]", file=sys.stderr)
+            return 2
+        collected_file = args[2]
     try:
         with open(args[0], encoding="utf-8") as fh:
             xml_text = fh.read()
@@ -106,6 +136,16 @@ def main(argv=None) -> int:
         print(f"error: '{args[0]}' is not valid JUnit XML: {e}", file=sys.stderr)
         return 2
     text = render(table)
+    if collected_file is not None:
+        try:
+            with open(collected_file, encoding="utf-8") as fh:
+                collected_text = fh.read()
+        except OSError as e:
+            print(f"error: cannot read '{collected_file}': {e}", file=sys.stderr)
+            return 2
+        missing = absent(table, collected_files(collected_text))
+        line = render_absent(missing)
+        text = text + "\n\n" + line
     print(text)
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_path:

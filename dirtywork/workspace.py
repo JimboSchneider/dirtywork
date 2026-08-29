@@ -9,6 +9,8 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+from .osfs import open_nofollow
+
 MAX_CONTEXT_CHARS = 32_000
 # Separate from tools.MAX_READ_BYTES (also 5 MB) even though the value is the
 # same today — this bounds a git blob size, not a filesystem read.
@@ -168,7 +170,7 @@ def ensure_worktrees_excluded(repo: Path) -> None:
         )
 
     try:
-        read_fd = os.open(str(exclude), os.O_RDONLY | os.O_NOFOLLOW)
+        read_fd = open_nofollow(exclude, os.O_RDONLY)
     except FileNotFoundError:
         existing = ""
     except OSError as e:
@@ -181,9 +183,7 @@ def ensure_worktrees_excluded(repo: Path) -> None:
         return
 
     try:
-        write_fd = os.open(
-            str(exclude), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o644
-        )
+        write_fd = open_nofollow(exclude, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     except OSError as e:
         raise WorkspaceError(f"cannot open {exclude} for writing: {e}")
     with os.fdopen(write_fd, "a", encoding="utf-8") as fh:

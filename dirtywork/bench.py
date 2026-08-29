@@ -18,6 +18,8 @@ import re
 import shutil
 import statistics
 import subprocess
+
+from .osfs import open_nofollow
 import sys
 import tempfile
 import time
@@ -391,7 +393,7 @@ def cmd_bench(args) -> int:
         out_path.parent.mkdir(parents=True, exist_ok=True)
     else:
         out_path = rundir.ensure_bench_dir(BENCH_HOME) / f"{stamp}.jsonl"
-    fd = os.open(str(out_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    fd = open_nofollow(out_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as fh:
         for spec in specs:
             model, provider, base_url = parse_model_spec(spec, args.provider, args.base_url)
