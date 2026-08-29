@@ -33,7 +33,7 @@ description, nothing else required anywhere.
 There was nothing to format. There were directories.
 
 So the feature that was going to be a wrapper per tool became a table with
-five rows, replacing two literal `".claude"` strings in the function that
+five rows. It replaces two literal `".claude"` strings in the function that
 computes where `init` writes. The flag is `--agent`, not `--format`, because
 a flag called format would have named a thing that doesn't exist. `dirtywork
 init --agent codex --repo .` writes the same bytes Claude gets, into the
@@ -84,8 +84,8 @@ the briefs, reviewed every run, and wrote the docs. I reviewed the spec,
 said go, reviewed the PR, and merged.
 
 One thing was new this time, learned on the Windows work that morning:
-before a brief went to the worker, it was applied literally on the host in
-a throwaway worktree and its tests run. That caught six defects in the
+before a brief went to the worker, Claude applied it literally on the host
+in a throwaway worktree and ran its tests. That caught six defects in the
 briefs — a review grep that could never pass, an unstated import position,
 two miscounts, a splice that would have produced 130-column lines, a
 one-off in the expected test delta — before a single run started.
@@ -97,13 +97,11 @@ one-off in the expected test delta — before a single run started.
 | W3 — the contract entry, the CI wheel-smoke step | **max_turns** | 60 | 231 s | 2 | see below |
 | W4 — 0.13.0, the `:0.13` image cycle | completed | 43 | 231 s | 0 | eight files, as briefed |
 
-Four briefs, eight runs counting the resumes, 224 turns, twenty-one minutes
-of worker wall clock, about 4.5 million prompt tokens and 35,000 completion
-tokens, $0. Every run that reached `--verify` passed it on the first round.
-The suite went from 1,662 tests to 1,681. Every deviation in that table
-went back through `dirtywork resume` with a feedback file naming the line;
-Claude wrote no production code. The four resumes for a test name, a comma,
-a long line and a YAML step took between one and two minutes each.
+Eight runs counting the resumes, twenty-one minutes of worker wall clock,
+$0. Every run that reached `--verify` passed on the first try, and the
+suite went from 1,662 tests to 1,681. Claude wrote no production code —
+every deviation in that table went back through `dirtywork resume`, with a
+feedback file naming the exact line to fix.
 
 ## The loop the meter didn't see
 

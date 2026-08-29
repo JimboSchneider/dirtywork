@@ -106,7 +106,7 @@
     <h2>One file, five directories</h2>
     <p>Codex CLI, Gemini CLI, Cursor and GitHub Copilot all read the same thing now: the <a href="https://agentskills.io">Agent Skills</a> standard — a <code>SKILL.md</code> with a <code>name</code> and a <code>description</code> in its frontmatter — and all four look in one shared pair of directories, <code>~/.agents/skills/</code> and the project's <code>.agents/skills/</code>. Claude Code's own docs say its skills follow the same standard. The 0.12 template already was one: <code>name: dirtywork</code>, a description, nothing else required anywhere.</p>
     <p>There was nothing to format. There were directories.</p>
-    <p>So the feature that was going to be a wrapper per tool became a table with five rows, replacing two literal <code>".claude"</code> strings in the function that computes where <code>init</code> writes. The flag is <code>--agent</code>, not <code>--format</code>, because a flag called format would have named a thing that doesn't exist. <code>dirtywork init --agent codex --repo .</code> writes the same bytes Claude gets, into the directory the other four read; <code>--agent gemini</code> on the same machine says <code>up to date:</code>, because it's the same two files. Claude Code stays the default and its paths don't move.</p>
+    <p>So the feature that was going to be a wrapper per tool became a table with five rows. It replaces two literal <code>".claude"</code> strings in the function that computes where <code>init</code> writes. The flag is <code>--agent</code>, not <code>--format</code>, because a flag called format would have named a thing that doesn't exist. <code>dirtywork init --agent codex --repo .</code> writes the same bytes Claude gets, into the directory the other four read; <code>--agent gemini</code> on the same machine says <code>up to date:</code>, because it's the same two files. Claude Code stays the default and its paths don't move.</p>
     <p>What that means for a 0.12 install is worth saying exactly, because the issue's acceptance line said "byte-identical" and that turned out to be false. The destinations and the frontmatter are identical. The body isn't, for a reason in the next section. So an unmodified 0.12.1 copy prints <code>updated: … (v0.12.1 -&gt; v0.13.0)</code> on the next <code>init</code>, which is what the stamp was built for.</p>
   </section>
 
@@ -120,7 +120,7 @@
   <section>
     <h2>The build</h2>
     <p>Same rule as the last few releases: dirtywork builds dirtywork. The released 0.12.1, from PyPI, drove qwen3-coder-next on LM Studio inside the Docker sandbox against this checkout. Claude wrote the spec, the plan and the briefs, reviewed every run, and wrote the docs. I reviewed the spec, said go, reviewed the PR, and merged.</p>
-    <p>One thing was new this time, learned on the Windows work that morning: before a brief went to the worker, it was applied literally on the host in a throwaway worktree and its tests run. That caught six defects in the briefs — a review grep that could never pass, an unstated import position, two miscounts, a splice that would have produced 130-column lines, a one-off in the expected test delta — before a single run started.</p>
+    <p>One thing was new this time, learned on the Windows work that morning: before a brief went to the worker, Claude applied it literally on the host in a throwaway worktree and ran its tests. That caught six defects in the briefs — a review grep that could never pass, an unstated import position, two miscounts, a splice that would have produced 130-column lines, a one-off in the expected test delta — before a single run started.</p>
     <table>
       <tr><th>Task</th><th>Status</th><th>Turns</th><th>Wall</th><th>Resumes</th><th>What came back</th></tr>
       <tr><td>W1 — the table, <code>--agent</code>, tests 17 and 24–29</td><td>completed</td><td>32</td><td>262 s</td><td>1</td><td>three files as briefed; a test name and a docstring comma off by a word</td></tr>
@@ -128,7 +128,7 @@
       <tr><td>W3 — the contract entry, the CI wheel-smoke step</td><td><strong>max_turns</strong></td><td>60</td><td>231 s</td><td>2</td><td>see below</td></tr>
       <tr><td>W4 — 0.13.0, the <code>:0.13</code> image cycle</td><td>completed</td><td>43</td><td>231 s</td><td>0</td><td>eight files, as briefed</td></tr>
     </table>
-    <p>Four briefs, eight runs counting the resumes, 224 turns, twenty-one minutes of worker wall clock, about 4.5 million prompt tokens and 35,000 completion tokens, $0. Every run that reached <code>--verify</code> passed it on the first round. The suite went from 1,662 tests to 1,681. Every deviation in that table went back through <code>dirtywork resume</code> with a feedback file naming the line; Claude wrote no production code. The four resumes for a test name, a comma, a long line and a YAML step took between one and two minutes each.</p>
+    <p>Eight runs counting the resumes, twenty-one minutes of worker wall clock, $0. Every run that reached <code>--verify</code> passed on the first try, and the suite went from 1,662 tests to 1,681. Claude wrote no production code — every deviation in that table went back through <code>dirtywork resume</code>, with a feedback file naming the exact line to fix.</p>
   </section>
 
   <section>
