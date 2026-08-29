@@ -438,3 +438,4 @@ rundir/transcript/workspace/bench/sandbox/export` vs `contract/`, `__main__.py`)
 
 | Task | Slug | Status | Turns | Wall | s/turn | Prompt tok | Compl tok | tok/s | Nudges | Guardrail | Tool mix | Verify | Resumes | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| W1 | `issue-96-windows-tier-1-0829092005-534a5b1d` | completed | 5 | 194.6 s | 38.9 | 64,953 | 6,100 | 31.3 | 0 | 0 | write_file×2, bash×2 | pass (round 1; sandbox 1,623 passed/5 skipped; host 1,622/6) | 0 | osfs.py + test_osfs.py byte-identical to the brief; the brief itself was pre-run on the host and caught `THREADENTRY32` `LONG`→`c_int32` (`74ea91b`) |
