@@ -6,7 +6,8 @@ machine does the typing, inside a sandbox, for free. You review the diff and
 merge what survives. This page gets you there. It is the setup I use to build
 dirtywork itself.
 
-You need dirtywork 0.12.0 or later. Not counting the model download, the
+You need dirtywork 0.12.0 or later — 0.13.0 for anything but Claude
+Code. Not counting the model download, the
 whole thing takes a few minutes.
 
 ## You need three things
@@ -68,6 +69,35 @@ inherits your conventions. That's the place for "we use pytest, four-space
 indents, no new dependencies" — not for orchestrator instructions. Leave the
 driving to the skill.
 
+## Other orchestrators
+
+Codex CLI, Gemini CLI, Cursor and GitHub Copilot read the same kind of file
+Claude Code does — a `SKILL.md` in the [Agent Skills](https://agentskills.io)
+layout — and all four look in one shared directory. So it's one command, not
+four:
+
+    dirtywork init --agent codex --repo .
+
+    wrote: /Users/you/.agents/skills/dirtywork/SKILL.md
+    wrote: /Users/you/repos/yourproject/.agents/skills/dirtywork/SKILL.md
+
+`--agent gemini`, `--agent cursor` and `--agent copilot` write those same two
+files (`init` will say `up to date:`). The file is byte-for-byte what
+`--agent claude` writes; only the directory differs. What each tool does with
+it:
+
+- **Codex CLI** lists it as `$dirtywork` and picks it on its own when a
+  request matches the description.
+- **Gemini CLI** asks you to confirm the first time it activates the skill —
+  you'll see the name, the description and the path. `/skills list` shows it.
+- **Cursor** and **Copilot** show it in the `/` menu and can pick it on their
+  own. For Copilot that means the CLI or VS Code's agent mode; the cloud agent
+  runs on GitHub's machines and can't reach your LM Studio or Docker.
+
+The rule is the same everywhere: the skill never goes into `AGENTS.md` or
+`CLAUDE.md`, because dirtywork hands those to the *worker* on every run.
+`init` never writes there. Needs 0.13.0 or later.
+
 ## Try it
 
 Open Claude Code in the repo and ask for something small:
@@ -112,35 +142,24 @@ None of this is required, but it's what makes the setup stick for me.
   `init` refreshes a copy you haven't touched, leaves a current one alone, and
   won't overwrite one you edited unless you pass `--force`. It tells you
   which happened, one line per file.
-- **Other providers.** The skill assumes LM Studio on `localhost:1234`: its
-  run template passes only `--model`, and its first-run check curls that
-  port. dirtywork itself takes more — `--provider ollama` for Ollama,
-  `--base-url <url>` for any other OpenAI-compatible server, `--provider
-  anthropic` (needs `ANTHROPIC_API_KEY`) — but the skill doesn't say so, so
-  Claude won't pass those flags unless you make it: say it in the request
-  ("delegate this with `--provider ollama`"), or add the flag to the run
-  template in your **personal** copy. In a shared repo that means `dirtywork
-  init` without `--repo`, then edit `~/.claude/skills/dirtywork/SKILL.md` —
-  not the committed project copy, which is the team's baseline. Claude Code
-  loads a personal skill over a project skill of the same name, so your
-  flags win in that repo and nobody else's setup changes. Two costs: `init`
-  after an upgrade will skip your edited copy (`skipped (locally
-  modified)`), so diff it against `dirtywork init --stdout` and carry your
-  line forward; and the project copy keeps its own stamp, so refresh it
-  separately. A provider-neutral skill is part of
-  [#87](https://github.com/JimboSchneider/dirtywork/issues/87).
-- **Other agents.** `dirtywork init --stdout` prints the skill without
-  writing anything. Together with `dirtywork contract`, anything that can run
-  a shell command has what Claude has.
+- **Other providers.** The skill's run template carries `--provider` and
+  `--base-url`, and its first-run check covers LM Studio, Ollama and any
+  other OpenAI-compatible endpoint — it asks rather than guessing when more
+  than one is running. If you added a `--provider` line by hand under 0.12,
+  `init` will now report your copy as locally modified; `--force` takes the
+  new template, which has the line. One more thing the skill says, because
+  it bit a user: `resume` inherits `--provider` but not a custom
+  `--base-url`, so that URL goes on every resume.
 - **The worker can't install things.** The sandbox is offline by default
   (`--allow-network` is the deliberate exception). If
   your tests need a tool the image lacks — pytest, say — build a derived image
   once (a five-line Dockerfile in the
   [worker image guide](https://github.com/JimboSchneider/dirtywork/blob/main/docker/README.md#derived-images-extra-packages))
   and pass it with `--image`.
-- **The project skill is a file in the repo**, so a worker can read it like
-  any other file. Its first paragraph tells a worker to ignore it. That's a
-  polite request, not a wall; hiding `.claude/` from the worker for real is
+- **The project skill is a file in the repo** — under `.claude/` or
+  `.agents/` — so a worker can read it like any other file. Its first
+  paragraph tells a worker to ignore it. That's a polite request, not a
+  wall; hiding it from the worker for real is
   [#84](https://github.com/JimboSchneider/dirtywork/issues/84).
 - **Claude doesn't seem to know about dirtywork.** Check that
   `~/.claude/skills/dirtywork/SKILL.md` exists, then start a fresh Claude Code

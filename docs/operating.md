@@ -374,10 +374,12 @@ without being cut.
 
 `dirtywork init` writes the Claude Code skill that teaches an agent to drive dirtywork to
 `~/.claude/skills/dirtywork/SKILL.md`; `--repo PATH` writes a project copy too (commit it so the
-whole team's Claude gets it); `--no-user` skips the home copy. The file is stamped, so re-running
+whole team's Claude gets it); `--no-user` skips the home copy;
+`--agent codex` (or `gemini`, `cursor`, `copilot`) writes the same file to `.agents/skills/` instead —
+the directory those four tools share. The file is stamped, so re-running
 `init` after an upgrade refreshes an unmodified copy and leaves one you edited alone unless you pass
 `--force` (`skipped (locally modified)` and exit 1 tell you which). `dirtywork init --stdout` prints
-the skill for any other agent; `dirtywork contract` prints the machine contract — every flag, the
+the skill; `dirtywork contract` prints the machine contract — every flag, the
 stdout JSON, exit codes — for the installed version. The end-to-end walkthrough, from LM Studio
 to the first delegated task, is [Orchestrator setup](orchestrator-setup.md).
 
