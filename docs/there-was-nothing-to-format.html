@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>There Was Nothing to Format · dirtywork</title>
+<meta name="description" content="The issue planned a --format flag, one shape per tool, but checking the docs found Codex, Gemini CLI, Cursor and Copilot all read the Agent Skills standard from one shared directory, so dirtywork 0.13.0's init --agent is a table, not a format — plus a Node 22 worker image and the receipts.">
+<link rel="canonical" href="https://dirtywork.run/there-was-nothing-to-format.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="There Was Nothing to Format">
+<meta property="og:description" content="The issue planned a --format flag, one shape per tool, but checking the docs found Codex, Gemini CLI, Cursor and Copilot all read the Agent Skills standard from one shared directory, so dirtywork 0.13.0's init --agent is a table, not a format — plus a Node 22 worker image and the receipts.">
+<meta property="og:url" content="https://dirtywork.run/there-was-nothing-to-format.html">
+<meta property="og:image" content="https://dirtywork.run/assets/dirtywork-system.png">
+<meta property="og:image:alt" content="dirtywork’s division of labor: frontier architecture, local execution, and review before merge.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="There Was Nothing to Format">
+<meta name="twitter:description" content="The issue planned a --format flag, one shape per tool, but checking the docs found Codex, Gemini CLI, Cursor and Copilot all read the Agent Skills standard from one shared directory, so dirtywork 0.13.0's init --agent is a table, not a format — plus a Node 22 worker image and the receipts.">
+<meta name="twitter:image" content="https://dirtywork.run/assets/dirtywork-system.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "headline": "There Was Nothing to Format",
+  "description": "The issue planned a --format flag, one shape per tool, but checking the docs found Codex, Gemini CLI, Cursor and Copilot all read the Agent Skills standard from one shared directory, so dirtywork 0.13.0's init --agent is a table, not a format — plus a Node 22 worker image and the receipts.",
+  "datePublished": "2026-08-29",
+  "dateModified": "2026-08-29",
+  "url": "https://dirtywork.run/there-was-nothing-to-format.html",
+  "image": "https://dirtywork.run/assets/dirtywork-system.png",
+  "author": { "@type": "Organization", "name": "Dirt Simple Solutions" },
+  "publisher": { "@type": "Organization", "name": "Dirt Simple Solutions" }
+}
+</script>
+<style>
+  :root {
+    --bg: #F7F8F6;
+    --bg-raise: #FFFFFF;
+    --bg-inset: #EEF1ED;
+    --ink: #1B221D;
+    --ink-soft: #4A544D;
+    --ink-faint: #657069;
+    --line: #D9DFDA;
+    --local: #0E7A4E;
+    --frontier: #A66A1E;
+    --code-bg: #10150F;
+    --code-ink: #D6E2D6;
+    --code-dim: #7C8A7D;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111611; --bg-raise: #171D17; --bg-inset: #1C231C;
+      --ink: #E4EAE4; --ink-soft: #A7B2A8; --ink-faint: #828E84;
+      --line: #2A322A; --local: #4EC58C; --frontier: #D9A468;
+      --code-bg: #0B0F0B; --code-ink: #CFDCCF; --code-dim: #6E7B6F;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Charter", "Iowan Old Style", Georgia, "Times New Roman", serif;
+    font-size: 1.0625rem; line-height: 1.65;
+  }
+  .wrap { max-width: 46rem; margin: 0 auto; padding: 0 1.25rem 6rem; }
+  .display, h1, h2, h3 { font-family: "Avenir Next", "Avenir", "Segoe UI", "Helvetica Neue", sans-serif; }
+  .mono, code, pre { font-family: ui-monospace, "SF Mono", "Menlo", "Cascadia Mono", monospace; }
+  header { padding: 4.5rem 0 2.4rem; }
+  .eyebrow { color: var(--local); font-family: ui-monospace, "SF Mono", monospace; font-size: .72rem; letter-spacing: .14em; text-transform: uppercase; margin: 0 0 1.1rem; }
+  h1 { font-size: clamp(2.2rem, 6vw, 3.4rem); font-weight: 700; line-height: 1.06; letter-spacing: -.02em; margin: 0 0 1.25rem; text-wrap: balance; }
+  .standfirst { color: var(--ink-soft); font-size: 1.2rem; line-height: 1.55; max-width: 40rem; margin: 0; }
+  .standfirst strong { color: var(--ink); }
+  section { margin-top: 3.5rem; }
+  h2 { border-top: 1px solid var(--line); font-size: 1.5rem; font-weight: 600; line-height: 1.2; margin: 0 0 1.2rem; padding-top: 1.5rem; text-wrap: balance; }
+  h3 { font-size: 1.08rem; margin: 2rem 0 .6rem; }
+  p { margin: 1rem 0; }
+  a { color: var(--local); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--local); outline-offset: 2px; border-radius: 2px; }
+  ul { margin: 1rem 0; padding-left: 1.4rem; }
+  li { margin: .45rem 0; }
+  blockquote { border-left: 3px solid var(--frontier); color: var(--ink); font-size: 1.22rem; margin: 1.8rem 0; padding: .1rem 0 .1rem 1.2rem; }
+  blockquote p { margin: .45rem 0; }
+  pre { background: var(--code-bg); border-radius: 9px; color: var(--code-ink); font-size: .86rem; line-height: 1.65; overflow-x: auto; padding: 1.15rem 1.25rem; }
+  code { font-size: .88em; }
+  table { border-collapse: collapse; display: block; margin: 1.4rem 0; overflow-x: auto; width: 100%; }
+  th, td { border-bottom: 1px solid var(--line); padding: .7rem .85rem; text-align: left; vertical-align: top; }
+  th { color: var(--ink-faint); font-family: ui-monospace, "SF Mono", monospace; font-size: .75rem; letter-spacing: .08em; text-transform: uppercase; }
+  figure { margin: 2.4rem -3.5rem 2.8rem; }
+  figure img { background: var(--bg-raise); border: 1px solid var(--line); border-radius: 12px; display: block; height: auto; width: 100%; }
+  figcaption { color: var(--ink-faint); font-size: .82rem; margin: .7rem .2rem 0; text-align: center; }
+  .closing { border-top: 1px solid var(--line); color: var(--ink-soft); margin-top: 3.5rem; padding-top: 1.3rem; }
+  .footnote { color: var(--ink-faint); font-size: .9rem; margin-top: 2.5rem; }
+  @media (max-width: 760px) { figure { margin-left: 0; margin-right: 0; } }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header>
+    <p class="eyebrow">Build record · 2026-08-29</p>
+    <h1>There Was Nothing to Format</h1>
+    <p class="standfirst">The plan was a --format flag, one shape per tool. Checking the docs first found something simpler: <strong>Codex, Gemini CLI, Cursor and Copilot already share one directory, so dirtywork 0.13.0's init --agent is a table, not a format.</strong></p>
+  </header>
+
+  <p>Thursday I filed <a href="https://github.com/JimboSchneider/dirtywork/issues/87">#87</a>. The 0.12 release had given Claude Code a skill — <code>dirtywork init</code> writes a file Claude picks up on its own and drives the loop from — and everyone else got <code>dirtywork init --stdout</code> and a sentence telling them to put the text somewhere by hand. The issue was the obvious next step: a <code>--format</code> flag, one output shape per tool. Codex, Gemini CLI, Cursor. The spec from the day before had promised the flag by name.</p>
+  <p>The issue also carried a worry. Codex's native instruction file is <code>AGENTS.md</code>, and <code>AGENTS.md</code> is exactly the file dirtywork hands to the <em>worker</em> at the start of every run. Put orchestrator instructions there and the local model gets told how to review its own work. So the Codex format would have to be user-level, and each tool's location would have to be checked against that tool's current documentation, not remembered.</p>
+  <p>Saturday morning Claude checked. The issue was wrong in a useful way.</p>
+
+  <section>
+    <h2>One file, five directories</h2>
+    <p>Codex CLI, Gemini CLI, Cursor and GitHub Copilot all read the same thing now: the <a href="https://agentskills.io">Agent Skills</a> standard — a <code>SKILL.md</code> with a <code>name</code> and a <code>description</code> in its frontmatter — and all four look in one shared pair of directories, <code>~/.agents/skills/</code> and the project's <code>.agents/skills/</code>. Claude Code's own docs say its skills follow the same standard. The 0.12 template already was one: <code>name: dirtywork</code>, a description, nothing else required anywhere.</p>
+    <p>There was nothing to format. There were directories.</p>
+    <p>So the feature that was going to be a wrapper per tool became a table with five rows, replacing two literal <code>".claude"</code> strings in the function that computes where <code>init</code> writes. The flag is <code>--agent</code>, not <code>--format</code>, because a flag called format would have named a thing that doesn't exist. <code>dirtywork init --agent codex --repo .</code> writes the same bytes Claude gets, into the directory the other four read; <code>--agent gemini</code> on the same machine says <code>up to date:</code>, because it's the same two files. Claude Code stays the default and its paths don't move.</p>
+    <p>What that means for a 0.12 install is worth saying exactly, because the issue's acceptance line said "byte-identical" and that turned out to be false. The destinations and the frontmatter are identical. The body isn't, for a reason in the next section. So an unmodified 0.12.1 copy prints <code>updated: … (v0.12.1 -&gt; v0.13.0)</code> on the next <code>init</code>, which is what the stamp was built for.</p>
+  </section>
+
+  <section>
+    <h2>The skill assumed my machine</h2>
+    <p>While <a href="https://github.com/JimboSchneider/dirtywork/issues/87">#87</a> was open, someone on Windows running Ollama read the 0.12 skill and concluded, reasonably, that Claude would always assume LM Studio on <code>localhost:1234</code> and never pass <code>--provider</code> or <code>--base-url</code>. They were right about the skill and wrong about the tool, and that gap is a bug. The skill mentioned other providers once — "see the contract" — its run template had no provider line, and its first-run check curled my port.</p>
+    <p>That's fixed in the same file, so the stamp bumps once instead of twice. The first-run check now covers LM Studio, Ollama and any other OpenAI-compatible endpoint, and it says to ask rather than guess when more than one is running. The run template carries <code>[--provider openai|anthropic|ollama] [--base-url &lt;url&gt;]</code>. And there's a line I didn't know we needed until Claude checked the code while writing the spec: <code>resume</code> inherits <code>--provider</code> from the run it continues, but it never reads <code>--base-url</code> back. Omit it on a resume and you're back on LM Studio's port. That's precisely the trap the report described, one step later. The skill says so now.</p>
+    <p>The spec went through my review before the plan — six items, folded after Claude verified each against the checkout. One of them was a count of <code>:0.12</code> literals that was short by half, because the grep pattern that counted them was <code>dirtywork-worker:0.12</code> and the contract also says <code>my-worker:0.12</code> and bare <code>FROM :0.12</code>. The spec's acceptance check uses the wide pattern now. Small thing. It's the kind of small thing a plan is for.</p>
+  </section>
+
+  <section>
+    <h2>The build</h2>
+    <p>Same rule as the last few releases: dirtywork builds dirtywork. The released 0.12.1, from PyPI, drove qwen3-coder-next on LM Studio inside the Docker sandbox against this checkout. Claude wrote the spec, the plan and the briefs, reviewed every run, and wrote the docs. I reviewed the spec, said go, reviewed the PR, and merged.</p>
+    <p>One thing was new this time, learned on the Windows work that morning: before a brief went to the worker, it was applied literally on the host in a throwaway worktree and its tests run. That caught six defects in the briefs — a review grep that could never pass, an unstated import position, two miscounts, a splice that would have produced 130-column lines, a one-off in the expected test delta — before a single run started.</p>
+    <table>
+      <tr><th>Task</th><th>Status</th><th>Turns</th><th>Wall</th><th>Resumes</th><th>What came back</th></tr>
+      <tr><td>W1 — the table, <code>--agent</code>, tests 17 and 24–29</td><td>completed</td><td>32</td><td>262 s</td><td>1</td><td>three files as briefed; a test name and a docstring comma off by a word</td></tr>
+      <tr><td>W2 — the skill body, the endpoint hint, tests 14 and 30</td><td>completed</td><td>19</td><td>163 s</td><td>1</td><td><code>SKILL.md</code> byte-identical to the spec's appendix; one 170-column line</td></tr>
+      <tr><td>W3 — the contract entry, the CI wheel-smoke step</td><td><strong>max_turns</strong></td><td>60</td><td>231 s</td><td>2</td><td>see below</td></tr>
+      <tr><td>W4 — 0.13.0, the <code>:0.13</code> image cycle</td><td>completed</td><td>43</td><td>231 s</td><td>0</td><td>eight files, as briefed</td></tr>
+    </table>
+    <p>Four briefs, eight runs counting the resumes, 224 turns, twenty-one minutes of worker wall clock, about 4.5 million prompt tokens and 35,000 completion tokens, $0. Every run that reached <code>--verify</code> passed it on the first round. The suite went from 1,662 tests to 1,681. Every deviation in that table went back through <code>dirtywork resume</code> with a feedback file naming the line; Claude wrote no production code. The four resumes for a test name, a comma, a long line and a YAML step took between one and two minutes each.</p>
+  </section>
+
+  <section>
+    <h2>The loop the meter didn't see</h2>
+    <p>W3 is the row to read. Its brief was two prose edits to the machine contract and two lines added to a GitHub Actions workflow — a <code>run: |</code> block scalar. The worker did the prose, then spent fifty-one <code>bash</code> calls on the workflow file: <code>sed -n | cat -A</code> to look at it, <code>git checkout</code> to reset it, edit, look again. Sixty turns at 3.8 seconds each. Fast, and going nowhere.</p>
+    <p>The harness has a nudge for a worker that stops making progress. It never fired, because the worker never stopped editing. It edited and reverted the same file, which counts as change every time. That's a gap I hadn't seen until this transcript, and it's on the record now: a nudge that notices the same file edited <em>N</em> times while the test result doesn't move.</p>
+    <p>The first resume fixed the contract text and then, told in so many words to leave the workflow file alone, ran <code>git checkout .github/workflows/ci.yml</code> and threw away the correct step from the first run. The second resume put it back, byte for byte, with the two lines quoted in the feedback and a sentence forbidding <code>git checkout</code>, <code>git restore</code> and <code>git stash</code>. It converged. Two resumes is the plan's limit; a third would have meant the brief was wrong. The lesson that went into the plan file: a prose replacement wants "replace lines <em>N</em>–<em>M</em> with these <em>K</em> lines," not "replace from this anchor to that one."</p>
+    <p>The PR was open at 13:16, thirty-three minutes after I said go. My review found three documentation items — the homepage still said 0.12; the setup page's prerequisites were still LM Studio only; the troubleshooting section only knew <code>lms</code> — and the macOS job failed on the docs-only fix that followed. Not the fix: a test that counts entries in the runner's shared temp directory before and after the fingerprint script and expects them equal, which they are unless something else on the runner writes a file in that second. It had passed twenty minutes earlier on identical code. It measured the runner, not the script. That's <a href="https://github.com/JimboSchneider/dirtywork/issues/101">#101</a>, a test-only brief for another day.</p>
+  </section>
+
+  <section>
+    <h2>It worked on Codex the same afternoon</h2>
+    <p>Before that PR had even merged, I'd tried it. I installed the skill from the branch with <code>--agent codex</code>, opened Codex CLI in a different project — a Vite app — and asked it to delegate a small task: edge-case tests for a formatting module. The run's slug is stamped 13:45. The worker added only the tests that were asked for; the typecheck and both test suites passed on the host, thirty-one of thirty-one focused and 112 of 112 overall; main untouched; verdict recorded as accepted.</p>
+    <p>That's the receipt the spec had marked "best-effort, manual": a second vendor's agent driving the whole loop off a file <code>init</code> wrote. One report. I haven't run Gemini, Cursor or Copilot; the docs say so.</p>
+    <p>The run found one thing it couldn't do. The project is a Vite app, and the worker image's Node was Debian bookworm's 18 — end of life in April 2025, below what Vite 8 and current Vitest require. The worker would have had to bend the project's dependencies around the sandbox. That's the wrong direction, so:</p>
+  </section>
+
+  <section>
+    <h2>The image said it had no entrypoint</h2>
+    <p>The <code>:0.13</code> image is built from <code>node:22-bookworm-slim</code> now: Debian 12 plus Node 22 LTS, npm and corepack from the official image, Debian's <code>nodejs</code>/<code>npm</code> gone. The official image ships a <code>node</code> user at uid 1000, which is the uid <code>worker</code> has always had, so the Dockerfile removes it first. Everything else — .NET 8 and 10, the environment, no <code>WORKDIR</code> — is untouched. The published image is about seventeen megabytes larger than <code>:0.12</code> — Node 22's own base costs a little more than Debian's did.</p>
+    <p>My review of that PR found the better thing. The Dockerfile's comment and the image guide both said the image has no <code>ENTRYPOINT</code> and no <code>CMD</code> — dirtywork passes its own <code>--entrypoint</code> on every <code>create</code>, <code>run</code> and <code>exec</code>, so the image's own launch configuration is never trusted. True about dirtywork. Not true about the image: <code>node:22-bookworm-slim</code> sets <code>ENTRYPOINT ["docker-entrypoint.sh"]</code> and <code>CMD ["node"]</code>, so a bare <code>docker run</code> of our image started Node. And when Claude checked the <code>:0.12</code> image for comparison, it had been carrying Debian's <code>CMD ["bash"]</code> the whole time. The claim had never been literally true. It is now: <code>ENTRYPOINT []</code>, <code>CMD []</code>, a bare run refuses with "no command specified," and CI's sandbox smoke asserts both <code>docker inspect</code> → <code>null null</code> and <code>node --version</code> → <code>v22.</code> on every build, so the claim can't drift again without failing.</p>
+    <p>That CI assertion is where the day's second brief defect lived, and it was Claude's. The brief assumed the sandbox's <code>bash()</code> returns the command's output. It returns the output with an <code>exit code: 0</code> line in front of it, so the assertion saw <code>'exit code: 0\nv22.23.2'</code> and failed on a correct image. The brief had been pre-checked, but as text: the file parsed, the unit tests passed. Nobody had run the smoke script against a built image. Claude did that next — built the image locally, reproduced the failure, applied the fix, watched it pass — and then sent the three-line fix through a fresh dirtywork run, because the first run's worktree was already cleaned and the rule doesn't have a clause for three lines. Every brief after that was checked by running it, not reading it.</p>
+  </section>
+
+  <section>
+    <h2>Forty minutes</h2>
+    <p>0.13.0 was cut at 14:53. PyPI had it within a minute. The self-check on my machine printed every line the spec predicted: <code>wrote:</code> for the home copy, <code>updated: .claude/skills/dirtywork/SKILL.md (v0.12.1 -&gt; v0.13.0)</code> for the project copy, <code>wrote:</code> for <code>--agent codex</code>, <code>up to date:</code> for <code>--agent gemini</code>. The published <code>:0.13</code> inspects as <code>null null</code>, runs Node 22, and its digest is the one thing 0.13.1 changes.</p>
+    <p>Then 0.13.1 was built by 0.13.0. The released wheel, sixteen minutes old, drove the worker inside a <code>pytest</code> image derived from the just-published <code>:0.13</code>, and pinned that image's digest in one run and one resume for a dropped comment line. The pre-check for that brief was the smoke script resolving the pulled image against the pin, so a wrong digest would have refused on the host. It didn't. 0.13.1 was cut at 15:34.</p>
+    <p>Also in the release, from the morning: native Windows no longer dies on <code>os.killpg</code>, <code>os.O_NOFOLLOW</code> or <code>os.kill(pid, 0)</code> (<a href="https://github.com/JimboSchneider/dirtywork/issues/96">#96</a> tier 1). It stays unsupported — there's a categorized list of 158 test failures behind those three — and WSL2 stays the way in.</p>
+  </section>
+
+  <section>
+    <h2>Try it, and what's next</h2>
+<pre><code>pipx install dirtywork
+cd ~/repos/yourproject
+dirtywork init --repo .                  # Claude Code
+dirtywork init --agent codex --repo .    # Codex, Gemini CLI, Cursor, Copilot</code></pre>
+    <p>Then open your agent there and ask it to delegate something small. If it's Gemini, it will ask you to confirm the skill the first time. If it's a Vite project, the worker can run your tests now.</p>
+    <p>Next: the edit-and-revert nudge from the W3 transcript, the temp-directory test, and a real behavior change delegated from Codex rather than a test file — the loop with review in it, on the new image.</p>
+  </section>
+
+  <p class="footnote">Claude (Fable 5) verified the four tools' documentation, wrote the spec and the plan and their worker briefs, ran and reviewed every run, wrote the docs, and drafted this post from the session record. The local model (qwen3-coder-next via LM Studio) did the typing inside the released dirtywork 0.12.1, and then 0.13.0. Jim filed the issue, chose <code>--agent</code>, reviewed the spec and both PRs, ran the Codex experiment, and cut both releases. Same process as the earlier posts.</p>
+</main>
+</body>
+</html>
