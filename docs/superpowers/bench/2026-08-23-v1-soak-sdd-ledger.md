@@ -496,3 +496,20 @@ ships as 0.13.0 with it.
 | W3 | `issue-87-dirtywork-init-agent-0829125413-aecbfd58` | **max_turns** | 60 | 230.8 s | 3.8 | 1,419,439 | 13,293 | 57.6 | 0 | 0 | read_file×4, edit_file×5, bash×51 | none (max_turns) | 2 | Worktree at the end: CI step present and YAML valid; contract synopsis re-wrapped onto two lines; the new **init** text *merged into* the old paragraph (the old "to `~/.claude/…` … as well;" fragment survived); one trailing space. The 51 `bash` calls were `sed -n … \| cat -A` / `git checkout ci.yml` / re-edit cycles on the `\|` block scalar — 3.8 s/turn, no nudge fired (`no_change` needs edits to stop; these were edits that kept reverting) |
 | W3-r1 | `issue-87-dirtywork-init-agent-0829130024-d88420fb` | completed | 29 | 120.9 s | 4.2 | 396,631 | 3,303 | 27.3 | 0 | 0 | bash×20, read_file×5, edit_file×2, apply_edits×1, finish×1 | pass (round 1; 1,681/8) | — | three-item feedback (synopsis one line; delete the fragment + re-wrap; trailing space). All three applied — **but it also ran `git checkout .github/workflows/ci.yml`**, reverting the CI step the feedback said not to touch; its re-wrap left a 138- and a 109-column line and dropped `copilot`'s backticks |
 | W3-r2 | `issue-87-dirtywork-init-agent-0829130427-f7250860` | completed | 26 | 116.4 s | 4.5 | 308,517 | 3,577 | 30.7 | 0 | 0 | bash×19, read_file×3, edit_file×3, finish×1 | pass (round 1; 1,681/8) | — | feedback: the CI step's two exact lines + anchor, three exact replacement lines for the contract, and "never `git checkout`/`restore`/`stash`". Both applied exactly; paragraph words identical to the brief's; CI line byte-exact, YAML parses; host `test_contract.py` 42 passed. Verdict **accept**; export `b47e2cb` ff'd; `runs clean --force --keep-transcript`. Lesson for the brief: a prose paragraph replacement wants "replace lines N–M with these K lines", not "replace from X through Y" |
+| W4 | `issue-87-task-w4-of-0829130726-b1f9c658` | completed | 43 | 230.5 s | 5.4 | 1,340,200 | 5,917 | 25.7 | 1 | 0 | read_file×13, apply_edits×5, edit_file×11, grep×1, bash×18, finish×1 | pass (round 1; 1,682/8, 52 s) | 0 | 8 files as briefed (+44/−47): 0.13.0, `DEFAULT_IMAGE` `:0.13`, `PINNED_DIGEST = None` with the 0.12 digest in the history comment, contract 8 → `:0.13`, `docker/README.md` 19 + both release lists, `ci.yml:98`, `operating.md`; A9 sweep on the worktree returns only the history line; host full suite **1,681 passed / 9 skipped** (= baseline + 19). Verdict **accept**; export `c7e4ed7` ff'd; cleaned |
+
+**Totals (4 briefs, 8 runs incl. 4 resumes, 12:44–13:13 CDT):** 224 turns, 1,271 s of worker wall
+(21.2 min), 4,484,212 prompt / 35,391 completion tokens; verify passed round 1 on every run that
+reached it; one `max_turns` (W3's YAML block-scalar loop). **Claude touched code: none** — every
+deviation was fixed by `resume --feedback-file` (W1 ×1, W2 ×1, W3 ×2). Claude wrote the docs (D1,
+`8f80df0`) and the ledger. Host suite on the integration branch (`c7e4ed7`): **1,681 passed,
+9 skipped, 38 deselected** vs baseline 1,662 (+19: test 17 ×5 for 1, 24 ×5, 25, 26 ×5, 27–30).
+Sampler (`metrics-87.csv`, 350 rows at 5 s): LM Studio 2 models resident throughout; macOS
+`free_gb` min 0.1 / mean 4.4, `inactive_gb` mean 28.7 — the box was paging-adjacent with Docker +
+two models but no run stalled or timed out. Observations for the harness: (1) W3's first run burned
+60 turns at 3.8 s/turn without a nudge — `no_change` never fires while the worker keeps editing and
+reverting the same file; a "same file edited N times without the test changing" nudge would have
+caught it. (2) On a resume the worker twice reached for `git checkout <file>` to "reset" a file it
+didn't understand, once against an explicit instruction — worth a guardrail or a resume-prompt line.
+(3) Prose replacement briefs work when phrased "replace lines N–M with these K lines" and fail when
+phrased as a span between two quoted anchors.
