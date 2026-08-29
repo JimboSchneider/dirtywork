@@ -208,7 +208,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import os
-from ctypes import Structure, byref, c_int, c_long, c_size_t, c_uint, c_ulonglong, sizeof
+from ctypes import Structure, byref, c_int, c_size_t, c_uint, c_ulonglong, sizeof
 
 __all__ = ["open_nofollow", "win32"]
 
@@ -276,7 +276,7 @@ class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(Structure):
 
 class THREADENTRY32(Structure):
     _fields_ = [("dwSize", ctypes.c_uint32), ("cntUsage", ctypes.c_uint32), ("th32ThreadID", ctypes.c_uint32),
-                ("th32OwnerProcessID", ctypes.c_uint32), ("tpBasePri", c_long), ("tpDeltaPri", c_long),
+                ("th32OwnerProcessID", ctypes.c_uint32), ("tpBasePri", ctypes.c_int32), ("tpDeltaPri", ctypes.c_int32),   # LONG is 4 bytes on Windows; c_long is 8 on LP64 POSIX, where these tests also run
                 ("dwFlags", ctypes.c_uint32)]
 
 

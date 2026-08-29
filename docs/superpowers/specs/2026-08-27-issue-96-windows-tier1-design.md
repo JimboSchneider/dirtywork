@@ -586,7 +586,8 @@ with `ctypes.get_last_error()` and rendered with `ctypes.FormatError(err)` / `ct
 Every function below gets `argtypes` and `restype` set exactly as listed — a `HANDLE` left to the
 default `int` conversion is truncated on 64-bit and fails silently. Types are `ctypes.wintypes`:
 `HANDLE, DWORD, BOOL, LPVOID, LPCWSTR, LARGE_INTEGER, ULONG` plus `ctypes.c_size_t` (`SIZE_T`),
-`ctypes.c_ulonglong` (`ULONGLONG`), `ctypes.c_long` (`LONG`).
+`ctypes.c_ulonglong` (`ULONGLONG`), `ctypes.c_int32` (`LONG` — never `c_long`, which is 8 bytes on
+LP64 POSIX where the struct-size test also runs).
 
 Sources: Microsoft Learn pages for each function/structure. v3.1: every value below was read from
 its page on 2026-08-27 while the plan's briefs were written; the v3 "(confirm)" marks are
@@ -638,7 +639,7 @@ class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(Structure):   # winnt.h — read toda
 
 class THREADENTRY32(Structure):                     # tlhelp32.h — read today
     _fields_ = [("dwSize", DWORD), ("cntUsage", DWORD), ("th32ThreadID", DWORD),
-                ("th32OwnerProcessID", DWORD), ("tpBasePri", c_long), ("tpDeltaPri", c_long),
+                ("th32OwnerProcessID", DWORD), ("tpBasePri", c_int32), ("tpDeltaPri", c_int32),   # LONG: c_int32, not c_long (8 bytes on LP64)
                 ("dwFlags", DWORD)]
 
 class FILE_ATTRIBUTE_TAG_INFO(Structure):           # winbase.h — read today
