@@ -524,3 +524,19 @@ one friction: the `:0.12` image's Node 18 cannot run invoicr's Vite/Vitest — h
 | N22-fix | `fix-in-toolscisandboxsmokepy-only-touch-0829140842-b30f5ef1` | completed | 8 | 122.9 s | 15.4 | 40,877 | 514 | 4.2 | 0 | 0 | read_file×1, apply_edits×1, bash×5 | pass (round 1; 1,682/8) | 0 | **Brief defect, Claude's:** the N22 brief assumed `DockerSandbox.bash()` returns raw stdout; it returns `exit code: N` + output (`docker.py:1219`), so CI's `docker-live` failed on a correct image (`'exit code: 0\nv22.23.2'`). The N22 worktree was already cleaned, so this is a fresh run, not a resume: read the last line. Identical to the brief; reproduced and then verified on the host by running the smoke script against the locally built image. Lesson: pre-check *behaviour* (run the script against a built image), not only the brief's text. Export `cb3b8cb` ff'd; cleaned |
 | N22-ep | `clear-the-base-images-entrypointcmd-0829143822-4f300057` | completed | 18 | 148.7 s | 8.3 | 231,409 | 1,935 | 13.0 | 0 | 0 | read_file×6, edit_file×5, grep×1, bash×8, finish×1 | pass (round 1; 1,682/8) | 1 | Owner's review on PR #102: `node:22-bookworm-slim` sets `ENTRYPOINT ["docker-entrypoint.sh"]`/`CMD ["node"]` while the Dockerfile/README claimed neither (and `:0.12` had quietly inherited debian's `CMD ["bash"]`). `ENTRYPOINT []` + `CMD []` before `USER worker`; test asserts the lines; `ci_sandbox_smoke.py` asserts `docker inspect` → `null null`. Brief pre-checked **behaviourally** this time (build → inspect → smoke against the image). 4 files as briefed; smoke + test identical; two text deviations (a dropped "merely"; README kept "No `ENTRYPOINT`/`CMD` —") |
 | N22-ep-r1 | `clear-the-base-images-entrypointcmd-0829144159-58ed5570` | completed | 15 | 86.1 s | 5.7 | 128,190 | 1,683 | 19.5 | 0 | 0 | bash×8, edit_file×3, read_file×2, finish×1 | pass (round 1; 1,682/8) | — | two-item feedback applied exactly; final Dockerfile rebuilt on the host → `null null`; full suite **1,681 / 9**; verdict **accept**; export `9c6a6e2` ff'd; cleaned |
+
+**v0.13.0 released 2026-08-29 14:53 CDT** (`b3ead25`; PyPI installable within a minute this time). Self-dogfood
+with the released wheel on the maintainer's machine, spec §3.5 / A3: `pipx run --spec dirtywork==0.13.0
+dirtywork init --repo .` → `wrote: ~/.claude/skills/dirtywork/SKILL.md` (this machine had no home copy) and
+**`updated: .claude/skills/dirtywork/SKILL.md (v0.12.1 -> v0.13.0)`**; `init --agent codex` → `wrote:
+~/.agents/skills/dirtywork/SKILL.md`; `init --agent gemini` → `up to date:` (the shared pair); a second
+`init --repo .` → `up to date:` ×2; `dirtywork contract` names `--agent` twice; the three copies are
+byte-identical (stamp `v0.13.0 sha256:0ca840604e1c2d20`, 136 lines with the stamp). The repo copy is
+refreshed by the PR that carries this paragraph.
+**`:0.13` image published and verified 14:58 CDT:** pulled on arm64; `docker inspect` → Entrypoint/Cmd `null null`
+(a bare `docker run` refuses: "no command specified"); `node v22.23.2`, `npm 10.9.8`, git 2.39.5, ripgrep 13.0.0,
+Python 3.11.2, SDKs 8.0.424 + 10.0.400, `id` → `uid=1000(worker)`; platforms linux/amd64 + linux/arm64.
+Multi-arch index digest — RepoDigests, `buildx imagetools inspect` and the publish job's log agree —
+**`sha256:6d24d6a176899f9d4e027f2519206ba24ca7752a75946c21a55323d822c4d73c`**: the value 0.13.1 pins as
+`PINNED_DIGEST`. Derived `dirtywork-worker-pytest:0.13` built per `docker/README.md` (pytest 7.2.1) for the
+next dogfood cycle; the local pre-release test tags were removed before the pull.
