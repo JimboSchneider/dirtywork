@@ -15,11 +15,26 @@ dirtywork's containment model — what Docker mode locks down, what it doesn't, 
 > `windows-latest` in CI as an **advisory (allowed-to-fail) job**: it is a
 > separate job that the release gate does not require, and it publishes a
 > per-file pass/fail/error/skip table (`tools/junit_summary.py`) plus the raw
-> JUnit XML as an artifact. That measures the gap; it does not close it, and no
-> production code is changed for Windows. Items that still need real Windows
-> testing: Git for Windows paths and `\\?\` handling, `docker` CLI behavior, uid
-> `1000:1000`, symlink-as-file export, case-insensitivity, long paths,
-> `core.symlinks=false`, `core.longpaths`.
+> JUnit XML as an artifact, and (since #96) the list of collected test files the
+> run never reached, so a session that dies early cannot read as "measured".
+> That measures the gap. #96 tier 1 closes the three crashes that stopped the
+> unit suite on Windows, each with a Windows branch next to an unchanged POSIX
+> one: `osfs.open_nofollow` replaces `O_NOFOLLOW` (`CreateFileW` with
+> `FILE_FLAG_OPEN_REPARSE_POINT`, the attribute read from the handle we hold,
+> `ELOOP` on a symlink — no check-then-open window); `procs.run_capped` contains
+> the worker's process tree in a Job Object the child is assigned to while still
+> suspended, so nothing escapes it; `resume.pid_alive` uses `OpenProcess`
+> instead of `os.kill(pid, 0)`, which on Windows is a console-wide Ctrl-C.
+> **What degrades on Windows, and only there:** `0o600` create modes are advisory
+> (the file inherits its directory's ACL); any reparse point at the final
+> component is refused, not just symlinks; directories, junctions and directory
+> symlinks are refused with `EACCES` rather than `EISDIR`/`ELOOP`; `O_NONBLOCK`
+> is a no-op (no filesystem FIFOs); a kill that cannot be confirmed is reported
+> in the tool result — never silently assumed; Windows 7 / Server 2008 R2 (no
+> nested jobs) fail loudly at job assignment. Docker mode on Windows is untested.
+> Items that still need real Windows testing: Git for Windows paths and `\\?\`
+> handling, `docker` CLI behavior, uid `1000:1000`, symlink-as-file export,
+> case-insensitivity, long paths, `core.symlinks=false`, `core.longpaths`.
 
 **Docker is the default sandbox as of 0.4 — a breaking change from 0.2.**
 Every tool call (`read_file`/`write_file`/`append_file`/`edit_file`/`apply_edits`/
