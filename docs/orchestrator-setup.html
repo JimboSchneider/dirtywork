@@ -141,6 +141,7 @@ wrote: /Users/you/repos/yourproject/.agents/skills/dirtywork/SKILL.md</code></pr
       <li><strong>Gemini CLI</strong> asks you to confirm the first time it activates the skill — you'll see the name, the description and the path. <code>/skills list</code> shows it.</li>
       <li><strong>Cursor</strong> and <strong>Copilot</strong> show it in the <code>/</code> menu and can pick it on their own. For Copilot that means the CLI or VS Code's agent mode; the cloud agent runs on GitHub's machines and can't reach your model server or Docker.</li>
     </ul>
+    <p>Codex CLI is the one I've watched do it (one run, 2026-08-29): it picked the skill up from <code>.agents/skills</code>, wrote the brief, ran, checked the result on the host and recorded the verdict. The other three read the same file; I haven't run them.</p>
     <p>The rule is the same everywhere: the skill never goes into <code>AGENTS.md</code> or <code>CLAUDE.md</code>, because dirtywork hands those to the <em>worker</em> on every run. <code>init</code> never writes there. Needs 0.13.0 or later.</p>
   </section>
 
