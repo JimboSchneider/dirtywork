@@ -58,7 +58,9 @@ jobs:
       # "measured" again (#96 -- one did, for 13 files, until 2026-08-27).
       - run: python -m pytest --collect-only -q > collected.txt
         continue-on-error: true
-      - run: python -m pytest --junitxml=junit-windows.xml -rE
+      # --continue-on-collection-errors: one module that cannot import on Windows must
+      # not abort the session and hide the other 36 files (it did, on PR #99's first run).
+      - run: python -m pytest --junitxml=junit-windows.xml -rE --continue-on-collection-errors
         continue-on-error: true
       - name: Per-file summary
         if: always()
