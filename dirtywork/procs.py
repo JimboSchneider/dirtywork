@@ -232,13 +232,6 @@ def run_capped(argv: list[str], *, timeout: float, cwd=None, env=None,
     except subprocess.TimeoutExpired:
         timed_out = True
 
-    if kill_group:
-        _kill_group(proc.pid)
-    else:
-        try:
-            proc.kill()
-        except OSError:
-            pass
     trailer = _kill_tree(proc, tree, kill_group)
     try:
         proc.wait(timeout=5)

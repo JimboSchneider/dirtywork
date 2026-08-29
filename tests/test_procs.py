@@ -236,3 +236,19 @@ def test_run_capped_kills_grandchild_on_timeout():
     while pid_alive(grandchild) and time.monotonic() < deadline:
         time.sleep(0.1)
     assert pid_alive(grandchild) is False
+
+def test_run_capped_epilogue_goes_only_through_kill_tree(monkeypatch):
+    """Simulate Windows on any platform: _kill_group must be unreachable from
+    run_capped itself -- only _kill_tree may decide how to kill. A leftover
+    direct call is exactly what broke 141 tests on the Windows CI leg."""
+    def boom(pid):
+        raise AttributeError("module 'os' has no attribute 'killpg' (simulated Windows)")
+    monkeypatch.setattr(procs, "_kill_group", boom)
+    seen = {}
+    def fake_kill_tree(proc, tree, kg):
+        seen["called"] = True
+        return None
+    monkeypatch.setattr(procs, "_kill_tree", fake_kill_tree)
+    r = procs.run_capped(["bash", "-c", "echo hi"], timeout=5)
+    assert r.output.strip() == b"hi" and r.returncode == 0
+    assert seen == {"called": True}
