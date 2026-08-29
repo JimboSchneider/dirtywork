@@ -268,3 +268,44 @@ def test_windows_create_trunc_truncates_through_verified_handle(tmp_path):
     os.write(fd, b"a")
     os.close(fd)
     assert (tmp_path / "new").read_bytes() == b"a"
+
+
+SITES = {
+    # file:line -> (flags passed to open_nofollow, mode, cloexec, nonblock, the literal flags the site composed before #96)
+    "tools.py:104":  (os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644, True, True,  os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC),
+    "tools.py:216":  (os.O_WRONLY, 0o600, True, True,   os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC),
+    "tools.py:256":  (os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, True, False,  os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC),
+    "tools.py:856":  (os.O_WRONLY, 0o600, True, True,   os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC),
+    "rundir.py:105": (os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600, False, False, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW),
+    "transcript.py:37": (os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND, 0o600, False, False, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND | os.O_NOFOLLOW),
+    "workspace.py:171": (os.O_RDONLY, 0o600, False, False, os.O_RDONLY | os.O_NOFOLLOW),
+    "workspace.py:185": (os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644, False, False, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW),
+    "bench.py:394":  (os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600, False, False, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW),
+    "sandbox/export.py:255": (os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644, False, False, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW),
+    "sandbox/export.py:527": (os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600, False, False, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW),
+}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX composition")
+@pytest.mark.parametrize("site", sorted(SITES))
+def test_posix_composition_is_identical(monkeypatch, site):
+    """Each converted site composes exactly the os.open flags it composed before #96."""
+    flags, mode, cloexec, nonblock, before = SITES[site]
+    seen = {}
+    monkeypatch.setattr(os, "open", lambda p, f, m=0o777: seen.update(flags=f) or 3)
+    open_nofollow("p", flags, mode, cloexec=cloexec, nonblock=nonblock)
+    assert seen["flags"] == before, site
+
+
+def test_no_raw_nofollow_opens_outside_osfs():
+    """The eleven sites are converted; nothing else composes O_NOFOLLOW by hand."""
+    import re, pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent / "dirtywork"
+    offenders = []
+    for py in root.rglob("*.py"):
+        if py.name == "osfs.py":
+            continue
+        for n, line in enumerate(py.read_text(encoding="utf-8").splitlines(), 1):
+            if "os.open(" in line and "O_NOFOLLOW" in line:
+                offenders.append(f"{py.relative_to(root)}:{n}")
+    assert offenders == []

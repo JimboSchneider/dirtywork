@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 from .guardrails import GuardrailError, build_env, check_bash_command, resolve_in_worktree
+from .osfs import open_nofollow
 from .procs import run_capped
 
 MAX_RESULT_CHARS = 8000
@@ -100,9 +101,10 @@ def _open_regular(path: Path, flags: int, *, mode: int = 0o644, max_size: int | 
       later spawns (e.g. the `bash`/`grep` tools).
     O_NONBLOCK is cleared (via os.set_blocking) once S_ISREG is confirmed, so
     ordinary reads/writes on the returned file object behave normally.
+    On Windows, O_NONBLOCK and O_CLOEXEC have no filesystem equivalent (they are
+    still passed to os.open but are no-ops).
     """
-    full_flags = flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-    fd = os.open(str(path), full_flags, mode)
+    fd = open_nofollow(path, flags, mode, cloexec=True, nonblock=True)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
@@ -112,7 +114,8 @@ def _open_regular(path: Path, flags: int, *, mode: int = 0o644, max_size: int | 
                 f"'{path}' is {st.st_size} bytes, over the {max_size}-byte "
                 f"read limit; use grep to search it instead of reading it whole"
             )
-        os.set_blocking(fd, True)
+        if os.name != "nt":
+            os.set_blocking(fd, True)  # nonblock is a no-op on Windows; set_blocking is pipes-only there
     except Exception:
         os.close(fd)
         raise
@@ -212,8 +215,7 @@ def _write_atomic(target: Path, data: bytes, *, path: str, verb: str = "write",
         # behind. O_NONBLOCK makes a FIFO with no reader fail with ENXIO
         # instead of hanging; O_NOFOLLOW closes the final-component symlink
         # TOCTOU.
-        probe_fd = os.open(str(target),
-                           os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        probe_fd = open_nofollow(target, os.O_WRONLY, cloexec=True, nonblock=True)
     except OSError as e:
         if e.errno == errno.ELOOP:
             return (f"ERROR: '{path}' is a symlink; writing through a symlink is not "
@@ -251,10 +253,8 @@ def _write_atomic(target: Path, data: bytes, *, path: str, verb: str = "write",
                 return None
         tmp = target.parent / tmp_name(target.name)
         try:
-            tmp_fd = os.open(
-                str(tmp),
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                0o600)
+            tmp_fd = open_nofollow(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600,
+                                     cloexec=True)
         except OSError as e:
             if probe_fd is not None and e.errno in (errno.EACCES, errno.EROFS):
                 try:
@@ -853,7 +853,7 @@ def append_file(worktree: Path, path: str, text: str) -> str:
         return f"ERROR: {e}"
     p = _worktree_candidate(path, worktree)
     try:
-        probe_fd = os.open(str(p), os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        probe_fd = open_nofollow(p, os.O_WRONLY, cloexec=True, nonblock=True)
     except OSError as e:
         if e.errno == errno.ENOENT:
             return _append_missing(path)

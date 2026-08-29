@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .osfs import open_nofollow
+
 
 class Transcript:
     """Append-only JSONL event log.
@@ -34,8 +36,7 @@ class Transcript:
 
     def __init__(self, path: Path):
         self.path = Path(path)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND | os.O_NOFOLLOW
-        fd = os.open(str(self.path), flags, 0o600)
+        fd = open_nofollow(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND, 0o600)
         self._fh = os.fdopen(fd, "a", encoding="utf-8")
         self._lock = threading.Lock()
         self._buffer = None      # a list while a turn is open, else None
