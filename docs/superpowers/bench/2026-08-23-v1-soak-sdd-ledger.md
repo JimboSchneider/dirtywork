@@ -443,9 +443,10 @@ rundir/transcript/workspace/bench/sandbox/export` vs `contract/`, `__main__.py`)
 | W3 | `issue-96-windows-tier-1-0829093316-58f40edc` | completed | 34 | 370.5 s | 10.9 | 928,975 | 15,175 | 41.0 | 0 | 0 | read_file×12, apply_edits×7, bash×6, edit_file×3, list_dir×2, insert_after×1, append_file×1, write_file×1 | pass (round 1; sandbox 1,651/7; host 1,650/8) | 0 | `_Tree`/`_fail`/`_spawn_windows`/`_spawn`/`_kill_tree` byte-identical to the brief; run_capped's three edits as instructed; POSIX Popen + `_kill_group` unchanged; only the test import line touched among the six originals |
 | W4 | `issue-96-windows-tier-1-0829094242-2a221aaa` | completed | 27 | 235.2 s | 8.7 | 466,843 | 3,486 | 14.8 | 0 | 0 | read_file×11, bash×8, grep×4, apply_edits×2, edit_file×1 | pass (round 1; sandbox 1,657/8; host 1,656/9) | 0 | `pid_alive`/`_pid_alive_windows` byte-identical to the brief; `os.kill` only in the POSIX branch; callers untouched |
 | W5 | `issue-96-windows-tier-1-0829094907-386519c7` | completed | 7 | 98.6 s | 14.1 | 57,772 | 2,486 | 25.2 | 0 | 0 | edit_file×4, read_file×2 | pass (round 1; sandbox 1,660/8; host 1,659/9) | 0 | functions byte-identical to the brief; `main()` as instructed; output byte-identical without `--collected` on the real baseline junit |
+| W2b | `issue-96-windows-tier-1-0829100350-4a373483` | completed | 31 | 162.3 s | 5.2 | 483,330 | 5,998 | 37.0 | 0 | 0 | edit_file×12, read_file×9, bash×6, apply_edits×2, insert_after×1 | pass (round 1; sandbox 1,662/8; host test_osfs 33/5) | 0 | fix round for the W2 brief's own mistake: module-level `SITES` used POSIX-only `os.O_*`; PR #99's first Windows run: 1 collection error, `absent from this run: 37 test files` — the new line working as designed |
 
-**Totals (five runs, zero resumes):** 117 turns, 1,116 s of worker wall (18.6 min), 2,464,830 prompt +
-33,955 completion tokens. Every export byte-identical to its brief where the brief carried code;
+**Totals (six runs incl. the W2b fix round, zero resumes):** 148 turns, 1,278 s of worker wall (21.3 min),
+2,948,160 prompt + 39,953 completion tokens. Every export byte-identical to its brief where the brief carried code;
 nothing finished by hand. Sampler (`metrics-96.csv`, 464 samples, 14:17–14:57 UTC, 5 s cadence): free RAM
 min **0.06 GB** / mean 5.3 GB / max 13.5 GB, inactive mean 32.6 GB, 2 models resident throughout (qwen +
 devstral). Pre-run brief check on the host caught `THREADENTRY32` `LONG` → `c_int32` (`74ea91b`) before W1.
