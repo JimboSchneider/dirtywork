@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import time
 
 import pytest
@@ -206,7 +207,7 @@ def test_kill_tree_windows_reports_terminate_failure(monkeypatch):
 
 def test_run_capped_appends_kill_trailer(monkeypatch):
     monkeypatch.setattr(procs, "_kill_tree", lambda proc, tree, kg: "process-tree kill: boom")
-    r = procs.run_capped(["bash", "-c", "echo hi"], timeout=5)
+    r = procs.run_capped([sys.executable, "-c", "print('hi')"], timeout=20)
     assert r.output.startswith(b"hi") and b"[dirtywork] process-tree kill: boom" in r.output
 
 
@@ -249,6 +250,6 @@ def test_run_capped_epilogue_goes_only_through_kill_tree(monkeypatch):
         seen["called"] = True
         return None
     monkeypatch.setattr(procs, "_kill_tree", fake_kill_tree)
-    r = procs.run_capped(["bash", "-c", "echo hi"], timeout=5)
+    r = procs.run_capped([sys.executable, "-c", "print('hi')"], timeout=20)
     assert r.output.strip() == b"hi" and r.returncode == 0
     assert seen == {"called": True}
