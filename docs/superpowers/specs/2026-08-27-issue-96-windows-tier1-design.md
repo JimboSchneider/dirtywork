@@ -1,6 +1,6 @@
 # Windows tier 1: stop crashing on three POSIX-only calls (#96) — design
 
-v3.2, 2026-08-29. Status: **implementation-ready; plan v1.1 at
+v3.3, 2026-08-29. Status: **built (PR #99); §6 measured below; plan v1.1 at
 `docs/superpowers/plans/2026-08-27-issue-96-windows-tier1.md`. Sequenced behind #87 (0.13.0).**
 Target: 0.13.x.
 
@@ -538,6 +538,14 @@ advisory leg — that leg is the point.
 testcases is named; a file absent from both lists is not.
 
 ## 6. Acceptance
+
+**Measured on PR #99 (advisory leg, `33294cd`, 2026-08-29):** 1 ✔ `absent from this run: 0` (1,671 collected).
+2 ✔ for the branch's own tests — the two Windows-only Job Object tests pass; the four *original* bash-based
+`test_procs` tests fail because the GitHub runner's `bash` is the WSL launcher stub (tier 2). O_NOFOLLOW group 0;
+`test_resume` 29/0; `test_osfs` 24/0 with all five Windows-only tests. 3 ✘ as a number: the "~25 long tail" was
+estimated from the 179 failures visible before the truncation was found and was blind to 558 tests; the measured
+tail is **158** (0 errors, 0 crashes), categorized in the PR. 4–6 ✔. 7 pending a person with a Windows machine.
+
 
 1. Advisory `windows-latest` table on the PR: `absent from this run: 0` — every file pytest
    collected has results.

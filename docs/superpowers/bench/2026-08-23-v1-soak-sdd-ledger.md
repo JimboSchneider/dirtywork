@@ -457,3 +457,16 @@ devstral). Pre-run brief check on the host caught `THREADENTRY32` `LONG` → `c_
 1,603 + 56 new; 8 Windows-only skips + the 1 baseline skip); docker-live (CI's invocation, local `:0.12`)
 `25 passed, 1 skipped, 1 deselected in 164 s`. PR **#99** opened 2026-08-29 10:00 CDT; the advisory
 Windows table on it is acceptance §6 — recorded below when it lands.
+
+**Windows receipt (advisory leg on PR #99, four runs):** `305135b`-1 (`b13369b` head, before W2b): 1 collection
+error, `absent from this run: 37 test files` — the new line working as designed; `305135b`: 1,356/291/0, absent 0,
+141 of the 291 = the leftover `_kill_group` epilogue; `e8b53af`: 1,488/160/0, absent 0, `test_procs` 6 failed — all
+bash-driven (the runner's `bash` is the WSL launcher stub); **`33294cd` (final): 1,490 passed, 158 failed, 0 errors,
+23 skipped, absent 0.** `test_osfs` 24/0 incl. the five Windows-only tests (junction → `EACCES`, file symlink →
+`ELOOP`, `O_CREAT|O_TRUNC` on a symlink leaves the target, missing parent → `FileNotFoundError`, truncate through the
+verified handle); `test_resume` 29/0; `test_procs` 21/4 — the four are the original bash-based tests. Spec §6: 1 ✔
+(absent 0), 2 ✔ for the branch's own tests (the two Windows-only Job Object tests pass; four originals need a real
+bash), 3 ✘ as a number — the "~25" estimate was made blind to 558 tests; the measured tail is 158 (38 backslash paths
+in expected strings, 28 ownership/uid checks, 15 sharing violations, 9 symlink privilege, 7 rejected filenames, 4
+`mkfifo`, ~50 bash-driven, ~7 uncategorized; zero crashes, zero errors), 4 ✔, 5 ✔, 6 ✔, 7 pending a person. All seven
+PR checks green including `gate`. Merge is the owner's call.
