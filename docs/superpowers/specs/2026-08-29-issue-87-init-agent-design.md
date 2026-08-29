@@ -1,6 +1,6 @@
 # `dirtywork init --agent`: one skill file, every orchestrator's discovery path (#87, 0.13.0) — design
 
-Status: v1, 2026-08-29. Follows #82 (0.12.0, `docs/superpowers/specs/2026-08-26-operator-contract-init-design.md`),
+Status: v1.1, 2026-08-29 (owner review folded, §0.1). Follows #82 (0.12.0, `docs/superpowers/specs/2026-08-26-operator-contract-init-design.md`),
 whose §2 scoped other-agent output out and whose §4 promised "a `--format` flag on `init`, not a new command".
 
 ## 0. The owner's decision (2026-08-29)
@@ -17,6 +17,29 @@ whose §2 scoped other-agent output out and whose §4 promised "a `--format` fla
   `_ENDPOINT_HINTS["openai"]` names the flags a wrong-provider user needs. One hash bump instead of two.
 - **Release: 0.13.0**, together with #96 tier 1 (already on main, `d755222`). No 0.12.2.
 
+### 0.1 Owner review fold (v1.1, 2026-08-29 12:10 CDT — six items, each verified before folding)
+
+1. Image-ripple scope: v1 counted four `:0.12` lines in the packaged contract because its grep
+   pattern was `dirtywork-worker:0.12`, which misses `my-worker:0.12` (line 86, twice) and bare
+   `FROM :0.12` / "the `:0.12` image" (126, 120). Re-counted with `:0\.12\b`: seven contract
+   lines, twenty in `docker/README.md`, plus the two release lists there. §3.4 and A9 now use the
+   broad pattern so no spelling escapes.
+2. The resume bullet is the owner's wording: `resume` inherits `--provider` but does not restore a
+   *custom* `--base-url`; the default needs no repeating.
+3. The first-run check no longer says "check which one answers": determine the intended provider,
+   ask when more than one is running, never pick silently; "available" for a generic server,
+   "loaded" for LM Studio/Ollama.
+4. §3.1/§3.4/docs say outright that the four non-Claude agents share one destination pair; the
+   README example is `--repo .` so it produces a committed project skill, not a home-only one.
+5. Evidence: Gemini's getting-started tutorial requires both `name:` and `description:` (verified
+   at geminicli.com/docs/cli/tutorials/skills-getting-started); Codex "scans `.agents/skills` in
+   every directory from your current working directory up to the repository root" (verified,
+   learn.chatgpt.com/docs/build-skills); the Claude source is cited as
+   `code.claude.com/docs/en/skills` (the owner's `/docs/en/slash-commands` serves the same page,
+   "Extend Claude with skills", checked today).
+6. Skills are orchestrator instruction files; what they are not is *worker-context* instruction
+   files (§1.2, fact 3).
+
 ## 1. Problem and evidence
 
 ### 1.1 Today
@@ -31,9 +54,9 @@ telling it to place the text by hand. `destinations()` (`dirtywork/contract/__in
 
 | Tool | Personal skills | Project skills | Frontmatter | Source |
 |---|---|---|---|---|
-| Claude Code | `~/.claude/skills/<name>/SKILL.md` | `.claude/skills/<name>/SKILL.md` | `description` required; `name` optional (display only for personal/project skills) | code.claude.com/docs/en/skills.md — "Claude Code skills follow the Agent Skills open standard" |
-| Codex CLI | `$HOME/.agents/skills` | `$REPO_ROOT/.agents/skills` (also `$CWD/.agents/skills`, `$CWD/../.agents/skills`; `/etc/codex/skills`) | `name`, `description` required | learn.chatgpt.com/docs/build-skills (redirect target of developers.openai.com/codex/skills) — invoked as `$dirtywork` or implicitly by description |
-| Gemini CLI | `~/.gemini/skills/` **or the `~/.agents/skills/` alias** (alias wins within the tier) | `.gemini/skills/` or `.agents/skills/` | not stated; the standard applies | geminicli.com/docs/cli/skills — activation calls `activate_skill` and **asks the user for consent**; `/skills list`, `gemini skills list --all` |
+| Claude Code | `~/.claude/skills/<name>/SKILL.md` | `.claude/skills/<name>/SKILL.md` | `description` required; `name` optional (display only for personal/project skills) | code.claude.com/docs/en/skills — "Claude Code skills follow the Agent Skills open standard" |
+| Codex CLI | `$HOME/.agents/skills` | `.agents/skills` in **every directory from `$CWD` up to the repository root** (also `/etc/codex/skills`) | `name`, `description` required | learn.chatgpt.com/docs/build-skills (redirect target of developers.openai.com/codex/skills) — invoked as `$dirtywork` or implicitly by description |
+| Gemini CLI | `~/.gemini/skills/` **or the `~/.agents/skills/` alias** (alias wins within the tier) | `.gemini/skills/` or `.agents/skills/` (workspace skills need workspace trust) | `name`, `description` both required, first thing in the file | geminicli.com/docs/cli/skills and …/cli/tutorials/skills-getting-started — activation calls `activate_skill` and **asks the user for consent**; `/skills list`, `gemini skills list --all` |
 | Cursor | `~/.agents/skills/`, `~/.cursor/skills/` (legacy: `~/.claude/skills/`, `~/.codex/skills/`) | `.agents/skills/`, `.cursor/skills/` (legacy: `.claude/skills/`, `.codex/skills/`) | `name`, `description` required | cursor.com/docs/skills — `/` menu or automatic |
 | GitHub Copilot (CLI, VS Code, cloud agent) | `~/.copilot/skills`, `~/.agents/skills` (VS Code also `~/.claude/skills`) | `.github/skills`, `.claude/skills`, `.agents/skills` | `name`, `description` required (VS Code doc) | docs.github.com/en/copilot/concepts/agents/about-agent-skills; code.visualstudio.com/docs/agent-customization/agent-skills |
 | Agent Skills standard | — | — | `name` ≤ 64 chars, `[a-z0-9-]`, **must match the directory name**; `description` ≤ 1024 chars | agentskills.io/specification |
@@ -42,7 +65,8 @@ Three facts fall out:
 
 1. **One directory pair — `~/.agents/skills/dirtywork/SKILL.md` and `<repo>/.agents/skills/dirtywork/SKILL.md` — is read by Codex, Gemini CLI, Cursor and Copilot.** Cursor and Copilot additionally read the `.claude/skills` copies a Claude install already wrote.
 2. **The 0.12 template is already a valid standard skill**: `name: dirtywork` matches the directory `dirtywork`, `description` is 273 characters (limit 1024), nothing else is required anywhere. The same bytes are correct for every tool. There is no wrapper to write.
-3. **None of these paths is a file the worker is fed.** `workspace.load_repo_context` (`workspace.py:242-270`) reads exactly `CLAUDE.md` and `AGENTS.md` at the repository root of the base commit, by `git ls-tree`. `.agents/skills/…` is not `AGENTS.md`. The issue's worry — that Codex's only target is `AGENTS.md` — is moot: Codex reads skills. `~/.codex/AGENTS.md` (which does exist, with `AGENTS.override.md`) is not used.
+3. **None of these paths is a file the worker is fed.** `workspace.load_repo_context` (`workspace.py:242-270`) reads exactly `CLAUDE.md` and `AGENTS.md` at the repository root of the base commit, by `git ls-tree`. `.agents/skills/…` is not `AGENTS.md`. The issue's worry — that Codex's only target is `AGENTS.md` — is moot: Codex reads skills, and a skill is an orchestrator instruction file, not a
+   *worker-context* one. `~/.codex/AGENTS.md` (which does exist, with `AGENTS.override.md`) is not used.
 
 What the issue got wrong, recorded so it is not re-derived: Codex has had skills since well before this
 spec; Gemini CLI too; Cursor's rules (`.cursor/rules/*.mdc`) and Copilot's instructions
@@ -120,9 +144,11 @@ write"), `--repo` validation before any write, resolve-based de-duplication, ato
 `render_skill` is untouched. `--stdout` prints the same bytes whatever `--agent` says; `--agent` is
 accepted with `--stdout` and has no effect on the output (test 26).
 
-Two agents on one machine: `init --agent claude` then `init --agent codex` — two independent
-destination pairs, each with its own stamp. A Claude user who also runs Cursor or Copilot already
-has a copy those tools read (§1.2); the docs say so, `init` does not special-case it.
+The four non-Claude agents share one destination pair: `init --agent codex` and `init --agent
+gemini` write the same two files, and the second reports `up to date:` — one install serves all
+four. Claude Code plus any of the others is two independent pairs, each with its own stamp. A
+Claude user who also runs Cursor or Copilot already has a copy those tools read (§1.2); the docs
+say so, `init` does not special-case it.
 
 ### 3.2 The skill body: provider-neutral
 
@@ -133,10 +159,11 @@ the worker at it verbatim). Nothing else in the body changes.
 
 ```
 - The endpoint you will pass is serving and the model you will pass as `--model`
-  is loaded: LM Studio `curl -s http://localhost:1234/v1/models`; Ollama
-  `ollama ps`; another OpenAI-compatible server `curl -s <base-url>/models`.
-  If the request does not say which, check which one answers before the first
-  run — do not assume LM Studio. `--provider anthropic` needs `ANTHROPIC_API_KEY`.
+  is loaded (LM Studio `curl -s http://localhost:1234/v1/models`; Ollama
+  `ollama ps`) or available (another OpenAI-compatible server:
+  `curl -s <base-url>/models`). If the request does not say which provider,
+  find out; if more than one is running, ask — never pick one silently, and
+  never assume LM Studio. `--provider anthropic` needs `ANTHROPIC_API_KEY`.
 ```
 
 (b) **Run template** — one line added between `--model` and `--verify`, and one bullet:
@@ -151,9 +178,9 @@ the worker at it verbatim). Nothing else in the body changes.
 
 ```
 - `--provider`/`--base-url`: omit both for LM Studio on `localhost:1234` (the
-  default). Ollama is `--provider ollama`; any other OpenAI-compatible server is
-  `--base-url <url>`. `resume` inherits `--provider` from the run it continues
-  but not `--base-url` — pass that again on every `resume`.
+  default). Use `--provider ollama` for Ollama; for another OpenAI-compatible
+  server, pass `--base-url <url>`. `resume` inherits `--provider`, but it does
+  not restore a custom `--base-url` — repeat that custom URL on every resume.
 ```
 
 (c) `dirtywork/__main__.py` `_ENDPOINT_HINTS["openai"]` becomes
@@ -171,7 +198,7 @@ LM Studio's port. A run started against another server therefore needs `--base-u
 
 Constraints the edits respect: the drift guard (`test_skill_flags_exist_in_parser`) collects every
 `--[a-z][a-z-]*` token; `--provider`, `--base-url` and `--model` exist in the parser, and
-`openai|anthropic|ollama`, `<url>` are not option-shaped. Line count 126 → 134 (Appendix A, counted) against the cap of
+`openai|anthropic|ollama`, `<url>` are not option-shaped. Line count 126 → 135 (Appendix A, counted) against the cap of
 200. The "Parallelism is processes … (LM Studio serves several requests per loaded model)" line is
 left alone: true, and I have not verified Ollama's parallelism default, so the skill does not claim it.
 
@@ -209,7 +236,8 @@ reader that walks or globs.
   **init** entry (lines 233-246) gains: default `claude` → `~/.claude/skills/dirtywork/SKILL.md`
   (+ `<PATH>/.claude/…`); `codex`, `gemini`, `cursor`, `copilot` → `~/.agents/skills/dirtywork/SKILL.md`
   (+ `<PATH>/.agents/…`), "the file is the same for every agent (the Agent Skills standard); only
-  the directory differs; run `init` once per agent you use"; the last sentence extends to
+  the directory differs, and the four non-Claude agents share it — one `init` covers all four"; the
+  last sentence extends to
   "a project copy committed to the target repo — under `.claude/` or `.agents/` — is visible to the
   worker like any other file". Everything else in the entry stands.
 - `.github/workflows/ci.yml` `wheel-smoke`: one added step after the existing `init --stdout`
@@ -221,20 +249,27 @@ reader that walks or globs.
   cycle** (#82 §3.5, owner decision C2, unchanged policy): `dirtywork/sandbox/docker_args.py`
   `DEFAULT_IMAGE` → `ghcr.io/jimboschneider/dirtywork-worker:0.13`, `PINNED_DIGEST = None` with the
   0.12 digest (`sha256:edcf3a47…fe3c`) added to the history comment; `tests/test_docker_args.py:22`;
-  `.github/workflows/ci.yml:98` docker-live tag → `:0.13`; the four `:0.12` literals in the packaged
-  contract (lines 29, 74, 79, 109); the thirteen in `docker/README.md`; `docs/operating.md:494`
-  ("the `:0.13` image, the default since 0.13.0"). The digest is pinned in 0.13.1, as 0.12.1 did.
-  Nothing under `docs/superpowers/` is swept (history).
+  `.github/workflows/ci.yml:98` docker-live tag → `:0.13`; **every** `:0.12` in the packaged
+  contract — seven lines: 29, 74, 79, 86 (`my-worker:0.12`, twice), 109, 120 ("the `:0.12` image"),
+  126 (`FROM :0.12`) — the unqualified and custom-image spellings included; every `:0.12` in
+  `docker/README.md` (lines 28, 40, 44-47, 105, 118, 125-126, 141-142, 154, 161-162, 197, 212-213,
+  the `my-worker:0.12` custom-image examples included), plus `0.13.0` appended to the first-release
+  list (line 115) and `0.13.1 for 0.13` to the pin list (line 119); `tests/test_docker_args.py:22-24`
+  (assert and its pin comment); `docs/operating.md:494` ("the `:0.13` image, the default since
+  0.13.0"). The digest is pinned in 0.13.1, as 0.12.1 did. Nothing under `docs/superpowers/` is
+  swept (history), and the digest-history comment in `docker_args.py` keeps its `:0.12` lines.
 - `README.md` **Use it from Claude Code** (lines 146-157): "Any other agent can read the same
-  instructions with `dirtywork init --stdout`" → "`dirtywork init --agent codex` (or `gemini`,
-  `cursor`, `copilot`) installs the same file where that tool looks"; the two sentences "The skill
+  instructions with `dirtywork init --stdout`" → "`dirtywork init --agent codex --repo .` installs
+  the same file where Codex looks — and Gemini CLI, Cursor and Copilot, which share that
+  directory (`--agent gemini|cursor|copilot` write the same files)"; the two sentences "The skill
   assumes LM Studio on `localhost:1234` … says how" are deleted (the template carries
   `--provider`/`--base-url`); the "put your own tweaks (a `--provider` line, say)" example in the
   next paragraph loses its parenthetical.
 - `docs/orchestrator-setup.md` and its hand-maintained twin `docs/orchestrator-setup.html`:
   "You need dirtywork 0.12.0 or later" → "0.12.0 or later; 0.13.0 for anything but Claude Code";
-  a new section **Other orchestrators** after "Teach Claude the loop" — one command per tool
-  (`dirtywork init --agent codex --repo .` etc.), where it lands, how each tool surfaces it (Codex:
+  a new section **Other orchestrators** after "Teach Claude the loop" — one command
+  (`dirtywork init --agent codex --repo .`; `gemini`, `cursor` and `copilot` land in the same two
+  files, so one install serves all four), where it lands, how each tool surfaces it (Codex:
   `$dirtywork` or by description; Gemini CLI: asks you to confirm the first time it activates it,
   `/skills list` shows it; Cursor and Copilot: the `/` menu, or on its own), which Copilot surfaces
   can actually run a local model (CLI and VS Code agent mode; the cloud agent cannot reach your
@@ -275,10 +310,10 @@ the maintainer has installed — and is recorded as done or not done, not assume
 - **Edited 0.12 copies** (the docs told users to add `--provider` by hand) print `skipped (locally
   modified)` after the upgrade, rc 1, file untouched — the safe direction. The docs say `--force` is
   now the right answer because the template has the line.
-- **Codex's nearest-directory lookup** (`$CWD/.agents/skills` before `$REPO_ROOT/.agents/skills`)
-  means a project copy is found from any subdirectory of the repo; `init --repo` writes at the path
-  given, which the docs tell users to make the repo root. Not enforced (`--repo` need not be a git
-  repo — #82 §3.3).
+- **Codex scans `.agents/skills` in every directory from `$CWD` up to the repository root**, so a
+  project copy at the root is found from any subdirectory; `init --repo` writes at the path given,
+  which the docs tell users to make the repo root. Not enforced (`--repo` need not be a git repo —
+  #82 §3.3).
 
 ## 5. Tests
 
@@ -299,9 +334,10 @@ Same fixtures (`home` monkeypatches `HOME`; `_git`).
   stdout == `render_skill(__version__)` and no file is written.
 - 27 `test_init_unknown_agent_is_a_usage_error` — `init --agent emacs` → `SystemExit` with code 2,
   nothing written.
-- 28 `test_init_agents_are_independent` — `init --agent claude` then `init --agent codex` in the
-  same `HOME`: both files exist; the second prints `wrote:`; a local edit to one then `init` for
-  the other still prints `up to date:` for the other and never touches the edited one.
+- 28 `test_init_agents_share_or_split_destinations` — in one `HOME`: `init --agent claude` then
+  `init --agent codex` → both files exist, the second prints `wrote:`; then `init --agent gemini`
+  → `up to date:` for the same `~/.agents/…` file (the four share it); a local edit to the
+  `.claude` copy, then `init --agent cursor` → still `up to date:` and the edited copy is untouched.
 - 29 `test_agent_dirs_table` — `AGENT_DIRS["claude"] == ".claude"`; every other value is
   `".agents"`; `AGENTS == tuple(AGENT_DIRS)`; the parser's `--agent` choices equal `AGENTS`
   (walk `m._build_parser()` as `_option_strings` does, find the `init` subparser's `--agent` action).
@@ -323,7 +359,7 @@ CI: the `wheel-smoke` step in §3.4.
 | A6 | The skill names only real flags | Drift guard (test 16) green with `--provider`/`--base-url` present |
 | A7 | Suite and CI | Full suite on the host; `wheel-smoke` (with the new step) green on the PR |
 | A8 | Docs | `docs/orchestrator-setup.md` has **Other orchestrators**; `grep -n "init --stdout" README.md docs/orchestrator-setup.md` finds no "other agents use --stdout" sentence; after merge, Pages `built` and sitemap URLs 200 |
-| A9 | Image cycle consistent | `grep -rn "dirtywork-worker:0.12" --include='*.py' --include='*.md' --include='*.yml' . \| grep -v docs/superpowers` returns only the digest-history comment in `docker_args.py`; `PINNED_DIGEST is None`; `DEFAULT_IMAGE`, `ci.yml`, the contract and `docker/README.md` all say `:0.13` |
+| A9 | Image cycle consistent — no `:0.12` in any spelling | `grep -rn ':0\.12\b' --include='*.py' --include='*.md' --include='*.yml' --include='*.toml' --include='Dockerfile*' . \| grep -v docs/superpowers` returns **only** lines of the digest-history comment in `dirtywork/sandbox/docker_args.py` (the pattern catches `dirtywork-worker:0.12`, `my-worker:0.12` and bare `FROM :0.12` alike; v1's `dirtywork-worker:0.12` pattern let the other two escape); `PINNED_DIGEST is None`; `docker/README.md` lists `0.13.0` among first releases and `0.13.1 for 0.13` among pins; `DEFAULT_IMAGE`, `ci.yml`, the contract and `docker/README.md` all say `:0.13` |
 | A10 | Built the dogfood way | Each brief's run has a ledger row (status, turns, wall, tokens, tok/s, nudges, verdict); a Claude fallback, if any, is named in the PR |
 
 ## 7. Files
@@ -368,10 +404,11 @@ first `run` in a session. Do not guess flags.
 
 - `dirtywork --version` — installed and on PATH (`pipx install dirtywork` if not).
 - The endpoint you will pass is serving and the model you will pass as `--model`
-  is loaded: LM Studio `curl -s http://localhost:1234/v1/models`; Ollama
-  `ollama ps`; another OpenAI-compatible server `curl -s <base-url>/models`.
-  If the request does not say which, check which one answers before the first
-  run — do not assume LM Studio. `--provider anthropic` needs `ANTHROPIC_API_KEY`.
+  is loaded (LM Studio `curl -s http://localhost:1234/v1/models`; Ollama
+  `ollama ps`) or available (another OpenAI-compatible server:
+  `curl -s <base-url>/models`). If the request does not say which provider,
+  find out; if more than one is running, ask — never pick one silently, and
+  never assume LM Studio. `--provider anthropic` needs `ANTHROPIC_API_KEY`.
 - `docker info` — docker mode (the default, and the contained one) needs a
   running Docker; the worker image is pulled on the first run if it is
   absent (exit 2 with "Build or pull the worker image" means that failed —
@@ -405,9 +442,9 @@ automatically: put worker-facing conventions there, not in every brief.
       --max-turns 60 --timeout 1800
 
 - `--provider`/`--base-url`: omit both for LM Studio on `localhost:1234` (the
-  default). Ollama is `--provider ollama`; any other OpenAI-compatible server is
-  `--base-url <url>`. `resume` inherits `--provider` from the run it continues
-  but not `--base-url` — pass that again on every `resume`.
+  default). Use `--provider ollama` for Ollama; for another OpenAI-compatible
+  server, pass `--base-url <url>`. `resume` inherits `--provider`, but it does
+  not restore a custom `--base-url` — repeat that custom URL on every resume.
 - `--verify` runs your gate in the sandbox after the worker finishes and feeds
   failures back for up to `--verify-rounds` further attempts.
 - Progress is on **stderr**: transcript path, worktree path, `error:` lines.
