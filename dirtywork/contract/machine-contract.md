@@ -38,8 +38,8 @@ dirtywork run --repo <path> "<task>"
     [--max-patch-mb 10]               # docker mode only; diff.patch cap
     [--allow-commit]                  # host mode only; worker commits its own work
 dirtywork contract                          # print this document (the installed version's) to stdout; exit 0
-dirtywork init [--repo <path>] [--no-user] [--force] [--stdout]
-                                            # install the Claude Code skill — see "init" below
+dirtywork init [--agent claude|codex|gemini|cursor|copilot] [--repo <path>] [--no-user] [--force] [--stdout]
+                                            # install the orchestrator skill — see "init" below
 dirtywork --version                         # prints `dirtywork X.Y.Z`
 ```
 
@@ -230,9 +230,13 @@ the ordinary `--tmp-size`/`--gitdir-size`/`--home-size` defaults (`1g`/
   a container's commits could not reach the host anyway. `dirtywork resume`
   inherits the setting from the run it continues.
 
-**init:** writes the Claude Code skill that teaches an orchestrating agent to drive dirtywork
-(the text `dirtywork init --stdout` prints) to `~/.claude/skills/dirtywork/SKILL.md` and, with
-`--repo PATH`, to `<PATH>/.claude/skills/dirtywork/SKILL.md` as well; `--no-user` skips the home
+**init:** writes the skill that teaches an orchestrating agent to drive dirtywork (the text
+`dirtywork init --stdout` prints). `--agent` picks the directory: `claude` (the default) →
+`~/.claude/skills/dirtywork/SKILL.md` and, with `--repo PATH`,
+`<PATH>/.claude/skills/dirtywork/SKILL.md`; `codex`, `gemini`, `cursor` and `copilot` →
+`~/.agents/skills/dirtywork/SKILL.md` and `<PATH>/.agents/skills/dirtywork/SKILL.md`. The file is
+the same for every agent (the Agent Skills standard); only the directory differs, and the four
+non-Claude agents share it — one `init` covers all four. `--no-user` skips the home
 copy (`--no-user` without `--repo` is a usage error). The first line after the frontmatter is a
 stamp — `<!-- dirtywork-skill vX.Y.Z sha256:<16 hex> … -->` — whose hash covers the rest of the
 file, so `init` can tell its own unmodified output from a copy you edited: absent → `wrote:`;
@@ -242,8 +246,8 @@ modified):` unless `--force` (`overwrote:`). One stdout line per destination, us
 project. Exit 0 when every destination was written or current, 1 when any was skipped, 2 on a
 usage or environment error (`error: …` on stderr; nothing further is written). `--stdout`
 prints the rendered skill and writes nothing. The skill is never injected into the worker's
-prompt; a project copy committed to the target repo is visible to the worker like any other
-file (its first paragraph tells a worker to ignore it).
+prompt; a project copy committed to the target repo — under `.claude/` or `.agents/` — is
+visible to the worker like any other file (its first paragraph tells a worker to ignore it).
 
 **Security:** Docker mode (the default) protects host integrity and host execution, not
 repository-history confidentiality — the worker can read the *entire* parent object store (every

@@ -130,6 +130,8 @@ jobs:
       - run: |
           smoke/bin/dirtywork init --stdout > skill.md && grep -q '^name: dirtywork' skill.md && grep -q 'dirtywork-skill v' skill.md
       - run: |
+          mkdir smoke-repo && smoke/bin/dirtywork init --agent codex --no-user --repo smoke-repo && test -f smoke-repo/.agents/skills/dirtywork/SKILL.md && smoke/bin/dirtywork init --agent gemini --stdout > skill2.md && cmp skill.md skill2.md
+      - run: |
           smoke/bin/dirtywork --version > version.txt && grep -q '^dirtywork ' version.txt
 
   gate:
