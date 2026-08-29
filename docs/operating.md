@@ -493,7 +493,7 @@ are not part of the installed package.
   old `:0.10` image** — a 0.10 defect, not a dirtywork bug: that image's
   .NET 8 runtime trips the sandbox's per-command file-size limit
   (`ulimit -f 524288`, 256 MiB) at startup with W^X enabled, the .NET
-  default. Use the `:0.12` image (the default since 0.12.0), or a derived
+  default. Use the `:0.13` image (the default since 0.13.0), or a derived
   image based on `:0.10` that adds `ENV DOTNET_EnableWriteXorExecute=0` — see
   [`docker/README.md`](../docker/README.md).
 - **`aborted after 3 consecutive unknown_tool failures` on Devstral, with tool names that end in `[TOOL_CALLS]bash`** — 0.10 counted each as an unknown tool. 1.0 (#67) recovers the call: the tool after the last marker runs with the arguments given, the transcript's `tool_result` shows `tool: bash` and the raw name in `tool_raw`, and the model is told once per turn (`nudge` kind `name_recovered`) to emit clean calls. If a name has a marker but no real tool after it, it is still an unknown-tool failure.

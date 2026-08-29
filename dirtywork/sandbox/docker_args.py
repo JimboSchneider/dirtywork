@@ -5,17 +5,14 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.12"
-# Pinned for 0.12.1: the multi-arch index digest of the :0.12 image published
-# by the v0.12.0 release, resolved with
-# `docker pull ghcr.io/jimboschneider/dirtywork-worker:0.12` and cross-checked
-# against `docker image inspect --format '{{json .RepoDigests}}'` and
-# `docker buildx imagetools inspect` (all agree); docker/README.md documents
-# the procedure. MUST be re-resolved whenever the :0.12 tag is re-pushed.
-# This only ever pins a REGISTRY digest -- resolve_image()
-# enforces it against a *pulled* DEFAULT_IMAGE only; a locally built/loaded
-# image warns instead of refusing, and a user-supplied --image is never
-# checked. (0.11.x pinned :0.11 at
+DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.13"
+# 0.13.0 is the first release of the minor: unpinned until 0.13.1 pins the
+# published :0.13 digest per docker/README.md ("Pin a digest"). This only ever
+# pins a REGISTRY digest -- resolve_image() enforces it against a *pulled*
+# DEFAULT_IMAGE only; a locally built/loaded image warns instead of refusing,
+# and a user-supplied --image is never checked. (0.12.x pinned :0.12 at
+# sha256:edcf3a4718392bfe169a078b08ce35cc1e320f2b85231a87439e4ea24d78fe3c;
+# 0.11.x pinned :0.11 at
 # sha256:4e3c032e984a12fcb897159780dc7963d3887184354fcaf421d6164ece97562e;
 # 0.10.x pinned :0.10 at
 # sha256:4fc400ca48dc98474003f6f00eaf7a49a7b063364dc6aad488187710db225a30;
@@ -27,7 +24,7 @@ DEFAULT_IMAGE = "ghcr.io/jimboschneider/dirtywork-worker:0.12"
 # sha256:1f7b98898001b7064d8db396a8a5a1a324df4ce48692597fcd4381ea90e4354a;
 # 0.5.x pinned :0.5 at
 # sha256:3b8d019a2f20a9df55a72ed51139076f02f2feb597243a69519bc41db1029648.)
-PINNED_DIGEST: str | None = "sha256:edcf3a4718392bfe169a078b08ce35cc1e320f2b85231a87439e4ea24d78fe3c"
+PINNED_DIGEST: str | None = None
 # Always passed explicitly on every docker create/run/exec so an image's own
 # ENTRYPOINT/CMD/ENV can never substitute a different PATH for the tether,
 # chown, or an export step (spec §3 "Entrypoint and PATH are always explicit").
