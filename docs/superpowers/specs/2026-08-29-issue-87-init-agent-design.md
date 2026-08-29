@@ -1,6 +1,6 @@
 # `dirtywork init --agent`: one skill file, every orchestrator's discovery path (#87, 0.13.0) — design
 
-Status: v1.1, 2026-08-29 (owner review folded, §0.1). Follows #82 (0.12.0, `docs/superpowers/specs/2026-08-26-operator-contract-init-design.md`),
+Status: v1.2, 2026-08-29 (v1.1 owner review folded, §0.1; v1.2 A9's exclusion — see the end of §0.1). Follows #82 (0.12.0, `docs/superpowers/specs/2026-08-26-operator-contract-init-design.md`),
 whose §2 scoped other-agent output out and whose §4 promised "a `--format` flag on `init`, not a new command".
 
 ## 0. The owner's decision (2026-08-29)
@@ -39,6 +39,11 @@ whose §2 scoped other-agent output out and whose §4 promised "a `--format` fla
    "Extend Claude with skills", checked today).
 6. Skills are orchestrator instruction files; what they are not is *worker-context* instruction
    files (§1.2, fact 3).
+
+v1.2 (12:40 CDT): the host pre-check of the plan's W4 brief found `:0.12` twice in
+`docs/2026-08-27-how-do-i-get-your-setup.md` — the 0.12.0 build record. History, like
+`docs/superpowers/`; A9's exclusion now covers the dated posts under `docs/` (`docs/2026-*`), and
+§3.4 says so.
 
 ## 1. Problem and evidence
 
@@ -256,8 +261,9 @@ reader that walks or globs.
   the `my-worker:0.12` custom-image examples included), plus `0.13.0` appended to the first-release
   list (line 115) and `0.13.1 for 0.13` to the pin list (line 119); `tests/test_docker_args.py:22-24`
   (assert and its pin comment); `docs/operating.md:494` ("the `:0.13` image, the default since
-  0.13.0"). The digest is pinned in 0.13.1, as 0.12.1 did. Nothing under `docs/superpowers/` is
-  swept (history), and the digest-history comment in `docker_args.py` keeps its `:0.12` lines.
+  0.13.0"). The digest is pinned in 0.13.1, as 0.12.1 did. Nothing under `docs/superpowers/` or in the dated posts `docs/2026-*.md`
+  is swept (history — the 0.12.0 build record mentions `:0.12` twice), and the digest-history
+  comment in `docker_args.py` keeps its `:0.12` lines.
 - `README.md` **Use it from Claude Code** (lines 146-157): "Any other agent can read the same
   instructions with `dirtywork init --stdout`" → "`dirtywork init --agent codex --repo .` installs
   the same file where Codex looks — and Gemini CLI, Cursor and Copilot, which share that
@@ -359,7 +365,7 @@ CI: the `wheel-smoke` step in §3.4.
 | A6 | The skill names only real flags | Drift guard (test 16) green with `--provider`/`--base-url` present |
 | A7 | Suite and CI | Full suite on the host; `wheel-smoke` (with the new step) green on the PR |
 | A8 | Docs | `docs/orchestrator-setup.md` has **Other orchestrators**; `grep -n "init --stdout" README.md docs/orchestrator-setup.md` finds no "other agents use --stdout" sentence; after merge, Pages `built` and sitemap URLs 200 |
-| A9 | Image cycle consistent — no `:0.12` in any spelling | `grep -rn ':0\.12\b' --include='*.py' --include='*.md' --include='*.yml' --include='*.toml' --include='Dockerfile*' . \| grep -v docs/superpowers` returns **only** lines of the digest-history comment in `dirtywork/sandbox/docker_args.py` (the pattern catches `dirtywork-worker:0.12`, `my-worker:0.12` and bare `FROM :0.12` alike; v1's `dirtywork-worker:0.12` pattern let the other two escape); `PINNED_DIGEST is None`; `docker/README.md` lists `0.13.0` among first releases and `0.13.1 for 0.13` among pins; `DEFAULT_IMAGE`, `ci.yml`, the contract and `docker/README.md` all say `:0.13` |
+| A9 | Image cycle consistent — no `:0.12` in any spelling | `grep -rn ':0\.12\b' --include='*.py' --include='*.md' --include='*.yml' --include='*.toml' --include='Dockerfile*' . \| grep -v 'docs/superpowers\|docs/2026-'` returns **only** lines of the digest-history comment in `dirtywork/sandbox/docker_args.py` (the dated posts under `docs/` are build records, history like `docs/superpowers/`) (the pattern catches `dirtywork-worker:0.12`, `my-worker:0.12` and bare `FROM :0.12` alike; v1's `dirtywork-worker:0.12` pattern let the other two escape); `PINNED_DIGEST is None`; `docker/README.md` lists `0.13.0` among first releases and `0.13.1 for 0.13` among pins; `DEFAULT_IMAGE`, `ci.yml`, the contract and `docker/README.md` all say `:0.13` |
 | A10 | Built the dogfood way | Each brief's run has a ledger row (status, turns, wall, tokens, tok/s, nudges, verdict); a Claude fallback, if any, is named in the PR |
 
 ## 7. Files
