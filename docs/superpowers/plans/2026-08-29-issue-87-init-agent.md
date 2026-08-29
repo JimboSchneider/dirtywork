@@ -9,9 +9,23 @@
 > prose (`C…`/`D…` tasks). A Claude implementer touches code only after a worker resume-with-feedback
 > has failed, and the PR says so. Owner approval is needed for the merge and the release, never assumed.
 
-**Plan v1** (2026-08-29 12:25 CDT) against spec v1.1 (`b5a63a0`,
-`docs/superpowers/specs/2026-08-29-issue-87-init-agent-design.md`). Six tasks: C0, W1, W2, W3, W4,
+**Plan v1.1** (2026-08-29 12:40 CDT; v1 12:25) against spec v1.2 (`db3528a`,
+`docs/superpowers/specs/2026-08-29-issue-87-init-agent-design.md`). Seven tasks: C0, W1, W2, W3, W4,
 D1, C1 — each W sized well under the #82/#96 calibration (~150–250 changed lines per 60-turn run).
+
+### Pre-check fold (v1.1 — every brief applied literally on the host before any run)
+
+Two throwaway worktrees, briefs applied verbatim by a Sonnet subagent, tests run with
+`pipx run --spec pytest`: **W1+W2** — `test_contract.py` 42 then 43 passed, full suite 1681 passed /
+9 skipped, `SKILL.md` = spec Appendix A byte for byte (135 lines); **W3+W4** — YAML valid,
+`--version` → 0.13.0, full suite 1662 passed / 9 skipped. Six plan defects found and fixed here:
+W1's review grep for `".claude"` could never pass (the `AGENT_DIRS` table contains it — now scoped
+to `destinations()`); W1's import position was unstated (now: after the `from .budget` line);
+W3's splice produced 130-column lines (the whole **init** paragraph is now given pre-wrapped);
+W4 miscounted (`docker/README.md` is 19 occurrences on 18 lines, the contract 8 on 7; W4 touches
+eight files, not nine); the A9 sweep flagged `docs/2026-08-27-how-do-i-get-your-setup.md` (the
+0.12.0 build record — history; the exclusion now covers the dated posts, spec v1.2); C1's expected
+test delta is +19 (measured), not +16.
 
 **Goal:** `dirtywork init --agent claude|codex|gemini|cursor|copilot` writes the one skill file to
 the directory that agent reads (`.claude/skills` for Claude Code, `.agents/skills` for the other
@@ -169,7 +183,7 @@ AGENTS = tuple(AGENT_DIRS)
     to $HOME) is one destination."""
 In the module docstring replace `the Claude Code skill `dirtywork init` renders` with `the orchestrator skill `dirtywork init` renders (Claude Code by default; --agent picks another tool's directory)`. Nothing else in the module changes.
 
-3. dirtywork/__main__.py — add `from .contract import AGENTS` with the other `from .` imports at the top (keep the lazy `from . import contract as contract_mod` inside main()). In _build_parser(): the parser description becomes "Driving it from an agent? `dirtywork init` installs the orchestrator skill (Claude Code by default; --agent for Codex, Gemini CLI, Cursor, Copilot); `dirtywork contract` prints the reference."; the init subparser's help becomes "install the skill that teaches an orchestrating agent to drive dirtywork (Claude Code by default; --agent for Codex, Gemini CLI, Cursor, Copilot)". Add, before the --repo argument:
+3. dirtywork/__main__.py — add the line `from .contract import AGENTS` directly after the line `from .budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB` near the top (keep the lazy `from . import contract as contract_mod` inside main()). In _build_parser(): the parser description becomes "Driving it from an agent? `dirtywork init` installs the orchestrator skill (Claude Code by default; --agent for Codex, Gemini CLI, Cursor, Copilot); `dirtywork contract` prints the reference."; the init subparser's help becomes "install the skill that teaches an orchestrating agent to drive dirtywork (Claude Code by default; --agent for Codex, Gemini CLI, Cursor, Copilot)". Add, before the --repo argument:
     init_p.add_argument("--agent", choices=AGENTS, default="claude",
                         help="whose skills directory to write: claude -> .claude/skills (default); codex, gemini, cursor, copilot -> .agents/skills")
 --repo's help becomes "also write the skill into this project (<PATH>/<agent dir>/skills/dirtywork/SKILL.md)"; --no-user's help becomes "do not write the home copy (~/<agent dir>/skills/dirtywork/SKILL.md)".
@@ -239,7 +253,7 @@ Run: python3 -m pytest -q -p no:cacheprovider tests/test_contract.py — every t
 ```
 
 - [ ] **Step 3: Run** `$SCRATCH/run87.sh $SCRATCH/brief-87-w1.md`. Expected: `completed`, verify pass.
-- [ ] **Step 4: Review** (Execution model). Specifically: `grep -n '"\.claude"' dirtywork/contract/__init__.py` must print **nothing** (both literals gone); `grep -c "AGENT_DIRS\[args.agent\]" dirtywork/contract/__init__.py` → 2; `grep -n "from .contract import AGENTS" dirtywork/__main__.py` → 1 hit at the top; `dirtywork init --help` (from the worktree: `PYTHONPATH=. python3 -m dirtywork init --help`) shows `--agent {claude,codex,gemini,cursor,copilot}`; test 17 shows 5 parametrized passes; host suite green.
+- [ ] **Step 4: Review** (Execution model). Specifically: `sed -n '/^def destinations/,/^def /p' dirtywork/contract/__init__.py | grep -c '"\.claude"'` → 0 (the only `".claude"` left in the module is the `AGENT_DIRS` entry — a whole-file grep cannot be the check); `grep -c "AGENT_DIRS\[args.agent\]" dirtywork/contract/__init__.py` → 2; `grep -n "from .contract import AGENTS" dirtywork/__main__.py` → 1 hit at the top; `dirtywork init --help` (from the worktree: `PYTHONPATH=. python3 -m dirtywork init --help`) shows `--agent {claude,codex,gemini,cursor,copilot}`; test 17 shows 5 parametrized passes; host suite green.
 - [ ] **Step 5: Resume if needed** (`--feedback-file`, ≤ 2). Then export commit, fast-forward `issue-87-init-agent`, remove the worktree, delete the run branch, ledger row.
 
 ---
@@ -323,15 +337,25 @@ with
 dirtywork init [--agent claude|codex|gemini|cursor|copilot] [--repo <path>] [--no-user] [--force] [--stdout]
                                             # install the orchestrator skill — see "init" below
 
-2. machine-contract.md, the paragraph that begins `**init:** writes the Claude Code skill`: replace everything from `**init:**` up to and including `(`--no-user` without `--repo` is a usage error).` with:
+2. machine-contract.md: replace the whole **init** paragraph — from the line that begins `**init:** writes the Claude Code skill` through the line that ends `(its first paragraph tells a worker to ignore it).` — with exactly these 18 lines (already wrapped; do not re-wrap):
 **init:** writes the skill that teaches an orchestrating agent to drive dirtywork (the text
 `dirtywork init --stdout` prints). `--agent` picks the directory: `claude` (the default) →
-`~/.claude/skills/dirtywork/SKILL.md` and, with `--repo PATH`, `<PATH>/.claude/skills/dirtywork/SKILL.md`;
-`codex`, `gemini`, `cursor` and `copilot` → `~/.agents/skills/dirtywork/SKILL.md` and
-`<PATH>/.agents/skills/dirtywork/SKILL.md`. The file is the same for every agent (the Agent Skills
-standard); only the directory differs, and the four non-Claude agents share it — one `init` covers
-all four. `--no-user` skips the home copy (`--no-user` without `--repo` is a usage error).
-Keep the rest of the paragraph (from `The first line after the frontmatter is a` onward) verbatim, except its final sentence: change `a project copy committed to the target repo is visible to the worker like any other` to `a project copy committed to the target repo — under `.claude/` or `.agents/` — is visible to the worker like any other`.
+`~/.claude/skills/dirtywork/SKILL.md` and, with `--repo PATH`,
+`<PATH>/.claude/skills/dirtywork/SKILL.md`; `codex`, `gemini`, `cursor` and `copilot` →
+`~/.agents/skills/dirtywork/SKILL.md` and `<PATH>/.agents/skills/dirtywork/SKILL.md`. The file is
+the same for every agent (the Agent Skills standard); only the directory differs, and the four
+non-Claude agents share it — one `init` covers all four. `--no-user` skips the home copy
+(`--no-user` without `--repo` is a usage error). The first line after the frontmatter is a stamp —
+`<!-- dirtywork-skill vX.Y.Z sha256:<16 hex> … -->` — whose hash covers the rest of the file, so
+`init` can tell its own unmodified output from a copy you edited: absent → `wrote:`; identical to
+the current render → `up to date:`; stamped, unmodified, but different (a newer dirtywork, or a
+changed template) → `updated:`; edited or unstamped → `skipped (locally modified):` unless
+`--force` (`overwrote:`). One stdout line per destination, user then project. Exit 0 when every
+destination was written or current, 1 when any was skipped, 2 on a usage or environment error
+(`error: …` on stderr; nothing further is written). `--stdout` prints the rendered skill and
+writes nothing. The skill is never injected into the worker's prompt; a project copy committed to
+the target repo — under `.claude/` or `.agents/` — is visible to the worker like any other file
+(its first paragraph tells a worker to ignore it).
 
 3. .github/workflows/ci.yml, job wheel-smoke: directly after the step whose run line starts `smoke/bin/dirtywork init --stdout > skill.md`, add a new step with the same indentation as its neighbours:
       - run: |
@@ -380,17 +404,17 @@ def test_default_image_and_pinned_digest():
 
 4. .github/workflows/ci.yml: the line `tags: ghcr.io/jimboschneider/dirtywork-worker:0.12` → `:0.13`.
 
-5. dirtywork/contract/machine-contract.md: every `:0.12` → `:0.13` — seven occurrences on seven lines, including `my-worker:0.12` (twice on one line), `The `:0.12` image ships`, and `FROM :0.12`. No other edit.
+5. dirtywork/contract/machine-contract.md: every `:0.12` → `:0.13` — eight occurrences on seven lines (the `my-worker:0.12` line has two), including `The `:0.12` image ships` and `FROM :0.12`. No other edit. Check: `grep -o ':0\.13\b' dirtywork/contract/machine-contract.md | wc -l` prints 8.
 
-6. docker/README.md: every `:0.12` → `:0.13` (20 occurrences, including `FROM :0.12` near the top and `my-worker:0.12` in the derived-image examples). Two list edits: in `The first release of a minor (0.4.0, 0.5.0, 0.6.0, 0.7.0, 0.8.0, 0.9.0, 0.10.0, 0.11.0, 0.12.0) ships with` insert `, 0.13.0` after `0.12.0`; in `0.11.1 for 0.11; 0.12.1 for 0.12 — 0.7.x shipped unpinned` insert `; 0.13.1 for 0.13` after `0.12.1 for 0.12`.
+6. docker/README.md: every `:0.12` → `:0.13` (19 occurrences on 18 lines — the `FROM :0.12` line near the top has two — including `my-worker:0.12` in the derived-image examples). Check: `grep -o ':0\.13\b' docker/README.md | wc -l` prints 19. Two list edits: in `The first release of a minor (0.4.0, 0.5.0, 0.6.0, 0.7.0, 0.8.0, 0.9.0, 0.10.0, 0.11.0, 0.12.0) ships with` insert `, 0.13.0` after `0.12.0`; in `0.11.1 for 0.11; 0.12.1 for 0.12 — 0.7.x shipped unpinned` insert `; 0.13.1 for 0.13` after `0.12.1 for 0.12`.
 
 7. docs/operating.md: `Use the `:0.12` image (the default since 0.12.0)` → `Use the `:0.13` image (the default since 0.13.0)`.
 
-Check before finishing: `grep -rn ':0\.12\b' --include='*.py' --include='*.md' --include='*.yml' --include='*.toml' . | grep -v docs/superpowers` must print only the `(0.12.x pinned :0.12 at` history line in dirtywork/sandbox/docker_args.py; `grep -rn '0\.12\.0\|0\.12\.1' pyproject.toml dirtywork/__init__.py` prints nothing. Verify: python3 -m pytest -q -p no:cacheprovider (test_docker_args, test_version_flag and the stamp tests read the new version).
+Check before finishing: `grep -rn ':0\.12\b' --include='*.py' --include='*.md' --include='*.yml' --include='*.toml' . | grep -v 'docs/superpowers\|docs/2026-'` must print only the `(0.12.x pinned :0.12 at` history line in dirtywork/sandbox/docker_args.py (the dated posts under docs/ are build records — history, never swept); `grep -rn '0\.12\.0\|0\.12\.1' pyproject.toml dirtywork/__init__.py` prints nothing. Verify: python3 -m pytest -q -p no:cacheprovider (test_docker_args, test_version_flag and the stamp tests read the new version).
 ```
 
 - [ ] **Step 2: Run** `$SCRATCH/run87.sh $SCRATCH/brief-87-w4.md`.
-- [ ] **Step 3: Review.** The A9 grep on the host (spec §6) — only the history line; `git -C <run-worktree> diff --stat` names exactly nine files; `PYTHONPATH=. python3 -m dirtywork --version` → `dirtywork 0.13.0`; `PYTHONPATH=. python3 -m dirtywork init --stdout | head -5` shows `v0.13.0` in the stamp; host suite green.
+- [ ] **Step 3: Review.** The A9 grep on the host (spec §6) — only the history line; `git -C <run-worktree> diff --stat` names exactly eight files (the eight in this task's **Files** line); `PYTHONPATH=. python3 -m dirtywork --version` → `dirtywork 0.13.0`; `PYTHONPATH=. python3 -m dirtywork init --stdout | head -5` shows `v0.13.0` in the stamp; host suite green.
 - [ ] **Step 4: Resume if needed; chain.**
 
 ---
@@ -463,9 +487,9 @@ Check before finishing: `grep -rn ':0\.12\b' --include='*.py' --include='*.md' -
 
 **Files:** the ledger section; the PR.
 
-- [ ] **Step 1: Full suite** in the integration worktree: `PYTHONPATH=. pipx run --spec pytest pytest -q -p no:cacheprovider 2>&1 | tail -1` — green; record the count against C0's baseline (expect +≈16: 5×test 17 −1, 5×24, 25, 5×26, 27, 28, 29, 30).
+- [ ] **Step 1: Full suite** in the integration worktree: `PYTHONPATH=. pipx run --spec pytest pytest -q -p no:cacheprovider 2>&1 | tail -1` — green; record the count against C0's baseline (expect +19: test 17 ×5 replaces 1, 5×24, 25, 5×26, 27, 28, 29, 30 — the host pre-check measured 1662 → 1681 passed, 9 skipped).
 - [ ] **Step 2: A1–A6.** `PYTHONPATH=. python3 -m dirtywork init --agent codex --stdout | cmp - <(PYTHONPATH=. python3 -m dirtywork init --stdout)` (A4); the `diff` of Appendix A against `SKILL.md` (A2, body); `pipx run --spec dirtywork==0.12.1 dirtywork init --stdout | sed -n 1,4p | cmp - <(PYTHONPATH=. python3 -m dirtywork init --stdout | sed -n 1,4p)` (A2, frontmatter identical); tests 16/17/24/29 named in the suite output (A1, A5, A6).
-- [ ] **Step 3: A9.** `grep -rn ':0\.12\b' --include='*.py' --include='*.md' --include='*.yml' --include='*.toml' --include='Dockerfile*' . | grep -v docs/superpowers` → only the history line; `grep -n "0.13.0\|0.13.1 for 0.13" docker/README.md` → both lists.
+- [ ] **Step 3: A9.** `grep -rn ':0\.12\b' --include='*.py' --include='*.md' --include='*.yml' --include='*.toml' --include='Dockerfile*' . | grep -v 'docs/superpowers\|docs/2026-'` → only the history line in `docker_args.py`; `grep -n "0.13.0\|0.13.1 for 0.13" docker/README.md` → both lists.
 - [ ] **Step 4: A8.** D1 step 5's greps.
 - [ ] **Step 5: Sampler off + ledger.** `tools/soak_sampler.sh $SCRATCH/metrics-87.csv --stop`; fill the `## #87` table (one row per run and resume), the host counts, the RAM/tok-per-s summary from `metrics-87.csv`, and a "Claude touched code?" line (expected: no). Commit `docs(ledger): #87 runs`.
 - [ ] **Step 6: PR.** `git push -u origin issue-87-init-agent`; `gh pr create --title "#87: dirtywork init --agent — one skill file, every orchestrator's directory; provider-neutral skill; 0.13.0 — built by the released dirtywork 0.12.1"` with a body that has: the one-paragraph finding (spec §1.2), the flag, the three skill hunks, the `updated:` consequence for existing installs, the image cycle, the ledger link, the test delta, and "Claude implemented: none" (or the exact leftovers). Watch `test`, `docker-live`, `wheel-smoke` (with the new step), `gate`; the advisory Windows leg is informational.
