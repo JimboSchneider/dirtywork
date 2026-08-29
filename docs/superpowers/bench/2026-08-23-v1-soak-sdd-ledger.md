@@ -489,3 +489,5 @@ ships as 0.13.0 with it.
 
 | Task | Slug | Status | Turns | Wall | s/turn | Prompt tok | Compl tok | tok/s | Nudges | Guardrail | Tool mix | Verify | Resumes | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| W1 | `issue-87-dirtywork-init-agent-0829124432-da8ab231` | completed | 32 | 261.9 s | 8.2 | 628,525 | 5,443 | 20.8 | 1 (`no_change`, turn 30) | 0 | read_file×6, grep×1, edit_file×9, bash×17, finish×1 | pass (round 1; sandbox 1,681/8 skipped, 51 s) | 1 | 3 files as briefed (+90/−11); code verbatim except a docstring `;` for `,`; tests verbatim except one test name (`share_split` for `share_or_split`); host `test_contract.py` 42 passed, full suite **1,680 passed / 9 skipped** (+18 = W1's share) |
+| W1-r1 | `issue-87-dirtywork-init-agent-0829125141-ab5d2de9` | completed | 8 | 69.4 s | 8.7 | 72,733 | 440 | 6.3 | 0 | 0 | bash×5, edit_file×2, finish×1 | pass (round 1; 1,681/8) | — | resume with a two-item feedback file (rename the test, comma in the docstring); both applied, nothing else touched; verdict **accept**; export `9472f36` ff'd into `issue-87-init-agent`; `runs clean --keep-transcript` |
