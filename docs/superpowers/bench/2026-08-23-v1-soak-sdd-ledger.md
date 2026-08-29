@@ -513,3 +513,11 @@ caught it. (2) On a resume the worker twice reached for `git checkout <file>` to
 didn't understand, once against an explicit instruction — worth a guardrail or a resume-prompt line.
 (3) Prose replacement briefs work when phrased "replace lines N–M with these K lines" and fail when
 phrased as a span between two quoted anchors.
+
+**Post-merge receipt (owner, 2026-08-29 13:51 CDT — the "non-Claude orchestrator" check spec §3.5
+left as manual):** Codex CLI, driving dirtywork from the `.agents/skills` copy, ran a smoke task on
+invoicr — Qwen added only the requested edge-case tests to `web/src/lib/format.test.ts`; host
+verification passed (typecheck, 31/31 focused, 112/112 full); main untouched; verdict accepted. The
+one friction: the `:0.12` image's Node 18 cannot run invoicr's Vite/Vitest — hence the row below.
+
+| N22 | `node-22-worker-image-debian-0829135812-6774b08d` | completed | 29 | 189.4 s | 6.5 | 454,274 | 3,857 | 20.4 | 0 | 0 | read_file×12, apply_edits×1, edit_file×8, grep×1, bash×6, finish×1 | pass (round 1; 1,682/8, 53 s) | 0 | Worker image → `node:22-bookworm-slim` (plan `docs/superpowers/plans/2026-08-29-node22-worker-image.md`): 5 files as briefed (+27/−11); smoke script and test **identical** to the brief; one accepted deviation — the Dockerfile comment block sits above `FROM`, which is this file's convention. Host `test_docker_image.py` green, full suite **1,681 passed / 9 skipped**. Local arm64 build of the exact Dockerfile: `node v22.23.2`, `npm 10.9.8`, git/rg/python3, SDKs 8.0.424 + 10.0.400, `worker` uid 1000, `id node` fails; **2.44 GB vs 2.49 GB** for `:0.12`. Verdict **accept**; export ff'd; cleaned |
