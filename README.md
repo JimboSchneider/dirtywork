@@ -62,7 +62,7 @@ Full model, known exposures and the host-mode caveats:
 |---|---|---|
 | Developed & benchmarked | macOS on Apple Silicon (M-series, unified memory) with LM Studio | all worker/bench numbers and model-sizing guidance in `docs/superpowers/bench/` were measured here |
 | CI-tested | Linux x86_64 (Ubuntu, Python 3.9 + 3.13) and macOS | unit suite on every push; the Docker sandbox live tests run on Linux in CI |
-| Unsupported | Windows | the unit suite also runs on `windows-latest` in CI as an advisory (allowed-to-fail) job that publishes a per-file pass/fail/error/skip table; Windows remains unsupported until an integration suite passes (see the note in [Security & trust](https://github.com/JimboSchneider/dirtywork/blob/main/docs/security.md#security--trust)); the plan is [#96](https://github.com/JimboSchneider/dirtywork/issues/96); **WSL2 is the way in — note below** |
+| Unsupported | Windows | the unit suite runs on `windows-latest` in CI as an advisory (allowed-to-fail) job with a per-file pass/fail/error/skip table and, since #96 tier 1, runs to completion — the three POSIX-only crashes (`killpg`, `O_NOFOLLOW`, `os.kill(pid, 0)`) have Windows branches; Windows remains unsupported until an integration suite passes (Docker mode there is untested) (see the note in [Security & trust](https://github.com/JimboSchneider/dirtywork/blob/main/docs/security.md#security--trust)); the plan is [#96](https://github.com/JimboSchneider/dirtywork/issues/96); **WSL2 is the way in — note below** |
 **Windows: use WSL2** *(one report so far, 2026-08-27: runs cleanly — more welcome)*. Native
 Windows crashes today on two POSIX-only calls; the plan to fix that is
 [#96](https://github.com/JimboSchneider/dirtywork/issues/96). Inside WSL2 it's the CI-tested
