@@ -533,3 +533,10 @@ dirtywork init --repo .` → `wrote: ~/.claude/skills/dirtywork/SKILL.md` (this 
 `init --repo .` → `up to date:` ×2; `dirtywork contract` names `--agent` twice; the three copies are
 byte-identical (stamp `v0.13.0 sha256:0ca840604e1c2d20`, 136 lines with the stamp). The repo copy is
 refreshed by the PR that carries this paragraph.
+**`:0.13` image published and verified 14:58 CDT:** pulled on arm64; `docker inspect` → Entrypoint/Cmd `null null`
+(a bare `docker run` refuses: "no command specified"); `node v22.23.2`, `npm 10.9.8`, git 2.39.5, ripgrep 13.0.0,
+Python 3.11.2, SDKs 8.0.424 + 10.0.400, `id` → `uid=1000(worker)`; platforms linux/amd64 + linux/arm64.
+Multi-arch index digest — RepoDigests, `buildx imagetools inspect` and the publish job's log agree —
+**`sha256:6d24d6a176899f9d4e027f2519206ba24ca7752a75946c21a55323d822c4d73c`**: the value 0.13.1 pins as
+`PINNED_DIGEST`. Derived `dirtywork-worker-pytest:0.13` built per `docker/README.md` (pytest 7.2.1) for the
+next dogfood cycle; the local pre-release test tags were removed before the pull.
