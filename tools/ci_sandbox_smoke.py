@@ -107,9 +107,10 @@ def main() -> int:
         try:
             sb.start(worktree, repo, "smoke", base_commit)
             print("START OK")
-            node_version = sb.bash("node --version").strip()
-            print("node --version:", node_version)
-            assert node_version.startswith("v22."), f"expected Node 22 in the image, got {node_version!r}"
+            node_out = sb.bash("node --version")
+            print("node --version:", node_out.strip())
+            node_version = node_out.strip().splitlines()[-1]
+            assert node_version.startswith("v22."), f"expected Node 22 in the image, got {node_out!r}"
             print(sb.bash("id; git --version; ls -la /work /gitdir | head"))
             print(sb.finalize().export_status)
         except Exception as e:
