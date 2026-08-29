@@ -415,3 +415,26 @@ Release day (2026-08-27): v0.12.0 cut 10:13 CDT (PyPI + `:0.12` multi-arch image
 | W3-fix | `issue-82-w3-follow-up-githubworkflowsciy-0827092942-1b86588c` | completed | 4 | 62.6s | 15.7 | 20,563 | 375 | ~6.0 compl | 0 | - | read_file 1, apply_edits 1, bash 1 (3 tool results) | pass (round 1, exit 0; 1604 in-container) | 0 | follow-up run, not a resume (W3's worktree was already integrated): the brief's three wheel-smoke `run:` lines were plain YAML scalars containing colon-space (`'^name: dirtywork'`) — invalid YAML, caught by the plan's Psych check — rewritten as block scalars exactly as briefed, one apply_edits call; the defect was the brief's, not the worker's |
 | 0.12.1-pin (rejected) | `0121-pin-the-012-worker-image-0827102525-00abf63c` | completed | 17 | 175.9s | 10.3 | 198,398 | 2,907 | ~16.5 compl | 0 | - | read_file 11, list_dir 1, edit_file 5, bash 4, finish 1 | pass (1550 in-container) | 0 | **orchestrator error, not the worker's**: `--branch-from main` resolved to the checkout's stale local `main` (at #80, pre-#82); the worker's edits were faithful to the brief on that base and it even reconstructed the :0.12 bump, but the branch lacked 0.12.0 — rejected with that note, transcript kept, local main fast-forwarded to origin/main |
 | 0.12.1-pin | `0121-pin-the-012-worker-image-0827103109-d587c9fd` | completed | 5 | 154.8s | 31.0 | 66,985 | 2,530 | ~16.3 compl | 0 | - | read_file 5, edit_file 5, bash 2, finish 1 (13 tool results) | pass (round 1, exit 0; 1604 in-container) | 0 | first try on the right base (c933503); runtime = released **0.12.0**, image `dirtywork-worker-pytest:0.12` built from the published :0.12; five files exactly as briefed, digest `edcf3a47…78fe3c` (RepoDigests = buildx index digest, amd64+arm64); host suite 1603 passed + 1 skipped; PR release-0.12.1 |
+
+## #96 — Windows tier 1 (plan v1.1 `ea8ceb2`, spec v3.2 `ed95796`)
+
+Started 2026-08-29 09:15 CDT on the owner's "Go". Sequencing note: #87 (0.13.0) is still open with
+no PR; the owner started #96 ahead of it — the file sets do not overlap (`procs/osfs/resume/tools/
+rundir/transcript/workspace/bench/sandbox/export` vs `contract/`, `__main__.py`).
+
+- Runtime: released dirtywork **0.12.1** (`pipx run --spec`), worker `qwen/qwen3-coder-next` via LM
+  Studio, image `dirtywork-worker-pytest:0.12`, Docker 29.7.2, `--verify "python3 -m pytest -q -p
+  no:cacheprovider" --verify-rounds 2 --max-turns 60 --timeout 1800`, branch-from
+  `issue-96-windows-tier1`.
+- Host baseline (`f3e110c`, `pipx run --spec pytest pytest -q -p no:cacheprovider`, `PYTHONPATH=.`):
+  **1,603 passed, 1 skipped, 38 deselected in 92.79 s**.
+- Windows baseline (advisory leg on `f3e110c`, run 33117885789, artifact `junit-windows`):
+  **816 collected, 636 passed, 150 failed, 29 errors, 2 skipped; 17 test files absent** (4 by
+  marker: `test_docker_lifecycle`, `test_docker_runs`, `test_live`, `test_live_ollama`; **13 never
+  reached**: `test_rundir`, `test_runner`, `test_runs`, `test_sandbox_host`, `test_soak_tools`,
+  `test_strays`, `test_tools_bash`, `test_tools_files`, `test_toolspec`, `test_transcript`,
+  `test_transcript_schema`, `test_watchdog`, `test_workspace` — the `KeyboardInterrupt` from
+  `test_pid_alive`, spec §1).
+
+| Task | Slug | Status | Turns | Wall | s/turn | Prompt tok | Compl tok | tok/s | Nudges | Guardrail | Tool mix | Verify | Resumes | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
