@@ -1,6 +1,6 @@
 # Windows tier 1: stop crashing on three POSIX-only calls (#96) — design
 
-v3.1, 2026-08-27. Status: **implementation-ready; plan v1 at
+v3.2, 2026-08-29. Status: **implementation-ready; plan v1.1 at
 `docs/superpowers/plans/2026-08-27-issue-96-windows-tier1.md`. Sequenced behind #87 (0.13.0).**
 Target: 0.13.x.
 
@@ -81,6 +81,27 @@ Edits, each verified before folding:
    and §3.2's table gives each site's exact arguments; `test_posix_composition_is_identical`
    checks the table against the pre-change flags.
 
+### 0.3 Plan review fold (v3.2, 2026-08-29 — five items on plan v1, all verified)
+
+1. **Termination was not confirmed.** The failure path terminated the child and ignored whether
+   that worked, and `_kill_tree` ignored `TerminateJobObject`/`CloseHandle` results. §3.1 now:
+   once the child is in the job, a failure kills the **job** (checked) and then confirms the child
+   with a bounded wait; every unconfirmed kill and every failed close is named in the returned
+   message — and `_kill_tree` returns a trailer `run_capped` appends to the output, so a Windows
+   kill that did not happen is never silent. POSIX is untouched.
+2. **`ERROR_PATH_NOT_FOUND` (3) was missing** from the errno map; a missing parent directory would
+   have surfaced as `EIO`. Mapped to `ENOENT`. And a fact that simplifies W2: Python's
+   `OSError(errno, …)` selects the subclass itself (`ENOENT` → `FileNotFoundError`, `EEXIST` →
+   `FileExistsError`, `EACCES` → `PermissionError`, `EISDIR` → `IsADirectoryError`), so every
+   call site's existing `except FileNotFoundError` keeps working on Windows without edits.
+3. **Toolhelp errors were lost.** "Thread not found" passed `err=0` and could not tell list
+   exhaustion (`ERROR_NO_MORE_FILES`) from a failed `Thread32First/Next`. §3.1 reads
+   `GetLastError` after the loop, before `CloseHandle(snap)`, and reports each case by name.
+4. Plan header said v3/`4e27b8c` and "six tasks" — fixed in plan v1.1.
+5. The exact regression the whole helper exists for — `O_CREAT|O_TRUNC` against a **file
+   symlink** — is now a named test on both the fake and the real Windows leg: `ELOOP`, no
+   truncation call, target untouched (§5).
+
 ## 1. Problem and evidence
 
 A Windows user hit `AttributeError: module 'os' has no attribute 'killpg'` on the first run
@@ -155,61 +176,149 @@ resumed only after assignment. Every call below is checked; every failure captur
 returns the error. Prototypes and constants are in Appendix A.
 
 ```
-def _spawn_windows(argv, *, cwd, env, stdin) -> tuple[Popen, _Tree] | Captured:
-    hJob = K.CreateJobObjectW(None, None)
-    if not hJob: return _fail("CreateJobObjectW")                       # err = get_last_error()
+@dataclass
+class _Tree:
+    """The two handles the Windows branch holds for a child: its job and the
+    process handle used to assign it. None on POSIX."""
+    job: int
+    proc: int
 
+
+def _fail(win, what: str, *, err=None, kill=None, close=(), job=None) -> Captured:
+    """The one failure path of _spawn_windows: read the error code BEFORE any
+    cleanup call (CloseHandle clobbers it); kill the JOB when the child is
+    already in it (else the child itself); CONFIRM the child is gone with a
+    bounded wait; close the handles; return the same shape run_capped returns
+    when Popen itself raises OSError. Anything that could not be confirmed
+    -- a kill that failed, a wait that timed out, a close that failed -- is
+    named in the message. Nothing is ever left silently running."""
+    err = win.get_last_error() if err is None else err
+    notes = []
+    if job is not None and not win.TerminateJobObject(job, 1):
+        notes.append(f"TerminateJobObject failed [WinError {win.get_last_error()}]")
+    if kill is not None:
+        try:
+            kill.kill()                                   # TerminateProcess; harmless after the job kill
+        except OSError as e:
+            notes.append(f"TerminateProcess failed: {e}")
+        try:
+            kill.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            notes.append(f"child pid {kill.pid} NOT confirmed dead after 5s")
+    for h in close:
+        if not win.CloseHandle(h):
+            notes.append(f"CloseHandle({h}) failed [WinError {win.get_last_error()}]")
+    msg = f"process-tree containment unavailable: {what}: [WinError {err}] {win.FormatError(err)}"
+    if notes:
+        msg += "; " + "; ".join(notes)
+    return Captured(returncode=None, output=msg.encode(), truncated=False, timed_out=False)
+
+
+def _spawn_windows(argv, *, cwd, env, stdin, win=None, popen=subprocess.Popen):   # plan W3 carries this verbatim
+    """Create the child suspended, put it in a job that kills every descendant
+    when the job dies, then resume its one initial thread -- so containment
+    holds from the child's first instruction (spec §3.1). Every Win32 return
+    is checked; any failure goes through _fail. Once AssignProcessToJobObject
+    has succeeded, every _fail passes job=hJob so the JOB is killed."""
+    win = osfs.win32() if win is None else win
+    hJob = win.CreateJobObjectW(None, None)
+    if not hJob:
+        return _fail(win, "CreateJobObjectW")
     info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
     info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-    if not K.SetInformationJobObject(hJob, JobObjectExtendedLimitInformation,
-                                     byref(info), sizeof(info)):
-        return _fail("SetInformationJobObject", close=[hJob])
-
+    if not win.SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, byref(info), sizeof(info)):
+        return _fail(win, "SetInformationJobObject", close=[hJob])
     try:
-        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=..., stdout=PIPE, stderr=STDOUT,
-                                creationflags=CREATE_SUSPENDED)
+        proc = popen(argv, cwd=cwd, env=env,
+                     stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                     creationflags=CREATE_SUSPENDED)
     except OSError as e:
-        K.CloseHandle(hJob); return Captured(returncode=None, output=str(e).encode(), ...)   # today's path
-
-    hProc = K.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, proc.pid)
-    if not hProc: return _fail("OpenProcess", kill=proc, close=[hJob])
-    if not K.AssignProcessToJobObject(hJob, hProc):
-        return _fail("AssignProcessToJobObject", kill=proc, close=[hProc, hJob])   # Win7: ERROR_ACCESS_DENIED
-
-    # resume the single initial thread; Popen closed its thread handle at creation
-    snap = K.CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
-    if snap == INVALID_HANDLE_VALUE: return _fail("CreateToolhelp32Snapshot", kill=proc, close=[hProc, hJob])
-    te = THREADENTRY32(); te.dwSize = sizeof(THREADENTRY32)            # required, or Thread32First fails
+        win.CloseHandle(hJob)
+        return Captured(returncode=None, output=str(e).encode(), truncated=False, timed_out=False)
+    hProc = win.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, proc.pid)
+    if not hProc:
+        return _fail(win, "OpenProcess", kill=proc, close=[hJob])
+    if not win.AssignProcessToJobObject(hJob, hProc):
+        return _fail(win, "AssignProcessToJobObject", kill=proc, close=[hProc, hJob])
+    # From here the child is in the job: failures kill the job (job=hJob), not just the child.
+    snap = win.CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+    if snap == INVALID_HANDLE_VALUE:
+        return _fail(win, "CreateToolhelp32Snapshot", kill=proc, close=[hProc, hJob], job=hJob)
+    te = THREADENTRY32()
+    te.dwSize = sizeof(THREADENTRY32)           # required, or Thread32First fails
     tid = None
-    ok = K.Thread32First(snap, byref(te))
+    ok = win.Thread32First(snap, byref(te))
     while ok:
-        if te.th32OwnerProcessID == proc.pid: tid = te.th32ThreadID; break
-        ok = K.Thread32Next(snap, byref(te))                             # FALSE + ERROR_NO_MORE_FILES at end
-    K.CloseHandle(snap)
-    if tid is None: return _fail("thread not found in snapshot", kill=proc, close=[hProc, hJob])
+        if te.th32OwnerProcessID == proc.pid:
+            tid = te.th32ThreadID
+            break
+        ok = win.Thread32Next(snap, byref(te))
+    code = win.get_last_error()                 # BEFORE CloseHandle(snap): exhaustion is ERROR_NO_MORE_FILES,
+    win.CloseHandle(snap)                       # anything else is a Thread32First/Next failure
+    if tid is None:
+        what = "thread not found in snapshot" if code == ERROR_NO_MORE_FILES else "Thread32First/Thread32Next"
+        return _fail(win, what, err=code, kill=proc, close=[hProc, hJob], job=hJob)
+    hThread = win.OpenThread(THREAD_SUSPEND_RESUME, False, tid)
+    if not hThread:
+        return _fail(win, "OpenThread", kill=proc, close=[hProc, hJob], job=hJob)
+    prev = win.ResumeThread(hThread)             # previous suspend count; 0xFFFFFFFF on failure
+    err = win.get_last_error()
+    win.CloseHandle(hThread)
+    if prev != 1:
+        return _fail(win, f"ResumeThread returned {prev}", err=err, kill=proc, close=[hProc, hJob], job=hJob)
+    return proc, _Tree(job=hJob, proc=hProc)
 
-    hThread = K.OpenThread(THREAD_SUSPEND_RESUME, False, tid)
-    if not hThread: return _fail("OpenThread", kill=proc, close=[hProc, hJob])
-    prev = K.ResumeThread(hThread)                                       # previous suspend count; (DWORD)-1 on failure
-    err = get_last_error(); K.CloseHandle(hThread)
-    if prev != 1: return _fail(f"ResumeThread returned {prev}", err=err, kill=proc, close=[hProc, hJob])
-    return proc, _Tree(hJob, hProc)
 
-def _fail(what, *, err=None, kill=None, close=()):
-    err = get_last_error() if err is None else err                       # BEFORE any cleanup call
-    if kill is not None:
-        try: kill.kill()                                                  # TerminateProcess; ignore result — best effort
-        except OSError: pass
-        try: kill.wait(timeout=5)
-        except subprocess.TimeoutExpired: pass
-    for h in close: K.CloseHandle(h)                                      # ignore result; nothing to do about it
-    return Captured(returncode=None, truncated=False, timed_out=False,
-                    output=f"process-tree containment unavailable: {what}: {FormatError(err)}".encode())
+def _spawn(argv, *, cwd, env, stdin, kill_group):
+    """(proc, tree) or a Captured describing why the child could not be started.
+    POSIX: exactly today's Popen call. Windows with kill_group: the job branch."""
+    if os.name == "nt" and kill_group:
+        return _spawn_windows(argv, cwd=cwd, env=env, stdin=stdin)
+    try:
+        proc = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=kill_group,
+        )
+    except OSError as e:
+        return Captured(returncode=None, output=str(e).encode(), truncated=False, timed_out=False)
+    return proc, None
 
-def _kill_tree_windows(tree):
-    K.TerminateJobObject(tree.job, 1)      # replaces _kill_group(proc.pid); unconditional, as today; result ignored
-    K.CloseHandle(tree.job)                # KILL_ON_JOB_CLOSE: belt to TerminateJobObject's braces
-    K.CloseHandle(tree.proc)
+
+def _kill_tree(proc, tree, kill_group: bool):
+    """Unconditional, clean exit included -- as today. Returns None, or a
+    string run_capped appends to the output describing a kill or close that
+    failed, so a Windows kill that did not happen is never silent. POSIX
+    always returns None (byte-identical behaviour)."""
+    if tree is not None:
+        win = osfs.win32()
+        notes = []
+        if not win.TerminateJobObject(tree.job, 1):      # replaces _kill_group(proc.pid)
+            notes.append(f"TerminateJobObject failed [WinError {win.get_last_error()}]")
+            try:
+                proc.kill()                                # fall back to the child alone
+            except OSError as e:
+                notes.append(f"TerminateProcess failed: {e}")
+        for h in (tree.job, tree.proc):                    # KILL_ON_JOB_CLOSE: belt to TerminateJobObject's braces
+            if not win.CloseHandle(h):
+                notes.append(f"CloseHandle({h}) failed [WinError {win.get_last_error()}]")
+        return "process-tree kill: " + "; ".join(notes) if notes else None
+    if kill_group:
+        _kill_group(proc.pid)
+    else:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    return None
+
+# run_capped: `trailer = _kill_tree(...)`; its `proc.wait(timeout=5)` on TimeoutExpired with a tree appends
+# "child pid N NOT confirmed dead after 5s" to the trailer; if trailer: output += b"\n[dirtywork] " + trailer
 ```
 
 - POSIX branch: unchanged, byte-for-byte (`start_new_session=kill_group`, `_kill_group`).
@@ -222,8 +331,11 @@ def _kill_tree_windows(tree):
   the transcript. Nothing runs uncontained. Windows 7 / Server 2008 R2 (no nested jobs) fail at
   `AssignProcessToJobObject` with `ERROR_ACCESS_DENIED`; GitHub's Windows runners are inside a job
   and nested jobs are supported from Windows 8 / Server 2012, so CI exercises the real path.
-- The suspended process is never left suspended: every early exit terminates it first
-  (`Popen.kill()` is `TerminateProcess` on Windows). `ResumeThread` must return exactly `1`: `0`
+- **Termination is confirmed or reported.** Every early exit kills the job once the child is in
+  it (else the child), then waits up to 5 s for the child; an unconfirmed kill, a failed
+  `TerminateJobObject` or a failed `CloseHandle` is named in the returned message. On the normal
+  path `_kill_tree` returns a trailer that `run_capped` appends to `output`, so the operator sees a
+  kill that did not happen. The suspended process is never left suspended. `ResumeThread` must return exactly `1`: `0`
   means the thread was not suspended (not ours to have created), `>1` means it is still suspended,
   `0xFFFFFFFF` is failure.
 - `signal.SIGKILL` is referenced only inside the POSIX branch; it is never evaluated on Windows.
@@ -299,7 +411,11 @@ Every `if not ...:` above reads `get_last_error()` **before** `CloseHandle`, exa
 
 - The attribute is read from the **handle we hold**; there is no check-then-open window. A file
   symlink is refused with `errno.ELOOP` — the errno POSIX `O_NOFOLLOW` produces and the one
-  `tools.py:218` and `tools.py:860` branch on — so those messages are unchanged.
+  `tools.py:218` and `tools.py:860` branch on — so those messages are unchanged. Every other
+  failure is `OSError(errno, …)` with the errno from `ERROR_* → errno` (`ERROR_FILE_NOT_FOUND`/
+  `ERROR_PATH_NOT_FOUND` → `ENOENT`, `ERROR_FILE_EXISTS` → `EEXIST`, `ERROR_ACCESS_DENIED` →
+  `EACCES`, `ERROR_INVALID_PARAMETER` → `EINVAL`, else `EIO`); Python picks the subclass from the
+  errno, so `workspace.py:172`'s `except FileNotFoundError` is untouched.
 - **Directories, junctions and directory symlinks** are never opened: without
   `FILE_FLAG_BACKUP_SEMANTICS` (deliberately absent — these are file writes) `CreateFileW` fails
   with `ERROR_ACCESS_DENIED` → `EACCES`, before any attribute is read. Fail-closed, different
@@ -375,9 +491,16 @@ advisory leg — that leg is the point.
   pgid and `SIGKILL`.
 - `test_kill_tree_windows_terminates_job` — monkeypatch `os.name = "nt"` and a fake `_win`
   namespace; assert `TerminateJobObject` then `CloseHandle(job)`, in that order.
-- `test_spawn_windows_assign_failure_terminates_child` — fake `AssignProcessToJobObject`
-  returning 0; assert `TerminateProcess` called and `Captured.returncode is None` with the error
-  text. Runs everywhere.
+- `test_spawn_windows_failure_terminates_child_and_fails_loudly` — each Win32 call failing in
+  turn; assert the child was killed **and waited**, the job killed when the child was already in
+  it, and `Captured.returncode is None` with the call's name in the text. Runs everywhere.
+- `test_spawn_windows_thread_not_found_vs_toolhelp_failure` — list exhaustion reports
+  `thread not found in snapshot [WinError 18]`; a failing `Thread32First` reports
+  `Thread32First/Thread32Next` with its own error code.
+- `test_fail_reports_unconfirmed_termination` — a child whose `wait` times out, or whose kill
+  raises, is named in the message.
+- `test_kill_tree_windows_reports_terminate_failure` and `test_run_capped_appends_kill_trailer` —
+  a failed `TerminateJobObject` falls back to `TerminateProcess` and the trailer reaches `output`.
 - *(Windows only)* `test_run_capped_resumes_suspended_child` — `python -c "print('hi')"` returns
   `hi` within the timeout (a stuck-suspended child would time out instead).
 - *(Windows only)* `test_run_capped_kills_grandchild_on_timeout` — `python -c` that spawns a
@@ -398,8 +521,13 @@ advisory leg — that leg is the point.
 - *(Windows only)* `test_refuses_junction_with_eacces` — `_winapi.CreateJunction` at the final
   component → `OSError` with `errno.EACCES`; the handle count does not grow.
 - *(Windows only)* `test_create_trunc_truncates_existing_through_verified_handle` — existing
-  file with content → after `open_nofollow(O_WRONLY|O_CREAT|O_TRUNC)` and close, size is 0; and
-  with a file symlink at the path instead → `ELOOP`, target untouched.
+  file with content → after `open_nofollow(O_WRONLY|O_CREAT|O_TRUNC)` and close, size is 0.
+- `test_create_trunc_on_symlink_is_refused_before_any_truncate` (fake, everywhere) and
+  *(Windows only)* `test_windows_create_trunc_on_file_symlink_leaves_target` — `O_CREAT|O_TRUNC`
+  with a file symlink at the path → `ELOOP`, no `SetFileInformationByHandle`, target byte-identical.
+- `test_path_not_found_maps_enoent_as_filenotfounderror` (fake) and *(Windows only)*
+  `test_windows_missing_parent_is_filenotfounderror` — a missing parent directory raises
+  `FileNotFoundError`.
 
 `tests/test_resume.py`:
 - `test_pid_alive` stays. Add `test_pid_alive_windows_never_sends_console_events` —
@@ -537,7 +665,7 @@ least loud).
 | `THREAD_SUSPEND_RESUME` | `0x0002` | Thread Security and Access Rights — read 2026-08-27 |
 | `STILL_ACTIVE` | `259` | `GetExitCodeProcess` — read 2026-08-27 |
 | `INVALID_HANDLE_VALUE` | `HANDLE(-1).value` (all bits set) | handleapi.h |
-| `ERROR_FILE_NOT_FOUND` / `ERROR_ACCESS_DENIED` / `ERROR_NO_MORE_FILES` / `ERROR_FILE_EXISTS` / `ERROR_INVALID_PARAMETER` / `ERROR_ALREADY_EXISTS` | `2` / `5` / `18` / `80` / `87` / `183` | System Error Codes — read 2026-08-27 |
+| `ERROR_FILE_NOT_FOUND` / `ERROR_PATH_NOT_FOUND` / `ERROR_ACCESS_DENIED` / `ERROR_NO_MORE_FILES` / `ERROR_FILE_EXISTS` / `ERROR_INVALID_PARAMETER` / `ERROR_ALREADY_EXISTS` | `2` / `3` / `5` / `18` / `80` / `87` / `183` | System Error Codes — read 2026-08-27 |
 | `GENERIC_READ` / `GENERIC_WRITE` / `FILE_APPEND_DATA` | `0x80000000` / `0x40000000` / `0x0004` | Generic Access Rights; File Access Rights — read 2026-08-27 |
 | `FILE_SHARE_READ` / `_WRITE` / `_DELETE` | `1` / `2` / `4` | `CreateFileW` — read 2026-08-27 |
 | `CREATE_NEW` / `OPEN_EXISTING` / `OPEN_ALWAYS` | `1` / `3` / `4` | `CreateFileW` — read 2026-08-27 — no `CREATE_ALWAYS` (2), no `TRUNCATE_EXISTING` (5), by design |
