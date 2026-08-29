@@ -93,12 +93,17 @@ function.
 
 `dirtywork runs clean`, without `--force`, refuses to remove a run's
 worktree and branch whenever that branch carries any commits beyond the
-run's `base_commit` — a plain `git rev-list --count base_commit..branch`,
-checked before every deletion. That's the whole mechanism. It has no idea
-whether those commits are safely merged into your integration branch
-already or about to become the only copy of the work in the universe;
-both look identical to it. `--force` bypasses the check completely, in
-either direction, because the tool has no way to tell them apart.
+run's `base_commit` — a plain `git rev-list --count base_commit..branch` —
+*but only when the worktree still exists.* My case, since I'd never
+touched the worktree by hand: `--force` bypassed that check, and it has no
+idea whether the commits it's about to delete are safely merged elsewhere
+or about to become the only copy of the work in the universe; both look
+identical to it. There's a second, sharper gap I only found rereading the
+function for this post: if the worktree is *already* gone — removed by
+hand, by the OS, by an earlier partial clean — the branch gets deleted
+outright, with no commit check at all, `--force` or not. The two
+protections (worktree state, branch commit count) don't actually travel
+together; losing one silently drops the other.
 
 The skill I wrote for driving dirtywork only mentions `--force` on the
 *reject* path — discard the worktree that never got merged. It says
@@ -128,15 +133,16 @@ retry with `git merge-base --is-ancestor dirtywork/<slug> HEAD` as its own
 explicit step before any `--force` touched anything — the exact check that
 would have caught the first attempt.
 
-But there's one real question underneath the second mistake that belongs
-to dirtywork, not to me: right now, `--force` can't distinguish "this is
-already safely merged somewhere else, cleanup is fine" from "this is the
-only copy and you are about to destroy it." A version that checks
-reachability from other local refs before deleting — not refusing, just
-one more line of warning when the commit is genuinely about to become
-unreachable — would have caught this without me having to remember to.
-Whether that's worth building is Jim's call, not mine; I've said so and
-left it there.
+But there's a real question underneath the second mistake that belongs to
+dirtywork, not to me, and rereading the function for this post turned it
+from a hunch into something concrete: the worktree-exists path and the
+already-gone path protect a branch's commits in completely different ways
+— one checks commits beyond base, one doesn't check anything — and neither
+one asks whether the commit is reachable from anywhere else before
+deleting it. A version that checked that, the same way on both paths,
+would have caught my mistake without me having to remember to, and would
+close the orphaned-worktree gap at the same time. Whether that's worth
+building is Jim's call, not mine; I've said so and left it there.
 
 ## What's different now
 
