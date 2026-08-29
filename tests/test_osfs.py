@@ -2,6 +2,12 @@ import errno
 import os
 import pytest
 from dirtywork import osfs
+# POSIX-only open flags, absent on Windows. Read with a 0 fallback so this module
+# imports there (its Windows-only tests must collect); the composition test that
+# uses them is POSIX-only and asserts against the real values.
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 from dirtywork.osfs import open_nofollow, _win_open_params, _win_open, INVALID_HANDLE_VALUE, ERROR_FILE_EXISTS, CREATE_NEW, OPEN_EXISTING, OPEN_ALWAYS, GENERIC_READ, GENERIC_WRITE, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT
 
 WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="Windows only")
@@ -272,17 +278,17 @@ def test_windows_create_trunc_truncates_through_verified_handle(tmp_path):
 
 SITES = {
     # file:line -> (flags passed to open_nofollow, mode, cloexec, nonblock, the literal flags the site composed before #96)
-    "tools.py:104":  (os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644, True, True,  os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC),
-    "tools.py:216":  (os.O_WRONLY, 0o600, True, True,   os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC),
-    "tools.py:256":  (os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, True, False,  os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC),
-    "tools.py:856":  (os.O_WRONLY, 0o600, True, True,   os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC),
-    "rundir.py:105": (os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600, False, False, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW),
-    "transcript.py:37": (os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND, 0o600, False, False, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND | os.O_NOFOLLOW),
-    "workspace.py:171": (os.O_RDONLY, 0o600, False, False, os.O_RDONLY | os.O_NOFOLLOW),
-    "workspace.py:185": (os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644, False, False, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW),
-    "bench.py:394":  (os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600, False, False, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW),
-    "sandbox/export.py:255": (os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644, False, False, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW),
-    "sandbox/export.py:527": (os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600, False, False, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW),
+    "tools.py:104":  (os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644, True, True,  os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _NOFOLLOW | _NONBLOCK | _CLOEXEC),
+    "tools.py:216":  (os.O_WRONLY, 0o600, True, True,   os.O_WRONLY | _NOFOLLOW | _NONBLOCK | _CLOEXEC),
+    "tools.py:256":  (os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, True, False,  os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _CLOEXEC),
+    "tools.py:856":  (os.O_WRONLY, 0o600, True, True,   os.O_WRONLY | _NOFOLLOW | _NONBLOCK | _CLOEXEC),
+    "rundir.py:105": (os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600, False, False, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _NOFOLLOW),
+    "transcript.py:37": (os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND, 0o600, False, False, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND | _NOFOLLOW),
+    "workspace.py:171": (os.O_RDONLY, 0o600, False, False, os.O_RDONLY | _NOFOLLOW),
+    "workspace.py:185": (os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644, False, False, os.O_WRONLY | os.O_CREAT | os.O_APPEND | _NOFOLLOW),
+    "bench.py:394":  (os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600, False, False, os.O_WRONLY | os.O_CREAT | os.O_APPEND | _NOFOLLOW),
+    "sandbox/export.py:255": (os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644, False, False, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW),
+    "sandbox/export.py:527": (os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600, False, False, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _NOFOLLOW),
 }
 
 
@@ -309,3 +315,23 @@ def test_no_raw_nofollow_opens_outside_osfs():
             if "os.open(" in line and "O_NOFOLLOW" in line:
                 offenders.append(f"{py.relative_to(root)}:{n}")
     assert offenders == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX values")
+def test_posix_flag_fallbacks_are_the_real_values():
+    assert (_NOFOLLOW, _CLOEXEC, _NONBLOCK) == (os.O_NOFOLLOW, os.O_CLOEXEC, os.O_NONBLOCK)
+
+
+def test_module_imports_without_posix_only_flags():
+    """Windows has no O_NOFOLLOW/O_CLOEXEC/O_NONBLOCK; this module must still import
+    there. Simulate it in a subprocess: strip the attributes, then import."""
+    import subprocess, sys, pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent
+    code = ("import os\n"
+            "for n in ('O_NOFOLLOW', 'O_CLOEXEC', 'O_NONBLOCK'):\n"
+            "    if hasattr(os, n): delattr(os, n)\n"
+            "import tests.test_osfs\n"
+            "print('ok')\n")
+    r = subprocess.run([sys.executable, "-c", code], cwd=str(root), capture_output=True, text=True,
+                       env={**os.environ, "PYTHONPATH": str(root)}, timeout=60)
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
