@@ -182,7 +182,7 @@ def _git(*args, cwd):
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
-def test_real_script_on_the_host(tmp_path: Path):
+def test_real_script_on_the_host(tmp_path: Path, monkeypatch):
     """Test the real fingerprint script on a repository with nested repositories.
 
     Spec §7 test 11b: one host test that runs the real fingerprint script
@@ -311,10 +311,23 @@ def test_real_script_on_the_host(tmp_path: Path):
     after_count = count_files(real_objects)
     assert after_count == before_count, f"Object store file count should not change: {before_count} -> {after_count}"
 
-    # 7. Count entries of tempfile.gettempdir() before and after
+    # 7. Count entries of a private temp dir before and after -- tempfile.gettempdir()
+    # is the runner's SHARED system temp dir, and any other process creating or
+    # removing an entry there during the ~1s window flakes this assertion for a
+    # reason that has nothing to do with the script under test (#101). Point the
+    # script at a private TMPDIR instead and clear tempfile's module-level cache
+    # (tempfile.tempdir) so gettempdir() re-reads the env var. HostSandbox.bash()
+    # carries TMPDIR from os.environ into the subprocess (dirtywork/guardrails.py
+    # build_env()), and the script's `mktemp -d` honors it, so both sides land on
+    # the same private directory.
     import tempfile
 
+    private_tmp = tmp_path / "systmp"
+    private_tmp.mkdir()
+    monkeypatch.setenv("TMPDIR", str(private_tmp))
+    monkeypatch.setattr(tempfile, "tempdir", None)
     temp_dir = tempfile.gettempdir()
+    assert temp_dir == str(private_tmp), f"expected the private TMPDIR, got {temp_dir}"
 
     def count_temp_entries(path):
         """Count entries in a directory."""

@@ -545,3 +545,19 @@ next dogfood cycle; the local pre-release test tags were removed before the pull
 
 | R131 | `0131-pin-the-013-worker-0829150917-4c4f750a` | completed | 8 | 137.7 s | 17.2 | 92,046 | 1,731 | 12.6 | 0 | 0 | read_file×5, edit_file×5, bash×5 | pass (round 1; 1,682/8, 52 s) | 1 | 4 files as briefed; `pyproject`/`__init__`/test identical to the brief; `docker_args.py` dropped one comment line ("pins a REGISTRY digest -- resolve_image() enforces it against a *pulled*"). Pre-check was behavioural: with the pin applied, `tools/ci_sandbox_smoke.py` on the host resolved the pulled `:0.13` against the digest (START OK) — a wrong digest would have refused |
 | R131-r1 | `0131-pin-the-013-worker-0829151232-f2a2eb1f` | completed | 8 | 121.5 s | 15.2 | 74,949 | 578 | 4.8 | 0 | 0 | read_file×1, insert_after×1, bash×5, finish×1 | pass (round 1; 1,682/8) | — | one-item feedback restored the line; `docker_args.py` now identical to the brief; host `--version` → 0.13.1, pin enforced on the host, full suite **1,681 / 9**; verdict **accept**; export `6532140` ff'd; cleaned |
+
+## #101 — flaky `test_real_script_on_the_host`: private TMPDIR (plan v1)
+
+Root cause traced through the actual code path before writing the brief: `HostSandbox.bash()` →
+`tools.bash()` → `build_env()` (`dirtywork/guardrails.py:210`) explicitly carries `TMPDIR` from
+`os.environ` into the subprocess (`keep = ("PATH", "TERM", "LANG", "TMPDIR")`), and
+`FINGERPRINT_SCRIPT`'s `mktemp -d` honors it — so `monkeypatch.setenv("TMPDIR", …)` genuinely
+redirects where the script writes, not just where the test's counter looks. Verified with a
+standalone proof before the run: a decoy file dropped into the real system tmp dir (1,907 entries on
+this machine) flips the old assertion's count and fails it; the same decoy has zero effect on the
+new, privately-scoped count.
+
+| Task | Slug | Status | Turns | Wall | s/turn | Prompt tok | Compl tok | tok/s | Nudges | Verify | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| W1 | `issue-101-flaky-test-teststestchangespyt-0829163614-56d657ba` | completed | 15 | — | — | — | — | — | 0 | pass (1,682/8) | Identical to the brief; 5x + full suite green on the host. **Then lost**: a `git merge --ff-only` was run against the wrong checked-out branch (main was still on the previous PR's branch) and failed; a separate `runs clean --force --keep-transcript` right after it ran anyway (no exit-code check between the two commands) and force-deleted the worktree and branch before the export was ever integrated. Nothing salvageable was actually lost — the fix was already verified byte-identical to the plan's committed brief — but the receipt itself (this run's diff.patch) is gone; only `run.json` and the transcript survive `--keep-transcript`. |
+| W1-retry | `issue-101-flaky-test-teststestchangespyt-0829164249-613e4589` | completed | 12 | — | — | — | — | — | 0 | pass (1,682/8) | Same brief, re-run from the correct branch. Verified identical to the brief again, 5x + full suite green (1,681/9). This time every step checked its own precondition before the next ran: `set -eu` on the export/rebase/merge chain, and `git merge-base --is-ancestor dirtywork/<slug> HEAD` confirmed *before* `runs clean --force` — the exact check that would have caught the first attempt. Verdict **accept**; cleaned. |
