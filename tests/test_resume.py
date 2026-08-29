@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from dirtywork.resume import (
     RESUME_MARKER,
     RESUME_TAIL_CHARS,
     ResumeError,
+    _pid_alive_windows,
     build_resume_task,
     check_resumable,
     find_stashes,
@@ -93,6 +95,64 @@ def test_pid_alive():
     assert pid_alive(0) is False
     assert pid_alive(None) is False
     assert pid_alive(2 ** 22 + 12345) is False
+
+
+class FakeWin:
+    def __init__(self, handle=1, err=0, exit_code=259, ok=1):
+        self.handle = handle
+        self.err = err
+        self.exit_code = exit_code
+        self.ok = ok
+        self.closed = []
+
+    def get_last_error(self):
+        return self.err
+
+    def OpenProcess(self, access, inherit, pid):
+        assert access == 0x1000 and inherit is False
+        return self.handle
+
+    def GetExitCodeProcess(self, h, out):
+        out._obj.value = self.exit_code
+        return self.ok
+
+    def CloseHandle(self, h):
+        self.closed.append(h)
+        return 1
+
+
+def test_pid_alive_windows_never_sends_console_events(monkeypatch):
+    """On Windows os.kill(pid, 0) is a Ctrl-C broadcast; the branch must not call it."""
+    monkeypatch.setattr(os, "name", "nt")
+
+    def boom(*a):
+        raise AssertionError("os.kill must not be called on Windows")
+
+    monkeypatch.setattr(os, "kill", boom)
+    assert pid_alive(4242, win=FakeWin()) is True
+    assert pid_alive(0, win=FakeWin()) is False
+
+
+@pytest.mark.parametrize("win, expected", [
+    (FakeWin(exit_code=259), True),            # STILL_ACTIVE
+    (FakeWin(exit_code=0), False),             # exited, handle still openable
+    (FakeWin(handle=0, err=5), True),          # ERROR_ACCESS_DENIED: exists, not ours
+    (FakeWin(handle=0, err=87), False),        # ERROR_INVALID_PARAMETER: no such process
+    (FakeWin(ok=0), False),                    # GetExitCodeProcess failed: fail closed
+])
+def test_pid_alive_windows_branch(win, expected):
+    assert _pid_alive_windows(4242, win) is expected
+    if win.handle:
+        assert win.closed == [win.handle]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows only")
+def test_pid_alive_exited_child():
+    import subprocess, sys
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    assert pid_alive(p.pid) is False
+    assert pid_alive(os.getpid()) is True
 
 
 def test_check_resumable_refuses_running_with_live_pid(tmp_path):
