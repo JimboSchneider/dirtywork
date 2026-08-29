@@ -97,6 +97,12 @@ def main() -> int:
         image_digest = docker_cli.image_repo_digest(cfg.image)
         print("resolved image ref (local Id, used for execution):", image_ref)
         print("resolved image digest (registry, provenance only):", image_digest)
+        meta = subprocess.run(
+            ["docker", "inspect", "--format", "{{json .Config.Entrypoint}} {{json .Config.Cmd}}", image_ref],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        print("image entrypoint/cmd:", meta)
+        assert meta == "null null", f"the image must clear the base image's ENTRYPOINT/CMD, got {meta}"
         label = docker_args.repo_label(repo)
         create_argv = docker_args.worker_create_argv(
             cfg, "smoke", image_ref, uid, gid, objects_dir, repo_label=label,
@@ -107,6 +113,10 @@ def main() -> int:
         try:
             sb.start(worktree, repo, "smoke", base_commit)
             print("START OK")
+            node_out = sb.bash("node --version")
+            print("node --version:", node_out.strip())
+            node_version = node_out.strip().splitlines()[-1]
+            assert node_version.startswith("v22."), f"expected Node 22 in the image, got {node_out!r}"
             print(sb.bash("id; git --version; ls -la /work /gitdir | head"))
             print(sb.finalize().export_status)
         except Exception as e:

@@ -34,9 +34,14 @@ def test_dockerfile_installs_the_packages_the_docs_promise():
     0.8 additions come from a real run whose bash suite needed them (issue
     #30); docker/README.md's package list must stay in step with this."""
     text = (DOCKER_DIR / "Dockerfile").read_text(encoding="utf-8")
-    for package in ("git", "bash", "coreutils", "findutils", "python3", "nodejs",
-                    "npm", "ripgrep", "jq", "uuid-runtime", "shellcheck", "curl"):
+    for package in ("git", "bash", "coreutils", "findutils", "python3",
+                    "ripgrep", "jq", "uuid-runtime", "shellcheck", "curl"):
         assert f"\n        {package} \\\n" in text, f"{package} is not in the apt list"
+    assert "\nFROM node:22-bookworm-slim\n" in text, "the base image must be the official Node 22 image"
+    assert "\nRUN userdel -r node && useradd -u 1000 -m worker\n" in text
+    assert "\nENTRYPOINT []\nCMD []\n" in text, "the base image's ENTRYPOINT/CMD must be cleared"
+    for package in ("nodejs", "npm"):
+        assert f"\n        {package} \\\n" not in text, f"{package} comes from the base image, not apt"
     readme = (DOCKER_DIR / "README.md").read_text(encoding="utf-8")
-    for package in ("jq", "uuid-runtime", "shellcheck", "curl"):
+    for package in ("jq", "uuid-runtime", "shellcheck", "curl", "node:22-bookworm-slim"):
         assert package in readme, f"{package} is not documented in docker/README.md"

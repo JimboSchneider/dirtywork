@@ -1,5 +1,11 @@
 # docker/Dockerfile
-FROM debian:bookworm-slim
+# node:22-bookworm-slim is Debian 12 (bookworm-slim) plus Node 22 LTS, npm and
+# corepack from the official image, installed under /usr/local/bin -- on the
+# PATH dirtywork passes to every exec. Debian's own Node package is 18,
+# end-of-life 2025-04-30 (nodejs/Release schedule.json); Vite 8 requires Node
+# 20.19+ / 22.12+ and current Vitest 22.12+, so a worker on the old image could
+# not run a real Vite project's tests. 22 is maintenance LTS until 2027-04-30.
+FROM node:22-bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
@@ -8,8 +14,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         findutils \
         python3 \
         python3-venv \
-        nodejs \
-        npm \
         ripgrep \
         jq \
         uuid-runtime \
@@ -61,11 +65,21 @@ ENV DOTNET_ROOT=/usr/share/dotnet \
     UseSharedCompilation=false \
     DOTNET_NOLOGO=1
 
-RUN useradd -u 1000 -m worker
+# The official image ships a `node` user at uid/gid 1000. Remove it so
+# `useradd -u 1000 -m worker` keeps giving `worker` the uid this image has
+# always had; nothing in the sandbox refers to the `node` user.
+RUN userdel -r node && useradd -u 1000 -m worker
+
+# The base image sets ENTRYPOINT ["docker-entrypoint.sh"] and CMD ["node"]
+# (debian:bookworm-slim set CMD ["bash"]). Clear both, so a bare `docker run`
+# of this image starts nothing rather than Node and the contract below is
+# true rather than merely unused.
+ENTRYPOINT []
+CMD []
 
 USER worker
 
-# No ENTRYPOINT and no CMD: every `docker create`/`docker run` dirtywork
+# No ENTRYPOINT and no CMD (both cleared above): every `docker create`/`docker run` dirtywork
 # issues passes an explicit --entrypoint (/bin/cat for the tether,
 # /bin/chown for the prep container, /bin/sh for compound export steps) and
 # every `docker exec` names its binary by absolute path — nothing in this
