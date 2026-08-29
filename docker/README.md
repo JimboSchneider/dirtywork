@@ -1,6 +1,6 @@
 # dirtywork worker image (ghcr.io/jimboschneider/dirtywork-worker)
 
-Built from `docker/Dockerfile`: Debian bookworm-slim, `USER worker` (uid
+Built from `docker/Dockerfile`: `node:22-bookworm-slim` (Debian 12 plus Node 22 LTS, npm and corepack from the official image -- Debian's own Node is 18, end-of-life), `USER worker` (uid
 1000), git, bash, coreutils, findutils, python3, node, .NET SDK, ripgrep,
 and (since 0.8) jq, uuid-runtime, shellcheck and curl. This Dockerfile
 installs .NET SDK **8.0 and 10.0**, both via Microsoft's official
@@ -32,8 +32,7 @@ passes its own explicit `--entrypoint` or absolute binary path.
 
 The same image is also used by `dirtywork bench` for the post-run
 acceptance containers (hash check via `/usr/bin/sha256sum`, the acceptance
-command via `/bin/sh`; the node fixture needs `nodejs`, which this image
-installs) and by `dirtywork runs export` for re-exports.
+command via `/bin/sh`; the node fixture needs `node`, which the base image provides) and by `dirtywork runs export` for re-exports.
 
 ## Build
 
@@ -45,6 +44,9 @@ installs) and by `dirtywork runs export` for re-exports.
     docker run --rm --entrypoint /usr/bin/rg ghcr.io/jimboschneider/dirtywork-worker:0.13 --version
     docker run --rm --entrypoint /usr/bin/python3 ghcr.io/jimboschneider/dirtywork-worker:0.13 --version
     docker run --rm --entrypoint /usr/bin/dotnet ghcr.io/jimboschneider/dirtywork-worker:0.13 --list-sdks
+    docker run --rm --entrypoint /usr/local/bin/node ghcr.io/jimboschneider/dirtywork-worker:0.13 --version
+
+`node --version` must print `v22.x` — the check CI's sandbox smoke (`tools/ci_sandbox_smoke.py`) makes on every image build.
 
 `dotnet --version` prints only the highest-resolved SDK (`10.0.400`); use
 `--list-sdks` instead and check that both an `8.0.x` and a `10.0.x` line

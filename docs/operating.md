@@ -16,7 +16,7 @@ Day-to-day usage once dirtywork is installed: running a task, reviewing and resu
 
   > **The worker cannot install dependencies in docker mode** (`--network none`,
   > no host directories mounted); it can only run what the image ships — git,
-  > bash, coreutils, findutils, python3, node/npm, the .NET SDKs (8.0 and 10.0
+  > bash, coreutils, findutils, python3, node/npm (Node 22), the .NET SDKs (8.0 and 10.0
   > since the `:0.11` image; the old `:0.10` image had 8.0 only), ripgrep, jq,
   > uuid-runtime, shellcheck and curl. Always run the repo's own gate yourself
   > on the exported worktree, or pass it as [`--verify`](#verifying-a-run). For
