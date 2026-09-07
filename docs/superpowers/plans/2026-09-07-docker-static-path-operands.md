@@ -26,7 +26,7 @@
 - [x] Launch the following brief verbatim through released dirtywork with the metrics sampler active.
 - [x] Review the exported diff and confirm regression failures against baseline, then passing tests on the fix.
 - [x] Run the default suite on the host and exercise actual emitted argv against container binaries with temporary fixtures.
-- [ ] Record run metrics/verdict, create a standalone PR, and link its status from the baseline inventory in PR #144.
+- [x] Record run metrics/verdict, create a standalone PR, and link its status from the baseline inventory in PR #144.
 
 ### Worker brief
 
@@ -103,3 +103,7 @@ Resume invocation: `dirtywork resume fix-docker-static-tool-pathoption-confus-09
 ## Fallback decision
 
 Both worker attempts were rejected. The first repeated incorrect capability-probe assumptions in its tests. During the resume the worker rewrote most of the test file, then restored the original file without completing the regressions. The orchestrator interrupted both attempts gracefully and preserved their receipts. Under the repository rule allowing fallback after a failed resume, Codex implemented the bounded final patch and tests on `codex/docker-static-paths`; none of the broad test rewrite was retained. See the [run ledger](../bench/2026-09-07-docker-static-path-operands-ledger.md).
+
+## Delivery
+
+Standalone fix: [PR #145](https://github.com/JimboSchneider/dirtywork/pull/145). The baseline inventory in [PR #144](https://github.com/JimboSchneider/dirtywork/pull/144) links the operand fix from both tool rows and the gap table. Both PRs are pending merge. Host validation and independent review are recorded in the ledger.
