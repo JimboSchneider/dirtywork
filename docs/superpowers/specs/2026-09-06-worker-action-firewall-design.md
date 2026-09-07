@@ -214,7 +214,7 @@ Runtime Supervisor benchmark #123 is the shared performance gate. Static-tool sa
 
 Implement in layers so policy can be proven without accidentally changing authority semantics:
 
-1. Inventory current worker tools and existing guardrail/containment policy.
+1. Inventory current worker tools and existing guardrail/containment policy. See the [action and authority inventory](2026-09-06-worker-action-firewall-inventory.md) for the #134 baseline, dispatch paths, compatibility contracts, and downstream gaps.
 2. Define closed canonical schema, capabilities, reason codes, and identity.
 3. Add deterministic normalization and contract tests.
 4. Add policy evaluation with parity fixtures for existing behavior.
