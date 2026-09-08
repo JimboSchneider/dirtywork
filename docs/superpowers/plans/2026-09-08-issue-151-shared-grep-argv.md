@@ -138,4 +138,4 @@ The worker's diff should match the dry-run patch. `tests/test_docker_sandbox.py`
 
 ## Delivery
 
-Run ledger: [issue #151 ledger](../bench/2026-09-08-issue-151-shared-grep-argv-ledger.md). PR link added once opened.
+Run ledger: [issue #151 ledger](../bench/2026-09-08-issue-151-shared-grep-argv-ledger.md). [PR #156](https://github.com/JimboSchneider/dirtywork/pull/156) closes issue #151; pending the owner's merge go-ahead.
