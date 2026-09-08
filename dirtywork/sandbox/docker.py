@@ -73,7 +73,7 @@ _SETTLE_SLEEP = 0.05
 def _rel(path: str, *, writing: bool = False):
     """Host-side path normalization — an accident guard, not the security
     boundary (the container's read-only rootfs and its own filesystem are
-    the boundary). Returns (normalized, None) or (None, error_string).
+    the boundary). Returns (normalized and './'-anchored, None) or (None, error_string).
     Rejects absolute paths, '..' escapes, and — when writing — a first path
     component of '.git' (mirrors resolve_in_worktree's writing=True guard in
     host mode)."""
@@ -91,7 +91,12 @@ def _rel(path: str, *, writing: bool = False):
         )
     if writing and parts and parts[0] == ".git":
         return None, f"ERROR: writing inside .git/ is not allowed (got '{path}')"
-    return normalized, None
+    # Issue #146: a bare `-` is stdin to head/rg/grep/stat and $OLDPWD to
+    # `cd`, and `--` does not change that. Every consumer puts this value in
+    # operand position, so anchor it with `./` here, once. `.` stays `.`:
+    # rg/grep print paths relative to the operand, and `././x` would defeat
+    # grep()'s leading-`./` strip.
+    return ("." if normalized == "." else "./" + normalized), None
 
 
 def _oversized(encoded: bytes):
@@ -785,9 +790,9 @@ class DockerSandbox:
             return err
         rows = []  # (name, is_dir, size)
         if self._probe("_has_gnu_find", ["/usr/bin/find", "--version"]):
-            # GNU find still treats -delete, ! and ( as expressions after --.
-            # Prefix the normalized path so it is always a starting point.
-            out, err = self._list_exec(path, ["/usr/bin/find", "./" + rel, "-mindepth", "1", "-maxdepth", "1",
+            # GNU find still treats -delete, ! and ( as expressions after --;
+            # _rel's `./` anchor keeps the path a starting point.
+            out, err = self._list_exec(path, ["/usr/bin/find", rel, "-mindepth", "1", "-maxdepth", "1",
                                               "-printf", "%y\t%s\t%f\n"])
             if err:
                 return err

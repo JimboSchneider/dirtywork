@@ -387,7 +387,7 @@ def test_read_file_exec_argv_and_shaping(started):
     out = sb.read_file("src/app.py")
     assert fake.calls[-1][0] == [
         "exec", "-w", "/work", "dw-abc123",
-        "/usr/bin/head", "-c", str(MAX_READ_BYTES + 1), "--", "src/app.py",
+        "/usr/bin/head", "-c", str(MAX_READ_BYTES + 1), "--", "./src/app.py",
     ]
     assert "     1\tline one" in out
     assert "     2\tline two" in out
@@ -424,9 +424,9 @@ def test_write_file_sends_content_on_stdin(started):
     assert argv[:10] == [
         "exec", "-w", "/work", "-i", "dw-abc123",
         "/bin/sh", "-c", docker_mod.WRITE_SCRIPT,
-        "_", "deep/new/file.txt",
+        "_", "./deep/new/file.txt",
     ]
-    assert re.fullmatch(r"deep/new/\.dw-tmp\.file\.txt\.[0-9a-f]{8}", argv[10])
+    assert re.fullmatch(r"\./deep/new/\.dw-tmp\.file\.txt\.[0-9a-f]{8}", argv[10])
     assert len(argv) == 11
     assert stdin == b"hello"
 
@@ -585,7 +585,7 @@ def test_list_dir_shapes_output(started):
     assert "README.md  (18 bytes)" in out
     assert fake.calls[-1][0] == [
         "exec", "-w", "/work", "dw-abc123",
-        "/usr/bin/find", "./.", "-mindepth", "1", "-maxdepth", "1",
+        "/usr/bin/find", ".", "-mindepth", "1", "-maxdepth", "1",
         "-printf", "%y\t%s\t%f\n",
     ]
 
@@ -2084,11 +2084,11 @@ def test_write_exec_uses_the_atomic_script_and_a_sibling_temp(started):
     assert argv[:8] == ["exec", "-w", "/work", "-i", "dw-abc123",
                         "/bin/sh", "-c", docker_mod.WRITE_SCRIPT]
     assert argv[8] == "_"
-    assert argv[9] == "deep/new/file.txt"
+    assert argv[9] == "./deep/new/file.txt"
     # The temp is a SIBLING of the target (same directory => same filesystem =>
     # `mv` is an atomic rename) and its name is generated HOST-side, so worker
     # bytes never reach the script text.
-    assert re.fullmatch(r"deep/new/\.dw-tmp\.file\.txt\.[0-9a-f]{8}", argv[10])
+    assert re.fullmatch(r"\./deep/new/\.dw-tmp\.file\.txt\.[0-9a-f]{8}", argv[10])
     assert len(argv) == 11
     assert stdin == b"hello"
     # Spec §2.6: `&&`-chained, never move INTO a directory, guards echo their
@@ -2167,8 +2167,8 @@ def test_append_file_write_script_shape(started):
     argv = [c for c in fake.calls if _is_append_write_exec(c)][0][0]
     assert argv[:8] == ["exec", "-w", "/work", "-i", "dw-abc123",
                         "/bin/sh", "-c", docker_mod.APPEND_WRITE_SCRIPT]
-    assert argv[8] == "_" and argv[9] == "deep/notes.md"
-    assert re.fullmatch(r"deep/\.dw-tmp\.notes\.md\.[0-9a-f]{8}", argv[10])
+    assert argv[8] == "_" and argv[9] == "./deep/notes.md"
+    assert re.fullmatch(r"\./deep/\.dw-tmp\.notes\.md\.[0-9a-f]{8}", argv[10])
     assert len(argv) == 11
     # Spec §2.6: the missing-target guard is re-checked at write time, the copy
     # is made before the append, and the promote tail is shared with WRITE_SCRIPT.
@@ -3033,6 +3033,7 @@ def test_after_bash_sample_does_not_overwrite_a_violation_recorded_during_it(sta
     ("!", "./!"),
     ("(", "./("),
     ("./-delete", "./-delete"),
+    ("-", "./-"),
 ])
 def test_list_dir_treats_expression_like_paths_as_paths(started, path, expected_path):
     sb, fake, _ = started
@@ -3045,17 +3046,56 @@ def test_list_dir_treats_expression_like_paths_as_paths(started, path, expected_
 
 
 @pytest.mark.parametrize("has_rg", [True, False])
-@pytest.mark.parametrize("path", ["--pre=./helper", "-v"])
+@pytest.mark.parametrize("path", ["--pre=./helper", "-v", "-"])
 def test_grep_treats_option_like_paths_as_paths(started, has_rg, path):
     sb, fake, _ = started
     sb._has_rg = has_rg
     fake.script(["exec"], _ok(b"./file.txt:1:needle\n"))
     out = sb.grep("needle", path=path, glob="*.txt")
     argv = fake.calls[-1][0][4:]
-    assert argv[-2:] == ["--", path]
+    assert argv[-2:] == ["--", "./" + path]
     if has_rg:
         assert argv[:-2] == ["/usr/bin/rg", "-n", "--no-heading", "-M", "300",
                             "-e", "needle", "-g", "*.txt"]
     else:
         assert argv[:-2] == ["/usr/bin/grep", "-rn", "-e", "needle", "--include=*.txt"]
     assert out == "file.txt:1:needle"
+
+
+@pytest.mark.parametrize(("path", "expected"), [
+    ("-", "./-"),
+    ("./-", "./-"),
+    ("-/", "./-"),
+    ("src/-", "./src/-"),
+    (".", "."),
+    ("./", "."),
+])
+def test_rel_anchors_every_operand_except_the_cwd(path, expected):
+    assert docker_mod._rel(path) == (expected, None)
+
+
+def test_read_file_bare_dash_is_a_file_operand_not_stdin(started):
+    sb, fake, _ = started
+    fake.script(["exec"], _ok(b"dash\n"))
+    assert "dash" in sb.read_file("-")
+    assert fake.calls[-1][0][-2:] == ["--", "./-"]
+
+
+def test_list_dir_fallback_bare_dash_is_a_directory_not_oldpwd(started):
+    sb, fake, _ = started
+    sb._has_gnu_find = False
+    fake.script(["exec"], [_ok(b"file.txt\n"), _ok(b"10 file.txt\n10 total\n")])
+    assert sb.list_dir("-") == "file.txt  (10 bytes)"
+    assert fake.calls[-2][0][-1] == "./-"
+    assert fake.calls[-1][0][-2:] == ["./-", "file.txt"]
+
+
+def test_append_file_guard_stats_bare_dash_as_a_file_not_stdin(started):
+    sb, fake, _ = started
+    _script_append_guard(fake, _ok(b"4\n"))
+    fake.script(["exec", "-w", "/work", "dw-abc123", "/usr/bin/head"], _ok(b"one\n"))
+    fake.script(["exec", "-w", "/work", "-i", "dw-abc123", "/bin/sh", "-c",
+                 docker_mod.APPEND_WRITE_SCRIPT], _ok())
+    sb.append_file("-", "two\n")
+    guard = [c for c in fake.calls if docker_mod.APPEND_GUARD_SCRIPT in c[0]][0][0]
+    assert guard[-2:] == ["_", "./-"]
