@@ -179,11 +179,18 @@ APPEND_WRITE_SCRIPT = (
 # target like the host's stat(); a dangling link is kind `l`. NUL records
 # survive a newline in a name, and `./$f` keeps a name like `-` an operand.
 # Verified byte-identical on dash and BusyBox, so there is no GNU-find
-# branch and no ls/wc fallback to keep in step.
+# branch and no ls/wc fallback to keep in step. Two guards from the PR #155
+# review: `[ -r . ]` refuses a directory the worker cannot read (an
+# unexpanded glob looks exactly like an empty directory), and the loop stops
+# after `$2` entries -- the host's cap plus one, so the cap note still
+# fires -- because every regular file costs a `stat` fork (20,000 entries
+# took 6 s; 95,000 would pass the exec timeout, and the host shows 2,000).
 LIST_SCRIPT = (
     'cd -- "$1" || exit 1; '
-    'for f in .[!.]* ..?* *; do '
+    '[ -r . ] || { echo "Permission denied" >&2; exit 1; }; '
+    'n=0; for f in .[!.]* ..?* *; do '
     '[ -e "./$f" ] || [ -L "./$f" ] || continue; '
+    'n=$((n+1)); [ "$n" -gt "$2" ] && break; '
     'if [ -d "./$f" ]; then printf "d\\t0\\t%s\\0" "$f"; '
     'elif [ -L "./$f" ] && ! [ -e "./$f" ]; then printf "l\\t0\\t%s\\0" "$f"; '
     'else printf "f\\t%s\\t%s\\0" "$(stat -Lc %s -- "./$f" 2>/dev/null || echo 0)" "$f"; fi; '
@@ -810,7 +817,7 @@ class DockerSandbox:
         rel, err = _rel(path)
         if err:
             return err
-        out, err = self._list_exec(path, ["/bin/sh", "-c", LIST_SCRIPT, "sh", rel])
+        out, err = self._list_exec(path, ["/bin/sh", "-c", LIST_SCRIPT, "sh", rel, str(MAX_LIST_ENTRIES + 1)])
         if err:
             return err
         rows = []  # (name, kind, size); kind is d, f or l (broken symlink)

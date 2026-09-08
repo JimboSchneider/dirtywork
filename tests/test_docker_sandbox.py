@@ -585,7 +585,7 @@ def test_list_dir_shapes_output(started):
     assert "README.md  (18 bytes)" in out
     assert fake.calls[-1][0] == [
         "exec", "-w", "/work", "dw-abc123",
-        "/bin/sh", "-c", docker_mod.LIST_SCRIPT, "sh", ".",
+        "/bin/sh", "-c", docker_mod.LIST_SCRIPT, "sh", ".", str(docker_mod.MAX_LIST_ENTRIES + 1),
     ]
 
 
@@ -777,7 +777,7 @@ def test_list_dir_passes_the_target_dir_as_the_script_operand(started):
     sb, fake, run_dir = started
     fake.script(["exec"], _ok(b"f\t10\tfile.txt\0"))
     assert sb.list_dir("src") == "file.txt  (10 bytes)"
-    assert fake.calls[-1][0][-2:] == ["sh", "./src"]
+    assert fake.calls[-1][0][-3:] == ["sh", "./src", str(docker_mod.MAX_LIST_ENTRIES + 1)]
 
 
 def test_grep_falls_back_to_grep_rn_when_no_rg(started):
@@ -3028,7 +3028,7 @@ def test_list_dir_treats_expression_like_paths_as_paths(started, path, expected_
     sb, fake, _ = started
     fake.script(["exec"], _ok(b"f\t18\tREADME.md\0"))
     out = sb.list_dir(path)
-    assert fake.calls[-1][0][-2:] == ["sh", expected_path]
+    assert fake.calls[-1][0][-3:-1] == ["sh", expected_path]
     assert out == "README.md  (18 bytes)"
 
 
@@ -3106,3 +3106,9 @@ def test_probe_docker_error_is_not_cached_for_grep(started):
     assert sb.grep("hello") == "src/app.py:2:hello"
     assert sb._has_rg is True
     assert fake.calls[-1][0][4] == "/usr/bin/rg"
+
+
+def test_list_dir_unreadable_directory_is_an_error_not_an_empty_listing(started):
+    sb, fake, _ = started
+    fake.script(["exec"], _fail(b"Permission denied\n"))
+    assert sb.list_dir("locked") == "ERROR: cannot list 'locked': Permission denied\n"
