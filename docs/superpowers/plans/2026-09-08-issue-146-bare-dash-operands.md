@@ -23,7 +23,7 @@
 - [x] Launch the brief below verbatim through released dirtywork with the metrics sampler active.
 - [x] Review the exported diff against the dry-run patch; run the full suite on the host against the worktree.
 - [x] Update `docs/superpowers/specs/2026-08-15-review-response-design.md` (`list_dir` is `find ./<path> …` since PR #145) and write the ledger row.
-- [ ] Open a PR that closes issue #146; note the fourth site.
+- [x] Open a PR that closes issue #146; note the fourth site.
 
 ### Worker brief
 
@@ -152,3 +152,7 @@ Released `dirtywork==0.13.1` via `pipx run --spec`, from repo HEAD `516a3c1` (ma
 ### Review gates
 
 The worker's diff should match the dry-run patch (same three production edits, nine expectation edits, four appended tests). Any other touched file or any rewritten passing test is a finding. Host: `tests/test_docker_sandbox.py` 176 passed, full suite green, `git diff --check` clean. Independently: the nine new cases fail on the baseline module.
+
+## Delivery
+
+[PR #153](https://github.com/JimboSchneider/dirtywork/pull/153) closes issue #146; run ledger in [the bench directory](../bench/2026-09-08-issue-146-bare-dash-operands-ledger.md). Pending the owner's merge go-ahead.
