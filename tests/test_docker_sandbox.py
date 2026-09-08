@@ -579,21 +579,20 @@ def test_edit_file_non_utf8(started):
 
 def test_list_dir_shapes_output(started):
     sb, fake, run_dir = started
-    fake.script(["exec"], _ok(b"d\t96\tsrc\nf\t18\tREADME.md\n"))
+    fake.script(["exec"], _ok(b"d\t0\tsrc\0f\t18\tREADME.md\0"))
     out = sb.list_dir(".")
     assert "src/" in out
     assert "README.md  (18 bytes)" in out
     assert fake.calls[-1][0] == [
         "exec", "-w", "/work", "dw-abc123",
-        "/usr/bin/find", ".", "-mindepth", "1", "-maxdepth", "1",
-        "-printf", "%y\t%s\t%f\n",
+        "/bin/sh", "-c", docker_mod.LIST_SCRIPT, "sh", ".",
     ]
 
 
 def test_list_dir_caps_entries(started):
     from dirtywork.tools import MAX_LIST_ENTRIES
     sb, fake, run_dir = started
-    lines = "".join(f"f\t1\tfile{i}\n" for i in range(MAX_LIST_ENTRIES + 50))
+    lines = "".join(f"f\t1\tfile{i}\0" for i in range(MAX_LIST_ENTRIES + 50))
     fake.script(["exec"], _ok(lines.encode()))
     out = sb.list_dir(".")
     assert "capped" in out
@@ -766,29 +765,19 @@ def test_bash_output_capped(started):
     assert "capped" in out
 
 
-def test_list_dir_falls_back_to_ls_when_no_gnu_find(started):
+def test_list_dir_is_one_exec_and_never_probes(started):
     sb, fake, run_dir = started
-    # Script find --version to fail (no GNU find), then ls -1Ap, then wc -c
-    # The _probe makes a call first to check for GNU find (fails)
-    # Then list_dir uses the fallback which needs ls -1Ap and wc -c (2 more calls)
-    fake.script(["exec"], [_fail(b"find: not found"), _ok(b"b.txt\nsub/\na.txt\n"), _ok(b"3 b.txt\n5 a.txt\n8 total\n")])
-    out = sb.list_dir(".")
-    assert out == "a.txt  (5 bytes)\nb.txt  (3 bytes)\nsub/"
-    # Verify exactly three exec calls: one for find probe, one for ls -1Ap, one for wc -c
-    # No per-file stat calls should exist
-    assert len(fake.calls) == 3
-    for call in fake.calls:
-        assert "/usr/bin/stat" not in call[0]
+    fake.script(["exec"], _ok(b"f\t3\tb.txt\0d\t0\tsub\0f\t5\ta.txt\0"))
+    assert sb.list_dir(".") == "a.txt  (5 bytes)\nb.txt  (3 bytes)\nsub/"
+    assert len(fake.calls) == 1
+    assert getattr(sb, "_has_gnu_find", None) is None
 
 
-def test_list_dir_fallback_passes_target_dir(started):
+def test_list_dir_passes_the_target_dir_as_the_script_operand(started):
     sb, fake, run_dir = started
-    # Script find --version to fail (no GNU find), then ls with "src", then wc -c
-    fake.script(["exec"], [_fail(b""), _ok(b"file.txt\n"), _ok(b"10 file.txt\n10 total\n")])
-    out = sb.list_dir("src")
-    assert "file.txt  (10 bytes)" in out
-    # Verify the ls exec's argv contains "src" (the target dir is passed)
-    assert any("src" in str(call[0]) for call in fake.calls)
+    fake.script(["exec"], _ok(b"f\t10\tfile.txt\0"))
+    assert sb.list_dir("src") == "file.txt  (10 bytes)"
+    assert fake.calls[-1][0][-2:] == ["sh", "./src"]
 
 
 def test_grep_falls_back_to_grep_rn_when_no_rg(started):
@@ -3037,11 +3026,9 @@ def test_after_bash_sample_does_not_overwrite_a_violation_recorded_during_it(sta
 ])
 def test_list_dir_treats_expression_like_paths_as_paths(started, path, expected_path):
     sb, fake, _ = started
-    sb._has_gnu_find = True
-    fake.script(["exec"], _ok(b"f\t18\tREADME.md\n"))
+    fake.script(["exec"], _ok(b"f\t18\tREADME.md\0"))
     out = sb.list_dir(path)
-    argv = fake.calls[-1][0][4:]
-    assert argv[:2] == ["/usr/bin/find", expected_path]
+    assert fake.calls[-1][0][-2:] == ["sh", expected_path]
     assert out == "README.md  (18 bytes)"
 
 
@@ -3081,13 +3068,10 @@ def test_read_file_bare_dash_is_a_file_operand_not_stdin(started):
     assert fake.calls[-1][0][-2:] == ["--", "./-"]
 
 
-def test_list_dir_fallback_bare_dash_is_a_directory_not_oldpwd(started):
+def test_list_dir_renders_symlink_kinds_like_the_host(started):
     sb, fake, _ = started
-    sb._has_gnu_find = False
-    fake.script(["exec"], [_ok(b"file.txt\n"), _ok(b"10 file.txt\n10 total\n")])
-    assert sb.list_dir("-") == "file.txt  (10 bytes)"
-    assert fake.calls[-2][0][-1] == "./-"
-    assert fake.calls[-1][0][-2:] == ["./-", "file.txt"]
+    fake.script(["exec"], _ok(b"d\t0\tdirlink\0f\t5\tfilelink\0l\t0\tdangling\0"))
+    assert sb.list_dir(".") == "dangling  (broken symlink)\ndirlink/\nfilelink  (5 bytes)"
 
 
 def test_append_file_guard_stats_bare_dash_as_a_file_not_stdin(started):
@@ -3106,15 +3090,10 @@ def _probe_timeout(argv):
     raise DockerError("docker exec ... timed out after 10s", timed_out=True)
 
 
-def test_probe_docker_error_is_not_cached_for_list_dir(started):
+def test_list_dir_survives_newline_and_tab_in_filenames(started):
     sb, fake, _ = started
-    fake.script(["exec"], [_probe_timeout, _ok(b"a.txt\n"), _ok(b"5 a.txt\n5 total\n"),
-                           _ok(b"find (GNU findutils) 4.9.0\n"), _ok(b"f\t18\tREADME.md\n")])
-    assert sb.list_dir(".") == "a.txt  (5 bytes)"
-    assert getattr(sb, "_has_gnu_find", None) is None
-    assert sb.list_dir(".") == "README.md  (18 bytes)"
-    assert sb._has_gnu_find is True
-    assert fake.calls[-1][0][4:6] == ["/usr/bin/find", "."]
+    fake.script(["exec"], _ok(b"f\t1\ta\nb\0f\t5\tt\tab\0d\t0\tsrc\0"))
+    assert sb.list_dir(".") == "a\nb  (1 bytes)\nsrc/\nt\tab  (5 bytes)"
 
 
 def test_probe_docker_error_is_not_cached_for_grep(started):

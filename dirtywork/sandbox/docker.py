@@ -172,6 +172,24 @@ APPEND_WRITE_SCRIPT = (
     'cp -- "$1" "$2" && cat >> "$2" && ' + _PROMOTE
 )
 
+# list_dir's ONE exec (issues #147, #148, #149): a portable /bin/sh loop that
+# prints one NUL-terminated `kind<TAB>size<TAB>name` record per entry,
+# dotfiles included. `[ -d ]` follows symlinks, so a link to a directory
+# lists as a directory like the host's is_dir(); `stat -L` sizes the link's
+# target like the host's stat(); a dangling link is kind `l`. NUL records
+# survive a newline in a name, and `./$f` keeps a name like `-` an operand.
+# Verified byte-identical on dash and BusyBox, so there is no GNU-find
+# branch and no ls/wc fallback to keep in step.
+LIST_SCRIPT = (
+    'cd -- "$1" || exit 1; '
+    'for f in .[!.]* ..?* *; do '
+    '[ -e "./$f" ] || [ -L "./$f" ] || continue; '
+    'if [ -d "./$f" ]; then printf "d\\t0\\t%s\\0" "$f"; '
+    'elif [ -L "./$f" ] && ! [ -e "./$f" ]; then printf "l\\t0\\t%s\\0" "$f"; '
+    'else printf "f\\t%s\\t%s\\0" "$(stat -Lc %s -- "./$f" 2>/dev/null || echo 0)" "$f"; fi; '
+    'done'
+)
+
 
 class DockerSandbox:
     """Every tool call and the run lifecycle for docker mode. Constructed
@@ -792,45 +810,18 @@ class DockerSandbox:
         rel, err = _rel(path)
         if err:
             return err
-        rows = []  # (name, is_dir, size)
-        if self._probe("_has_gnu_find", ["/usr/bin/find", "--version"]):
-            # GNU find still treats -delete, ! and ( as expressions after --;
-            # _rel's `./` anchor keeps the path a starting point.
-            out, err = self._list_exec(path, ["/usr/bin/find", rel, "-mindepth", "1", "-maxdepth", "1",
-                                              "-printf", "%y\t%s\t%f\n"])
-            if err:
-                return err
-            for line in out.splitlines():
-                if line:
-                    kind, size, name = line.split("\t", 2)
-                    rows.append((name, kind == "d", int(size)))
-        else:
-            # Spec fallback for images without GNU find: `ls -1Ap` inside the target
-            # directory (trailing `/` marks directories), then ONE batched `wc -c`
-            # for the file sizes — never one exec per entry.
-            out, err = self._list_exec(path, ["/bin/sh", "-c", 'cd -- "$1" && ls -1Ap', "sh", rel])
-            if err:
-                return err
-            names = [line for line in out.splitlines() if line]
-            files = [n for n in names if not n.endswith("/")]
-            sizes = {}
-            if files:
-                wc_out, wc_err = self._list_exec(path, ["/bin/sh", "-c", 'cd -- "$1" && shift && wc -c -- "$@"', "sh", rel, *files])
-                if wc_err is None:
-                    for line in wc_out.splitlines():
-                        parts = line.strip().split(None, 1)
-                        if len(parts) == 2 and parts[1] != "total":
-                            try:
-                                sizes[parts[1]] = int(parts[0])
-                            except ValueError:
-                                pass
-            for n in names:
-                if n.endswith("/"):
-                    rows.append((n[:-1], True, 0))
-                else:
-                    rows.append((n, False, sizes.get(n, 0)))
+        out, err = self._list_exec(path, ["/bin/sh", "-c", LIST_SCRIPT, "sh", rel])
+        if err:
+            return err
+        rows = []  # (name, kind, size); kind is d, f or l (broken symlink)
+        for record in out.split("\0"):
+            if record:
+                kind, size, name = record.split("\t", 2)
+                rows.append((name, kind, int(size)))
         rows.sort(key=lambda r: r[0])  # raw-name sort BEFORE formatting (host parity)
-        formatted = [f"{name}/" if is_dir else f"{name}  ({size} bytes)" for name, is_dir, size in rows]
+        formatted = [f"{name}/" if kind == "d"
+                     else f"{name}  (broken symlink)" if kind == "l"
+                     else f"{name}  ({size} bytes)" for name, kind, size in rows]
         note = ""
         if len(formatted) > MAX_LIST_ENTRIES:
             formatted = formatted[:MAX_LIST_ENTRIES]
