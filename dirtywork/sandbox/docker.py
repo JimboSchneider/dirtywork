@@ -766,14 +766,18 @@ class DockerSandbox:
                                     tool="insert_after")
 
     def _probe(self, attr: str, argv: list) -> bool:
-        """Probe once per sandbox instance for an optional in-image tool; cached on self."""
+        """Probe once per sandbox instance for an optional in-image tool; cached on
+        self. Only a definitive answer (an observed return code) is cached: a
+        DockerError -- an expired timeout included -- falls back for THIS call
+        only and leaves the cache unset, so the next call probes again instead
+        of downgrading the whole run to the fallback branches (issue #150)."""
         cached = getattr(self, attr, None)
         if cached is None:
             try:
                 captured = self._run(docker_args.exec_argv(self.container, argv), timeout=LIST_EXEC_TIMEOUT)
-                cached = captured.returncode == 0
             except docker_cli.DockerError:
-                cached = False
+                return False
+            cached = captured.returncode == 0
             setattr(self, attr, cached)
         return cached
 
