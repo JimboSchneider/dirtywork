@@ -585,7 +585,7 @@ def test_list_dir_shapes_output(started):
     assert "README.md  (18 bytes)" in out
     assert fake.calls[-1][0] == [
         "exec", "-w", "/work", "dw-abc123",
-        "/usr/bin/find", ".", "-mindepth", "1", "-maxdepth", "1",
+        "/usr/bin/find", "./.", "-mindepth", "1", "-maxdepth", "1",
         "-printf", "%y\t%s\t%f\n",
     ]
 
@@ -608,7 +608,7 @@ def test_grep_exec_argv_and_strips_leading_dot_slash(started):
     assert "./" not in out
     assert fake.calls[-1][0] == [
         "exec", "-w", "/work", "dw-abc123",
-        "/usr/bin/rg", "-n", "--no-heading", "-M", "300", "-e", "return 42", ".",
+        "/usr/bin/rg", "-n", "--no-heading", "-M", "300", "-e", "return 42", "--", ".",
     ]
 
 
@@ -3026,3 +3026,36 @@ def test_after_bash_sample_does_not_overwrite_a_violation_recorded_during_it(sta
 
     assert not [c for c in fake.calls if c[0][0] == "kill"]
     assert sb.watchdog.violation is None
+
+
+@pytest.mark.parametrize(("path", "expected_path"), [
+    ("-delete", "./-delete"),
+    ("!", "./!"),
+    ("(", "./("),
+    ("./-delete", "./-delete"),
+])
+def test_list_dir_treats_expression_like_paths_as_paths(started, path, expected_path):
+    sb, fake, _ = started
+    sb._has_gnu_find = True
+    fake.script(["exec"], _ok(b"f\t18\tREADME.md\n"))
+    out = sb.list_dir(path)
+    argv = fake.calls[-1][0][4:]
+    assert argv[:2] == ["/usr/bin/find", expected_path]
+    assert out == "README.md  (18 bytes)"
+
+
+@pytest.mark.parametrize("has_rg", [True, False])
+@pytest.mark.parametrize("path", ["--pre=./helper", "-v"])
+def test_grep_treats_option_like_paths_as_paths(started, has_rg, path):
+    sb, fake, _ = started
+    sb._has_rg = has_rg
+    fake.script(["exec"], _ok(b"./file.txt:1:needle\n"))
+    out = sb.grep("needle", path=path, glob="*.txt")
+    argv = fake.calls[-1][0][4:]
+    assert argv[-2:] == ["--", path]
+    if has_rg:
+        assert argv[:-2] == ["/usr/bin/rg", "-n", "--no-heading", "-M", "300",
+                            "-e", "needle", "-g", "*.txt"]
+    else:
+        assert argv[:-2] == ["/usr/bin/grep", "-rn", "-e", "needle", "--include=*.txt"]
+    assert out == "file.txt:1:needle"

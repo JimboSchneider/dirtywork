@@ -785,7 +785,9 @@ class DockerSandbox:
             return err
         rows = []  # (name, is_dir, size)
         if self._probe("_has_gnu_find", ["/usr/bin/find", "--version"]):
-            out, err = self._list_exec(path, ["/usr/bin/find", rel, "-mindepth", "1", "-maxdepth", "1",
+            # GNU find still treats -delete, ! and ( as expressions after --.
+            # Prefix the normalized path so it is always a starting point.
+            out, err = self._list_exec(path, ["/usr/bin/find", "./" + rel, "-mindepth", "1", "-maxdepth", "1",
                                               "-printf", "%y\t%s\t%f\n"])
             if err:
                 return err
@@ -840,7 +842,8 @@ class DockerSandbox:
             cmd = ["/usr/bin/grep", "-rn", "-e", pattern]
             if glob:
                 cmd += [f"--include={glob}"]
-        cmd.append(rel)
+        # Keep option-like paths (for example --pre=./helper) as operands.
+        cmd.extend(["--", rel])
         argv = docker_args.exec_argv(self.container, cmd)
         try:
             captured = self._run(argv, timeout=timeout + 10)
