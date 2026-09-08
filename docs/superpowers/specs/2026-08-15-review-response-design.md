@@ -344,7 +344,11 @@ boundary) and used relative to `/work`.
   (verified: `RLIMIT_FSIZE` is a hard, unraisable per-file cap even for
   root under `--cap-drop ALL`; the `"$1"` form passes any command string
   intact; exit codes propagate; 153 = file-size cap, documented).
-- `read_file`: `head -c <MAX_READ_BYTES> -- <path>` piped through the
+- Every `<path>` below is `_rel`'s output: normalized and anchored with `./`
+  (`.` stays `.`), so `-`, `-delete` and `--pre=…` reach the binary as
+  operands, never as stdin, a find expression or an option (PR #145, issue
+  #146).
+- `read_file`: `head -c <MAX_READ_BYTES> -- ./<path>` piped through the
   drain; offset/limit windowing and numbering on the host as today.
 - `write_file`: content on **stdin** — `docker exec -i … sh -c 'mkdir -p
   "$(dirname -- "$1")" && cat > "$1"' _ <path>` (no quoting of content;
@@ -354,10 +358,10 @@ boundary) and used relative to `/work`.
   read/write pair is not atomic; the only process that could race it is a
   worker background process, which is reaped after every `bash` call (§6),
   and the race can only affect the worker's own files.
-- `list_dir`: `find <path> -mindepth 1 -maxdepth 1 -printf …` when GNU
+- `list_dir`: `find ./<path> -mindepth 1 -maxdepth 1 -printf …` when GNU
   find exists, else `ls -1Ap`; capped on the host.
-- `grep`: `rg` if present in the image else `grep -rn`; same result
-  shaping as today.
+- `grep`: `rg` if present in the image else `grep -rn`, the path last after
+  `--`; same result shaping as today.
 
 ### 6. Reaping and budgets
 
