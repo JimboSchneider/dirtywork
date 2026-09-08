@@ -967,6 +967,24 @@ def grep_timeout_result(timeout: int) -> str:
     return GREP_TIMEOUT_TEXT.format(timeout=timeout)
 
 
+def grep_argv(executable: str, pattern: str, path: str, glob: str | None, *, rg: bool) -> list:
+    """The ONE search argv both backends run (issue #151). `executable` is the
+    binary the caller resolved (host: shutil.which; docker: the image's
+    /usr/bin path) and `rg` says which flag set it takes. Pattern and glob
+    travel as option values; the path is always the last operand after `--`,
+    so an option-like or bare `-` path (PR #145, issue #146) is never read
+    as a flag on either backend."""
+    if rg:
+        cmd = [executable, "-n", "--no-heading", "-M", "300", "-e", pattern]
+        if glob:
+            cmd += ["-g", glob]
+    else:
+        cmd = [executable, "-rn", "-e", pattern]
+        if glob:
+            cmd += [f"--include={glob}"]
+    return cmd + ["--", path]
+
+
 def grep(worktree: Path, pattern: str, path: str = ".", glob: str | None = None,
          timeout: int = 30) -> str:
     try:
@@ -976,16 +994,7 @@ def grep(worktree: Path, pattern: str, path: str = ".", glob: str | None = None,
     except OSError as e:
         return f"ERROR: cannot access '{path}': {e}"
     rg = shutil.which("rg")
-    if rg:
-        cmd = [rg, "-n", "--no-heading", "-M", "300", "-e", pattern]
-        if glob:
-            cmd += ["-g", glob]
-        cmd.append(str(p))
-    else:
-        cmd = ["grep", "-rn", "-e", pattern]
-        if glob:
-            cmd += [f"--include={glob}"]
-        cmd.append(str(p))
+    cmd = grep_argv(rg or "grep", pattern, str(p), glob, rg=bool(rg))
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:

@@ -1111,3 +1111,29 @@ def test_parse_change_head_and_net_change_round_trip():
 
     assert tools.parse_change_head("hello") is None
     assert tools.net_change("hello") is None
+
+
+@pytest.mark.parametrize(("executable", "rg", "glob", "expected"), [
+    ("/usr/bin/rg", True, None,
+     ["/usr/bin/rg", "-n", "--no-heading", "-M", "300", "-e", "needle", "--", "-"]),
+    ("/usr/bin/rg", True, "*.py",
+     ["/usr/bin/rg", "-n", "--no-heading", "-M", "300", "-e", "needle", "-g", "*.py", "--", "-"]),
+    ("grep", False, None, ["grep", "-rn", "-e", "needle", "--", "-"]),
+    ("grep", False, "*.py", ["grep", "-rn", "-e", "needle", "--include=*.py", "--", "-"]),
+])
+def test_grep_argv_puts_the_path_last_after_double_dash(executable, rg, glob, expected):
+    assert tools.grep_argv(executable, "needle", "-", glob, rg=rg) == expected
+
+
+def test_grep_runs_the_shared_argv_with_the_absolute_path_last(wt: Path, monkeypatch):
+    seen = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        return tools.subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(tools.shutil, "which", lambda name: "/usr/bin/rg" if name == "rg" else None)
+    monkeypatch.setattr(tools.subprocess, "run", fake_run)
+    assert tools.grep(wt, "needle", path="src", glob="*.py") == "No matches found."
+    assert seen == [["/usr/bin/rg", "-n", "--no-heading", "-M", "300", "-e", "needle", "-g", "*.py",
+                     "--", str(tools.resolve_in_worktree("src", wt))]]
