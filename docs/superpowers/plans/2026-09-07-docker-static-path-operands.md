@@ -4,7 +4,7 @@
 
 **Spec:** The owner's 2026-09-07 review of PR #144 approved a small standalone fix for the observed Docker `list_dir("-delete")` and `grep("x", "--pre=./helper")` argv. This plan records that bounded design; it does not implement Worker Action Firewall #139.
 
-**Architecture:** Leave `_rel` and policy unchanged. Prefix the normalized GNU find path with `./`; terminate rg and fallback grep options with `--` immediately before their path. Existing `head --` and fallback `cd --` paths already separate options from data. This fixes advertised-intent/evidence integrity inside the existing Docker containment; the equivalent effects are already possible via Docker bash.
+**Architecture:** Leave `_rel` and policy unchanged. Prefix the normalized GNU find path with `./`; terminate rg and fallback grep options with `--` immediately before their path. Existing `head --` and fallback `cd --` paths already terminate options, but `--` does not neutralize a bare `-` operand: GNU `head`, `rg` and `grep` read stdin for `-`, and dash `cd -- -` changes to `$OLDPWD` (verified in the worker image), so a path named `-` stays open at those sites and after the new grep separator; a `./` prefix closes it and is left as a follow-up outside this bounded fix. This fixes advertised-intent/evidence integrity inside the existing Docker containment; the equivalent effects are already possible via Docker bash.
 
 **Tech stack:** Python >=3.9, pytest, GNU find, ripgrep/GNU grep; no dependencies added.
 
