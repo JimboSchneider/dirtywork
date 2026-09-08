@@ -358,8 +358,13 @@ boundary) and used relative to `/work`.
   read/write pair is not atomic; the only process that could race it is a
   worker background process, which is reaped after every `bash` call (§6),
   and the race can only affect the worker's own files.
-- `list_dir`: `find ./<path> -mindepth 1 -maxdepth 1 -printf …` when GNU
-  find exists, else `ls -1Ap`; capped on the host.
+- `list_dir`: one `sh -c LIST_SCRIPT sh ./<path> <MAX_LIST_ENTRIES+1>` exec — a
+  POSIX loop over `.[!.]* ..?* *` that refuses an unreadable directory
+  (`[ -r . ]`), stops after the cap plus one entry, and prints
+  NUL-terminated `kind<TAB>size<TAB>name` records (`[ -d ]` and `stat -L` follow symlinks; a dangling link is kind
+  `l`, rendered as the host's `(broken symlink)`); parsed and capped on the
+  host. Replaced the GNU-find branch and its `ls -1Ap` + `wc -c` fallback
+  (issues #147, #148, #149).
 - `grep`: `rg` if present in the image else `grep -rn`, the path last after
   `--`; same result shaping as today.
 
