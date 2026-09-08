@@ -98,4 +98,4 @@ The worker's diff should match the dry-run patch (one production edit, one appen
 
 ## Delivery
 
-Run ledger: [issue #150 ledger](../bench/2026-09-08-issue-150-probe-docker-error-ledger.md). PR link added below once opened.
+Run ledger: [issue #150 ledger](../bench/2026-09-08-issue-150-probe-docker-error-ledger.md). [PR #154](https://github.com/JimboSchneider/dirtywork/pull/154) closes issue #150; pending the owner's merge go-ahead.
