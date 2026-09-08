@@ -232,4 +232,4 @@ The worker's diff should match the dry-run patch. Any other touched file or any 
 
 ## Delivery
 
-Run ledger: [issues #147/#148/#149 ledger](../bench/2026-09-08-issues-147-148-149-one-listing-script-ledger.md). PR link added once opened.
+Run ledger: [issues #147/#148/#149 ledger](../bench/2026-09-08-issues-147-148-149-one-listing-script-ledger.md). [PR #155](https://github.com/JimboSchneider/dirtywork/pull/155) closes issues #147, #148 and #149; pending the owner's merge go-ahead.
