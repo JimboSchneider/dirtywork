@@ -3099,3 +3099,31 @@ def test_append_file_guard_stats_bare_dash_as_a_file_not_stdin(started):
     sb.append_file("-", "two\n")
     guard = [c for c in fake.calls if docker_mod.APPEND_GUARD_SCRIPT in c[0]][0][0]
     assert guard[-2:] == ["_", "./-"]
+
+
+def _probe_timeout(argv):
+    """FakeDocker callable response: the capability probe's docker exec timed out."""
+    raise DockerError("docker exec ... timed out after 10s", timed_out=True)
+
+
+def test_probe_docker_error_is_not_cached_for_list_dir(started):
+    sb, fake, _ = started
+    fake.script(["exec"], [_probe_timeout, _ok(b"a.txt\n"), _ok(b"5 a.txt\n5 total\n"),
+                           _ok(b"find (GNU findutils) 4.9.0\n"), _ok(b"f\t18\tREADME.md\n")])
+    assert sb.list_dir(".") == "a.txt  (5 bytes)"
+    assert getattr(sb, "_has_gnu_find", None) is None
+    assert sb.list_dir(".") == "README.md  (18 bytes)"
+    assert sb._has_gnu_find is True
+    assert fake.calls[-1][0][4:6] == ["/usr/bin/find", "."]
+
+
+def test_probe_docker_error_is_not_cached_for_grep(started):
+    sb, fake, _ = started
+    fake.script(["exec"], [_probe_timeout, _ok(b"src/app.py:2:hello\n"),
+                           _ok(b"ripgrep 13.0.0\n"), _ok(b"./src/app.py:2:hello\n")])
+    assert sb.grep("hello") == "src/app.py:2:hello"
+    assert getattr(sb, "_has_rg", None) is None
+    assert fake.calls[-1][0][4] == "/usr/bin/grep"
+    assert sb.grep("hello") == "src/app.py:2:hello"
+    assert sb._has_rg is True
+    assert fake.calls[-1][0][4] == "/usr/bin/rg"
