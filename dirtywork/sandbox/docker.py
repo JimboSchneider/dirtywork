@@ -32,6 +32,7 @@ from ..tools import (
     _result_too_big,
     describe_change,
     describe_write,
+    grep_argv,
     grep_timeout_result,
     timeout_result,
     tmp_name,
@@ -841,16 +842,8 @@ class DockerSandbox:
         if err:
             return err
         # Probe for rg once per sandbox instance
-        if self._probe("_has_rg", ["/usr/bin/rg", "--version"]):
-            cmd = ["/usr/bin/rg", "-n", "--no-heading", "-M", "300", "-e", pattern]
-            if glob:
-                cmd += ["-g", glob]
-        else:
-            cmd = ["/usr/bin/grep", "-rn", "-e", pattern]
-            if glob:
-                cmd += [f"--include={glob}"]
-        # Keep option-like paths (for example --pre=./helper) as operands.
-        cmd.extend(["--", rel])
+        has_rg = self._probe("_has_rg", ["/usr/bin/rg", "--version"])
+        cmd = grep_argv("/usr/bin/rg" if has_rg else "/usr/bin/grep", pattern, rel, glob, rg=has_rg)
         argv = docker_args.exec_argv(self.container, cmd)
         try:
             captured = self._run(argv, timeout=timeout + 10)
