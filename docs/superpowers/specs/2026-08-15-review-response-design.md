@@ -358,9 +358,10 @@ boundary) and used relative to `/work`.
   read/write pair is not atomic; the only process that could race it is a
   worker background process, which is reaped after every `bash` call (§6),
   and the race can only affect the worker's own files.
-- `list_dir`: one `sh -c LIST_SCRIPT sh ./<path>` exec — a POSIX loop over
-  `.[!.]* ..?* *` that prints NUL-terminated `kind<TAB>size<TAB>name`
-  records (`[ -d ]` and `stat -L` follow symlinks; a dangling link is kind
+- `list_dir`: one `sh -c LIST_SCRIPT sh ./<path> <MAX_LIST_ENTRIES+1>` exec — a
+  POSIX loop over `.[!.]* ..?* *` that refuses an unreadable directory
+  (`[ -r . ]`), stops after the cap plus one entry, and prints
+  NUL-terminated `kind<TAB>size<TAB>name` records (`[ -d ]` and `stat -L` follow symlinks; a dangling link is kind
   `l`, rendered as the host's `(broken symlink)`); parsed and capped on the
   host. Replaced the GNU-find branch and its `ls -1Ap` + `wc -c` fallback
   (issues #147, #148, #149).

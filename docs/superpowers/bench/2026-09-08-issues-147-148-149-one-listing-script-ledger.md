@@ -34,3 +34,16 @@ Sampler (`tools/soak_sampler.sh`): 26 samples in the run window, free memory **2
 ## Preserved receipts
 
 Slug `issues-147-148-149-replace-0908152948-48e910ea`; local receipts at `~/.dirtywork/runs/<slug>/`: `run.json` (with the accept verdict), `transcript.jsonl`, `diff.patch`, and `orchestrator/` with the exact brief, launcher, stdout JSON, stderr, sampler CSV, and the dry-run and worker diffs. Local provenance, not published artifacts.
+
+## Review fix — 2026-09-08
+
+Two P2 findings from the PR #155 review at `c7d5836`, both reproduced in `dirtywork-worker-pytest:0.13` before briefing: (1) the shipped `LIST_SCRIPT` took 6 s on 20,000 files (`find`: under 1 s) because every regular file costs a `stat` fork, so 95,000 files, within the default workspace limit, would pass the 30 s exec timeout and end the run `sandbox_error`; (2) a directory with mode 0111 listed as "(empty directory)" because `cd` succeeds but the globs cannot expand. Fix: `[ -r . ]` guard, and the loop stops after `$2` entries, passed by `list_dir` as `MAX_LIST_ENTRIES + 1`. Dry-run on the PR head: red 7 / green 179; the guarded constant lists 95,000 files in 1 s (2,001 records), returns exit 1 with "Permission denied" for the 0111 directory, and behaves the same on Alpine as user `nobody`.
+
+| Run suffix | Status | Turns | Wall seconds | Prompt tokens | Completion tokens | Completion tokens / wall second | Nudges | Verdict |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `0908155219-f3148e5b` (resume of `0908152948-48e910ea`) | unchanged | 2 | 15.5 | 22,735 | 592 | 38.19 | 1 | reject |
+| `pr-155-review-found-two-0908155352-02ff4bab` (fresh, from the PR head) | completed | 15 | 139.7 | 93,623 | 1,427 | 10.21 | 0 | accept |
+
+The resume never made a tool call: both assistant turns were tool-call markup emitted as plain text (a fake `bash`/`git status` result, then a half-formed `read_file` in pseudo-XML), the harness sent its `unchanged_finish` nudge after the first, and the second ended the run `unchanged`. Host free memory during those 15 s was 0.91–2.97 GiB with three large models resident (`qwen3-coder-next` 44.9 GB, `qwen3.6-35b-a3b` 20.4 GB, `devstral-small-2` 15.1 GB). The fresh run with the same text as a standalone brief (`--branch-from` the PR branch) completed: `read_file` 6, `edit_file` 5, `append_file` 1, `bash` 2, zero tool errors, first edit at turn 7, verify round 1 exit 0; sampler 28 samples, free memory 1.36–6.40 GiB. Its diff matched the dry-run fix except one blank line before the appended test (the worker sent one leading newline instead of two); the orchestrator added that blank line before committing and says so in the commit message.
+
+Host on the merged PR branch: `tests/test_docker_sandbox.py` **179 passed**; full suite **1,704 passed / 9 skipped / 38 deselected**, 98.9 s; `git diff --check` clean. Receipts for both runs are under `~/.dirtywork/runs/<slug>/` with `orchestrator/` copies of the feedback or brief, launcher, stdout JSON, stderr, sampler CSV and diffs.

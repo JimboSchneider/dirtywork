@@ -233,3 +233,68 @@ The worker's diff should match the dry-run patch. Any other touched file or any 
 ## Delivery
 
 Run ledger: [issues #147/#148/#149 ledger](../bench/2026-09-08-issues-147-148-149-one-listing-script-ledger.md). [PR #155](https://github.com/JimboSchneider/dirtywork/pull/155) closes issues #147, #148 and #149; pending the owner's merge go-ahead.
+
+## Review fix (PR #155 review, 2026-09-08 15:47 CDT)
+
+Two P2 findings, both reproduced before briefing: per-file `stat` made 20,000 files take 6 s (95,000 would pass the 30 s exec timeout and abort the run as `sandbox_error`), and `cd` into a mode 0111 directory succeeded while the globs could not expand, so `list_dir` returned "(empty directory)". Fix: `[ -r . ]` refuses an unreadable directory up front (an unexpanded glob is indistinguishable from an empty one), and the loop stops after `$2` entries, which `list_dir` passes as `MAX_LIST_ENTRIES + 1` so the host cap note still fires. `find -L`-style alternatives were not revisited. Dry-run on the PR head: 7 failed on baseline, 179 passed with the fix.
+
+A `dirtywork resume` with the feedback below ended `unchanged` after two turns: both assistant turns were hallucinated tool-call markup as plain text, with no real tool calls (host free memory 0.9–3.0 GiB at the time). It was rejected and the same text was re-run as a fresh brief from the PR head, which completed. Details in the ledger.
+
+### Worker brief (fresh run; the resume feedback differed only in its first sentence)
+
+```text
+PR #155 review found two problems in LIST_SCRIPT (dirtywork/sandbox/docker.py), the /bin/sh script DockerSandbox.list_dir runs. (1) It runs `stat` once per regular file before the host applies its 2,000-entry cap: 20,000 files took 6 s and 95,000 files exceed the 30 s exec timeout, which aborts the run. (2) `cd` succeeds into a directory with mode 0111 but the globs cannot expand, so the loop emits nothing and list_dir reports "(empty directory)" instead of an error. Fix: refuse an unreadable directory up front with `[ -r . ]`, and stop the loop after `$2` entries, where list_dir passes MAX_LIST_ENTRIES + 1 so the host's cap note still fires.
+Touch ONLY dirtywork/sandbox/docker.py and tests/test_docker_sandbox.py. NEVER write_file either file. Use edit_file with the exact old/new strings below (keep every leading space; each old string occurs exactly once; line numbers are given so you do not need to search) and ONE append_file for the new test..
+
+P1 edit_file on dirtywork/sandbox/docker.py (lines 181-186: the last two comment lines above LIST_SCRIPT and its first four lines; new adds two guards). P1 old:
+# Verified byte-identical on dash and BusyBox, so there is no GNU-find
+# branch and no ls/wc fallback to keep in step.
+LIST_SCRIPT = (
+    'cd -- "$1" || exit 1; '
+    'for f in .[!.]* ..?* *; do '
+    '[ -e "./$f" ] || [ -L "./$f" ] || continue; '
+P1 new:
+# Verified byte-identical on dash and BusyBox, so there is no GNU-find
+# branch and no ls/wc fallback to keep in step. Two guards from the PR #155
+# review: `[ -r . ]` refuses a directory the worker cannot read (an
+# unexpanded glob looks exactly like an empty directory), and the loop stops
+# after `$2` entries -- the host's cap plus one, so the cap note still
+# fires -- because every regular file costs a `stat` fork (20,000 entries
+# took 6 s; 95,000 would pass the exec timeout, and the host shows 2,000).
+LIST_SCRIPT = (
+    'cd -- "$1" || exit 1; '
+    '[ -r . ] || { echo "Permission denied" >&2; exit 1; }; '
+    'n=0; for f in .[!.]* ..?* *; do '
+    '[ -e "./$f" ] || [ -L "./$f" ] || continue; '
+    'n=$((n+1)); [ "$n" -gt "$2" ] && break; '
+
+P2 edit_file on dirtywork/sandbox/docker.py (line 813, inside list_dir: pass the cap plus one as $2). P2 old:
+        out, err = self._list_exec(path, ["/bin/sh", "-c", LIST_SCRIPT, "sh", rel])
+P2 new:
+        out, err = self._list_exec(path, ["/bin/sh", "-c", LIST_SCRIPT, "sh", rel, str(MAX_LIST_ENTRIES + 1)])
+
+T1 edit_file on tests/test_docker_sandbox.py (line 588, inside test_list_dir_shapes_output). T1 old:
+        "/bin/sh", "-c", docker_mod.LIST_SCRIPT, "sh", ".",
+T1 new:
+        "/bin/sh", "-c", docker_mod.LIST_SCRIPT, "sh", ".", str(docker_mod.MAX_LIST_ENTRIES + 1),
+
+T2 edit_file on tests/test_docker_sandbox.py (line 780, inside test_list_dir_passes_the_target_dir_as_the_script_operand). T2 old:
+    assert fake.calls[-1][0][-2:] == ["sh", "./src"]
+T2 new:
+    assert fake.calls[-1][0][-3:] == ["sh", "./src", str(docker_mod.MAX_LIST_ENTRIES + 1)]
+
+T3 edit_file on tests/test_docker_sandbox.py (line 3031, inside test_list_dir_treats_expression_like_paths_as_paths). T3 old:
+    assert fake.calls[-1][0][-2:] == ["sh", expected_path]
+T3 new:
+    assert fake.calls[-1][0][-3:-1] == ["sh", expected_path]
+
+NEW TEST: ONE append_file to tests/test_docker_sandbox.py (3108 lines; it ends with `    assert fake.calls[-1][0][4] == "/usr/bin/rg"`) with exactly this text, starting with two empty lines. `_fail` and `started` already exist in that module.
+
+
+def test_list_dir_unreadable_directory_is_an_error_not_an_empty_listing(started):
+    sb, fake, _ = started
+    fake.script(["exec"], _fail(b"Permission denied\n"))
+    assert sb.list_dir("locked") == "ERROR: cannot list 'locked': Permission denied\n"
+
+VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_docker_sandbox.py and expect 179 passed. Then run python3 -m pytest -q -p no:cacheprovider with timeout=300. Finish when both pass.
+```
