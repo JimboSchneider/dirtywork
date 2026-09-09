@@ -667,14 +667,16 @@ VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_capabil
 - Create: `dirtywork/firewall/schema.py`
 - Test: `tests/test_firewall_schema.py`
 
+**Review fold-in (2026-09-08):** the identity digest encodes with `surrogatepass`, so a raw tool name carrying a lone surrogate still gets a rejection identity instead of a `UnicodeEncodeError` (regression test in group 14).
+
 **Interfaces:**
 - Consumes: `FirewallInternalError`, every `bounds` constant, `ReasonClass`/`ReasonCode`/`reason_class`, `ActionKind`/`Capability`/`BASE_CAPABILITIES` from Tasks 1–3
 - Produces: `ActionRequest` (frozen; `from_tool_call(tc, *, turn, batch_index, batch_size)` classmethod, duck-typed on `tc.id/.name/.arguments/.error/.raw_arguments`); `valid_call_id(value) -> bool`; private helpers `_str_field`, `_int_field`, `_tuple_field`; `Edit`, `ReadFileArgs`, `WriteFileArgs`, `AppendFileArgs`, `EditFileArgs`, `ApplyEditsArgs`, `InsertArgs`, `ListDirArgs`, `GrepArgs`, `BashArgs`, `FinishArgs` (each with `__post_init__` bounds, raising `FirewallInternalError`); `CanonicalArgs`; `ARGS_FOR_KIND`; `Decision`, `SemanticStatus`; `CanonicalAction`; `PolicyDecision`; `IDENTITY_FIELDS`; `action_identity(action) -> str`; `rejection_identity(request, rejection) -> str` (duck-typed on `rejection.reason_code`); `FirewallEvent` with `from_action`, `from_rejection`, `to_dict`. Pinned identity of the reference action: `3fcfda5eb96c0f0052810597adeb47a8f7d16cfe7bc46a29456e660ff74af783`
 
-- [x] **Dry-run on the scratch clone** (2026-09-08, clone of `main` at `d3c7ce8`): the files below written, `tests/test_firewall_*.py` for this task 46 passed, full host suite 1771 passed (baseline 1709), `ast.parse(..., feature_version=(3, 9))` clean. The brief text is the reference: its file blocks are the dry-run files byte for byte (checked by a round-trip script).
+- [x] **Dry-run on the scratch clone** (2026-09-08, clone of `main` at `d3c7ce8`): the files below written, `tests/test_firewall_*.py` for this task 47 passed, full host suite 1772 passed (baseline 1709), `ast.parse(..., feature_version=(3, 9))` clean. The brief text is the reference: its file blocks are the dry-run files byte for byte (checked by a round-trip script).
 - [ ] **Confirm the base.** `main` must be at the head that includes Task 3's PR. No line numbers in this brief; nothing to re-check.
 - [ ] **Launch** the brief below verbatim through the invocation in the header, sampler on.
-- [ ] **Review** against the gates in the header: `diff` every produced file against the brief's block (extract with the round-trip script or by eye); `files_changed` is exactly the brief's file list; host suite 1771 passed; `git diff --check` clean; 3.9 AST check silent.
+- [ ] **Review** against the gates in the header: `diff` every produced file against the brief's block (extract with the round-trip script or by eye); `files_changed` is exactly the brief's file list; host suite 1772 passed; `git diff --check` clean; 3.9 AST check silent.
 - [ ] This is the largest brief (31 KB). If the worker's `write_file` of `schema.py` lands truncated, do not resume; rerun fresh from `main` with the same brief (see the brief-recipe note on resume hallucination).
 - [ ] **Ledger row** in `docs/superpowers/bench/2026-09-XX-issue-135-w4-ledger.md` (status, turns, wall, tokens, tok/s, nudges, verdict, tool-call counts, sampler summary, diff-vs-brief result).
 - [ ] **PR** `dirtywork/<slug>` → `main`, titled `feat(firewall): issue #135 W4 — schema: request, canonical action, decision, identity, event`, body naming the plan, the ledger and the spec; part 4 of 5 for issue #135 (does not close it). Wait for the owner's explicit merge go.
@@ -686,7 +688,7 @@ Issue #135 task W4 of 5 (Worker Action Firewall B): add dirtywork/firewall/schem
 
 Touch ONLY dirtywork/firewall/schema.py, tests/test_firewall_schema.py. Create each NEW file with ONE write_file call whose content is exactly the text between its BEGIN and END marker lines below (byte for byte; keep every blank line; the file ends with a newline after its last line; the marker lines themselves are not part of the file). No other files, no docs, no commits, nothing else.
 
-FILE dirtywork/firewall/schema.py (new, 438 lines) — write_file with exactly:
+FILE dirtywork/firewall/schema.py (new, 441 lines) — write_file with exactly:
 === BEGIN dirtywork/firewall/schema.py ===
 """ActionRequest, the canonical action shapes, and the Firewall's identity
 and event types (spec §3, §4, §8, §9)."""
@@ -1003,8 +1005,11 @@ IDENTITY_FIELDS: "dict[ActionKind, tuple]" = {
 
 
 def _digest(lines: list) -> str:
+    """`surrogatepass` keeps hashing total: a raw tool name may carry a lone
+    surrogate that strict UTF-8 refuses to encode, and a rejection must still
+    get an identity."""
     text = f"dirtywork-firewall-identity/{IDENTITY_VERSION}\n" + "".join(line + "\n" for line in lines)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _json(value: Any) -> str:
@@ -1128,7 +1133,7 @@ class FirewallEvent:
         }
 === END dirtywork/firewall/schema.py ===
 
-FILE tests/test_firewall_schema.py (new, 448 lines) — write_file with exactly:
+FILE tests/test_firewall_schema.py (new, 455 lines) — write_file with exactly:
 === BEGIN tests/test_firewall_schema.py ===
 from __future__ import annotations
 
@@ -1531,6 +1536,13 @@ def test_rejection_identity_different_reason_code_differs():
     assert rejection_identity(r, rej_unknown) != rejection_identity(r, rej_payload)
 
 
+def test_rejection_identity_survives_a_lone_surrogate_in_the_name():
+    r = _request_for("\ud800")
+    rejection = SimpleNamespace(reason_code=ReasonCode.TOOL_UNKNOWN, detail="")
+    assert len(rejection_identity(r, rejection)) == 64
+    assert FirewallEvent.from_rejection(r, rejection).stage == "request"
+
+
 def test_rejection_identity_raw_name_absent_from_hash_and_to_dict():
     sentinel = "sentinel-tool-name-zzyzx"
     r = _request_for(sentinel)
@@ -1580,7 +1592,7 @@ def test_valid_call_id_rejects_empty_oversized_and_whitespace():
     assert not valid_call_id(None)
 === END tests/test_firewall_schema.py ===
 
-VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_schema.py and expect 46 passed. Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed. Finish when both pass.
+VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_schema.py and expect 47 passed. Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed. Finish when both pass.
 ```
 
 ---
@@ -1591,14 +1603,16 @@ VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_schema.
 - Modify: `dirtywork/firewall/__init__.py:1` (replace the one-line docstring file with the re-exports and `__all__`)
 - Test: `tests/test_firewall_request.py`
 
+**Review fold-in (2026-09-08):** the walker checks each key together with its value, in order, so first-failure order holds across keys and values; key strings are bounded by `MAX_STRING_CHARS` like any other string (two regression tests in groups 6 and 7).
+
 **Interfaces:**
 - Consumes: `ActionRequest`, `valid_call_id`, `_str_field` from Task 4; `ActionKind`; `ReasonCode`; bounds
 - Produces: `Rejection(reason_code: ReasonCode, detail: str)` (frozen, validated); `check_request(request: ActionRequest) -> Rejection | None` implementing spec §6.2 checks 1–8 in order; `dirtywork.firewall.__all__` equal to the spec §2 literal with every name resolving. This closes issue #135.
 
-- [x] **Dry-run on the scratch clone** (2026-09-08, clone of `main` at `d3c7ce8`): the files below written, `tests/test_firewall_*.py` for this task 36 passed, full host suite 1807 passed (baseline 1709), `ast.parse(..., feature_version=(3, 9))` clean. The brief text is the reference: its file blocks are the dry-run files byte for byte (checked by a round-trip script).
+- [x] **Dry-run on the scratch clone** (2026-09-08, clone of `main` at `d3c7ce8`): the files below written, `tests/test_firewall_*.py` for this task 38 passed, full host suite 1810 passed (baseline 1709), `ast.parse(..., feature_version=(3, 9))` clean. The brief text is the reference: its file blocks are the dry-run files byte for byte (checked by a round-trip script).
 - [ ] **Confirm the base.** `main` must be at the head that includes Task 4's PR. Re-check that `dirtywork/firewall/__init__.py` is still the one-line docstring quoted as the edit_file old string.
 - [ ] **Launch** the brief below verbatim through the invocation in the header, sampler on.
-- [ ] **Review** against the gates in the header: `diff` every produced file against the brief's block (extract with the round-trip script or by eye); `files_changed` is exactly the brief's file list; host suite 1807 passed; `git diff --check` clean; 3.9 AST check silent.
+- [ ] **Review** against the gates in the header: `diff` every produced file against the brief's block (extract with the round-trip script or by eye); `files_changed` is exactly the brief's file list; host suite 1810 passed; `git diff --check` clean; 3.9 AST check silent.
 - [ ] The isolation test spawns a subprocess with only `PYTHONPATH` and `PATH` in its environment; it passed on the host dry-run and needs no Docker.
 - [ ] **Ledger row** in `docs/superpowers/bench/2026-09-XX-issue-135-w5-ledger.md` (status, turns, wall, tokens, tok/s, nudges, verdict, tool-call counts, sampler summary, diff-vs-brief result).
 - [ ] **PR** `dirtywork/<slug>` → `main`, titled `feat(firewall): issue #135 W5 — boundary validator and package re-exports`, body naming the plan, the ledger and the spec; `Closes #135`. Wait for the owner's explicit merge go.
@@ -1663,7 +1677,7 @@ __all__ = [
 ]
 
 
-FILE dirtywork/firewall/request.py (new, 149 lines) — write_file with exactly:
+FILE dirtywork/firewall/request.py (new, 156 lines) — write_file with exactly:
 === BEGIN dirtywork/firewall/request.py ===
 """The tool-agnostic boundary validator: Rejection and check_request (spec §6)."""
 from __future__ import annotations
@@ -1726,26 +1740,33 @@ def _check_scalar(value) -> Optional[ReasonCode]:
     return ReasonCode.ARGUMENT_TYPE_INVALID
 
 
+def _check_key(key) -> Optional[ReasonCode]:
+    if not isinstance(key, str):
+        return ReasonCode.ARGUMENT_TYPE_INVALID
+    return _check_scalar(key)
+
+
 def _walk(node, depth: int) -> Optional[ReasonCode]:
     """Depth-first, key-order structural walk of one dict or list. `depth` is
     the container's own depth (the top-level `arguments` dict is depth 1).
     Depth and size are checked on entering a container, before its children
     are visited, so an oversized or too-deep structure is rejected without
-    being traversed."""
+    being traversed. Each key is checked together with its value, in order,
+    so the first failure reported is the first one met."""
     if depth > MAX_NESTING_DEPTH:
         return ReasonCode.NESTING_TOO_DEEP
     if isinstance(node, dict):
         if len(node) > (MAX_ARGUMENT_KEYS if depth == 1 else MAX_NESTED_KEYS):
             return ReasonCode.COLLECTION_TOO_LARGE
-        if not all(isinstance(key, str) for key in node):
-            return ReasonCode.ARGUMENT_TYPE_INVALID
-        children = node.values()
+        items = node.items()
     else:
         if len(node) > MAX_COLLECTION_ITEMS:
             return ReasonCode.COLLECTION_TOO_LARGE
-        children = node
-    for child in children:
-        rc = _walk(child, depth + 1) if isinstance(child, (dict, list)) else _check_scalar(child)
+        items = ((None, item) for item in node)
+    for key, child in items:
+        rc = None if key is None else _check_key(key)
+        if rc is None:
+            rc = _walk(child, depth + 1) if isinstance(child, (dict, list)) else _check_scalar(child)
         if rc is not None:
             return rc
     return None
@@ -1816,7 +1837,7 @@ def check_request(request: ActionRequest) -> Optional[Rejection]:
     return None
 === END dirtywork/firewall/request.py ===
 
-FILE tests/test_firewall_request.py (new, 279 lines) — write_file with exactly:
+FILE tests/test_firewall_request.py (new, 289 lines) — write_file with exactly:
 === BEGIN tests/test_firewall_request.py ===
 from __future__ import annotations
 
@@ -1977,6 +1998,11 @@ def test_string_too_long():
     assert r.reason_code is ReasonCode.STRING_TOO_LONG
 
 
+def test_key_too_long():
+    r = check_request(_request(arguments={"k" * (bounds.MAX_STRING_CHARS + 1): "a"}))
+    assert r.reason_code is ReasonCode.STRING_TOO_LONG
+
+
 def test_int_out_of_range():
     r = check_request(_request(arguments={"offset": 2**31}))
     assert r.reason_code is ReasonCode.NUMBER_OUT_OF_RANGE
@@ -2021,6 +2047,11 @@ def test_unknown_tool_and_oversized_reports_tool_unknown():
         )
     )
     assert r.reason_code is ReasonCode.TOOL_UNKNOWN
+
+
+def test_bad_value_before_later_bad_key_reports_the_value():
+    r = check_request(_request(arguments={"first": float("inf"), 1: "a"}))
+    assert r.reason_code is ReasonCode.NUMBER_OUT_OF_RANGE
 
 
 def test_nonobject_and_oversized_reports_payload_too_large():
@@ -2099,7 +2130,7 @@ def test_package_all_matches_spec_and_every_name_resolves():
         assert hasattr(fw, name), f"{name} does not resolve on the package"
 === END tests/test_firewall_request.py ===
 
-VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_request.py and expect 36 passed. Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed. Finish when both pass.
+VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_request.py and expect 38 passed. Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed. Finish when both pass.
 ```
 
 ---
