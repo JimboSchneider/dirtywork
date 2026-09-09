@@ -17,7 +17,7 @@ In scope:
 - the immutable `CanonicalAction` and its per-tool argument shapes (section 4);
 - the closed `ActionKind`, `Capability`, `Decision`, `ReasonCode`, `ReasonClass` and `SemanticStatus` vocabularies (sections 4, 5, 7);
 - the checked-in capability table mapping the complete #134 inventory (section 5);
-- `PolicyDecision` and the versioned `FirewallEvent` skeleton with `action_identity` (sections 8, 9);
+- `PolicyDecision` and the versioned `FirewallEvent` skeleton, covering both canonicalized actions and request-stage rejections, with `action_identity` and `rejection_identity` (sections 8, 9);
 - the failure and versioning contracts (sections 6, 10);
 - tests that pin every closed vocabulary (section 11).
 
@@ -27,20 +27,20 @@ Out of scope, with the owning issue: tool-specific coercion, path normalization 
 
 ```text
 dirtywork/firewall/
-  __init__.py        re-exports exactly the __all__ list below; nothing else
+  __init__.py        a docstring only until the final brief, which adds the re-exports below
   errors.py          FirewallInternalError; imports nothing from the package
   bounds.py          integer constants only (section 6.1); imports nothing from the package
   reasons.py         ReasonClass, ReasonCode, reason_class()
   capabilities.py    ActionKind, Capability, BASE_CAPABILITIES, LEGACY_RULES, FILE_TARGET_RULES
   schema.py          ActionRequest, Edit and the ten per-kind args classes, CanonicalArgs,
                      CanonicalAction, Decision, SemanticStatus, PolicyDecision, FirewallEvent,
-                     action_identity()
+                     action_identity(), rejection_identity()
   request.py         Rejection, check_request()
 ```
 
 Import order is strictly downward: `errors` and `bounds` import nothing; `reasons` imports nothing; `capabilities` imports `reasons`; `schema` imports `errors`, `bounds`, `reasons`, `capabilities`; `request` imports all of them. No file imports a later one, so each brief's tests pass before the next file exists.
 
-`__init__.py` defines this literal and nothing else:
+Importing any submodule executes `__init__.py` first, so eager re-exports would break every brief before the last one. Therefore `__init__.py` holds only a docstring until the `request.py` brief, which replaces it with the explicit imports and this `__all__`. Tests always import from submodules (`from dirtywork.firewall.bounds import ...`), never from the package root, so they pass at every stage:
 
 ```python
 __all__ = [
@@ -51,12 +51,14 @@ __all__ = [
     "ActionRequest", "Edit", "ReadFileArgs", "WriteFileArgs", "AppendFileArgs", "EditFileArgs",
     "ApplyEditsArgs", "InsertArgs", "ListDirArgs", "GrepArgs", "BashArgs", "FinishArgs",
     "CanonicalArgs", "CanonicalAction", "Decision", "SemanticStatus", "PolicyDecision",
-    "FirewallEvent", "action_identity",
+    "FirewallEvent", "action_identity", "rejection_identity",
     "Rejection", "check_request",
 ]
 ```
 
 Bound constants other than the two versions are imported from `dirtywork.firewall.bounds` directly.
+
+**Package registration.** `pyproject.toml` enumerates packages explicitly (`[tool.setuptools] packages = [...]`), so the first brief adds `"dirtywork.firewall"` to that list. Without it the source tree would pass tests while the wheel shipped no Firewall. Section 11 pins the list; the plan's host checklist also builds the wheel and imports `dirtywork.firewall` from it before the PR opens.
 
 Rules for the package:
 
@@ -65,7 +67,7 @@ Rules for the package:
 - `dirtywork/firewall/` may import `dirtywork.providers.ToolCall` (the boundary input) and nothing else from `dirtywork/`. Tests, not the package, cross-check constants against `builtin_tools` and `guardrails` (section 11) so the Firewall never depends on executor modules.
 - No module in `dirtywork/` outside the package imports it in this issue.
 
-`errors.py` and `bounds.py` share one worker brief; every other file is one brief; `schema.py` may be two.
+`errors.py`, `bounds.py` and the `pyproject.toml` line share the first brief; every other file is one brief; `schema.py` may be two. The `__init__.py` re-exports ride with `request.py`.
 
 ## 3. `ActionRequest`: the boundary object
 
@@ -125,6 +127,14 @@ Each kind has exactly one frozen dataclass. Field names match the advertised par
 
 `CanonicalArgs = Union[...]` of the ten classes. There is no generic `dict`-backed variant; a tool with no shape here cannot be canonicalized, which is the point.
 
+Annotations enforce nothing at runtime, so every args class has a `__post_init__` that establishes the bounded, immutable contract and raises `FirewallInternalError` otherwise:
+
+- every `str` field is a `str` (not a subclass surprise like `bytes`, not `None` unless the table says `| None`) and within its bound: `path` ≤ `MAX_PATH_CHARS`, `command` ≤ `MAX_COMMAND_CHARS`, `pattern` ≤ `MAX_PATTERN_CHARS`, `glob` ≤ `MAX_GLOB_CHARS`, `summary` ≤ `MAX_SUMMARY_CHARS`, all other strings ≤ `MAX_STRING_CHARS`;
+- every `int` field is an `int` and not a `bool`, and within its domain: `offset >= 0`, `limit >= 1`, `timeout` in `1..MAX_BASH_TIMEOUT`, all within `[MIN_INT, MAX_INT]`;
+- `edits` is a `tuple` (a `list` is rejected, so a frozen dataclass cannot smuggle a mutable container), of length `1..MAX_COLLECTION_ITEMS`, every item an `Edit`, and `Edit.old` nonempty.
+
+One private helper per check (`_str_field`, `_int_field`, `_tuple_field`) in `schema.py` keeps the ten classes to one line per field. These constructors are the last line, not the worker-facing one: #136 must reject a worker value with the precise reason code (`string_too_long`, `number_out_of_range`, `argument_type_invalid`) before constructing, so a constructor raise can only mean a harness bug and it still fails closed.
+
 ### 4.3 `CanonicalAction`
 
 ```python
@@ -141,8 +151,10 @@ class CanonicalAction:
 
 Invariants enforced in `__post_init__` (raise `FirewallInternalError`, never silently coerce):
 
+- `kind` is an `ActionKind` member and `semantic_status` a `SemanticStatus` member (identity checks, not value equality, so a look-alike string fails);
 - `type(args)` is the class the table assigns to `kind`;
-- `capabilities` is a nonempty `frozenset` whose members are `Capability` instances;
+- `call_id` satisfies check 2 of section 6.2 and `turn` is an `int` in `1..MAX_INT`;
+- `capabilities` is a nonempty `frozenset` whose members are all `Capability` members;
 - `BASE_CAPABILITIES[kind] <= capabilities` (an analyzer may add authority, never remove the base);
 - `schema_version == FIREWALL_SCHEMA_VERSION`;
 - every string field is within its bound (belt and braces: `check_request` bounds raw input, this bounds the canonical form).
@@ -267,11 +279,12 @@ Tool-agnostic and structural. It knows the closed tool set and the bounds, and n
    - a key that is not a `str` → `argument_type_invalid`;
    - a `str` longer than `MAX_STRING_CHARS` → `string_too_long`;
    - an `int` outside `[MIN_INT, MAX_INT]` or a `float` that is not finite → `number_out_of_range` (`bool` passes here; parameter typing is #136's);
+   - `None` passes: JSON `null` is a valid value today (`grep(glob=null)` succeeds and has a regression test), and null-valued extras are dropped by #136; field-level nullability is #136's;
    - any other type (`bytes`, custom objects) → `argument_type_invalid`.
 
 Size checks on a container (key count, item count) run before its children are walked, so an oversized structure is rejected without traversing it.
 
-Not checked here, by design: per-parameter length limits (`MAX_PATH_CHARS` etc.), required parameters, parameter types, unknown top-level keys, duplicate ids within a batch. Those need the tool's shape or the whole batch and belong to #136 (`argument_missing`, `argument_type_invalid`, `argument_unexpected`, `string_too_long` per field, `call_id_duplicate`). The codes are defined now so #136 adds no vocabulary.
+Not checked here, by design: per-parameter limits and domains (`MAX_PATH_CHARS`, `offset >= 0`, nullability), required parameters, parameter types, unknown top-level keys, duplicate ids within a batch. Those need the tool's shape or the whole batch and belong to #136, which rejects with `argument_missing`, `argument_type_invalid`, `argument_unexpected`, `string_too_long`, `number_out_of_range` or `call_id_duplicate` before it constructs an args class (section 4.2). The codes are defined now so #136 adds no vocabulary.
 
 `Rejection` is frozen: `reason_code: ReasonCode`, `detail: str` (`<= MAX_DETAIL_CHARS`, harness-composed, names a field or a limit, never quotes worker text). A `Rejection` becomes a `PolicyDecision(DENY, reason_code)` in #137; in this issue it is the validator's return value.
 
@@ -349,25 +362,47 @@ field "=" json(value) "\n"   for each identity field of that kind, in the order 
 
 Why targets and not contents: identity exists for exact-equivalent denial tracking (Supervisor design §11). A denied write to `.git/config` is the same denial whatever the content; a `bash` denial is keyed on the full canonical command, which is intentionally narrow (differently flagged commands do not compare equal). Two kinds with the same path hash differently because `kind` is serialized first. `capabilities` and `reason_code` are not in the hash; the Supervisor already keys on `reason_code + capability_set + action_identity`.
 
+**Rejection identity.** A rejected request has no `CanonicalAction`, but the Supervisor still needs an exact-equivalent key for repeated denials of the same malformed or unknown call. `rejection_identity(request, rejection) -> str` hashes, with the same prefix and `IDENTITY_VERSION`:
+
+```text
+"rejection" "\n"
+reason_code "\n"
+tool_name "\n"     the bounded raw name when it passed check 3, else ""
+```
+
+So a model that keeps calling `read_files` produces one identity, and one that keeps sending a 6 MiB `write_file` produces another. The raw name is hashed, never emitted.
+
 The hash is unsalted and gives no confidentiality: a consumer who can guess a command can confirm it from the identity. It exists for equality and dedup, not to hide its inputs. Contents are excluded for narrowness, not for secrecy.
 
 ### 9.2 `FirewallEvent`
+
+One event shape covers both outcomes, because a DENY at the request stage has no kind, args, capabilities or semantic status and must not invent them:
 
 ```python
 @dataclass(frozen=True)
 class FirewallEvent:
     schema_version: int              # FIREWALL_SCHEMA_VERSION
+    stage: str                       # "request" (rejected before canonicalization) | "action"
     turn: int
-    call_id: str
-    kind: ActionKind
-    capabilities: tuple[str, ...]    # sorted Capability values
+    call_id: str                     # "" when the rejection is call_id_invalid
+    kind: ActionKind | None          # None at the request stage
+    capabilities: tuple[str, ...]    # sorted Capability values; () at the request stage
     decision: Decision
-    reason_code: ReasonCode | None
-    action_identity: str             # 64 hex chars
-    semantic_status: SemanticStatus
+    reason_code: ReasonCode | None   # None iff ALLOW
+    reason_class: ReasonClass | None # reason_class(reason_code); None iff ALLOW
+    action_identity: str             # 64 hex chars: action_identity() or rejection_identity()
+    semantic_status: SemanticStatus | None   # None at the request stage
 ```
 
-`FirewallEvent.from_(action, policy)` is a `@classmethod` that derives it; `to_dict()` emits plain strings and ints under the field names above, suitable for `transcript.write("firewall", **event.to_dict())` in #141. No raw arguments, no `args` dict, no detail prose: the Supervisor consumes only the five fields its design §4.1 lists, and they are all here. Where and how often events are written (no per-ALLOW spam, parent design §14) is #141's decision.
+Two `@classmethod` constructors, and `__post_init__` enforces the stage rules:
+
+- `FirewallEvent.from_action(action, policy)`: `stage="action"`; `kind`, `capabilities`, `semantic_status` copied from the action; `decision`/`reason_code` from the policy; `action_identity = action_identity(action)`.
+- `FirewallEvent.from_rejection(request, rejection)`: `stage="request"`; `decision=DENY`; `reason_code` from the rejection; `kind=None`, `capabilities=()`, `semantic_status=None`; `action_identity = rejection_identity(request, rejection)`; `call_id` is the request's when it passed check 2, else `""`. This constructor also serves an internal error caught before an action exists (`reason_code=firewall_internal_error`); an internal error after an action exists goes through `from_action` with a `DENY` policy.
+- Invariants: `stage="request"` ⇒ `decision is DENY`, `kind is None`, `capabilities == ()`, `semantic_status is None`; `stage="action"` ⇒ `kind`, `semantic_status` set and `capabilities` nonempty; `reason_code is None` ⇔ `decision is ALLOW` ⇔ `reason_class is None`.
+
+**Supervisor counters.** Both stages are DENY evidence: a request-stage rejection counts toward total denial volume and toward exact-equivalent tracking under `reason_code + capability_set + action_identity` with an empty capability set. Request-stage events contribute nothing to the `semantic_unknown` aggregate. Whether the Supervisor weights the `malformed`/`bounds` classes differently from `authority` is issue #126's decision; `reason_class` is on the event so it can, without re-deriving anything.
+
+`to_dict()` emits the field names above with enum members as their string values, `None` as JSON `null`, and `capabilities` as a list of strings, suitable for `transcript.write("firewall", **event.to_dict())` in #141. No raw arguments, no `args` dict, no detail prose: the Supervisor consumes only the five fields its design §4.1 lists, and they are all here. Where and how often events are written (no per-ALLOW spam, parent design §14) is #141's decision.
 
 ## 10. Versioning and compatibility
 
@@ -376,6 +411,7 @@ class FirewallEvent:
 - `ReasonCode` values are append-only. A code that stops being emitted stays a member, marked deprecated in a comment, so stored evidence still decodes.
 - Existing run artifacts (`schema_version: 2` on `run.json` and the transcript) are unaffected: this issue writes nothing to them. When #141 adds a `firewall` event, existing readers ignore unknown events by convention (inventory §5.7).
 - `guardrail_block` events, their `reason` prose and rule order are untouched.
+- `pyproject.toml` gains `"dirtywork.firewall"` in the explicit package list; no other packaging change.
 
 ## 11. Tests
 
@@ -386,15 +422,17 @@ All under `tests/test_firewall_*.py`, host-runnable with the standard suite, no 
 3. **Lockstep with guardrails.** `len(LEGACY_RULES) == len(guardrails._RULES)`; the capability and reason code at each index equal the table in 5.3, and the eight reason codes are distinct.
 4. **Constant pins.** `MAX_COLLECTION_ITEMS == builtin_tools.MAX_APPLY_EDITS` and `MAX_BASH_TIMEOUT == BASH_SPEC.caps.timeout_max` (same quantity, must not drift); every other constant in 6.1 equals its literal from the table.
 5. **Totality.** Every `ActionKind` has a `BASE_CAPABILITIES` entry and an args class; every `ReasonCode` has a `reason_class`; every `Capability` appears in at least one of `BASE_CAPABILITIES`, `LEGACY_RULES`, `FILE_TARGET_RULES`, or the documented `NETWORK` reservation.
-6. **`check_request` malformed input.** One case per code it can return, in order: `batch_size=33`; empty/oversized/whitespace-containing id; empty/oversized name; unknown name (including a marker-polluted name, which #136 will recover but #135 rejects); `parse_error` set; `arguments=None`; `raw_chars` over; `arguments` a list/str/int; depth 5; 33 top-level keys; a nested object with 9 keys; a 101-item list; a non-str key; a 5 MiB + 1 string; `2**31` int; `float("inf")`; `bytes` value. Plus a well-formed `apply_edits` payload with 100 edits at depth 3 returns `None`.
+6. **`check_request` malformed input.** (Also: `{"pattern": "x", "glob": None}` and `{"path": "a", "extra": None}` return `None`.) One case per code it can return, in order: `batch_size=33`; empty/oversized/whitespace-containing id; empty/oversized name; unknown name (including a marker-polluted name, which #136 will recover but #135 rejects); `parse_error` set; `arguments=None`; `raw_chars` over; `arguments` a list/str/int; depth 5; 33 top-level keys; a nested object with 9 keys; a 101-item list; a non-str key; a 5 MiB + 1 string; `2**31` int; `float("inf")`; `bytes` value. Plus a well-formed `apply_edits` payload with 100 edits at depth 3 returns `None`.
 7. **First-failure order.** A request that is both unknown-tool and oversized reports `tool_unknown`; one that is both non-object and oversized reports `payload_too_large`.
 8. **Rejection detail** never contains worker-supplied text: build a request whose key, value and tool name are a sentinel string and assert the sentinel is absent from `detail`, and `len(detail) <= MAX_DETAIL_CHARS`.
 9. **`PolicyDecision` invariants.** `ALLOW` with any reason code raises; `DENY` with `None` raises; `DENY` with a bare string raises; `FirewallInternalError` is not a `ValueError`.
 10. **`semantic_unknown` cannot deny.** `PolicyDecision(DENY, reason_code=...)` accepts only `ReasonCode` members and `"semantic_unknown"` is not one; `CanonicalAction(semantic_status=UNKNOWN)` constructs fine and carries no reason code.
-11. **`CanonicalAction` invariants.** Wrong args class for kind raises; empty capabilities raises; capabilities missing the base raises; `schema_version=2` raises.
+11. **Constructor invariants.** `CanonicalAction`: wrong args class for kind raises; a string `"bash"` for `kind` raises; empty capabilities raises; capabilities missing the base raises; a `str` inside `capabilities` raises; `schema_version=2` raises; `turn=0` raises. Args classes: `ApplyEditsArgs(edits=[Edit(...)])` (a list) raises; an empty tuple raises; 101 edits raises; `Edit(old="")` raises; `ReadFileArgs(offset=-1)` raises; `BashArgs(timeout=601)` and `timeout=True` raise; `path` of `MAX_PATH_CHARS + 1` raises; `GrepArgs(glob=None)` constructs; `bytes` for any `str` field raises. Every raise is `FirewallInternalError`.
 12. **Identity.** Same kind and path with different content hash equal; `insert_before` vs `insert_after` same path differ; `bash` commands differing by one flag differ; `read_file` with different `offset` hash equal; the hash of a fixed action equals a literal 64-hex string (pins `IDENTITY_VERSION` and serialization), where the plan computes that literal once on the host from the reviewed implementation and pastes it into the brief rather than asking the worker to derive it; changing `IDENTITY_VERSION` changes it.
-13. **`FirewallEvent`.** `to_dict()` keys equal the literal field list; values are `str`/`int` only; `capabilities` sorted; no key named `args`, `arguments`, `content`, `command` or `path`.
-14. **Isolation.** `import dirtywork.firewall` succeeds with `sys.modules` free of `dirtywork.tools`, `dirtywork.builtin_tools`, `dirtywork.guardrails`, `dirtywork.runner` and `dirtywork.sandbox` (checked in a subprocess).
+13. **`FirewallEvent`.** `to_dict()` keys equal the literal field list; each value is a `str`, an `int`, `None`, or (for `capabilities`) a list of `str`; `capabilities` sorted; no key named `args`, `arguments`, `content`, `command` or `path`. `from_action` on an ALLOW policy gives `reason_code`, `reason_class` `None`; `from_rejection` for `tool_unknown` gives `stage="request"`, `kind=None`, `capabilities=[]`, `semantic_status=None`, and a `call_id_invalid` rejection gives `call_id=""`. Building a request-stage event with `decision=ALLOW`, or an action-stage event with `kind=None`, raises.
+14. **Rejection identity.** Two `tool_unknown` rejections with the same raw name hash equal, with different names differ, and a `payload_too_large` rejection of the same name differs from both; the raw name is absent from the hex string and from `to_dict()`.
+15. **Package registration.** Parse `pyproject.toml` (stdlib `tomllib` on 3.11+, else a line scan of the `packages = [...]` entry) and assert `"dirtywork.firewall"` is listed. The plan's host checklist additionally builds a wheel and runs `python -c "import dirtywork.firewall"` against it in a clean venv.
+16. **Isolation.** `import dirtywork.firewall` succeeds with `sys.modules` free of `dirtywork.tools`, `dirtywork.builtin_tools`, `dirtywork.guardrails`, `dirtywork.runner` and `dirtywork.sandbox` (checked in a subprocess).
 
 ## 12. Decisions taken that Jim may want to override
 
@@ -404,5 +442,5 @@ All under `tests/test_firewall_*.py`, host-runnable with the standard suite, no 
 4. **`HOST_FS` covers rules 4, 7 and 8 with three reason codes.** One capability for "outside the worktree", three codes so parity stays one-to-one with the ordered rules.
 5. **`NETWORK` is reserved but unset.** Keeps the vocabulary complete against `Caps.network`; #137 decides the analyzer.
 6. **`check_request` is tool-agnostic.** Per-field limits and typing wait for #136 where the tool shape is known, so #135 never grows a per-tool switch that #136 would rewrite.
-7. **`MAX_COMMAND_CHARS` is 32,768, a new number.** Nothing bounds command input today; the value is sized so a large heredoc passes, because a false denial here would be worker-visible.
+7. **`MAX_COMMAND_CHARS` is 32,768, a new number, provisional.** Nothing bounds command input today. Recorded transcripts cap raw arguments at 2,000 characters, so no existing run can show how long real worker commands get; the number is chosen to be far above any heredoc seen in review, and issue #142's replay harness must record the command-length distribution before it is treated as final.
 8. **Custom tools are denied as `tool_unknown` until a registration API exists.** The CLI ships no loader, so this changes nothing for users; embedders get an explicit later issue.
