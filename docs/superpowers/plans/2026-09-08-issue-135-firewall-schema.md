@@ -667,7 +667,7 @@ VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_capabil
 - Create: `dirtywork/firewall/schema.py`
 - Test: `tests/test_firewall_schema.py`
 
-**Review fold-in (2026-09-08):** the identity digest encodes with `surrogatepass`, so a raw tool name carrying a lone surrogate still gets a rejection identity instead of a `UnicodeEncodeError` (regression test in group 14).
+**Review fold-in (2026-09-08):** the identity digest encodes with `surrogatepass`, so a raw tool name carrying a lone surrogate still gets a rejection identity instead of a `UnicodeEncodeError` (regression test in group 14). `rejection_identity` is documented as a coarse audit key: request-stage events count toward total denial volume only, never toward exact-equivalent tracking (spec §9.2).
 
 **Interfaces:**
 - Consumes: `FirewallInternalError`, every `bounds` constant, `ReasonClass`/`ReasonCode`/`reason_class`, `ActionKind`/`Capability`/`BASE_CAPABILITIES` from Tasks 1–3
@@ -688,7 +688,7 @@ Issue #135 task W4 of 5 (Worker Action Firewall B): add dirtywork/firewall/schem
 
 Touch ONLY dirtywork/firewall/schema.py, tests/test_firewall_schema.py. Create each NEW file with ONE write_file call whose content is exactly the text between its BEGIN and END marker lines below (byte for byte; keep every blank line; the file ends with a newline after its last line; the marker lines themselves are not part of the file). No other files, no docs, no commits, nothing else.
 
-FILE dirtywork/firewall/schema.py (new, 441 lines) — write_file with exactly:
+FILE dirtywork/firewall/schema.py (new, 447 lines) — write_file with exactly:
 === BEGIN dirtywork/firewall/schema.py ===
 """ActionRequest, the canonical action shapes, and the Firewall's identity
 and event types (spec §3, §4, §8, §9)."""
@@ -1028,6 +1028,12 @@ def action_identity(action: CanonicalAction) -> str:
 
 def rejection_identity(request: ActionRequest, rejection: Any) -> str:
     """SHA-256 hex identity of a request-stage rejection (spec §9.1).
+
+    Coarse by design: only the reason code and the raw tool name are hashed,
+    because a rejected request has no canonical target and parsing its
+    arguments for one would be a second, untrusted normalization. It is an
+    audit key, not an exact-equivalent denial key; request-stage events
+    count toward total denial volume only (spec §9.2).
 
     `rejection` is duck-typed (only `.reason_code` is used) because
     `Rejection` lives in request.py, which imports this module.
@@ -1603,16 +1609,16 @@ VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_schema.
 - Modify: `dirtywork/firewall/__init__.py:1` (replace the one-line docstring file with the re-exports and `__all__`)
 - Test: `tests/test_firewall_request.py`
 
-**Review fold-in (2026-09-08):** the walker checks each key together with its value, in order, so first-failure order holds across keys and values; key strings are bounded by `MAX_STRING_CHARS` like any other string (two regression tests in groups 6 and 7).
+**Review fold-in (2026-09-08):** the walker checks each key together with its value, in order, so first-failure order holds across keys and values; key strings are bounded by `MAX_STRING_CHARS` like any other string (two regression tests in groups 6 and 7). Lists and dicts are walked by separate loops so no sentinel key can be confused with a real one; a `None` dict key, top-level or nested, is `argument_type_invalid` (two more tests in group 6).
 
 **Interfaces:**
 - Consumes: `ActionRequest`, `valid_call_id`, `_str_field` from Task 4; `ActionKind`; `ReasonCode`; bounds
 - Produces: `Rejection(reason_code: ReasonCode, detail: str)` (frozen, validated); `check_request(request: ActionRequest) -> Rejection | None` implementing spec §6.2 checks 1–8 in order; `dirtywork.firewall.__all__` equal to the spec §2 literal with every name resolving. This closes issue #135.
 
-- [x] **Dry-run on the scratch clone** (2026-09-08, clone of `main` at `d3c7ce8`): the files below written, `tests/test_firewall_*.py` for this task 38 passed, full host suite 1810 passed (baseline 1709), `ast.parse(..., feature_version=(3, 9))` clean. The brief text is the reference: its file blocks are the dry-run files byte for byte (checked by a round-trip script).
+- [x] **Dry-run on the scratch clone** (2026-09-08, clone of `main` at `d3c7ce8`): the files below written, `tests/test_firewall_*.py` for this task 40 passed, full host suite 1812 passed (baseline 1709), `ast.parse(..., feature_version=(3, 9))` clean. The brief text is the reference: its file blocks are the dry-run files byte for byte (checked by a round-trip script).
 - [ ] **Confirm the base.** `main` must be at the head that includes Task 4's PR. Re-check that `dirtywork/firewall/__init__.py` is still the one-line docstring quoted as the edit_file old string.
 - [ ] **Launch** the brief below verbatim through the invocation in the header, sampler on.
-- [ ] **Review** against the gates in the header: `diff` every produced file against the brief's block (extract with the round-trip script or by eye); `files_changed` is exactly the brief's file list; host suite 1810 passed; `git diff --check` clean; 3.9 AST check silent.
+- [ ] **Review** against the gates in the header: `diff` every produced file against the brief's block (extract with the round-trip script or by eye); `files_changed` is exactly the brief's file list; host suite 1812 passed; `git diff --check` clean; 3.9 AST check silent.
 - [ ] The isolation test spawns a subprocess with only `PYTHONPATH` and `PATH` in its environment; it passed on the host dry-run and needs no Docker.
 - [ ] **Ledger row** in `docs/superpowers/bench/2026-09-XX-issue-135-w5-ledger.md` (status, turns, wall, tokens, tok/s, nudges, verdict, tool-call counts, sampler summary, diff-vs-brief result).
 - [ ] **PR** `dirtywork/<slug>` → `main`, titled `feat(firewall): issue #135 W5 — boundary validator and package re-exports`, body naming the plan, the ledger and the spec; `Closes #135`. Wait for the owner's explicit merge go.
@@ -1677,7 +1683,7 @@ __all__ = [
 ]
 
 
-FILE dirtywork/firewall/request.py (new, 156 lines) — write_file with exactly:
+FILE dirtywork/firewall/request.py (new, 162 lines) — write_file with exactly:
 === BEGIN dirtywork/firewall/request.py ===
 """The tool-agnostic boundary validator: Rejection and check_request (spec §6)."""
 from __future__ import annotations
@@ -1758,18 +1764,24 @@ def _walk(node, depth: int) -> Optional[ReasonCode]:
     if isinstance(node, dict):
         if len(node) > (MAX_ARGUMENT_KEYS if depth == 1 else MAX_NESTED_KEYS):
             return ReasonCode.COLLECTION_TOO_LARGE
-        items = node.items()
-    else:
-        if len(node) > MAX_COLLECTION_ITEMS:
-            return ReasonCode.COLLECTION_TOO_LARGE
-        items = ((None, item) for item in node)
-    for key, child in items:
-        rc = None if key is None else _check_key(key)
-        if rc is None:
-            rc = _walk(child, depth + 1) if isinstance(child, (dict, list)) else _check_scalar(child)
+        for key, child in node.items():
+            rc = _check_key(key)
+            if rc is None:
+                rc = _child(child, depth)
+            if rc is not None:
+                return rc
+        return None
+    if len(node) > MAX_COLLECTION_ITEMS:
+        return ReasonCode.COLLECTION_TOO_LARGE
+    for child in node:
+        rc = _child(child, depth)
         if rc is not None:
             return rc
     return None
+
+
+def _child(child, depth: int) -> Optional[ReasonCode]:
+    return _walk(child, depth + 1) if isinstance(child, (dict, list)) else _check_scalar(child)
 
 
 _DETAIL_BY_CODE = {
@@ -1837,7 +1849,7 @@ def check_request(request: ActionRequest) -> Optional[Rejection]:
     return None
 === END dirtywork/firewall/request.py ===
 
-FILE tests/test_firewall_request.py (new, 289 lines) — write_file with exactly:
+FILE tests/test_firewall_request.py (new, 299 lines) — write_file with exactly:
 === BEGIN tests/test_firewall_request.py ===
 from __future__ import annotations
 
@@ -1993,6 +2005,16 @@ def test_non_str_key():
     assert r.reason_code is ReasonCode.ARGUMENT_TYPE_INVALID
 
 
+def test_none_key_top_level():
+    r = check_request(_request(arguments={None: "a"}))
+    assert r.reason_code is ReasonCode.ARGUMENT_TYPE_INVALID
+
+
+def test_none_key_nested():
+    r = check_request(_request(arguments={"path": {None: "a"}}))
+    assert r.reason_code is ReasonCode.ARGUMENT_TYPE_INVALID
+
+
 def test_string_too_long():
     r = check_request(_request(arguments={"path": "a" * (bounds.MAX_STRING_CHARS + 1)}))
     assert r.reason_code is ReasonCode.STRING_TOO_LONG
@@ -2130,7 +2152,7 @@ def test_package_all_matches_spec_and_every_name_resolves():
         assert hasattr(fw, name), f"{name} does not resolve on the package"
 === END tests/test_firewall_request.py ===
 
-VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_request.py and expect 38 passed. Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed. Finish when both pass.
+VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_request.py and expect 40 passed. Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed. Finish when both pass.
 ```
 
 ---
