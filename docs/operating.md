@@ -430,6 +430,10 @@ are not part of the installed package.
   `gemma4:latest`). The error lists what the server has.
 - **exit 2, "ANTHROPIC_API_KEY is not set"** — set that environment variable
   before running with `--provider anthropic`.
+- **exit 2, HTTP 401 from an OpenAI-compatible server** — the server wants a
+  key. Set `OPENAI_API_KEY`; the default provider sends it as a Bearer token
+  on every request when it is set, and sends no `Authorization` header when
+  it is not.
 - **status `max_turns` / `timeout`** — the worktree is kept; read the
   transcript to see where it stalled, salvage what's useful, or re-run with
   higher limits.

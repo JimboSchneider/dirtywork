@@ -25,7 +25,9 @@ first `run` in a session. Do not guess flags.
   `ollama ps`) or available (another OpenAI-compatible server:
   `curl -s <base-url>/models`). If the request does not say which provider,
   find out; if more than one is running, ask — never pick one silently, and
-  never assume LM Studio. `--provider anthropic` needs `ANTHROPIC_API_KEY`.
+  never assume LM Studio. `--provider anthropic` needs `ANTHROPIC_API_KEY`;
+  an OpenAI-compatible server with a key needs `OPENAI_API_KEY` (sent as a
+  Bearer token when set).
 - `docker info` — docker mode (the default, and the contained one) needs a
   running Docker; the worker image is pulled on the first run if it is
   absent (exit 2 with "Build or pull the worker image" means that failed —

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.parse
 
 from . import ChatResponse, ToolCall, sanitize_usage
@@ -129,14 +130,25 @@ class OpenAICompatClient:
     name = "openai"
 
     def __init__(self, base_url: str = DEFAULT_BASE_URL, timeout: int = 600, *,
-                 http_json=http_json):
+                 http_json=http_json, api_key: str | None = None):
         self.base_url = (DEFAULT_BASE_URL if base_url is None else base_url).rstrip("/")
         self.timeout = timeout
         self._http_json = http_json
+        # Issue #161: read host-side, at construction, exactly like
+        # AnthropicClient; never forwarded into the sandbox. Unset or empty
+        # means no Authorization header at all, so a keyless server sees the
+        # same request it always did.
+        self.api_key = api_key if api_key is not None else os.environ.get("OPENAI_API_KEY")
+
+    def _headers(self) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
 
     def list_models(self) -> list:
         body = self._http_json(f"{self.base_url}/models", None,
-                               {"Content-Type": "application/json"}, self.timeout,
+                               self._headers(), self.timeout,
                                method="GET")
         if not isinstance(body, dict) or not isinstance(body.get("data"), list):
             raise LLMError("unexpected /models response shape from server")
@@ -168,7 +180,7 @@ class OpenAICompatClient:
         static table exactly as it did before 0.9."""
         url = f"{_origin(self.base_url)}/api/v0/models"
         try:
-            body = self._http_json(url, None, {"Content-Type": "application/json"},
+            body = self._http_json(url, None, self._headers(),
                                    LOADED_CONTEXT_PROBE_TIMEOUT, method="GET")
         except LLMError:
             return None      # LLMTimeout is an LLMError: both mean "no answer"
@@ -199,5 +211,5 @@ class OpenAICompatClient:
             payload["temperature"] = temperature
         effective_timeout = timeout if timeout is not None else self.timeout
         body = self._http_json(f"{self.base_url}/chat/completions", payload,
-                               {"Content-Type": "application/json"}, effective_timeout)
+                               self._headers(), effective_timeout)
         return parse_chat_response(body)

@@ -20,7 +20,8 @@ dirtywork run --repo <path> "<task>"
     [--timeout 1800]                  # whole-run wall clock, seconds
     [--temperature <f>]               # omitted by default → server preset
     [--max-tokens 8192]               # per-reply output cap; must be < the context window
-    [--provider openai|anthropic|ollama]  # default: openai; anthropic needs ANTHROPIC_API_KEY
+    [--provider openai|anthropic|ollama]  # default: openai (sends OPENAI_API_KEY as a Bearer
+                                      # token when set); anthropic needs ANTHROPIC_API_KEY
     [--base-url <url>]                # default depends on --provider (LM Studio for openai,
                                       # https://api.anthropic.com for anthropic)
     [--max-worktree-mb 2048]

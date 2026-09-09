@@ -266,3 +266,48 @@ def test_runner_shaped_history_is_legal_for_strict_templates():
                assistant_message("", [tc]),
                tool_message("abc123def", "VERIFY FAILED (round 1 of 2) ...\n\n" + "timeout nudge")]
     assert_strict_template_legal(history)
+
+
+# --- OPENAI_API_KEY (issue #161) --------------------------------------------
+
+_JSON_HEADERS = {"Content-Type": "application/json"}
+
+
+def test_no_authorization_header_when_no_key(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    transport = RecordingTransport([{"data": [{"id": "m"}]}])
+    OpenAICompatClient(base_url="http://fake/v1", http_json=transport).list_models()
+    assert transport.calls[0]["headers"] == _JSON_HEADERS
+
+
+def test_empty_env_key_sends_no_authorization_header(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    transport = RecordingTransport([{"data": [{"id": "m"}]}])
+    OpenAICompatClient(base_url="http://fake/v1", http_json=transport).list_models()
+    assert transport.calls[0]["headers"] == _JSON_HEADERS
+
+
+def test_api_key_read_from_env_when_not_passed(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+    client = OpenAICompatClient(base_url="http://fake/v1", http_json=RecordingTransport([]))
+    assert client.api_key == "sk-from-env"
+
+
+def test_explicit_api_key_wins_over_env(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+    client = OpenAICompatClient(base_url="http://fake/v1", http_json=RecordingTransport([]),
+                                api_key="sk-explicit")
+    assert client.api_key == "sk-explicit"
+
+
+def test_bearer_header_sent_on_every_endpoint_when_key_set(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    transport = RecordingTransport([{"data": [{"id": "m"}]}, _LOADED_BODY,
+                                    _fixture("simple_ok.json")])
+    client = OpenAICompatClient(base_url="http://fake/v1", http_json=transport,
+                                api_key="sk-test")
+    client.list_models()
+    client.loaded_context_window("qwen/qwen3-coder-next")
+    client.chat("m", [{"role": "user", "content": "hi"}], [], max_tokens=10)
+    expected = {"Content-Type": "application/json", "Authorization": "Bearer sk-test"}
+    assert [c["headers"] for c in transport.calls] == [expected] * 3

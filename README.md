@@ -122,7 +122,9 @@ tool calls are unverified on Ollama.
   for the measured numbers
 - `--provider anthropic` needs the `ANTHROPIC_API_KEY` environment variable
   set; the default (`--provider openai`, LM Studio or any OpenAI-compatible
-  server) and `--provider ollama` need no key.
+  server) and `--provider ollama` need no key. If the OpenAI-compatible
+  server does require one, set `OPENAI_API_KEY` and it is sent as a Bearer
+  token; unset, nothing is sent.
 - `--provider ollama` talks to `http://localhost:11434/v1` and asks
   `GET /api/ps` what context length the model is actually loaded with. Run
   `ollama run <model>` first — Ollama lists *pulled* models, not resident ones,
