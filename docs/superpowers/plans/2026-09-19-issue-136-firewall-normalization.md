@@ -289,10 +289,10 @@ VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_paths.p
 - Consumes: `normalize_path`, `TargetClass` (Task 1); `check_request`, `Rejection` (`request.py`); `ActionRequest`, `CanonicalAction`, `Edit`, `SemanticStatus`, `ARGS_FOR_KIND` (`schema.py`); `ActionKind`, `Capability`, `BASE_CAPABILITIES` (`capabilities.py`); `ReasonCode`; the bounds. The tests import `dirtywork.toolspec` and `dirtywork.builtin_tools` for the recovery-equivalence, marker-tuple and field-table cross-checks.
 - Produces: `TOOL_CALL_MARKERS` (tuple, copied by value); `WRITE_KINDS` (frozenset of six `ActionKind`s); `Field(name, kind, required, default, limit, lo, hi)` frozen; `FIELD_TABLE: dict[ActionKind, tuple[Field, ...]]`; `Normalization(action, rejection, dropped_keys)` frozen with its invariants; `recover_name(name) -> (name, marker | None, cut)`; `canonicalize(request: ActionRequest) -> Normalization`. Task 3 appends `canonicalize_batch` after the last line of this file and re-exports six of these names plus it.
 
-- [x] **Dry-run on the scratch clone** (2026-09-19, on top of Task 1): the files below written, `tests/test_firewall_normalize.py` 212 passed, full host suite 2078 passed, `ast.parse(..., feature_version=(3, 9))` silent, `git diff --check` clean. Recovery equivalence proven against `ToolRegistry.recover_name` on 129 fixture names plus two 33K-character pathological strings; a 1.1 MB marker-only name rejects as `tool_name_invalid` well under a second. Tie-break recorded: an `edits` item that both lacks `new` and carries an extra key reports `argument_type_invalid`, because the spec's step 6 bullets are checked in the order written.
+- [x] **Dry-run on the scratch clone** (2026-09-19, on top of Task 1): the files below written, `tests/test_firewall_normalize.py` 219 passed, full host suite 2085 passed, `ast.parse(..., feature_version=(3, 9))` silent, `git diff --check` clean. Recovery equivalence proven against `ToolRegistry.recover_name` on 129 fixture names plus two 33K-character pathological strings; a 1.1 MB marker-only name rejects as `tool_name_invalid` well under a second. Review of PR #175 added the 32-character bound on numeric strings before `int()` (spec §4, decision 11) with seven tests, including a one-million-digit `offset` and `timeout` rejected in well under half a second. Tie-break recorded: an `edits` item that both lacks `new` and carries an extra key reports `argument_type_invalid`, because the spec's step 6 bullets are checked in the order written.
 - [ ] **Confirm the base.** Task 1's PR merged (or its run branch as `--branch-from`); `dirtywork/firewall/paths.py` present at the brief's content.
-- [ ] **Launch** the brief below verbatim through the invocation in the header, sampler on, model loaded in the same command. The brief is the largest of the three (about 37 KB, two writes of about 15 KB and 22 KB); if either file lands truncated, rerun fresh rather than resume.
-- [ ] **Review** against the gates in the header: `cmp` both files against the brief's blocks; `files_changed` is exactly the two files; host suite 2078 passed; `diff --check`; 3.9 grammar; the import-isolation test and the field-table cross-check green in the produced test file.
+- [ ] **Launch** the brief below verbatim through the invocation in the header, sampler on, model loaded in the same command. The brief is the largest of the three (about 39 KB, two writes of about 16 KB and 23 KB); if either file lands truncated, rerun fresh rather than resume.
+- [ ] **Review** against the gates in the header: `cmp` both files against the brief's blocks; `files_changed` is exactly the two files; host suite 2085 passed; `diff --check`; 3.9 grammar; the import-isolation test and the field-table cross-check green in the produced test file.
 - [ ] **Ledger** `docs/superpowers/bench/2026-09-XX-issue-136-w2-normalize-ledger.md` plus the sampler CSV, committed on the run branch.
 - [ ] **PR** titled `feat(firewall): issue #136 W2 — name recovery, the field table and the single-call pass`, body naming the plan, the spec and the ledger; part 2 of 3 for issue #136 (does not close it).
 
@@ -303,7 +303,7 @@ Issue #136 task W2 of 3 (Worker Action Firewall C): add dirtywork/firewall/norma
 
 Touch ONLY dirtywork/firewall/normalize.py, tests/test_firewall_normalize.py. Create each NEW file with ONE write_file call whose content is exactly the text between its BEGIN and END marker lines below (byte for byte; keep every blank line; the file ends with a newline after its last line; the marker lines themselves are not part of the file). Use relative paths exactly as written (never an absolute /work/... path). Do not edit dirtywork/firewall/__init__.py. No other files, no docs, no commits, nothing else.
 
-FILE dirtywork/firewall/normalize.py (new, 377 lines) — write_file with exactly:
+FILE dirtywork/firewall/normalize.py (new, 388 lines) — write_file with exactly:
 === BEGIN dirtywork/firewall/normalize.py ===
 """Per-tool canonicalization: ActionRequest to CanonicalAction, or to a
 Rejection carrying one of #135's codes (spec §3, §4, §5, §7, §8)."""
@@ -515,6 +515,13 @@ def _coerce_duration(value: Any) -> Optional[int]:
     return None
 
 
+# An int in [MIN_INT, MAX_INT] needs at most 11 characters; the allowance
+# covers the sign, whitespace and underscores that int() accepts. A longer
+# numeric string cannot be in range and is rejected before int() runs, which
+# is quadratic on Python 3.9 and raises past 4,300 digits on 3.11+ (spec §5).
+_MAX_NUMERIC_CHARS = 32
+
+
 def _clamp_timeout(value: int) -> int:
     return max(1, min(value, MAX_BASH_TIMEOUT))
 
@@ -556,6 +563,8 @@ def _coerce_scalar(field: Field, raw: Any) -> "tuple[Any, Optional[Rejection]]":
         if isinstance(raw, int):
             value = raw
         elif isinstance(raw, str):
+            if len(raw) > _MAX_NUMERIC_CHARS:
+                return None, _too_long(field.name, _MAX_NUMERIC_CHARS)
             try:
                 value = int(raw)
             except ValueError:
@@ -566,6 +575,8 @@ def _coerce_scalar(field: Field, raw: Any) -> "tuple[Any, Optional[Rejection]]":
             return None, _out_of_range(field.name, field.lo, field.hi)
         return value, None
     if kind == "duration":
+        if isinstance(raw, str) and len(raw) > _MAX_NUMERIC_CHARS:
+            return None, _too_long(field.name, _MAX_NUMERIC_CHARS)
         value = _coerce_duration(raw)
         if value is None:
             return None, _type_invalid(field.name)
@@ -684,7 +695,7 @@ def canonicalize(request: ActionRequest) -> Normalization:
     return Normalization(action=action, rejection=None, dropped_keys=dropped_keys)
 === END dirtywork/firewall/normalize.py ===
 
-FILE tests/test_firewall_normalize.py (new, 560 lines) — write_file with exactly:
+FILE tests/test_firewall_normalize.py (new, 599 lines) — write_file with exactly:
 === BEGIN tests/test_firewall_normalize.py ===
 from __future__ import annotations
 
@@ -1093,6 +1104,45 @@ def test_timeout_integer_above_max_int_rejected_by_check_request():
     assert result.rejection.reason_code is ReasonCode.NUMBER_OUT_OF_RANGE
 
 
+# --- group 18 (numeric strings are bounded before conversion) --------------
+
+
+@pytest.mark.parametrize("field", ["offset", "limit"])
+def test_numeric_string_at_the_bound_is_converted(field):
+    value = "0" * 31 + "5"  # 32 chars; int() gives 5
+    result = canonicalize(_req("read_file", {"path": "x", field: value}))
+    assert result.action is not None
+    assert getattr(result.action.args, field) == 5
+
+
+@pytest.mark.parametrize("field", ["offset", "limit"])
+def test_numeric_string_over_the_bound_is_string_too_long_before_conversion(field):
+    value = "0" * 32 + "5"  # 33 chars
+    result = canonicalize(_req("read_file", {"path": "x", field: value}))
+    assert result.rejection is not None
+    assert result.rejection.reason_code is ReasonCode.STRING_TOO_LONG
+    assert field in result.rejection.detail
+    assert value not in result.rejection.detail
+
+
+def test_timeout_numeric_string_over_the_bound_is_string_too_long():
+    result = canonicalize(_req("bash", {"command": "ls", "timeout": "0" * 32 + "60"}))
+    assert result.rejection is not None
+    assert result.rejection.reason_code is ReasonCode.STRING_TOO_LONG
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("read_file", {"path": "x", "offset": "1" * 1_000_000}),
+    ("bash", {"command": "ls", "timeout": "1" * 1_000_000}),
+], ids=["offset", "timeout"])
+def test_million_digit_numeric_string_is_rejected_fast(tool, args):
+    start = time.perf_counter()
+    result = canonicalize(_req(tool, args))
+    assert time.perf_counter() - start < 0.5
+    assert result.rejection is not None
+    assert result.rejection.reason_code is ReasonCode.STRING_TOO_LONG
+
+
 # --- group 12 (capability assembly) ------------------------------------------
 
 _CAPABILITY_CASES = [
@@ -1248,7 +1298,7 @@ def test_import_isolation():
         assert _forbidden_imports(root / rel) == [], rel
 === END tests/test_firewall_normalize.py ===
 
-VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_normalize.py and expect 212 passed. Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed (2078 passed). Finish when both pass.
+VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_normalize.py and expect 219 passed. Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed (2085 passed). Finish when both pass.
 ```
 
 ---
@@ -1262,10 +1312,10 @@ VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_normali
 - Consumes: `canonicalize`, `Normalization`, `Rejection`, `ReasonCode.CALL_ID_DUPLICATE` (Task 2 and #135); the parity tests import `dirtywork.toolspec._validate_args`, `ToolValidationError` and `dirtywork.builtin_tools.default_registry`.
 - Produces: `canonicalize_batch(requests: Sequence[ActionRequest]) -> list[Normalization]` (spec §9); the package root re-exports `Normalization`, `canonicalize`, `canonicalize_batch`, `recover_name`, `NormalizedPath`, `TargetClass`, `normalize_path`, and `__all__` has 40 names. This is the surface #137 and #138 import.
 
-- [x] **Dry-run on the scratch clone** (2026-09-19, on top of Task 2): the edits and the file below applied, `tests/test_firewall_normalize.py` 221 passed (212 + 9 batch), `tests/test_firewall_parity.py` 83 passed (45 shared-domain accepts, 17 shared-domain rejections, the ten exception rows and the `glob=null` non-exception), `tests/test_firewall_request.py` 40 passed with the grown pin, full host suite **2170 passed** (baseline 1829; 341 new across the three tasks), `ast.parse(..., feature_version=(3, 9))` silent, `git diff --check` clean, `len(dirtywork.firewall.__all__) == 40` and every name resolves. The pin in `test_firewall_request.py` is the one change outside the spec's file list: it is the #135 test that asserts `__all__` verbatim, and spec §2 grows `__all__` by seven, so the test grows with it.
+- [x] **Dry-run on the scratch clone** (2026-09-19, on top of Task 2): the edits and the file below applied, `tests/test_firewall_normalize.py` 228 passed (219 + 9 batch), `tests/test_firewall_parity.py` 84 passed (45 shared-domain accepts, 17 shared-domain rejections, the eleven exception rows including the numeric-string bound, and the `glob=null` non-exception), `tests/test_firewall_request.py` 40 passed with the grown pin, full host suite **2178 passed** (baseline 1829; 349 new across the three tasks), `ast.parse(..., feature_version=(3, 9))` silent, `git diff --check` clean, `len(dirtywork.firewall.__all__) == 40` and every name resolves. The pin in `test_firewall_request.py` is the one change outside the spec's file list: it is the #135 test that asserts `__all__` verbatim, and spec §2 grows `__all__` by seven, so the test grows with it.
 - [ ] **Confirm the base.** Task 2's PR merged (or its run branch as `--branch-from`); the five anchors below must still be at the quoted line numbers (`git show <base>:<file> | sed -n '<lines>p'`).
 - [ ] **Launch** the brief below verbatim through the invocation in the header, sampler on, model loaded in the same command. Five `edit_file` calls and one `write_file`; an `apply_edits` in place of several `edit_file`s is fine.
-- [ ] **Review** against the gates in the header: apply the brief's five pairs to the base with the round-trip script and `cmp` every produced file against the result; `cmp` the parity file against its block; `files_changed` is exactly the five files; host suite 2170 passed; `diff --check`; 3.9 grammar; `python3 -c "import dirtywork.firewall as f; assert len(f.__all__) == 40"` from the run's worktree.
+- [ ] **Review** against the gates in the header: apply the brief's five pairs to the base with the round-trip script and `cmp` every produced file against the result; `cmp` the parity file against its block; `files_changed` is exactly the five files; host suite 2178 passed; `diff --check`; 3.9 grammar; `python3 -c "import dirtywork.firewall as f; assert len(f.__all__) == 40"` from the run's worktree.
 - [ ] **Ledger** `docs/superpowers/bench/2026-09-XX-issue-136-w3-batch-parity-ledger.md` plus the sampler CSV, committed on the run branch.
 - [ ] **PR** titled `feat(firewall): issue #136 W3 — batch, re-exports and parity`, body naming the plan, the spec and the ledger; part 3 of 3; **closes #136**.
 - [ ] After merge: comment on issue #136 with the three ledgers; issue #137 (policy engine) is next and is briefed against the merged package.
@@ -1277,7 +1327,7 @@ Issue #136 task W3 of 3 (Worker Action Firewall C): add canonicalize_batch to th
 
 Touch ONLY dirtywork/firewall/normalize.py, dirtywork/firewall/__init__.py, tests/test_firewall_normalize.py, tests/test_firewall_request.py, tests/test_firewall_parity.py. Apply the FIVE edit_file edits below, each with the exact old and new text (byte for byte; keep indentation and blank lines; the "old:"/"new:" labels and the marker lines are not part of the text; NEVER use write_file or append_file on an existing file). Then create the ONE new file with ONE write_file call whose content is exactly the text between its BEGIN and END marker lines (byte for byte; the file ends with a newline after its last line). Use relative paths exactly as written (never an absolute /work/... path). Line numbers refer to the files before any of these edits. No other files, no docs, no commits, nothing else.
 
-EDIT edit_file on dirtywork/firewall/normalize.py (old is lines 377-377; the new text is 42 lines). old:
+EDIT edit_file on dirtywork/firewall/normalize.py (old is lines 388-388; the new text is 42 lines). old:
     return Normalization(action=action, rejection=None, dropped_keys=dropped_keys)
 new:
     return Normalization(action=action, rejection=None, dropped_keys=dropped_keys)
@@ -1323,7 +1373,7 @@ def canonicalize_batch(requests: "Sequence[ActionRequest]") -> "list[Normalizati
         results.append(canonicalize(request))
     return results
 
-EDIT edit_file on tests/test_firewall_normalize.py (old is lines 559-560; the new text is 116 lines). old:
+EDIT edit_file on tests/test_firewall_normalize.py (old is lines 598-599; the new text is 116 lines). old:
     for rel in ("dirtywork/firewall/paths.py", "dirtywork/firewall/normalize.py"):
         assert _forbidden_imports(root / rel) == [], rel
 new:
@@ -1473,7 +1523,7 @@ new:
         "NormalizedPath", "TargetClass", "normalize_path",
     ]
 
-FILE tests/test_firewall_parity.py (new, 344 lines) — write_file with exactly:
+FILE tests/test_firewall_parity.py (new, 354 lines) — write_file with exactly:
 === BEGIN tests/test_firewall_parity.py ===
 """Pins `canonicalize` to the registry's VALIDATION step,
 `dirtywork.toolspec._validate_args(spec, args)` -- not `ToolRegistry.execute`,
@@ -1819,7 +1869,17 @@ def test_apply_edits_unknown_nested_key_firewall_code_is_argument_unexpected():
     fw_outcome, rejection = _firewall("apply_edits", args)
     assert fw_outcome == "reject"
     assert rejection.reason_code is ReasonCode.ARGUMENT_UNEXPECTED
+
+
+def test_numeric_string_over_32_chars_registry_accepts_firewall_string_too_long():
+    args = {"path": "x", "offset": "0" * 40 + "5"}
+    outcome, call_args = _registry("read_file", args)
+    assert outcome == "accept"
+    assert call_args["offset"] == 5
+    outcome, rejection = _firewall("read_file", args)
+    assert outcome == "reject"
+    assert rejection.reason_code is ReasonCode.STRING_TOO_LONG
 === END tests/test_firewall_parity.py ===
 
-VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_normalize.py tests/test_firewall_parity.py tests/test_firewall_request.py and expect 344 passed (221 + 83 + 40). Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed (2170 passed). Finish when both pass.
+VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_normalize.py tests/test_firewall_parity.py tests/test_firewall_request.py and expect 352 passed (228 + 84 + 40). Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed (2178 passed). Finish when both pass.
 ```

@@ -80,13 +80,13 @@ Value kinds and what they accept, in the order the registry accepts them today:
 | Value kind | Accepts | Produces |
 | --- | --- | --- |
 | `str` | a `str` | the string |
-| `int` | an `int` that is not a `bool`; or a `str` that `int()` parses | an `int` |
-| `duration` | an `int` that is not a `bool`; a `str` that `int()` parses; a `str` matching the registry's duration pattern (1 to 9 digits, optional whitespace, a seconds or minutes unit, case-insensitive) | seconds as `int`, then clamped |
+| `int` | an `int` that is not a `bool`; or a `str` of at most 32 characters that `int()` parses | an `int` |
+| `duration` | an `int` that is not a `bool`; a `str` of at most 32 characters that `int()` parses or that matches the registry's duration pattern (1 to 9 digits, optional whitespace, a seconds or minutes unit, case-insensitive) | seconds as `int`, then clamped |
 | `path` | a `str` | the normalized path and its target class (section 6) |
 | `command` | a `str` | the string unchanged, byte for byte |
 | `edits` | a `list` of 1 to `MAX_COLLECTION_ITEMS` objects, each with exactly the keys `old` and `new`, both `str`, `old` nonempty | a `tuple[Edit, ...]` |
 
-Anything a value kind does not accept is `argument_type_invalid`. `finish` is the one kind whose only parameter is optional here although the registry requires it: the Runner already canonicalizes a missing summary to `""`, and #135 §4.2 pins that. This is the one declared difference between `FIELD_TABLE` and the registry's specs, and the cross-check test in section 12 carries it as its single exception.
+Anything a value kind does not accept is `argument_type_invalid`, except that a numeric string longer than 32 characters is `string_too_long` before any conversion is attempted: an int in `[MIN_INT, MAX_INT]` needs at most 11 characters, the allowance covers the sign, whitespace and underscores `int()` accepts, and a longer string cannot be in range. The bound exists because `int()` on a long string is quadratic on Python 3.9 (measured in review: 800,000 digits, 1.96 s) and raises past 4,300 digits on 3.11 and later, so without it the outcome would depend on the interpreter. `finish` is the one kind whose only parameter is optional here although the registry requires it: the Runner already canonicalizes a missing summary to `""`, and #135 §4.2 pins that. This is the one declared difference between `FIELD_TABLE` and the registry's specs, and the cross-check test in section 12 carries it as its single exception.
 
 The registry's `timeout` on `grep` is harness data injected after validation and is not a field; a worker-supplied `timeout` on `grep` is an unknown top-level key and is dropped. A test cross-checks `FIELD_TABLE` against the live `builtin_tools` specs: same parameter names in the same order, same required set, same defaults, for every kind. That test, not the package, imports the registry.
 
@@ -103,7 +103,7 @@ The registry's `timeout` on `grep` is harness data injected after validation and
    - present `null`: the default if the field is optional (nullable or not), `argument_type_invalid` if it is required;
    - otherwise the value kind's acceptance rule, else `argument_type_invalid` naming the field.
 6. **Bounds**, per field, immediately after its coercion, so the first bad field in table order is the one reported:
-   - a string over its bound is `string_too_long` naming the field and the limit;
+   - a string over its bound is `string_too_long` naming the field and the limit, including a numeric string over 32 characters for an `int` or `duration` field, which is rejected before conversion (section 4);
    - an `int` field outside its domain after coercion is `number_out_of_range`: `offset` in `0..MAX_INT`, `limit` in `1..MAX_INT`. The domain is checked on the coerced value, so `"2147483648"` for `offset`, which `check_request` cannot see as a number, is rejected here rather than raising inside `ReadFileArgs`;
    - `timeout` is clamped into `1..MAX_BASH_TIMEOUT` from either side once it reaches this step; the pass itself never rejects it. `check_request` runs first, so an integer `timeout` outside `[MIN_INT, MAX_INT]` is already `number_out_of_range` from step 1, while the string `"2147483648"` passes the structural check, coerces, and clamps to `600` here. Both are tested as a pair (section 14, decision 2);
    - `edits`: an empty list is `argument_type_invalid` (a list longer than `MAX_COLLECTION_ITEMS` never reaches this step; `check_request` rejects it as `collection_too_large`); an item that is not an object, or lacks `old` or `new`, or whose `old` or `new` is not a `str`, or whose `old` is empty, is `argument_type_invalid` with `detail` giving the index and field (`edits[3].old`); an item with any other key is `argument_unexpected` with the index. Item strings are bounded by `MAX_STRING_CHARS` (`string_too_long`).
@@ -169,7 +169,7 @@ Normalization is idempotent at the contract level (parent design §7): building 
 
 ## 11. Errors, bounds and performance
 
-- Every bound the pass applies is a `bounds.py` constant already pinned in #135; this issue adds no constant.
+- Every bound the pass applies is a `bounds.py` constant already pinned in #135, except the 32-character numeric-string bound of section 4, a private literal in `normalize.py` documented at its definition; it is derived from `MAX_INT`'s width, not a policy number.
 - `FirewallInternalError` propagates out of `canonicalize` and `canonicalize_batch`; neither catches anything.
 - The pass is a single walk over at most a handful of fields, one linear path normalization and one linear name recovery; the only regular expression is the registry's duration pattern, applied to a string the registry would apply it to today. No step re-reads `arguments` after step 5. Nothing here is claimed to meet the static-tool target of p95 under 1 ms on reference hardware (parent design §17); #142 measures it, and the tests in section 12 only guard against the superlinear cases found in review.
 
@@ -188,6 +188,7 @@ Three files, all under `tests/`. Tests may import `dirtywork.builtin_tools` and 
 
 - `recover_name` against the registry's own `recover_name` on a fixture of registry-shaped names (plain, each marker, each sanitised marker, whitespace padding, nested markers, a marker with no valid tail, a valid tail with no marker) and on pathological repeated-marker strings with and without a valid tail, asserting equal `(name, marker, cut)`; a one-mebibyte marker-only name completes in under one second; the marker-tuple equality test of section 3;
 - a non-string `tool_name` (`None`, a list) is `tool_name_invalid` from `check_request`, not an exception;
+- numeric strings are bounded before conversion: a 32-character zero-padded `"5"` converts, a 33-character one is `string_too_long` naming the field and not the value, for `offset`, `limit` and `timeout`; a one-million-digit string for `offset` and for `timeout` is rejected in well under half a second;
 - `int` boundaries after coercion: `"2147483647"` accepted for `offset`, `"2147483648"` and `"-1"` rejected as `number_out_of_range`, `"0"` rejected for `limit`; `timeout` clamped for `0`, `-5`, `601` and the string `"2147483648"`, paired with the integer `2147483648` being `number_out_of_range` from `check_request` before the pass runs;
 - per kind: a minimal accepted call with defaults filled, and the resulting `CanonicalAction`'s `kind`, `args`, `capabilities` and `semantic_status`;
 - every rejection code the pass can emit, once per code, with `detail` naming the field or index and never containing the worker's value;
@@ -212,6 +213,7 @@ The shared domain is the set of inputs that satisfy every bound the Firewall app
 | `null` on an optional parameter whose default is not `None` (`offset`, `limit`, `list_dir.path`, `grep.path`, `timeout`) | rejects (`bad_args`) | the default | section 14, decision 1. `grep.glob = null` is not an exception: both sides accept it as `None` |
 | `offset < 0`, `limit < 1` | accepts | `number_out_of_range` | section 5, step 6; the registry has no domain check |
 | coerced `offset` or `limit` above `MAX_INT` (a numeric string) | accepts | `number_out_of_range` | section 5, step 6 |
+| a numeric string over 32 characters (zero-padded or not) | accepts on Python 3.9, raises `ValueError` past 4,300 digits on 3.11+ | `string_too_long` | section 4; the registry's outcome depends on the interpreter |
 | `bash` `timeout` of `0` or below | accepts unchanged; `execute` passes `0` through | clamped to `1` | section 14, decision 2 |
 | `bash` `timeout` above `600`, including a numeric string above `MAX_INT` | accepts unchanged; `execute` clamps to `600` | clamped to `600` | same rule, applied at validation; the integer form above `MAX_INT` is rejected by `check_request` on both the shared and the exception side, so it is not in this row |
 | a string over its section 4 bound (`path`, `command`, `pattern`, `glob`, `summary`, content strings) | accepts | `string_too_long` | the registry bounds only total input bytes, and only in `execute` |
@@ -238,3 +240,4 @@ No runtime path changes: the Runner, registry and executors do not import the pa
 8. **`grep`'s `timeout` is an unknown key.** It is harness-injected after validation today; the canonical action does not carry it.
 9. **Interior `..` is kept and classed `parent_ref` with no capability.** Collapsing it can change the execution target through a symlink (section 6), and classifying it needs the filesystem the Firewall must not touch. The executor's containment keeps refusing real escapes as today. The cost is that `src/a/../x.py` and `src/x.py` are different identities, which is the conservative side of the parent design's rule against collapsing materially different targets.
 10. **Commands are canonical byte for byte.** Stripping can change shell meaning (section 7), so the Supervisor's exact-equivalent count sees `ls` and `ls\n` as different denials. Merging them would require a shell-aware normalizer, which is #137's analyzer territory at most and out of scope here.
+11. **Numeric strings are bounded at 32 characters before conversion.** Review measured `int()` at 1.96 s on 800,000 digits under Python 3.9, and 3.11+ raises past 4,300 digits; a bound derived from `MAX_INT`'s width keeps the outcome deterministic and cheap. The registry has no such bound, so it is a parity exception.
