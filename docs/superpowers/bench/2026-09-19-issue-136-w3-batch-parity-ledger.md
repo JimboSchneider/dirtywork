@@ -28,6 +28,22 @@ Sampler (`tools/soak_sampler.sh`, [CSV](2026-09-19-issue-136-w3-sampler.csv)): 3
 - `git diff --check`: clean. `ast.parse(..., feature_version=(3, 9))` over `dirtywork/firewall/*.py` and `tests/test_firewall_*.py`: silent. `len(dirtywork.firewall.__all__) == 40` and every name resolves.
 - No runtime behavior change: nothing outside the package imports it.
 
+## Review fix (PR #179, reviewer P2)
+
+The reviewer found that `canonicalize_batch` compared unvalidated ids for duplicates, so two deeply nested list ids make the `==` comparison recurse on Python 3.9 and take the whole batch down, a valid neighbour included; on newer Pythons the same input instead reports the second malformed id as `call_id_duplicate` rather than `call_id_invalid`. Both confirmed against `03d0371` (the recursion on the reviewer's 3.9 reproduction; no 3.9 interpreter on this host, the CI 3.9 job carries the regression test). The fix restricts duplicate detection to `str` ids: a non-string id is never compared and never a duplicate, and `check_request` rejects it as `call_id_invalid`. Two regression tests: two 2,000-deep nested-list ids beside a valid request (both `call_id_invalid`, the neighbour canonicalized), and two equal list ids (both invalid, neither a duplicate). Spec §9 updated in PR #178.
+
+Dry run on the scratch clone: `tests/test_firewall_normalize.py` 230 passed, full suite 2,180 passed. The brief was generated from the same three edit pairs against the W3 branch head, with base line numbers next to each anchor (4,605 characters; `orchestrator/brief.txt` and `orchestrator/edit-pairs/` in the run directory).
+
+Host for this run: LM Studio Bionic 1.1.5 serving `qwen3.6-35b-a3b-splash` on `localhost:1234/v1`, reasoning on by default, `--max-tokens 16384`; `--branch-from @issue-136-task-w3-of-0919173344-6ecff168`.
+
+| Run suffix | Status | Turns | Wall seconds | Prompt tokens | Completion tokens | Completion tokens / wall second | Nudges | Verdict |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `w3-review-fix-0919175145-01d5ee8d` | completed | 12 | 126.9 | 78,815 | 2,898 | 22.8 | 0 | accept |
+
+Tool calls: `read_file` 6 (the anchors, before editing), `edit_file` 3, `bash` 3, `finish` 1; tool errors 0; truncations 0. In-container: 230 passed, then the default suite; verify gate exit 0 on the first round. Both files byte-identical to the dry run after the brief's pairs are applied to the base; no orchestrator edit. Host suite after the fix: **2,180 passed / 9 skipped / 38 deselected**, 106.9 s (base `03d0371`: 2,178; 2 new). Sampler ([CSV](2026-09-19-issue-136-w3fix-sampler.csv)): 25 samples, free 52.0–54.1 GB, inactive 21.8–32.4 GB, one model resident.
+
+The plan's fenced `### Worker brief W3` block still carries the pre-review `canonicalize_batch`; this section and the run's `diff.patch` are the record of what changed after it.
+
 ## Preserved receipts
 
 Slug `issue-136-task-w3-of-0919173344-6ecff168`; local receipts at `~/.dirtywork/runs/<slug>/`: `run.json` (with the accept verdict), `transcript.jsonl`, `diff.patch`, and `orchestrator/` with the exact brief, stdout, launch/end timestamps, the `lms ps` lines at launch and the sampler CSV. Local provenance, not published artifacts.

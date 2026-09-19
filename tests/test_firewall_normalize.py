@@ -717,3 +717,33 @@ def test_batch_single_request_matches_canonicalize():
     direct_result = canonicalize(request)
     assert batch_result.action == direct_result.action
     assert batch_result.rejection == direct_result.rejection
+
+
+def _deep_list(depth):
+    value = []
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def test_batch_non_string_ids_never_crash_or_duplicate():
+    # Two deeply nested list ids: comparing them with == recurses on Python 3.9,
+    # so they must never reach the duplicate check; each is call_id_invalid
+    # on its own and the valid neighbour is still processed.
+    results = canonicalize_batch([
+        _req("read_file", {"path": "x"}, call_id=_deep_list(2000)),
+        _req("read_file", {"path": "x"}, call_id=_deep_list(2000)),
+        _req("read_file", {"path": "x"}, call_id="call_ok"),
+    ])
+    assert [r.rejection.reason_code if r.rejection else None for r in results[:2]] == [
+        ReasonCode.CALL_ID_INVALID, ReasonCode.CALL_ID_INVALID,
+    ]
+    assert results[2].action is not None
+
+
+def test_batch_equal_non_string_ids_are_invalid_not_duplicate():
+    results = canonicalize_batch([
+        _req("read_file", {"path": "x"}, call_id=["x"]),
+        _req("read_file", {"path": "x"}, call_id=["x"]),
+    ])
+    assert all(r.rejection.reason_code is ReasonCode.CALL_ID_INVALID for r in results)

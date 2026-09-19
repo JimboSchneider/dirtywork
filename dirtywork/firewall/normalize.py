@@ -396,19 +396,16 @@ def canonicalize_batch(requests: "Sequence[ActionRequest]") -> "list[Normalizati
     a non-string id is compared as-is -- is rejected with
     `Rejection(ReasonCode.CALL_ID_DUPLICATE, ...)` naming only its batch
     index, and is never canonicalized. Every other request is independent:
-    one request's rejection never affects its neighbours. Ids are tracked in
-    a `set` for a fast membership check; an id a set cannot hash (a list)
-    falls back to `==` against the unhashable ids seen so far rather than
-    raising."""
+    one request's rejection never affects its neighbours. Only `str` ids
+    take part: a non-string id is never a duplicate and is left to
+    `check_request`, which rejects it as `call_id_invalid`, so a malformed
+    id can neither crash the batch (comparing two deeply nested lists
+    recurses) nor be reported as a duplicate of another malformed id."""
     results: "list[Normalization]" = []
     seen: set = set()
-    seen_unhashable: list = []
     for index, request in enumerate(requests):
         call_id = request.call_id
-        try:
-            is_duplicate = call_id in seen
-        except TypeError:
-            is_duplicate = any(call_id == existing for existing in seen_unhashable)
+        is_duplicate = isinstance(call_id, str) and call_id in seen
         if is_duplicate:
             results.append(
                 Normalization(
@@ -421,9 +418,7 @@ def canonicalize_batch(requests: "Sequence[ActionRequest]") -> "list[Normalizati
                 )
             )
             continue
-        try:
+        if isinstance(call_id, str):
             seen.add(call_id)
-        except TypeError:
-            seen_unhashable.append(call_id)
         results.append(canonicalize(request))
     return results
