@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from .bounds import (
     FIREWALL_SCHEMA_VERSION,
@@ -386,3 +386,39 @@ def canonicalize(request: ActionRequest) -> Normalization:
         semantic_status=semantic_status,
     )
     return Normalization(action=action, rejection=None, dropped_keys=dropped_keys)
+
+
+def canonicalize_batch(requests: "Sequence[ActionRequest]") -> "list[Normalization]":
+    """Canonicalize a batch of requests in order (spec §9): the first request
+    carrying a given `call_id` goes through `canonicalize` normally, whatever
+    it decides; every later request whose `call_id` equals an earlier one's
+    -- compared with plain `==` on the id as given, before any validation, so
+    a non-string id is compared as-is -- is rejected with
+    `Rejection(ReasonCode.CALL_ID_DUPLICATE, ...)` naming only its batch
+    index, and is never canonicalized. Every other request is independent:
+    one request's rejection never affects its neighbours. Only `str` ids
+    take part: a non-string id is never a duplicate and is left to
+    `check_request`, which rejects it as `call_id_invalid`, so a malformed
+    id can neither crash the batch (comparing two deeply nested lists
+    recurses) nor be reported as a duplicate of another malformed id."""
+    results: "list[Normalization]" = []
+    seen: set = set()
+    for index, request in enumerate(requests):
+        call_id = request.call_id
+        is_duplicate = isinstance(call_id, str) and call_id in seen
+        if is_duplicate:
+            results.append(
+                Normalization(
+                    action=None,
+                    rejection=Rejection(
+                        ReasonCode.CALL_ID_DUPLICATE,
+                        f"duplicate call_id at batch index {index}",
+                    ),
+                    dropped_keys=0,
+                )
+            )
+            continue
+        if isinstance(call_id, str):
+            seen.add(call_id)
+        results.append(canonicalize(request))
+    return results

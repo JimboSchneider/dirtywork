@@ -603,3 +603,147 @@ def test_import_isolation():
     root = pathlib.Path(__file__).resolve().parents[1]
     for rel in ("dirtywork/firewall/paths.py", "dirtywork/firewall/normalize.py"):
         assert _forbidden_imports(root / rel) == [], rel
+
+
+# --- batch: canonicalize_batch --------------------------------------------
+
+from dirtywork.firewall.normalize import canonicalize_batch
+
+
+def test_batch_three_distinct_ids_all_canonicalized_in_order():
+    requests = [
+        _req("bash", {"command": "ls"}, call_id="call_1", batch_size=1),
+        _req("bash", {"command": "pwd"}, call_id="call_2", batch_size=1),
+        _req("bash", {"command": "echo hi"}, call_id="call_3", batch_size=1),
+    ]
+    results = canonicalize_batch(requests)
+    assert len(results) == 3
+    assert [r.rejection for r in results] == [None, None, None]
+    assert [r.action.args.command for r in results] == ["ls", "pwd", "echo hi"]
+
+
+def test_batch_duplicate_id_at_index_2():
+    requests = [
+        _req("bash", {"command": "ls"}, call_id="zzqx7", batch_size=1),
+        _req("bash", {"command": "pwd"}, call_id="b", batch_size=1),
+        _req("bash", {"command": "echo hi"}, call_id="zzqx7", batch_size=1),
+    ]
+    results = canonicalize_batch(requests)
+    assert results[0].rejection is None
+    assert results[0].action.args.command == "ls"
+    assert results[1].rejection is None
+    assert results[2].rejection is not None
+    assert results[2].rejection.reason_code is ReasonCode.CALL_ID_DUPLICATE
+    assert "index 2" in results[2].rejection.detail
+    assert "zzqx7" not in results[2].rejection.detail
+    assert results[2].dropped_keys == 0
+
+
+def test_batch_three_copies_of_same_id():
+    requests = [
+        _req("bash", {"command": "ls"}, call_id="dup", batch_size=1),
+        _req("bash", {"command": "pwd"}, call_id="dup", batch_size=1),
+        _req("bash", {"command": "echo hi"}, call_id="dup", batch_size=1),
+    ]
+    results = canonicalize_batch(requests)
+    assert results[0].rejection is None
+    assert results[0].action.args.command == "ls"
+    assert results[1].rejection is not None
+    assert results[1].rejection.reason_code is ReasonCode.CALL_ID_DUPLICATE
+    assert results[2].rejection is not None
+    assert results[2].rejection.reason_code is ReasonCode.CALL_ID_DUPLICATE
+
+
+def test_batch_duplicate_of_a_rejected_first_occurrence_is_still_flagged():
+    # Dedup is by position, before validation: the first occurrence being
+    # itself rejected (for an unrelated reason) does not exempt a later
+    # occurrence from call_id_duplicate.
+    requests = [
+        _req("not_a_tool", {}, call_id="x", batch_size=1),
+        _req("bash", {"command": "ls"}, call_id="x", batch_size=1),
+    ]
+    results = canonicalize_batch(requests)
+    assert results[0].rejection is not None
+    assert results[0].rejection.reason_code is ReasonCode.TOOL_UNKNOWN
+    assert results[1].rejection is not None
+    assert results[1].rejection.reason_code is ReasonCode.CALL_ID_DUPLICATE
+
+
+def test_batch_empty_is_empty():
+    assert canonicalize_batch([]) == []
+
+
+def test_batch_malformed_neighbour_does_not_affect_others():
+    requests = [
+        _req("write_file", {}, call_id="ok_1", batch_size=1),  # missing content
+        _req("bash", {"command": "ls"}, call_id="ok_2", batch_size=1),
+    ]
+    results = canonicalize_batch(requests)
+    assert results[0].rejection is not None
+    assert results[0].rejection.reason_code is ReasonCode.ARGUMENT_MISSING
+    assert results[1].rejection is None
+    assert results[1].action.args.command == "ls"
+
+
+def test_batch_ids_compared_exactly():
+    # "call_1" and "call_1 " are different ids under plain `==`; the second
+    # is not deduplicated against the first, so it reaches check_request on
+    # its own and is rejected for whitespace, not for being a duplicate.
+    requests = [
+        _req("bash", {"command": "ls"}, call_id="call_1", batch_size=1),
+        _req("bash", {"command": "pwd"}, call_id="call_1 ", batch_size=1),
+    ]
+    results = canonicalize_batch(requests)
+    assert results[0].rejection is None
+    assert results[1].rejection is not None
+    assert results[1].rejection.reason_code is ReasonCode.CALL_ID_INVALID
+
+
+def test_batch_size_field_not_required_to_match_request_count():
+    # canonicalize_batch never checks batch_size against len(requests); that
+    # consistency is the adapter's job (spec §9).
+    requests = [
+        _req("bash", {"command": "ls"}, call_id="call_1", batch_size=1),
+        _req("bash", {"command": "pwd"}, call_id="call_2", batch_size=1),
+    ]
+    assert len(requests) == 2
+    results = canonicalize_batch(requests)
+    assert all(r.rejection is None for r in results)
+
+
+def test_batch_single_request_matches_canonicalize():
+    request = _req("bash", {"command": "ls"}, call_id="call_1", batch_size=1)
+    batch_result = canonicalize_batch([request])[0]
+    direct_result = canonicalize(request)
+    assert batch_result.action == direct_result.action
+    assert batch_result.rejection == direct_result.rejection
+
+
+def _deep_list(depth):
+    value = []
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def test_batch_non_string_ids_never_crash_or_duplicate():
+    # Two deeply nested list ids: comparing them with == recurses on Python 3.9,
+    # so they must never reach the duplicate check; each is call_id_invalid
+    # on its own and the valid neighbour is still processed.
+    results = canonicalize_batch([
+        _req("read_file", {"path": "x"}, call_id=_deep_list(2000)),
+        _req("read_file", {"path": "x"}, call_id=_deep_list(2000)),
+        _req("read_file", {"path": "x"}, call_id="call_ok"),
+    ])
+    assert [r.rejection.reason_code if r.rejection else None for r in results[:2]] == [
+        ReasonCode.CALL_ID_INVALID, ReasonCode.CALL_ID_INVALID,
+    ]
+    assert results[2].action is not None
+
+
+def test_batch_equal_non_string_ids_are_invalid_not_duplicate():
+    results = canonicalize_batch([
+        _req("read_file", {"path": "x"}, call_id=["x"]),
+        _req("read_file", {"path": "x"}, call_id=["x"]),
+    ])
+    assert all(r.rejection.reason_code is ReasonCode.CALL_ID_INVALID for r in results)
