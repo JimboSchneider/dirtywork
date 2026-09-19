@@ -46,13 +46,15 @@ def recover_name(name: str) -> tuple[str, Optional[str], int]: ...
 
 ## 3. Name recovery
 
-`recover_name` is the registry's `ToolRegistry.recover_name` algorithm with the registry table replaced by the eleven `ActionKind` values, and `TOOL_CALL_MARKERS` copied by value: the five raw markers (`[TOOL_CALLS]`, `<tool_call>`, `<function=`, `<function_call>`, `<|tool_call|>`) plus their sanitised forms with every character outside `[A-Za-z0-9_-]` replaced by `_`. Behavior, unchanged from the registry:
+`recover_name` produces the same result as the registry's `ToolRegistry.recover_name` with the registry table replaced by the eleven `ActionKind` values, and `TOOL_CALL_MARKERS` copied by value: the five raw markers (`[TOOL_CALLS]`, `<tool_call>`, `<function=`, `<function_call>`, `<|tool_call|>`) plus their sanitised forms with every character outside `[A-Za-z0-9_-]` replaced by `_`. The contract, unchanged from the registry:
 
 - a name that is already an `ActionKind` value is returned as-is with marker `None` and cut `0`;
-- otherwise every occurrence of every marker is a candidate, tried latest end first, and the first whose stripped suffix is an `ActionKind` value wins, returning `(suffix, marker, position)`;
+- otherwise, if some marker occurrence leaves a suffix that strips to an `ActionKind` value, the occurrence with the latest end wins (the longest marker among ties), returning `(suffix, marker, position)`;
 - otherwise the name is returned unchanged with marker `None`; `check_request` then reports `tool_unknown` or `tool_name_invalid`.
 
-Recovery runs on any length of name before the length check, because it is linear in the name and the name is already in memory (section 14, decision 3). A test asserts the marker tuple equals `dirtywork.toolspec.TOOL_CALL_MARKERS` element for element, so the two copies cannot drift until #143 removes one.
+The algorithm is not the registry's. The registry collects every marker occurrence, sorts them, and slices a suffix for each, which is quadratic on a name made of repeated markers (measured 2026-09-19: 22K characters 6 ms, 88K 69 ms, 352K 1.1 s). This issue's implementation is linear and reaches the same answer by working from the end: strip trailing whitespace; the remaining tail must end in an `ActionKind` value; walk back over the whitespace before that value; a marker must end exactly there, checked longest first. A winning candidate in the registry's search must leave a suffix that strips to a kind value, so its marker ends exactly at the start of the whitespace run before that value, and the latest-end candidate is that one; the two algorithms therefore agree on every input, and a test proves it on a fixture of registry-shaped names plus pathological repeated-marker strings with and without a valid tail.
+
+Recovery runs only when `tool_name` is a `str`; anything else goes straight to `check_request`, which reports `tool_name_invalid`. It runs before the length check because it is linear and the name is already in memory (section 14, decision 3); a test canonicalizes a one-mebibyte marker-only name in well under a second. A second test asserts the marker tuple equals `dirtywork.toolspec.TOOL_CALL_MARKERS` element for element, so the two copies cannot drift until #143 removes one.
 
 `canonicalize` applies recovery to `request.tool_name` and proceeds with a copy of the request carrying the recovered name. The marker and cut are not part of the canonical action or its identity; they are available to #141 if evidence wants them, through the return value of `recover_name`, not through `Normalization`.
 
@@ -81,7 +83,7 @@ Value kinds and what they accept, in the order the registry accepts them today:
 | `int` | an `int` that is not a `bool`; or a `str` that `int()` parses | an `int` |
 | `duration` | an `int` that is not a `bool`; a `str` that `int()` parses; a `str` matching the registry's duration pattern (1 to 9 digits, optional whitespace, a seconds or minutes unit, case-insensitive) | seconds as `int`, then clamped |
 | `path` | a `str` | the normalized path and its target class (section 6) |
-| `command` | a `str` | the string with leading and trailing whitespace stripped |
+| `command` | a `str` | the string unchanged, byte for byte |
 | `edits` | a `list` of 1 to `MAX_COLLECTION_ITEMS` objects, each with exactly the keys `old` and `new`, both `str`, `old` nonempty | a `tuple[Edit, ...]` |
 
 Anything a value kind does not accept is `argument_type_invalid`. `finish` is the one kind whose only parameter is optional here although the registry requires it: the Runner already canonicalizes a missing summary to `""`, and #135 §4.2 pins that.
@@ -92,7 +94,7 @@ The registry's `timeout` on `grep` is harness data injected after validation and
 
 `canonicalize(request)` runs these steps in order and stops at the first failure. The order is part of the contract and is tested.
 
-1. **Name recovery**, then **`check_request`** (#135 §6.2). A `Rejection` from it is returned as-is with `dropped_keys = 0`.
+1. **Name recovery** when `tool_name` is a `str`, then **`check_request`** (#135 §6.2). A `Rejection` from it is returned as-is with `dropped_keys = 0`, so the validator's documented precedence holds for every malformed request, including a non-string name.
 2. **Kind.** `kind = ActionKind(request.tool_name)`; `check_request` step 4 guarantees membership.
 3. **Required fields.** For each required field in table order, the key must be present in `arguments`, else `argument_missing` with `detail` naming the field. Presence, not value: a present `null` is step 5's business. Required fields are checked before unknown keys so a misspelled required key reports the missing name rather than an unexpected one.
 4. **Unknown top-level keys** are dropped and counted; the count becomes `dropped_keys`. They are never rejected at the top level (#135 §12, decision 2).
@@ -102,8 +104,8 @@ The registry's `timeout` on `grep` is harness data injected after validation and
    - otherwise the value kind's acceptance rule, else `argument_type_invalid` naming the field.
 6. **Bounds**, per field, immediately after its coercion, so the first bad field in table order is the one reported:
    - a string over its bound is `string_too_long` naming the field and the limit;
-   - `offset < 0` or `limit < 1` is `number_out_of_range`;
-   - `timeout` is clamped into `1..MAX_BASH_TIMEOUT` and never rejected (section 14, decision 2);
+   - an `int` field outside its domain after coercion is `number_out_of_range`: `offset` in `0..MAX_INT`, `limit` in `1..MAX_INT`. The domain is checked on the coerced value, so `"2147483648"` for `offset`, which `check_request` cannot see as a number, is rejected here rather than raising inside `ReadFileArgs`;
+   - `timeout` is clamped into `1..MAX_BASH_TIMEOUT` from either side and never rejected, whatever the coerced value (section 14, decision 2);
    - `edits`: an empty list is `argument_type_invalid` (a list longer than `MAX_COLLECTION_ITEMS` never reaches this step; `check_request` rejects it as `collection_too_large`); an item that is not an object, or lacks `old` or `new`, or whose `old` or `new` is not a `str`, or whose `old` is empty, is `argument_type_invalid` with `detail` giving the index and field (`edits[3].old`); an item with any other key is `argument_unexpected` with the index. Item strings are bounded by `MAX_STRING_CHARS` (`string_too_long`).
 7. **Paths.** Every `path` field goes through `normalize_path`; the canonical string replaces the raw one and the target class is kept for step 9.
 8. **Args class.** The kind's class is constructed from the coerced fields. Its `__post_init__` is the last line (#135 §4.2); after steps 5 and 6 it cannot raise on worker input, and if it does, the raise propagates.
@@ -115,23 +117,26 @@ The registry's `timeout` on `grep` is harness data injected after validation and
 
 `normalize_path(raw: str) -> NormalizedPath(path: str, target: TargetClass)` is pure string work and never touches the filesystem.
 
-Normalization: the input is split on `/`; empty components and `.` are dropped; `..` pops the previous component when there is one to pop, and is kept when there is none; the result is joined with `/`; an empty result is `.`. A trailing slash therefore disappears, and `src//x.py`, `src/./x.py` and `src/a/../x.py` all become `src/x.py`, while `./../x` becomes `../x`. An input that begins with `/` is absolute: the same collapse is applied, a `..` with nothing to pop is dropped rather than kept (there is nothing above the root, and the executors' resolution does the same), and the leading `/` is kept, so `/work/../etc/passwd` becomes `/etc/passwd` and `/../etc` becomes `/etc`. This is `posixpath.normpath` for every input except that an empty input becomes `.` explicitly and a leading `//` is not preserved. Bytes are never changed: no case folding, no Unicode normalization, no `~` expansion, no backslash conversion, because the file executors do none of those (section 14, decisions 4 and 5).
+Normalization: the input is split on `/`; empty components and `.` components are dropped; every `..` component is kept exactly where it is; the result is joined with `/`; an empty result is `.`; an input that begins with `/` keeps a single leading `/`. So a trailing slash disappears, `src//x.py` and `src/./x.py` become `src/x.py`, `./../x` becomes `../x`, and `src/a/../x.py` stays `src/a/../x.py`. Bytes are never changed: no case folding, no Unicode normalization, no `~` expansion, no backslash conversion, because the file executors do none of those (section 14, decisions 4 and 5).
 
-`TargetClass` is a three-member `str` enum:
+`..` is never collapsed because collapsing it lexically can change the execution target. With a symlink `link -> nested/child` in the worktree, the host resolves `link/../target.txt` to `nested/target.txt`, while `posixpath.normpath` gives `target.txt`; a canonical action carrying the collapsed path would read or write a different file than the worker asked for once #138 hands canonical arguments to the executor. Dropping `.` and empty components and a trailing slash cannot cross a symlink, so those are safe. A test with a real symlink in a temporary directory pins this: it asserts the two resolutions differ and that `normalize_path` keeps the `..`.
+
+`TargetClass` is a four-member `str` enum:
 
 | Target | When | Capability it adds |
 | --- | --- | --- |
-| `outside` | the input is absolute, or a `..` pops with nothing to pop | `HOST_FS`, every kind |
-| `repo_metadata` | the first component of the normalized relative path is exactly `.git` | `REPO_CONTROL`, write kinds only |
-| `workspace` | otherwise | none |
+| `outside` | the input is absolute, or the normalized path's first component is `..` | `HOST_FS`, every kind |
+| `repo_metadata` | the first component is exactly `.git` and no component is `..` | `REPO_CONTROL`, write kinds only |
+| `parent_ref` | some component after the first is `..`, and the path is neither absolute nor leading-`..` | none; the executor's containment decides |
+| `workspace` | no component is `..` and neither of the first two rows applies | none |
 
-For an escaping relative path the popped-past-root components are kept in the canonical string (`../../etc/passwd` stays `../../etc/passwd`), so identity distinguishes escape targets and #141's evidence can say which one without the raw input. `.git` matches the component exactly: `.gitignore` and `src/.git/x` are `workspace`. The write kinds are `write_file`, `append_file`, `edit_file`, `apply_edits`, `insert_before` and `insert_after`; the other kinds reading under `.git` stay `workspace`-capable because the executors allow those reads today.
+A leading `..` is a certain escape: it is applied to the worktree root itself, and the root's parent is outside the worktree whatever symlinks the root contains. An interior `..` cannot be classified without the filesystem, so `parent_ref` is honest about that: the Firewall adds no capability, and the executor's existing resolution keeps refusing real escapes exactly as it does today. #137 may treat `parent_ref` as it likes; nothing here pre-empts it. The canonical string keeps every component for all four classes (`../../etc/passwd` stays `../../etc/passwd`, `/work/../etc/passwd` stays `/work/../etc/passwd`), so identity distinguishes targets and #141's evidence can name one without the raw input. `.git` matches the component exactly: `.gitignore` and `src/.git/x` are `workspace`, and `.git/../x` is `parent_ref`. The write kinds are `write_file`, `append_file`, `edit_file`, `apply_edits`, `insert_before` and `insert_after`; the other kinds reading under `.git` stay `workspace`-capable because the executors allow those reads today.
 
 The Firewall does not know where the worktree is, so an absolute path is `outside` even when it names a file inside the worktree. #137 owns the mode-scoped decision that the host backend accepts such a path today and the Docker backend does not (#135 §5.3); the Firewall's job is to make the target class deterministic and the path canonical.
 
 ## 7. Per-kind notes
 
-- **`bash`.** `command` keeps every interior byte; only leading and trailing whitespace is stripped, so `ls` and `ls\n` share an identity while `echo "a  b"` and `echo "a b"` do not. `timeout` follows the duration rule and the clamp. Capabilities are the base `SHELL` set only. `semantic_status` is `semantic_unknown` for every bash action produced here; #137's analyzer is the only code that may set `semantic_known`, and the #135 test that `PolicyDecision` cannot deny on `semantic_unknown` continues to hold.
+- **`bash`.** `command` is the exact string the worker sent, every byte, including leading and trailing whitespace: a command ending in an escaped space (`printf 'x'\ `) means something different once the space is gone, so stripping can change what runs and would declare two different commands equivalent. The registry does strip commands, but only for its repeat-detection key, never for execution. `ls` and `ls\n` are therefore distinct identities here; `echo "a  b"` and `echo "a b"` are too. `timeout` follows the duration rule and the clamp. Capabilities are the base `SHELL` set only. `semantic_status` is `semantic_unknown` for every bash action produced here; #137's analyzer is the only code that may set `semantic_known`, and the #135 test that `PolicyDecision` cannot deny on `semantic_unknown` continues to hold.
 - **`finish`.** `summary` defaults to `""`.
 - **`grep`.** `pattern` and `glob` are bounded and kept verbatim; they are not paths and are not normalized. `glob` may be `null`.
 - **`list_dir`.** `path` defaults to `.`.
@@ -140,7 +145,7 @@ The Firewall does not know where the worktree is, so an absolute path is `outsid
 
 ## 8. Capabilities and semantic status
 
-Capability assembly is one expression per action: `BASE_CAPABILITIES[kind]`, plus `HOST_FS` when any path field's target is `outside`, plus `REPO_CONTROL` when a path field's target is `repo_metadata` and the kind is a write kind. Every kind has at most one path field today, so "any" and "a" are the same thing; the rule is written for the set so a future kind with two paths needs no rewrite. `NETWORK`, `PRIVILEGE`, `REPO_PUBLISH`, `SYSTEM_CONTROL` and `REMOTE_CODE_EXEC` are never set in this issue; they are #137's.
+Capability assembly is one expression per action: `BASE_CAPABILITIES[kind]`, plus `HOST_FS` when any path field's target is `outside`, plus `REPO_CONTROL` when a path field's target is `repo_metadata` and the kind is a write kind. A `parent_ref` or `workspace` target adds nothing. Every kind has at most one path field today, so "any" and "a" are the same thing; the rule is written for the set so a future kind with two paths needs no rewrite. `NETWORK`, `PRIVILEGE`, `REPO_PUBLISH`, `SYSTEM_CONTROL` and `REMOTE_CODE_EXEC` are never set in this issue; they are #137's.
 
 `semantic_status` is `semantic_known` for the nine static kinds and `finish`, and `semantic_unknown` for `bash`.
 
@@ -154,11 +159,11 @@ Normalization is idempotent at the contract level (parent design §7): building 
 
 | Same identity | Different identity |
 | --- | --- |
-| `src/x.py`, `./src/x.py`, `src/./x.py`, `src/a/../x.py`, `src/x.py/` | `src/x.py` vs `src/y.py` |
+| `src/x.py`, `./src/x.py`, `src/./x.py`, `src//x.py`, `src/x.py/` | `src/x.py` vs `src/y.py`; `src/x.py` vs `src/a/../x.py` |
 | `read_file(path, offset=0)` vs `read_file(path, offset=10)` | `list_dir(".")` vs `list_dir("src")` |
-| `bash("ls")` vs `bash("ls\n")` vs `bash("  ls  ")` | `bash("ls")` vs `bash("ls -l")`; `bash('echo "a  b"')` vs `bash('echo "a b"')` |
+| `bash("ls")` vs `bash("ls")` sent twice | `bash("ls")` vs `bash("ls\n")` vs `bash("  ls  ")`; `bash("ls")` vs `bash("ls -l")`; `bash('echo "a  b"')` vs `bash('echo "a b"')` |
 | `grep(pattern, path=".")` vs `grep(pattern)` (default) | `grep(p, glob=None)` vs `grep(p, glob="*.py")` |
-| `../x` vs `./../x` | `../x` vs `x` |
+| `../x` vs `./../x` | `../x` vs `x`; `link/../x` vs `x` |
 
 `action_identity` and `rejection_identity` themselves are unchanged from #135; this issue only makes their inputs canonical.
 
@@ -166,7 +171,7 @@ Normalization is idempotent at the contract level (parent design §7): building 
 
 - Every bound the pass applies is a `bounds.py` constant already pinned in #135; this issue adds no constant.
 - `FirewallInternalError` propagates out of `canonicalize` and `canonicalize_batch`; neither catches anything.
-- The pass is a single walk over at most a handful of fields plus one linear path normalization; the only regular expression is the registry's duration pattern, applied to a string the registry would apply it to today. No allocation is proportional to anything but the input, and no step re-reads `arguments` after step 5. The static-tool target of p95 under 1 ms on reference hardware (parent design §17) is met by construction; #142 measures it.
+- The pass is a single walk over at most a handful of fields, one linear path normalization and one linear name recovery; the only regular expression is the registry's duration pattern, applied to a string the registry would apply it to today. No step re-reads `arguments` after step 5. Nothing here is claimed to meet the static-tool target of p95 under 1 ms on reference hardware (parent design §17); #142 measures it, and the tests in section 12 only guard against the superlinear cases found in review.
 
 ## 12. Tests
 
@@ -174,13 +179,16 @@ Three files, all under `tests/`. Tests may import `dirtywork.builtin_tools` and 
 
 `tests/test_firewall_paths.py`:
 
-- one table of `(input, expected path, expected target)` covering every rule in section 6: empty, `.`, trailing slash, repeated slashes, `.` and `..` in every position, escapes of every depth, absolute inputs with and without `..`, `.git` as first component versus elsewhere versus `.gitignore`, `~`, backslashes, non-ASCII bytes, and a path of exactly `MAX_PATH_CHARS`;
+- one table of `(input, expected path, expected target)` covering every rule in section 6: empty, `.`, trailing slash, repeated slashes, `.` in every position, `..` leading, interior and trailing, absolute inputs with and without `..`, `.git` as first component versus elsewhere versus `.gitignore` versus `.git/../x`, `~`, backslashes, non-ASCII bytes, and a path of exactly `MAX_PATH_CHARS`;
+- the symlink fixture of section 6: a temporary directory with `link -> nested/child`, asserting that `os.path.realpath` and `posixpath.normpath` disagree on `link/../target.txt` and that `normalize_path` keeps the `..`;
 - the identity equivalence and distinctness sets of section 10 that concern paths, checked through `action_identity` on real actions;
 - `normalize_path` is total on `str`: no input raises.
 
 `tests/test_firewall_normalize.py`:
 
-- `recover_name` against the registry's fixture shapes, and the marker-tuple equality test of section 3;
+- `recover_name` against the registry's own `recover_name` on a fixture of registry-shaped names (plain, each marker, each sanitised marker, whitespace padding, nested markers, a marker with no valid tail, a valid tail with no marker) and on pathological repeated-marker strings with and without a valid tail, asserting equal `(name, marker, cut)`; a one-mebibyte marker-only name completes in under one second; the marker-tuple equality test of section 3;
+- a non-string `tool_name` (`None`, a list) is `tool_name_invalid` from `check_request`, not an exception;
+- `int` boundaries after coercion: `"2147483647"` accepted for `offset`, `"2147483648"` and `"-1"` rejected as `number_out_of_range`, `"0"` rejected for `limit`; `timeout` clamped for `0`, `-5`, `601` and `"2147483648"`;
 - per kind: a minimal accepted call with defaults filled, and the resulting `CanonicalAction`'s `kind`, `args`, `capabilities` and `semantic_status`;
 - every rejection code the pass can emit, once per code, with `detail` naming the field or index and never containing the worker's value;
 - the step order: an unknown key beside a missing required key reports `argument_missing`; a `null` required field reports `argument_type_invalid`, not `argument_missing`; a `string_too_long` on the first field is reported before an `argument_type_invalid` on the second; `check_request`'s own rejections come first;
@@ -192,28 +200,36 @@ Three files, all under `tests/`. Tests may import `dirtywork.builtin_tools` and 
 - `semantic_status` per kind;
 - idempotence per section 10, for every kind;
 - `Normalization` invariants;
-- `FIELD_TABLE` versus the live registry: names in order, required set, defaults, for every kind;
+- `FIELD_TABLE` versus the live registry: names in order, required set, defaults, for every kind, with one declared exception: `finish.summary` is required with no default in the registry and optional with default `""` here (section 4);
 - import isolation of `paths.py` and `normalize.py`.
 
-`tests/test_firewall_parity.py`:
+`tests/test_firewall_parity.py` pins the pass to the registry's **validation** step, `toolspec._validate_args(spec, args)`, not to `ToolRegistry.execute`, which additionally clamps `timeout` at the top, applies the run deadline and byte caps, and runs the tool. The contract is: on the shared domain, the same accept-or-reject outcome, and on accept, equal values for every field the registry produces, with paths compared as strings after both sides drop `.` and empty components (the registry does not normalize at validation). The shared domain is every value kind's accepted forms, unknown top-level keys, missing required keys, numeric-string and duration coercion, and the `apply_edits` schema, minus this exception table, each row of which has its own test asserting both behaviors so the difference is on the record:
 
-- a fixture corpus of raw argument dicts per kind, run through both `toolspec._validate_args(spec, args)` and `canonicalize`, asserting the same accept-or-reject outcome and, on accept, equal coerced values for every field the registry produces (paths compared after the registry's value is passed through `normalize_path`, since the registry does not normalize);
-- the corpus covers every value kind's accepted forms, unknown keys, missing required keys, and numeric-string coercion;
-- the two leniencies of section 14 (decisions 1 and 2) are excluded from the corpus and pinned by their own tests, which also assert that the registry rejects those inputs today, so the difference is on the record.
+| Input | Registry validation | This issue | Why |
+| --- | --- | --- | --- |
+| `null` on an optional parameter | rejects (`bad_args`) | the default | section 14, decision 1 |
+| `bash` `timeout` of `0` or below | accepts unchanged; `execute` passes `0` through | clamped to `1` | section 14, decision 2 |
+| `bash` `timeout` above `600` | accepts unchanged; `execute` clamps to `600` | clamped to `600` | same rule, applied at validation |
+| `finish` with no `summary` | rejects (`argument_missing`) | `summary = ""` | Runner canonicalizes it today; #135 §4.2 |
+| `apply_edits` item with empty `old` | accepts; the tool fails at execution | `argument_type_invalid` | `Edit.old` must be nonempty (#135 §4.2) |
+| coerced `int` above `MAX_INT` | accepts; fails inside the tool or not at all | `number_out_of_range` | section 5, step 6 |
+| unknown nested key in an `edits` item | rejects (`additionalProperties`) | `argument_unexpected` | same outcome, different label; asserted equal-outcome |
 
 Expected counts per brief are recorded in the plan from the dry run.
 
 ## 13. Compatibility
 
-No runtime path changes: the Runner, registry and executors do not import the package. The registry's `recover_name` and `_validate_args` keep working exactly as before; this issue adds a second implementation of each rule inside the Firewall and pins the two together with tests, so #138 can switch the Runner to the Firewall without a worker-visible change, and #143 can delete the registry's copies. Run artifacts, the transcript and `guardrail_block` events are untouched.
+No runtime path changes: the Runner, registry and executors do not import the package. The registry's `recover_name` and `_validate_args` keep working exactly as before; this issue adds a second implementation of each rule inside the Firewall and pins the two together with tests, so #138 can switch the Runner to the Firewall with only the section 12 exception table as worker-visible differences, and #143 can delete the registry's copies. Two registry behaviors are deliberately not part of the parity contract because they are not validation: `ToolRegistry.execute`'s timeout clamp, deadline clamp and byte caps stay in the executor, and the repeat-detection key's `normpath` and `strip` stay in the registry, since they exist to spot an idle loop and must not shape what runs or what a denial is keyed on. Run artifacts, the transcript and `guardrail_block` events are untouched.
 
 ## 14. Decisions taken that Jim may want to override
 
 1. **`null` on an optional parameter means its default.** The registry rejects `offset: null` today with a `bad_args` strike. A model that spells out "no offset" is asking for the default, and the #135 validator already lets `null` through. Recorded as a deliberate leniency; #140 can tighten it.
-2. **`timeout` below 1 is clamped to 1, not rejected.** The registry passes `0` through and the command times out at once; nothing intends that. `#135 §4.2` already requires `1..MAX_BASH_TIMEOUT` after coercion.
-3. **Name recovery runs before the length check and on any length.** Linear, in-memory, and the registry does the same.
+2. **`timeout` is clamped into `1..MAX_BASH_TIMEOUT` from both sides at validation, never rejected.** The registry's validation passes `0` and `601` through; its executor clamps the top only, and `0` times out at once, which nothing intends. `#135 §4.2` already requires `1..MAX_BASH_TIMEOUT` after coercion.
+3. **Name recovery runs before the length check, on any string length, with a linear algorithm that is not the registry's.** The registry's search is quadratic on repeated markers (section 3); copying it would have made an unbounded pre-validation step. The result is proven equal on a fixture, and the registry's copy is left alone until #143.
 4. **Absolute paths are `outside` regardless of mode.** The Firewall does not know the worktree's location and should not; #137 scopes the denial by backend as #135 §5.3 says.
 5. **`~` is a literal component.** The file executors never expand it; treating it as home here would make the Firewall stricter than the containment behind it on a path that is harmless today.
 6. **`.git` is matched as a first component only.** A nested `.git` directory inside the worktree is an ordinary directory to the executors today.
 7. **Unknown nested keys are `argument_unexpected` by position, not name.** Naming them would put worker text in `detail`.
 8. **`grep`'s `timeout` is an unknown key.** It is harness-injected after validation today; the canonical action does not carry it.
+9. **Interior `..` is kept and classed `parent_ref` with no capability.** Collapsing it can change the execution target through a symlink (section 6), and classifying it needs the filesystem the Firewall must not touch. The executor's containment keeps refusing real escapes as today. The cost is that `src/a/../x.py` and `src/x.py` are different identities, which is the conservative side of the parent design's rule against collapsing materially different targets.
+10. **Commands are canonical byte for byte.** Stripping can change shell meaning (section 7), so the Supervisor's exact-equivalent count sees `ls` and `ls\n` as different denials. Merging them would require a shell-aware normalizer, which is #137's analyzer territory at most and out of scope here.
