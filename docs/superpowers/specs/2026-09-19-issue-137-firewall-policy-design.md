@@ -49,7 +49,7 @@ class Outcome:
 def evaluate(action: CanonicalAction, context: PolicyContext) -> Verdict: ...
 def decide(request: ActionRequest, context: PolicyContext) -> Outcome: ...
 def decide_batch(requests: "Sequence[ActionRequest]", context: PolicyContext) -> "list[Outcome]": ...
-def analyze_command(command: str, context: PolicyContext) -> Optional[ShellMatch]: ...
+def analyze_command(command: str, *, mode: str, worktree_roots: "tuple[str, ...]") -> Optional[ShellMatch]: ...
 ```
 
 `evaluate` is pure: no I/O, no filesystem, no clock. It raises `FirewallInternalError` on any input outside its contract and on any internal inconsistency; it never catches anything. `decide` is the opposite by design: it never raises (section 7).
@@ -85,7 +85,7 @@ Detail strings are fixed harness sentences per rule (`"path is option-like"`, `"
 
 `rewrite_worktree_refs(command, roots)` substitutes each root, longest first, followed by the legacy boundary `(?=[/\s'"]|$)`, with `.`, in the checked string only; the command that executes is never changed. It is the legacy function with the `Path.resolve()` call replaced by the caller-supplied second form.
 
-`analyze_command(command, context)` runs the rewrite in host mode, skips host-scoped rules in Docker mode, and returns the first matching rule as `ShellMatch(index, capability, reason_code, legacy_reason)` or `None`. Only the first match is reported, mirroring `check_bash_command`; a second matching rule contributes nothing to the decision or the evidence (section 10, decision 2). A test pins multi-match precedence: `sudo git push` is rule 1; a command that both destroys outside the worktree and pipes a download into an interpreter is rule 4 in host mode and rule 5 in Docker mode, where rule 4 is skipped.
+`analyze_command(command, mode=..., worktree_roots=...)` takes the context's two fields as plain arguments, because `shell.py` sits below `policy.py` in the import order and must not import `PolicyContext`; `evaluate` passes them through. It runs the rewrite in host mode, skips host-scoped rules in Docker mode, and returns the first matching rule as `ShellMatch(index, capability, reason_code, legacy_reason)` or `None`. Only the first match is reported, mirroring `check_bash_command`; a second matching rule contributes nothing to the decision or the evidence (section 10, decision 2). A test pins multi-match precedence: `sudo git push` is rule 1; a command that both destroys outside the worktree and pipes a download into an interpreter is rule 4 in host mode and rule 5 in Docker mode, where rule 4 is skipped.
 
 The analyzer never classifies a command as `semantic_known`: a denylist match proves a denial, not an understanding of a permitted command, so every `bash` action keeps the `semantic_unknown` #136 gave it, and the #135 test that `PolicyDecision` cannot deny on `semantic_unknown` continues to hold. The shell guardrails remain what `guardrails.py` says they are, best-effort accident guards and not the OS boundary; this issue moves the knowledge, not the claim.
 
@@ -96,7 +96,7 @@ In order:
 1. `action` must be a `CanonicalAction` and `context` a `PolicyContext`, else `FirewallInternalError`. A raw worker dictionary therefore cannot reach a rule (parent design §19).
 2. `finish`: `ALLOW`.
 3. A kind with a `path` field: section 4. The returned action is the input unchanged.
-4. `bash`: `analyze_command(args.command, context)`. A match is `DENY` with the rule's `reason_code` and its `legacy_reason` as `detail`, and the returned action is the input with the rule's capability added to its set (`dataclasses.replace(action, capabilities=action.capabilities | {capability})`), so a `sudo` denial's evidence says `{SHELL, PRIVILEGE}`. No match is `ALLOW` with the action unchanged.
+4. `bash`: `analyze_command(args.command, mode=context.mode, worktree_roots=context.worktree_roots)`. A match is `DENY` with the rule's `reason_code` and its `legacy_reason` as `detail`, and the returned action is the input with the rule's capability added to its set (`dataclasses.replace(action, capabilities=action.capabilities | {capability})`), so a `sudo` denial's evidence says `{SHELL, PRIVILEGE}`. No match is `ALLOW` with the action unchanged.
 5. Any other kind is unreachable (`ActionKind` is closed and `CanonicalAction` checks membership), and the fall-through raises `FirewallInternalError` rather than allowing.
 
 The result is `Verdict(action, PolicyDecision)`. `ALLOW` decisions have `reason_code None` and `detail ""`; `DENY` decisions have a code and a detail within `MAX_DETAIL_CHARS` that never quotes worker text. Precedence, in one sentence: request-stage rejections from `check_request` and `canonicalize` come before anything here (they never reach `evaluate`); within a path kind the four rules in order; within `bash` the eight rules in order with host-only rules skipped in Docker mode; nothing overlaps across kinds.
