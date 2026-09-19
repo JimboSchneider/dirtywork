@@ -28,6 +28,22 @@ Sampler (`tools/soak_sampler.sh`, [CSV](2026-09-19-issue-135-w4-sampler.csv)): 5
 - `git diff --check`: clean. `ast.parse(..., feature_version=(3, 9))` over `dirtywork/firewall/*.py` and `tests/test_firewall_*.py`: silent.
 - No runtime behavior change: `schema.py` imports only its siblings in `dirtywork/firewall/`, and nothing outside the package imports it.
 
+## Review fix (PR #171, reviewer P2)
+
+The reviewer found that `FirewallEvent`'s public constructor accepted values outside the closed event contract: on a valid action-stage denial, `dataclasses.replace(event, decision="deny")` constructed and `to_dict()` then raised `AttributeError`; a `reason_class` contradicting `reason_code` was accepted; `capabilities` given as a list was accepted despite the frozen dataclass. All three reproduced on `e9a1502`. The fix makes `__post_init__` check `schema_version`, enum membership of `decision`, `kind`, `semantic_status`, `reason_code` and `reason_class`, that `capabilities` is a tuple of `Capability` values, and that `reason_class` is `reason_class(reason_code)`; 12 regression tests cover direct construction and `dataclasses.replace` for each invalid state and one valid replace.
+
+Dry run on a scratch clone at `e9a1502`: tests-only 11 failed / 48 passed; with the fix 59 passed; full suite 1,789 passed. The brief was generated from the same four edit pairs, with base line numbers next to each anchor (6,406 characters; `orchestrator/brief.txt` and `orchestrator/apply_w4fix.py` in the run directory).
+
+Host for this run: LM Studio Bionic 1.1.5 serving `qwen3.8-27b-splash` (Splash engine 0.0.4) on the same `localhost:1234/v1`, reasoning on by default (issue #173), `--max-tokens 16384`; `--branch-from @issue-135-task-w4-of-0919121850-f11bfebd`.
+
+| Run suffix | Status | Turns | Wall seconds | Prompt tokens | Completion tokens | Completion tokens / wall second | Nudges | Verdict |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `w4-review-fix-0919135849-86309d24` | completed | 6 | 137.1 | 38,767 | 2,114 | 15.4 | 0 | accept |
+
+Tool calls: `read_file` 3 (the two anchors and the test file head), `edit_file` 4 (all four in one turn), `bash` 2, `finish` 1; tool errors 0; truncations 0. In-container: 59 passed, then the default suite; verify gate exit 0 on the first round. `schema.py` came out byte-identical to the dry run. The test file carried one extra blank line after the import block; the orchestrator removed it so the file matches the dry run, the only orchestrator edit. Host suite after the fix: **1,789 passed / 9 skipped / 38 deselected**, 105.0 s (base `e9a1502`: 1,777; 12 new). Sampler ([CSV](2026-09-19-issue-135-w4fix-sampler.csv)): 27 samples, free 30.7–32.9 GB, inactive 33.6–42.9 GB, one model loaded.
+
+The plan's fenced `### Worker brief W4` block still carries the pre-review `schema.py`; this section and the run's `diff.patch` are the record of what changed after it.
+
 ## Preserved receipts
 
 Slug `issue-135-task-w4-of-0919121850-f11bfebd`; local receipts at `~/.dirtywork/runs/<slug>/`: `run.json` (with the accept verdict), `transcript.jsonl`, `diff.patch`, and `orchestrator/` with the exact brief, stdout, launch/end timestamps and the sampler CSV. Local provenance, not published artifacts.

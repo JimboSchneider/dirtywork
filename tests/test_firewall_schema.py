@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+import enum
 from types import SimpleNamespace
 
 import pytest
@@ -366,6 +368,54 @@ def test_firewall_event_action_stage_no_kind_raises():
             action_identity="0" * 64,
             semantic_status=SemanticStatus.KNOWN,
         )
+
+
+class _LookalikeDecision(str, enum.Enum):
+    DENY = "deny"
+
+
+def _denied_action_event():
+    policy = PolicyDecision(Decision.DENY, ReasonCode.PRIVILEGE_ESCALATION, "")
+    return FirewallEvent.from_action(_write_action(), policy)
+
+
+@pytest.mark.parametrize("field, value", [
+    ("decision", "deny"),
+    ("decision", _LookalikeDecision.DENY),
+    ("kind", "write_file"),
+    ("semantic_status", "semantic_known"),
+    ("reason_code", "privilege_escalation"),
+    ("reason_class", "authority"),
+    ("capabilities", ["workspace_write"]),
+    ("capabilities", ("workspace_write", 1)),
+    ("capabilities", ("not_a_capability",)),
+    ("schema_version", bounds.FIREWALL_SCHEMA_VERSION + 1),
+])
+def test_firewall_event_replace_with_invalid_field_raises(field, value):
+    with pytest.raises(FirewallInternalError):
+        dataclasses.replace(_denied_action_event(), **{field: value})
+
+
+def test_firewall_event_reason_class_must_match_reason_code():
+    with pytest.raises(FirewallInternalError):
+        dataclasses.replace(_denied_action_event(), reason_class=ReasonClass.MALFORMED)
+    request = ActionRequest(
+        call_id="call_1", tool_name="read_files", arguments={}, parse_error=None,
+        raw_chars=2, turn=1, batch_index=0, batch_size=1,
+    )
+    rejection = SimpleNamespace(reason_code=ReasonCode.TOOL_UNKNOWN, detail="")
+    event = FirewallEvent.from_rejection(request, rejection)
+    with pytest.raises(FirewallInternalError):
+        dataclasses.replace(event, reason_class=ReasonClass.AUTHORITY)
+
+
+def test_firewall_event_replace_with_valid_field_keeps_the_contract():
+    event = dataclasses.replace(_denied_action_event(), turn=7)
+    assert event.turn == 7
+    d = event.to_dict()
+    assert d["decision"] == "deny"
+    assert d["reason_class"] == "authority"
+    assert isinstance(event.capabilities, tuple)
 
 
 # --- group 14: rejection identity -------------------------------------------

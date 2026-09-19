@@ -373,6 +373,26 @@ class FirewallEvent:
     semantic_status: Optional[SemanticStatus]
 
     def __post_init__(self) -> None:
+        if self.schema_version != FIREWALL_SCHEMA_VERSION:
+            raise FirewallInternalError("schema_version mismatch")
+        if not isinstance(self.decision, Decision):
+            raise FirewallInternalError("decision must be a Decision member")
+        if self.kind is not None and not isinstance(self.kind, ActionKind):
+            raise FirewallInternalError("kind must be an ActionKind member or None")
+        if self.semantic_status is not None and not isinstance(
+            self.semantic_status, SemanticStatus
+        ):
+            raise FirewallInternalError("semantic_status must be a SemanticStatus member or None")
+        if self.reason_code is not None and not isinstance(self.reason_code, ReasonCode):
+            raise FirewallInternalError("reason_code must be a ReasonCode member or None")
+        if self.reason_class is not None and not isinstance(self.reason_class, ReasonClass):
+            raise FirewallInternalError("reason_class must be a ReasonClass member or None")
+        _tuple_field(self.capabilities, "capabilities", str, 0, len(Capability))
+        for cap in self.capabilities:
+            try:
+                Capability(cap)
+            except ValueError:
+                raise FirewallInternalError("capabilities items must be Capability values") from None
         if self.stage == "request":
             if self.decision is not Decision.DENY:
                 raise FirewallInternalError("request-stage event must be DENY")
@@ -395,6 +415,8 @@ class FirewallEvent:
             raise FirewallInternalError("reason_code is None iff decision is ALLOW")
         if allow != (self.reason_class is None):
             raise FirewallInternalError("reason_class is None iff decision is ALLOW")
+        if self.reason_code is not None and self.reason_class is not reason_class(self.reason_code):
+            raise FirewallInternalError("reason_class must be reason_class(reason_code)")
 
     @classmethod
     def from_action(cls, action: CanonicalAction, policy: PolicyDecision) -> "FirewallEvent":
