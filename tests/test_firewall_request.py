@@ -293,6 +293,8 @@ def test_package_all_matches_spec_and_every_name_resolves():
         "CanonicalArgs", "CanonicalAction", "Decision", "SemanticStatus", "PolicyDecision",
         "FirewallEvent", "action_identity", "rejection_identity",
         "Rejection", "check_request",
+        "Normalization", "canonicalize", "canonicalize_batch", "recover_name",
+        "NormalizedPath", "TargetClass", "normalize_path",
     ]
     assert fw.__all__ == expected
     for name in expected:

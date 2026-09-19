@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from .bounds import (
     FIREWALL_SCHEMA_VERSION,
@@ -386,3 +386,44 @@ def canonicalize(request: ActionRequest) -> Normalization:
         semantic_status=semantic_status,
     )
     return Normalization(action=action, rejection=None, dropped_keys=dropped_keys)
+
+
+def canonicalize_batch(requests: "Sequence[ActionRequest]") -> "list[Normalization]":
+    """Canonicalize a batch of requests in order (spec §9): the first request
+    carrying a given `call_id` goes through `canonicalize` normally, whatever
+    it decides; every later request whose `call_id` equals an earlier one's
+    -- compared with plain `==` on the id as given, before any validation, so
+    a non-string id is compared as-is -- is rejected with
+    `Rejection(ReasonCode.CALL_ID_DUPLICATE, ...)` naming only its batch
+    index, and is never canonicalized. Every other request is independent:
+    one request's rejection never affects its neighbours. Ids are tracked in
+    a `set` for a fast membership check; an id a set cannot hash (a list)
+    falls back to `==` against the unhashable ids seen so far rather than
+    raising."""
+    results: "list[Normalization]" = []
+    seen: set = set()
+    seen_unhashable: list = []
+    for index, request in enumerate(requests):
+        call_id = request.call_id
+        try:
+            is_duplicate = call_id in seen
+        except TypeError:
+            is_duplicate = any(call_id == existing for existing in seen_unhashable)
+        if is_duplicate:
+            results.append(
+                Normalization(
+                    action=None,
+                    rejection=Rejection(
+                        ReasonCode.CALL_ID_DUPLICATE,
+                        f"duplicate call_id at batch index {index}",
+                    ),
+                    dropped_keys=0,
+                )
+            )
+            continue
+        try:
+            seen.add(call_id)
+        except TypeError:
+            seen_unhashable.append(call_id)
+        results.append(canonicalize(request))
+    return results

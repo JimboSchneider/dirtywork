@@ -10,6 +10,8 @@ from .capabilities import (
     LEGACY_RULES,
 )
 from .errors import FirewallInternalError
+from .normalize import Normalization, canonicalize, canonicalize_batch, recover_name
+from .paths import NormalizedPath, TargetClass, normalize_path
 from .reasons import ReasonClass, ReasonCode, reason_class
 from .request import Rejection, check_request
 from .schema import (
@@ -45,4 +47,6 @@ __all__ = [
     "CanonicalArgs", "CanonicalAction", "Decision", "SemanticStatus", "PolicyDecision",
     "FirewallEvent", "action_identity", "rejection_identity",
     "Rejection", "check_request",
+    "Normalization", "canonicalize", "canonicalize_batch", "recover_name",
+    "NormalizedPath", "TargetClass", "normalize_path",
 ]
