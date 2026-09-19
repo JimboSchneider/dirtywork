@@ -16,6 +16,7 @@
 - Python 3.9 compatible source: `from __future__ import annotations` first in every module and test; `class X(str, enum.Enum)`; no `StrEnum`, `match`, `kw_only`, `slots=True`.
 - Package rules (spec §2): stdlib only; `dirtywork/firewall/paths.py` and `normalize.py` import nothing from `dirtywork/` outside the package; tests may import `dirtywork.builtin_tools` and `dirtywork.toolspec`; tests import from submodules, never the package root, until Task 3 adds the re-exports.
 - No runtime behavior change: nothing outside the package imports it after this issue (spec §1, §13). The registry's `recover_name` and `_validate_args` are untouched.
+- No brief may contain a literal tool-call marker: `<tool_call>` is a special token of the worker's chat template and the engine consumes it inside a tool-call argument (W2 attempt 2 arrived with every such fixture replaced by `[]`). Reference files build markers by concatenation, as the module and the registry do; the generator checks the briefs for literals.
 - Every task's brief names its files; the worker touches only those. New files are written with `write_file`; the one existing-file change (`__init__.py`, Task 3) is an exact `edit_file` pair with its base line numbers. Brief blocks below are the reference files: re-extract them to compare a worker diff.
 - Each task runs from `main` at the head the dry run used, after the previous task's PR has merged, or stacked with `--branch-from @<previous slug>` when the owner prefers to review the series together (then retarget each PR to `main` after the one below merges, close/reopen for CI). One PR per task, one ledger row per run under `docs/superpowers/bench/`, sampler on.
 - No merge and no release without the owner's explicit per-action go.
@@ -289,9 +290,9 @@ VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_paths.p
 - Consumes: `normalize_path`, `TargetClass` (Task 1); `check_request`, `Rejection` (`request.py`); `ActionRequest`, `CanonicalAction`, `Edit`, `SemanticStatus`, `ARGS_FOR_KIND` (`schema.py`); `ActionKind`, `Capability`, `BASE_CAPABILITIES` (`capabilities.py`); `ReasonCode`; the bounds. The tests import `dirtywork.toolspec` and `dirtywork.builtin_tools` for the recovery-equivalence, marker-tuple and field-table cross-checks.
 - Produces: `TOOL_CALL_MARKERS` (tuple, copied by value); `WRITE_KINDS` (frozenset of six `ActionKind`s); `Field(name, kind, required, default, limit, lo, hi)` frozen; `FIELD_TABLE: dict[ActionKind, tuple[Field, ...]]`; `Normalization(action, rejection, dropped_keys)` frozen with its invariants; `recover_name(name) -> (name, marker | None, cut)`; `canonicalize(request: ActionRequest) -> Normalization`. Task 3 appends `canonicalize_batch` after the last line of this file and re-exports six of these names plus it.
 
-- [x] **Dry-run on the scratch clone** (2026-09-19, on top of Task 1): the files below written, `tests/test_firewall_normalize.py` 219 passed, full host suite 2085 passed, `ast.parse(..., feature_version=(3, 9))` silent, `git diff --check` clean. Recovery equivalence proven against `ToolRegistry.recover_name` on 129 fixture names plus two 33K-character pathological strings; a 1.1 MB marker-only name rejects as `tool_name_invalid` well under a second. Review of PR #175 added the 32-character bound on numeric strings before `int()` (spec §4, decision 11) with seven tests, including a one-million-digit `offset` and `timeout` rejected in well under half a second. Tie-break recorded: an `edits` item that both lacks `new` and carries an extra key reports `argument_type_invalid`, because the spec's step 6 bullets are checked in the order written.
+- [x] **Dry-run on the scratch clone** (2026-09-19, on top of Task 1): the files below written, `tests/test_firewall_normalize.py` 219 passed, full host suite 2085 passed, `ast.parse(..., feature_version=(3, 9))` silent, `git diff --check` clean. Recovery equivalence proven against `ToolRegistry.recover_name` on 129 fixture names plus two 33K-character pathological strings; a 1.1 MB marker-only name rejects as `tool_name_invalid` well under a second. W2 attempt 2 on the real worker showed that literal `<tool_call>` strings in test fixtures do not survive the tool-call channel (they arrived as `[]`), so the reference test file builds its marker strings by concatenation; same tests, same count. Review of PR #175 added the 32-character bound on numeric strings before `int()` (spec §4, decision 11) with seven tests, including a one-million-digit `offset` and `timeout` rejected in well under half a second. Tie-break recorded: an `edits` item that both lacks `new` and carries an extra key reports `argument_type_invalid`, because the spec's step 6 bullets are checked in the order written.
 - [ ] **Confirm the base.** Task 1's PR merged (or its run branch as `--branch-from`); `dirtywork/firewall/paths.py` present at the brief's content.
-- [ ] **Launch** the brief below verbatim through the invocation in the header, sampler on, model loaded in the same command. The brief is the largest of the three (about 39 KB, two writes of about 16 KB and 23 KB); if either file lands truncated, rerun fresh rather than resume.
+- [ ] **Launch** the brief below verbatim through the invocation in the header, sampler on, model loaded in the same command. The brief is the largest of the three (about 39 KB, two writes of about 16 KB and 23 KB; no literal markers anywhere in it); if either file lands truncated, rerun fresh rather than resume.
 - [ ] **Review** against the gates in the header: `cmp` both files against the brief's blocks; `files_changed` is exactly the two files; host suite 2085 passed; `diff --check`; 3.9 grammar; the import-isolation test and the field-table cross-check green in the produced test file.
 - [ ] **Ledger** `docs/superpowers/bench/2026-09-XX-issue-136-w2-normalize-ledger.md` plus the sampler CSV, committed on the run branch.
 - [ ] **PR** titled `feat(firewall): issue #136 W2 — name recovery, the field table and the single-call pass`, body naming the plan, the spec and the ledger; part 2 of 3 for issue #136 (does not close it).
@@ -695,7 +696,7 @@ def canonicalize(request: ActionRequest) -> Normalization:
     return Normalization(action=action, rejection=None, dropped_keys=dropped_keys)
 === END dirtywork/firewall/normalize.py ===
 
-FILE tests/test_firewall_normalize.py (new, 599 lines) — write_file with exactly:
+FILE tests/test_firewall_normalize.py (new, 605 lines) — write_file with exactly:
 === BEGIN tests/test_firewall_normalize.py ===
 from __future__ import annotations
 
@@ -751,6 +752,12 @@ def _req(tool, arguments, call_id="call_1", turn=1, batch_index=0, batch_size=1)
 
 _REGISTRY = builtin_tools.default_registry()
 _KIND_VALUES = [kind.value for kind in ActionKind]
+# Built by concatenation, like the module and the registry: a worker model
+# writing this file through its own tool channel cannot emit the literal
+# tags, because its chat template treats them as special tokens.
+_TC = "<" + "tool_call>"
+_FN = "<" + "function="
+_TCS = "[" + "TOOL_CALLS]"
 
 
 # --- group 1/2 (recover_name and TOOL_CALL_MARKERS parity) ------------------
@@ -761,11 +768,11 @@ for _marker in TOOL_CALL_MARKERS:
         _RECOVER_NAME_FIXTURE.append(_marker + _name)
 _RECOVER_NAME_FIXTURE.extend(
     [
-        "<tool_call> bash ",
-        "<tool_call>\tbash",
-        "<tool_call><tool_call>bash",
-        "[TOOL_CALLS]<function=grep",
-        "<tool_call>nope",
+        _TC + " bash ",
+        _TC + "\tbash",
+        _TC + _TC + "bash",
+        _TCS + _FN + "grep",
+        _TC + "nope",
         "foobash",
         "call bash",
         "",
@@ -784,7 +791,7 @@ def test_recover_name_matches_registry(name):
 
 @pytest.mark.parametrize(
     "name",
-    ["<tool_call>" * 3000 + "nope", "<tool_call>" * 3000 + "bash"],
+    [_TC * 3000 + "nope", _TC * 3000 + "bash"],
     ids=["repeated_marker_no_tail", "repeated_marker_bash_tail"],
 )
 def test_recover_name_matches_registry_pathological(name):
@@ -799,7 +806,7 @@ def test_tool_call_markers_equals_toolspec():
 
 
 def test_giant_marker_only_name_is_fast_and_tool_name_invalid():
-    name = "<tool_call>" * 100_000
+    name = _TC * 100_000
     assert len(name) > 1024 * 1024
     request = _req(name, {})
     t0 = time.perf_counter()
@@ -1373,7 +1380,7 @@ def canonicalize_batch(requests: "Sequence[ActionRequest]") -> "list[Normalizati
         results.append(canonicalize(request))
     return results
 
-EDIT edit_file on tests/test_firewall_normalize.py (old is lines 598-599; the new text is 116 lines). old:
+EDIT edit_file on tests/test_firewall_normalize.py (old is lines 604-605; the new text is 116 lines). old:
     for rel in ("dirtywork/firewall/paths.py", "dirtywork/firewall/normalize.py"):
         assert _forbidden_imports(root / rel) == [], rel
 new:
