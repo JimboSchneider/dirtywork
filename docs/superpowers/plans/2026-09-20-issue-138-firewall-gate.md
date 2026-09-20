@@ -16,7 +16,7 @@
 - `dirtywork/firewall/` keeps its import isolation: nothing inside it may import anything outside it. `dirtywork/firewall_gate.py` may import only `dirtywork.firewall` and `dirtywork.providers`.
 - No CLI flag, no environment variable, no way to disable enforcement.
 - Baseline before task 1: **2,275 passed, 9 skipped, 38 deselected** (`PYTHONPATH=. pytest -q -p no:cacheprovider`).
-- The worker writes code and tests. Claude writes `docs/` prose afterwards, except the minimal schema rows task 3 needs to keep the schema suite green.
+- The worker writes code and tests. Claude writes `docs/` prose afterwards, except the minimal schema rows and the `firewall_denial` section that task 2 needs to keep the schema suite green.
 - Each task ends on the full suite passing, and its PR is stacked on the previous task's run branch.
 
 ## Run recipe
