@@ -94,7 +94,7 @@ In order:
 
 1. `action` must be a `CanonicalAction` and `context` a `PolicyContext`, else `FirewallInternalError`. A raw worker dictionary therefore cannot reach a rule (parent design §19).
 2. `finish`: `ALLOW`.
-3. A kind with a `path` field: section 4. The returned action is the input unchanged.
+3. A kind with a `path` field: section 4. On a `DENY` the returned action is the input with the capability `FILE_TARGET_RULES` maps to the reason code added to its set (`REPO_CONTROL` for `repo_metadata_target`, `HOST_FS` for `path_outside_workspace`), so the evidence asserts the same authority whether the target was spelled `.git/config`, `src/../.git/config` or `/wt/.git/config`; review of the first reference found the alias spellings denied with only the base capability. On `ALLOW` the returned action is the input unchanged. An unmapped path-denial code is a `FirewallInternalError`.
 4. `bash`: `analyze_command(args.command, mode=context.mode, worktree_roots=context.worktree_roots)`. A match is `DENY` with the rule's `reason_code` and its `legacy_reason` as `detail`, and the returned action is the input with the rule's capability added to its set (`dataclasses.replace(action, capabilities=action.capabilities | {capability})`), so a `sudo` denial's evidence says `{SHELL, PRIVILEGE}`. No match is `ALLOW` with the action unchanged.
 5. Any other kind is unreachable (`ActionKind` is closed and `CanonicalAction` checks membership), and the fall-through raises `FirewallInternalError` rather than allowing.
 
@@ -114,7 +114,7 @@ The result is `Verdict(action, PolicyDecision)`. `ALLOW` decisions have `reason_
 
 ## 8. Evidence
 
-Nothing new is defined. `FirewallEvent` carries the enriched capabilities, the decision, the reason code and class, the identity and the semantic status; `to_dict()` is what #141 writes. Because the shell capability is added before the event is built, the Supervisor's exact-equivalent key `reason_code + capability_set + action_identity` distinguishes a `sudo` denial from a `git push` denial of the same command text by both code and capability. When and how often events are recorded remains #141's decision.
+Nothing new is defined. `FirewallEvent` carries the enriched capabilities, the decision, the reason code and class, the identity and the semantic status; `to_dict()` is what #141 writes. Because the matched capability, shell or file-target, is added before the event is built, the Supervisor's exact-equivalent key `reason_code + capability_set + action_identity` distinguishes a `sudo` denial from a `git push` denial of the same command text by both code and capability. When and how often events are recorded remains #141's decision.
 
 ## 9. Errors, bounds and performance
 
