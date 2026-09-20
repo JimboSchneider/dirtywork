@@ -788,6 +788,46 @@ def test_main_docker_llm_error_after_start_finalizes_before_stop(tmp_path, monke
     assert finalize_calls == [1]
 
 
+def test_main_docker_firewall_denial_counter_survives_llm_error(tmp_path, monkeypatch, capsys):
+    # Spec #138 §2/§7: turn 1's bash `git push` is denied by the Firewall
+    # gate before the registry ever sees it; turn 2's LLMError escapes
+    # Runner.run() into main()'s exception handler, same as the neighbour
+    # test above -- the denial the runner already recorded must survive
+    # onto both run.json and the stdout payload via _fail_run(runner=...).
+    from dirtywork.llm import LLMError
+    from dirtywork.procs import Captured
+    from dirtywork.sandbox import RunArtifacts
+    from dirtywork.sandbox.docker import DockerSandbox as RealDockerSandbox
+    m, repo = _docker_mode_scaffold(tmp_path, monkeypatch)
+    monkeypatch.setattr(m.docker_cli, "run",
+                        lambda argv, *, timeout, stdin=None: Captured(1, b"", False, False))
+
+    def finalize(self):
+        return RunArtifacts(export_status="ok")
+
+    FakeDockerSandbox = _fake_docker_sandbox_class(RealDockerSandbox, finalize=finalize)
+    monkeypatch.setattr(m, "DockerSandbox", FakeDockerSandbox)
+
+    class FlakyClient(DictProvider):
+        def reply(self, model, messages, tools):
+            if self.calls == 1:
+                return tool_call_body("bash", {"command": "git push"}, call_id="c1")
+            raise LLMError("connection dropped")
+
+    patch_provider(monkeypatch, m, FlakyClient)
+
+    rc = m.main(["run", "--repo", str(repo), "some task"])
+
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "model_error"
+    assert payload["firewall_denials"] == 1
+    assert payload["firewall_internal_errors"] == 0
+    run_json = json.loads((Path(payload["run_dir"]) / "run.json").read_text())
+    assert run_json["firewall_denials"] == 1
+    assert run_json["firewall_internal_errors"] == 0
+
+
 def test_main_docker_export_failed_status_from_finalize_result(tmp_path, monkeypatch, capsys):
     # Fix item 6, trigger 1: Runner.run() completes normally and finalize()
     # (called inside Runner.finish()) returns an export_status that starts
