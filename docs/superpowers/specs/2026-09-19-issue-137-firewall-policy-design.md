@@ -98,7 +98,7 @@ In order:
 4. `bash`: `analyze_command(args.command, mode=context.mode, worktree_roots=context.worktree_roots)`. A match is `DENY` with the rule's `reason_code` and its `legacy_reason` as `detail`, and the returned action is the input with the rule's capability added to its set (`dataclasses.replace(action, capabilities=action.capabilities | {capability})`), so a `sudo` denial's evidence says `{SHELL, PRIVILEGE}`. No match is `ALLOW` with the action unchanged.
 5. Any other kind is unreachable (`ActionKind` is closed and `CanonicalAction` checks membership), and the fall-through raises `FirewallInternalError` rather than allowing.
 
-The result is `Verdict(action, PolicyDecision)`. `ALLOW` decisions have `reason_code None` and `detail ""`; `DENY` decisions have a code and a detail within `MAX_DETAIL_CHARS` that never quotes worker text. Precedence, in one sentence: request-stage rejections from `check_request` and `canonicalize` come before anything here (they never reach `evaluate`); within a path kind the four rules in order; within `bash` the eight rules in order with host-only rules skipped in Docker mode; nothing overlaps across kinds.
+The result is `Verdict(action, PolicyDecision)`. `ALLOW` decisions have `reason_code None` and `detail ""`; `DENY` decisions have a code and a detail within `MAX_DETAIL_CHARS` that never quotes worker text. Precedence, in one sentence: request-stage rejections from `check_request` and `canonicalize` come before anything here (they never reach `evaluate`); within a path kind the three rules in order; within `bash` the eight rules in order with host-only rules skipped in Docker mode; nothing overlaps across kinds.
 
 ## 7. `decide` and `decide_batch`: fail closed
 
