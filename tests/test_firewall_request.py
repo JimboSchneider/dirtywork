@@ -295,6 +295,8 @@ def test_package_all_matches_spec_and_every_name_resolves():
         "Rejection", "check_request",
         "Normalization", "canonicalize", "canonicalize_batch", "recover_name",
         "NormalizedPath", "TargetClass", "normalize_path",
+        "PolicyContext", "Verdict", "Outcome", "evaluate", "decide", "decide_batch",
+        "SHELL_RULES", "analyze_command",
     ]
     assert fw.__all__ == expected
     for name in expected:
