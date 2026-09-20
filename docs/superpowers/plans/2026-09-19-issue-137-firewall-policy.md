@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Repository `CLAUDE.md`: the latest released dirtywork plus a local worker implements code; Claude plans, briefs and reviews. PyPI checked 2026-09-19: `dirtywork==0.13.2`. Worker: `qwen3.6-35b-a3b-splash` (Inco AI Splash engine) served by LM Studio Bionic 1.1.5 on `http://localhost:1234/v1`; the model reasons by default and the released dirtywork cannot send `reasoning_effort` (issue #173), so every run passes `--max-tokens 16384`. Docker sandbox, image `dirtywork-worker-pytest:0.13`, network off.
+- Repository `CLAUDE.md`: the latest released dirtywork plus a local worker implements code; Claude plans, briefs and reviews. PyPI checked 2026-09-19: `dirtywork==0.13.2`. Worker: `qwen3.6-35b-a3b-splash` (Inco AI Splash engine) served by LM Studio Bionic 1.1.5 on `http://localhost:1234/v1`; the model reasons by default and the released dirtywork cannot send `reasoning_effort` (issue #173), so every run passes `--max-tokens 16384` (Task 2, whose brief carries a 30 KB write, passes `--max-tokens 24576`). Docker sandbox, image `dirtywork-worker-pytest:0.13`, network off.
 - The worker must be the only resident model: a Splash run beside a second 45 GB model died on an engine memory timeout (issue #136 W2 attempt 1). `lms ps` before every launch.
 - No brief may contain a literal tool-call marker (`<tool_call>` and its kin): the worker's chat template treats them as special tokens and the engine consumes them inside a tool-call argument (issue #136 W2 attempt 2). Reference files build such strings by concatenation; the generator greps every brief for literals.
 - Python 3.9 compatible source: `from __future__ import annotations` first in every module and test; `class X(str, enum.Enum)`; no `StrEnum`, `match`, `kw_only`, `slots=True`.
@@ -47,72 +47,29 @@ The brief is passed as one argv element. The sampler CSV is committed beside the
 - Ledger row: status, turns, wall, prompt/completion tokens, tok/s, nudges, verdict, tool-call counts, sampler summary, diff-vs-brief result.
 
 ---
-### Task 1: shell: the analyzer, the drift pin and the new reason code
+### Task 1: shell: the analyzer and the drift pin
 
 **Files:**
 - Create: `dirtywork/firewall/shell.py`
-- Modify: `dirtywork/firewall/reasons.py:46` and `:75-76` (append `PATH_OPTION_LIKE` and its `MALFORMED` row), `tests/test_firewall_reasons.py:37-39`, `:49-50`, `:81`, `:85` (the code list, the `MALFORMED` list, and the two counts, 26 to 27 and 8 to 9)
 - Test: `tests/test_firewall_shell.py`
 
 **Interfaces:**
-- Consumes: `Capability` (`capabilities.py`), `ReasonCode` (`reasons.py`), `FirewallInternalError`. The tests import `dirtywork.guardrails` (`_RULES`, `_ROOT_BOUNDARY`, `_rewrite_worktree_refs`, `check_bash_command`) and `LEGACY_RULES` for the drift pin.
-- Produces: `ShellRule(index, scope, pattern, legacy_reason, capability, reason_code)` frozen; `SHELL_RULES` (eight, in `guardrails._RULES` order); `ROOT_BOUNDARY`; `ShellMatch(index, capability, reason_code, legacy_reason)`; `rewrite_worktree_refs(command, roots) -> str`; `analyze_command(command, *, mode, worktree_roots) -> Optional[ShellMatch]` (spec §5). `ReasonCode.PATH_OPTION_LIKE`, class `MALFORMED`. Task 2's `evaluate` calls `analyze_command` for every `bash` action.
+- Consumes: `Capability` (`capabilities.py`), `ReasonCode` (`reasons.py`, unchanged), `FirewallInternalError`. The tests import `dirtywork.guardrails` (`_RULES`, `_ROOT_BOUNDARY`, `_rewrite_worktree_refs`, `check_bash_command`) and `LEGACY_RULES` for the drift pin.
+- Produces: `ShellRule(index, scope, pattern, legacy_reason, capability, reason_code)` frozen; `SHELL_RULES` (eight, in `guardrails._RULES` order); `ROOT_BOUNDARY`; `ShellMatch(index, capability, reason_code, legacy_reason)`; `rewrite_worktree_refs(command, roots) -> str`; `analyze_command(command, *, mode, worktree_roots) -> Optional[ShellMatch]` (spec §5). Task 2's `evaluate` calls `analyze_command` for every `bash` action.
 
-- [x] **Dry-run on the scratch clone** (2026-09-19, clone of `main` at `d8638e4`): the edits and files below applied, `tests/test_firewall_shell.py` 9 passed (drift pin, host and Docker parity on a 31-command corpus against `check_bash_command`, the rewrite against `_rewrite_worktree_refs` on a symlinked temporary worktree, multi-match precedence, empty and benign commands, never-raises, bad inputs, the new code), `tests/test_firewall_reasons.py` 4 passed with the grown pins, full host suite 2189 passed (baseline 2180), `ast.parse(..., feature_version=(3, 9))` silent, `git diff --check` clean. The `MALFORMED` count assertion in the reasons test was the one pin the spec did not name; it grows with the list.
-- [ ] **Confirm the base.** `main` at `d8638e4` or later with `dirtywork/firewall/reasons.py` and `tests/test_firewall_reasons.py` unchanged since (`git log --oneline -1 -- dirtywork/firewall/reasons.py` shows `0237bf5`); the six anchors must still be at the quoted line numbers.
-- [ ] **Launch** the brief below verbatim through the invocation in the header, sampler on, only the worker model resident. Six `edit_file` calls and two `write_file`s.
-- [ ] **Review** against the gates in the header: apply the brief's six pairs to the base with the round-trip script and `cmp` every produced file; `cmp` the two new files against their blocks; `files_changed` is exactly the four files; host suite 2189 passed; `diff --check`; 3.9 grammar; the drift and parity tests green in the produced test file.
+- [x] **Dry-run on the scratch clone** (2026-09-19, clone of `main` at `d8638e4`): the files below written, `tests/test_firewall_shell.py` 8 passed (drift pin, host and Docker parity on a 31-command corpus against `check_bash_command`, the rewrite against `_rewrite_worktree_refs` on a symlinked temporary worktree, multi-match precedence, empty and benign commands, never-raises, bad inputs), full host suite 2188 passed (baseline 2180), `ast.parse(..., feature_version=(3, 9))` silent, `git diff --check` clean. A first draft added a reason code for option-like paths; review showed #145 and #153 had already closed that gap, and the code was dropped before any run (spec §3).
+- [ ] **Confirm the base.** `main` at `d8638e4` or later with `dirtywork/firewall/` unchanged since (`git log --oneline -1 -- dirtywork/firewall` shows `d1da433`).
+- [ ] **Launch** the brief below verbatim through the invocation in the header, sampler on, only the worker model resident. Two `write_file`s.
+- [ ] **Review** against the gates in the header: `cmp` the two new files against their blocks; `files_changed` is exactly the two files; host suite 2188 passed; `diff --check`; 3.9 grammar; the drift and parity tests green in the produced test file.
 - [ ] **Ledger** `docs/superpowers/bench/2026-09-XX-issue-137-w1-shell-ledger.md` plus the sampler CSV, committed on the run branch.
-- [ ] **PR** `dirtywork/<slug>` → `main` (or stacked), titled `feat(firewall): issue #137 W1 — shell analyzer, drift pin and path_option_like`, body naming the plan, the spec and the ledger; part 1 of 3 for issue #137 (does not close it).
+- [ ] **PR** `dirtywork/<slug>` → `main` (or stacked), titled `feat(firewall): issue #137 W1 — shell analyzer and drift pin`, body naming the plan, the spec and the ledger; part 1 of 3 for issue #137 (does not close it).
 
 ### Worker brief W1
 
 ```text
-Issue #137 task W1 of 3 (Worker Action Firewall D): add dirtywork/firewall/shell.py, the deterministic shell-command analyzer (the eight guardrail rules copied by value, the worktree-reference rewrite, analyze_command) with its test, and append the one new reason code path_option_like (class malformed) to dirtywork/firewall/reasons.py with the matching pin updates in tests/test_firewall_reasons.py. The rest of dirtywork/firewall/ exists from issues #135 and #136. Nothing outside the package imports it. Spec: docs/superpowers/specs/2026-09-19-issue-137-firewall-policy-design.md sections 3, 5 and 11 (the texts below are its exact content).
+Issue #137 task W1 of 3 (Worker Action Firewall D): add dirtywork/firewall/shell.py, the deterministic shell-command analyzer (the eight guardrail rules copied by value, the worktree-reference rewrite, analyze_command) with its test. The rest of dirtywork/firewall/ exists from issues #135 and #136. Nothing outside the package imports it. Spec: docs/superpowers/specs/2026-09-19-issue-137-firewall-policy-design.md sections 3, 5 and 11 (the files below are its exact content).
 
-Touch ONLY dirtywork/firewall/reasons.py, tests/test_firewall_reasons.py, dirtywork/firewall/shell.py, tests/test_firewall_shell.py. First apply the SIX edit_file edits below, each with the exact old and new text (byte for byte; keep indentation and blank lines; the "old:"/"new:" labels and the === marker lines are not part of the text; NEVER use write_file or append_file on an existing file). Then create each NEW file with ONE write_file call whose content is exactly the text between its BEGIN and END marker lines (byte for byte; the file ends with a newline after its last line). Use relative paths exactly as written (never an absolute /work/... path). Line numbers refer to the files before any of these edits. No other files, no docs, no commits, nothing else.
-
-EDIT edit_file on dirtywork/firewall/reasons.py (old is lines 46-46; the new text is 2 lines). old:
-    FIREWALL_INTERNAL_ERROR = "firewall_internal_error"
-new:
-    FIREWALL_INTERNAL_ERROR = "firewall_internal_error"
-    PATH_OPTION_LIKE = "path_option_like"
-
-EDIT edit_file on dirtywork/firewall/reasons.py (old is lines 75-76; the new text is 3 lines). old:
-    ReasonCode.FIREWALL_INTERNAL_ERROR: ReasonClass.INTERNAL,
-}
-new:
-    ReasonCode.FIREWALL_INTERNAL_ERROR: ReasonClass.INTERNAL,
-    ReasonCode.PATH_OPTION_LIKE: ReasonClass.MALFORMED,
-}
-
-EDIT edit_file on tests/test_firewall_reasons.py (old is lines 37-39; the new text is 4 lines). old:
-        "firewall_internal_error",
-    ]
-)
-new:
-        "firewall_internal_error",
-        "path_option_like",
-    ]
-)
-
-EDIT edit_file on tests/test_firewall_reasons.py (old is lines 49-50; the new text is 3 lines). old:
-    ReasonCode.ARGUMENT_UNEXPECTED,
-]
-new:
-    ReasonCode.ARGUMENT_UNEXPECTED,
-    ReasonCode.PATH_OPTION_LIKE,
-]
-
-EDIT edit_file on tests/test_firewall_reasons.py (old is lines 81-81; the new text is 1 lines). old:
-    assert len(ReasonCode) == 26
-new:
-    assert len(ReasonCode) == 27
-
-EDIT edit_file on tests/test_firewall_reasons.py (old is lines 85-85; the new text is 1 lines). old:
-    assert len(MALFORMED) == 8
-new:
-    assert len(MALFORMED) == 9
+Touch ONLY dirtywork/firewall/shell.py, tests/test_firewall_shell.py. Create each NEW file with ONE write_file call whose content is exactly the text between its BEGIN and END marker lines below (byte for byte; keep every blank line; the file ends with a newline after its last line; the marker lines themselves are not part of the file). Use relative paths exactly as written (never an absolute /work/... path). No other files, no docs, no commits, nothing else.
 
 FILE dirtywork/firewall/shell.py (new, 158 lines) — write_file with exactly:
 === BEGIN dirtywork/firewall/shell.py ===
@@ -276,11 +233,11 @@ def analyze_command(
     return None
 === END dirtywork/firewall/shell.py ===
 
-FILE tests/test_firewall_shell.py (new, 190 lines) — write_file with exactly:
+FILE tests/test_firewall_shell.py (new, 184 lines) — write_file with exactly:
 === BEGIN tests/test_firewall_shell.py ===
 """Tests for dirtywork.firewall.shell: the drift pin against guardrails.py,
-parity across a command corpus, the worktree-reference rewrite, multi-match
-precedence and the vocabulary pin for PATH_OPTION_LIKE (spec §5, §11)."""
+parity across a command corpus, the worktree-reference rewrite and
+multi-match precedence (spec §5, §11)."""
 from __future__ import annotations
 
 import pytest
@@ -288,7 +245,6 @@ import pytest
 import dirtywork.guardrails as guardrails
 from dirtywork.firewall.capabilities import LEGACY_RULES
 from dirtywork.firewall.errors import FirewallInternalError
-from dirtywork.firewall.reasons import ReasonClass, ReasonCode, reason_class
 from dirtywork.firewall.shell import (
     ROOT_BOUNDARY,
     SHELL_RULES,
@@ -463,14 +419,9 @@ def test_bad_mode_and_non_str_raise_internal_error():
         analyze_command("ls", mode="bogus", worktree_roots=())
     with pytest.raises(FirewallInternalError):
         analyze_command(123, mode="host", worktree_roots=())
-
-
-def test_new_reason_code_registered():
-    assert ReasonCode.PATH_OPTION_LIKE.value == "path_option_like"
-    assert reason_class(ReasonCode.PATH_OPTION_LIKE) is ReasonClass.MALFORMED
 === END tests/test_firewall_shell.py ===
 
-VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_shell.py tests/test_firewall_reasons.py and expect 13 passed. Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed (2189 passed). Finish when both pass.
+VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_shell.py and expect 8 passed. Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed (2188 passed). Finish when both pass.
 ```
 
 ---
@@ -478,27 +429,112 @@ VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_shell.p
 
 **Files:**
 - Create: `dirtywork/firewall/policy.py`
-- Test: `tests/test_firewall_policy.py`
+- Modify: `dirtywork/firewall/normalize.py` (`duplicate_positions` added before `canonicalize_batch`, which is refactored onto it; one `edit_file` pair, base line numbers in the brief)
+- Test: `tests/test_firewall_policy.py` (the existing `tests/test_firewall_normalize.py` batch tests stay green unchanged)
 
 **Interfaces:**
-- Consumes: `analyze_command` (Task 1); `canonicalize`, `canonicalize_batch`, `WRITE_KINDS` (`normalize.py`); `normalize_path`, `TargetClass` (`paths.py`); `CanonicalAction`, `ActionRequest`, `PolicyDecision`, `Decision`, `FirewallEvent` (`schema.py`); `Rejection`; `ReasonCode`; `ActionKind`; `FirewallInternalError`.
-- Produces: `PolicyContext(mode, worktree_roots)` frozen with its invariants; `Verdict(action, policy)`; `Outcome(action, policy, event, dropped_keys)`; `evaluate(action, context) -> Verdict`; `decide(request, context) -> Outcome`; `decide_batch(requests, context) -> list[Outcome]`; the three detail constants `DETAIL_PATH_OPTION_LIKE`, `DETAIL_REPO_METADATA_TARGET`, `DETAIL_PATH_OUTSIDE_WORKSPACE` (spec §4, §6, §7). This is the surface #138 calls.
+- Consumes: `analyze_command` (Task 1); `canonicalize`, `Normalization`, `WRITE_KINDS` and the new `duplicate_positions` (`normalize.py`); `normalize_path`, `TargetClass` (`paths.py`); `CanonicalAction`, `ActionRequest`, `PolicyDecision`, `Decision`, `FirewallEvent` (`schema.py`); `Rejection`; `ReasonCode`; `ActionKind`; `FirewallInternalError`.
+- Produces: `PolicyContext(mode, worktree_roots)` frozen with its invariants; `Verdict(action, policy)`; `Outcome(action, policy, event, dropped_keys)`; `evaluate(action, context) -> Verdict`; `decide(request, context) -> Outcome`; `decide_batch(requests, context) -> list[Outcome]`; the two detail constants `DETAIL_REPO_METADATA_TARGET`, `DETAIL_PATH_OUTSIDE_WORKSPACE`; `normalize.duplicate_positions(requests) -> frozenset[int]` (spec §4, §6, §7). This is the surface #138 calls.
 
-- [x] **Dry-run on the scratch clone** (2026-09-19, on top of Task 1): the files below written, `tests/test_firewall_policy.py` 58 passed (context invariants; every file-target rule on a read kind and a write kind in both modes, option-like across all nine path kinds; `finish`; every shell rule through `evaluate` with the capability added; detail bounds and no leakage; `evaluate`'s raise contract; `decide` accept, rejection, internal-error and double-failure paths; `decide_batch` mixed batches; the parent design §19 invariants as named tests; import isolation), full host suite 2247 passed (Task 1: 2189), `ast.parse(..., feature_version=(3, 9))` silent, `git diff --check` clean.
-- [ ] **Confirm the base.** Task 1's PR merged (or its run branch as `--branch-from`); `dirtywork/firewall/shell.py` present at the brief's content and `ReasonCode.PATH_OPTION_LIKE` defined.
-- [ ] **Launch** the brief below verbatim through the invocation in the header, sampler on, only the worker model resident. Two `write_file`s of about 8 KB and 26 KB; if either lands truncated, rerun fresh rather than resume.
-- [ ] **Review** against the gates in the header: `cmp` both files against the brief's blocks; `files_changed` is exactly the two files; host suite 2247 passed; `diff --check`; 3.9 grammar; the §19 invariant tests and import isolation green in the produced test file.
+- [x] **Dry-run on the scratch clone** (2026-09-19, on top of Task 1): the files and the edit below applied, `tests/test_firewall_policy.py` 70 passed (context and root-shape invariants; every file-target rule on a read kind and a write kind in both modes, the `.git` aliases and the `..` component cases, a benign path across all nine path kinds; `finish`; every shell rule through `evaluate` with the capability added; detail bounds and no leakage; `evaluate`'s raise contract; `decide` accept, rejection, internal-error and double-failure paths; `decide_batch` mixed batches with per-request isolation; the parent design §19 invariants as named tests; import isolation), full host suite 2258 passed (Task 1: 2188), `ast.parse(..., feature_version=(3, 9))` silent, `git diff --check` clean.
+- [ ] **Confirm the base.** Task 1's PR merged (or its run branch as `--branch-from`); `dirtywork/firewall/shell.py` present at the brief's content; the `normalize.py` anchor at the quoted line numbers.
+- [ ] **Launch** the brief below verbatim through the invocation in the header, sampler on, only the worker model resident. One `edit_file` and two `write_file`s (about 10 KB and 30 KB; the 45 KB brief is the largest of the series). Pass `--max-tokens 24576` for this run so hidden reasoning cannot starve the 30 KB write; if either write lands truncated anyway, rerun fresh rather than resume.
+- [ ] **Review** against the gates in the header: apply the brief's pair to the base with the round-trip script and `cmp` `normalize.py`; `cmp` both new files against their blocks; `files_changed` is exactly the three files; host suite 2258 passed; `diff --check`; 3.9 grammar; the §19 invariant tests and import isolation green in the produced test file.
 - [ ] **Ledger** `docs/superpowers/bench/2026-09-XX-issue-137-w2-policy-ledger.md` plus the sampler CSV, committed on the run branch.
 - [ ] **PR** titled `feat(firewall): issue #137 W2 — policy context, file-target rules, evaluate and fail-closed decide`, body naming the plan, the spec and the ledger; part 2 of 3 for issue #137 (does not close it).
 
 ### Worker brief W2
 
 ```text
-Issue #137 task W2 of 3 (Worker Action Firewall D): add dirtywork/firewall/policy.py, the deterministic policy engine (PolicyContext, Verdict, Outcome, the four ordered file-target rules, evaluate, and the fail-closed decide and decide_batch) with its test. dirtywork/firewall/shell.py and ReasonCode.PATH_OPTION_LIKE exist from task W1; the rest of the package from issues #135 and #136. Nothing outside the package imports it. The package re-exports are task W3, not this one. Spec: docs/superpowers/specs/2026-09-19-issue-137-firewall-policy-design.md sections 2, 3, 4, 6, 7 and 11 (the files below are its exact content).
+Issue #137 task W2 of 3 (Worker Action Firewall D): add dirtywork/firewall/policy.py, the deterministic policy engine (PolicyContext, Verdict, Outcome, the ordered file-target rules, evaluate, and the fail-closed decide and decide_batch) with its test, and add duplicate_positions to dirtywork/firewall/normalize.py with canonicalize_batch refactored onto it. dirtywork/firewall/shell.py exists from task W1; the rest of the package from issues #135 and #136. Nothing outside the package imports it. The package re-exports are task W3, not this one. Spec: docs/superpowers/specs/2026-09-19-issue-137-firewall-policy-design.md sections 2, 3, 4, 6, 7 and 11 (the texts below are its exact content).
 
-Touch ONLY dirtywork/firewall/policy.py, tests/test_firewall_policy.py. Create each NEW file with ONE write_file call whose content is exactly the text between its BEGIN and END marker lines below (byte for byte; keep every blank line; the file ends with a newline after its last line; the marker lines themselves are not part of the file). Use relative paths exactly as written (never an absolute /work/... path). Do not edit dirtywork/firewall/__init__.py. No other files, no docs, no commits, nothing else.
+Touch ONLY dirtywork/firewall/normalize.py, dirtywork/firewall/policy.py, tests/test_firewall_policy.py. First apply the ONE edit_file edit below with the exact old and new text (byte for byte; keep indentation and blank lines; the "old:"/"new:" labels and the === marker lines are not part of the text; NEVER use write_file or append_file on an existing file). Then create each NEW file with ONE write_file call whose content is exactly the text between its BEGIN and END marker lines (byte for byte; the file ends with a newline after its last line). Use relative paths exactly as written (never an absolute /work/... path). Line numbers refer to the file before the edit. Do not edit dirtywork/firewall/__init__.py. No other files, no docs, no commits, nothing else.
 
-FILE dirtywork/firewall/policy.py (new, 226 lines) — write_file with exactly:
+EDIT edit_file on dirtywork/firewall/normalize.py (old is lines 391-424; the new text is 47 lines). old:
+def canonicalize_batch(requests: "Sequence[ActionRequest]") -> "list[Normalization]":
+    """Canonicalize a batch of requests in order (spec §9): the first request
+    carrying a given `call_id` goes through `canonicalize` normally, whatever
+    it decides; every later request whose `call_id` equals an earlier one's
+    -- compared with plain `==` on the id as given, before any validation, so
+    a non-string id is compared as-is -- is rejected with
+    `Rejection(ReasonCode.CALL_ID_DUPLICATE, ...)` naming only its batch
+    index, and is never canonicalized. Every other request is independent:
+    one request's rejection never affects its neighbours. Only `str` ids
+    take part: a non-string id is never a duplicate and is left to
+    `check_request`, which rejects it as `call_id_invalid`, so a malformed
+    id can neither crash the batch (comparing two deeply nested lists
+    recurses) nor be reported as a duplicate of another malformed id."""
+    results: "list[Normalization]" = []
+    seen: set = set()
+    for index, request in enumerate(requests):
+        call_id = request.call_id
+        is_duplicate = isinstance(call_id, str) and call_id in seen
+        if is_duplicate:
+            results.append(
+                Normalization(
+                    action=None,
+                    rejection=Rejection(
+                        ReasonCode.CALL_ID_DUPLICATE,
+                        f"duplicate call_id at batch index {index}",
+                    ),
+                    dropped_keys=0,
+                )
+            )
+            continue
+        if isinstance(call_id, str):
+            seen.add(call_id)
+        results.append(canonicalize(request))
+    return results
+new:
+def duplicate_positions(requests: "Sequence[ActionRequest]") -> "frozenset[int]":
+    """The batch indexes whose `call_id` is a `str` equal to an earlier
+    request's `str` `call_id` (spec §9): compared with plain `==` on the id
+    as given, before any validation, so a non-string id is compared as-is.
+    Only `str` ids take part: a non-string id never marks and is never
+    marked as a duplicate, so a malformed id can neither crash the batch
+    (comparing two deeply nested lists recurses) nor be reported as a
+    duplicate of another malformed id. The first request carrying a given
+    `call_id` is never included, only every later one that repeats it.
+    Never raises."""
+    positions: "set[int]" = set()
+    seen: set = set()
+    for index, request in enumerate(requests):
+        call_id = request.call_id
+        if not isinstance(call_id, str):
+            continue
+        if call_id in seen:
+            positions.add(index)
+        else:
+            seen.add(call_id)
+    return frozenset(positions)
+
+
+def canonicalize_batch(requests: "Sequence[ActionRequest]") -> "list[Normalization]":
+    """Canonicalize a batch of requests in order (spec §9): the first request
+    carrying a given `call_id` goes through `canonicalize` normally, whatever
+    it decides; every later request at a `duplicate_positions` index is
+    rejected with `Rejection(ReasonCode.CALL_ID_DUPLICATE, ...)` naming only
+    its batch index, and is never canonicalized. Every other request is
+    independent: one request's rejection never affects its neighbours."""
+    positions = duplicate_positions(requests)
+    results: "list[Normalization]" = []
+    for index, request in enumerate(requests):
+        if index in positions:
+            results.append(
+                Normalization(
+                    action=None,
+                    rejection=Rejection(
+                        ReasonCode.CALL_ID_DUPLICATE,
+                        f"duplicate call_id at batch index {index}",
+                    ),
+                    dropped_keys=0,
+                )
+            )
+            continue
+        results.append(canonicalize(request))
+    return results
+
+FILE dirtywork/firewall/policy.py (new, 256 lines) — write_file with exactly:
 === BEGIN dirtywork/firewall/policy.py ===
 """The deterministic policy engine: `evaluate` (pure, first match wins) and
 the fail-closed entry points `decide` / `decide_batch` (spec §3, §4, §6,
@@ -511,7 +547,7 @@ from typing import Optional, Sequence
 
 from .capabilities import ActionKind
 from .errors import FirewallInternalError
-from .normalize import WRITE_KINDS, canonicalize, canonicalize_batch
+from .normalize import WRITE_KINDS, Normalization, canonicalize, duplicate_positions
 from .paths import TargetClass, normalize_path
 from .reasons import ReasonCode
 from .request import Rejection
@@ -524,9 +560,8 @@ from .schema import (
 )
 from .shell import analyze_command
 
-# Fixed harness sentences for the three file-target deny rules that carry
+# Fixed harness sentences for the two file-target deny rules that carry
 # one (spec §4): never the path, always within MAX_DETAIL_CHARS.
-DETAIL_PATH_OPTION_LIKE = "path is option-like"
 DETAIL_REPO_METADATA_TARGET = "write under the repository's .git"
 DETAIL_PATH_OUTSIDE_WORKSPACE = "path resolves outside the worktree"
 
@@ -539,9 +574,10 @@ class PolicyContext:
     """The sandbox mode and the worktree root forms for one run (spec §3).
 
     `worktree_roots` is supplied, never discovered: host mode requires it
-    nonempty (absolute posix paths, longest first); Docker mode requires it
-    empty, since a container-scoped command has no worktree path to rewrite
-    against and every absolute path is already outside it (spec §4 rule 3).
+    nonempty (absolute posix paths, longest first, each already normalized
+    and never "/"); Docker mode requires it empty, since a container-scoped
+    command has no worktree path to rewrite against and every absolute path
+    is already outside it (spec §4 rule 3).
     """
 
     mode: str
@@ -554,6 +590,14 @@ class PolicyContext:
             isinstance(root, str) for root in self.worktree_roots
         ):
             raise FirewallInternalError("worktree_roots must be a tuple of str")
+        for root in self.worktree_roots:
+            if (
+                not root
+                or not posixpath.isabs(root)
+                or root != posixpath.normpath(root)
+                or root == "/"
+            ):
+                raise FirewallInternalError(f"invalid worktree root: {root!r}")
         is_host = self.mode == "host"
         if is_host and not self.worktree_roots:
             raise FirewallInternalError("host mode requires a nonempty worktree_roots")
@@ -582,22 +626,37 @@ class Outcome:
     dropped_keys: int
 
 
-def _inside_worktree(path: str, roots: "tuple[str, ...]") -> bool:
-    return any(path == root or path.startswith(root + "/") for root in roots)
+def _matching_root(path: str, roots: "tuple[str, ...]") -> Optional[str]:
+    return next((root for root in roots if path == root or path.startswith(root + "/")), None)
+
+
+def _deny_relative(rel: str, kind: ActionKind) -> Optional[PolicyDecision]:
+    """`rel` is a relative posix path whose '..' have been resolved lexically
+    (or that has none): first component '..' -> DENY PATH_OUTSIDE_WORKSPACE;
+    first component '.git' and kind in WRITE_KINDS -> DENY
+    REPO_METADATA_TARGET; else None. (`first component` = the first
+    non-empty, non-'.' element of `rel.split("/")`; for "." it is none.)"""
+    first_component = next((part for part in rel.split("/") if part not in ("", ".")), None)
+    if first_component == "..":
+        return PolicyDecision(
+            Decision.DENY, ReasonCode.PATH_OUTSIDE_WORKSPACE, DETAIL_PATH_OUTSIDE_WORKSPACE
+        )
+    if first_component == ".git" and kind in WRITE_KINDS:
+        return PolicyDecision(
+            Decision.DENY, ReasonCode.REPO_METADATA_TARGET, DETAIL_REPO_METADATA_TARGET
+        )
+    return None
 
 
 def _evaluate_path_kind(action: CanonicalAction, context: PolicyContext) -> Verdict:
-    """The four file-target rules of spec §4, first match wins, over the
+    """The file-target rules of spec §4, first match wins, over the
     canonical path string and its re-derived TargetClass (the #136
-    normalizer is idempotent, so this is exact)."""
+    normalizer is idempotent, so this is exact). Backend-aware: a `.git` or
+    `..` alias reachable only via the worktree root (host, absolute) or via
+    a lexically-resolved relative parent reference (both modes) is
+    classified the same as the literal form."""
     p = action.args.path
     t = normalize_path(p).target
-
-    first_component = next((part for part in p.split("/") if part), "")
-    if first_component.startswith("-"):
-        return Verdict(
-            action, PolicyDecision(Decision.DENY, ReasonCode.PATH_OPTION_LIKE, DETAIL_PATH_OPTION_LIKE)
-        )
 
     if t is TargetClass.REPO_METADATA and action.kind in WRITE_KINDS:
         return Verdict(
@@ -606,30 +665,26 @@ def _evaluate_path_kind(action: CanonicalAction, context: PolicyContext) -> Verd
         )
 
     if t is TargetClass.OUTSIDE:
-        host_exception = (
-            context.mode == "host"
-            and p.startswith("/")
-            and _inside_worktree(p, context.worktree_roots)
-        )
-        if not host_exception:
-            return Verdict(
-                action,
-                PolicyDecision(
-                    Decision.DENY, ReasonCode.PATH_OUTSIDE_WORKSPACE, DETAIL_PATH_OUTSIDE_WORKSPACE
-                ),
-            )
-
-    if (
-        context.mode == "docker"
-        and t is TargetClass.PARENT_REF
-        and posixpath.normpath(p).startswith("..")
-    ):
+        root = _matching_root(p, context.worktree_roots) if p.startswith("/") else None
+        if context.mode == "host" and root is not None:
+            # The remainder is resolved lexically too, so `/wt/src/../.git/config`
+            # and `/wt/a/../../etc` classify like their relative forms (spec §4).
+            rel = posixpath.normpath(p[len(root):].lstrip("/") or ".")
+            denial = _deny_relative(rel, action.kind)
+            if denial is not None:
+                return Verdict(action, denial)
+            return Verdict(action, PolicyDecision(Decision.ALLOW, None, ""))
         return Verdict(
             action,
             PolicyDecision(
                 Decision.DENY, ReasonCode.PATH_OUTSIDE_WORKSPACE, DETAIL_PATH_OUTSIDE_WORKSPACE
             ),
         )
+
+    if t is TargetClass.PARENT_REF:
+        denial = _deny_relative(posixpath.normpath(p), action.kind)
+        if denial is not None:
+            return Verdict(action, denial)
 
     return Verdict(action, PolicyDecision(Decision.ALLOW, None, ""))
 
@@ -669,7 +724,7 @@ def evaluate(action: CanonicalAction, context: PolicyContext) -> Verdict:
 
 def _outcome_from(request: ActionRequest, normalization, context: PolicyContext) -> Outcome:
     """The post-`canonicalize` half of `decide` (spec §7), shared with
-    `decide_batch` once `canonicalize_batch` has already run."""
+    `decide_batch` once its per-request `Normalization` is in hand."""
     if normalization.rejection is not None:
         policy = PolicyDecision(
             Decision.DENY, normalization.rejection.reason_code, normalization.rejection.detail
@@ -709,31 +764,43 @@ def decide(request: ActionRequest, context: PolicyContext) -> Outcome:
 
 
 def decide_batch(requests: "Sequence[ActionRequest]", context: PolicyContext) -> "list[Outcome]":
-    """`decide` over a batch (spec §7): `canonicalize_batch` handles
-    duplicate ids; each result is turned into an Outcome under the same
-    per-request guard as `decide`, so one request's failure never affects
-    its neighbours. If `canonicalize_batch` itself raises, every request
-    gets the internal-error outcome."""
+    """`decide` over a batch (spec §7): duplicate ids are found once via
+    `duplicate_positions`; each request is then turned into an Outcome under
+    the same per-request guard as `decide`, so one request's failure never
+    affects its neighbours. If `duplicate_positions` itself raises, every
+    request gets the internal-error outcome."""
     try:
-        normalizations = canonicalize_batch(requests)
+        positions = duplicate_positions(requests)
     except Exception as exc:
         return [_internal_error_outcome(request, exc) for request in requests]
 
     outcomes = []
-    for request, normalization in zip(requests, normalizations):
+    for index, request in enumerate(requests):
         try:
+            if index in positions:
+                normalization = Normalization(
+                    None,
+                    Rejection(
+                        ReasonCode.CALL_ID_DUPLICATE,
+                        f"duplicate call_id at batch index {index}",
+                    ),
+                    0,
+                )
+            else:
+                normalization = canonicalize(request)
             outcomes.append(_outcome_from(request, normalization, context))
         except Exception as exc:
             outcomes.append(_internal_error_outcome(request, exc))
     return outcomes
 === END dirtywork/firewall/policy.py ===
 
-FILE tests/test_firewall_policy.py (new, 617 lines) — write_file with exactly:
+FILE tests/test_firewall_policy.py (new, 733 lines) — write_file with exactly:
 === BEGIN tests/test_firewall_policy.py ===
-"""Tests for dirtywork.firewall.policy: PolicyContext invariants, the four
-file-target rules, the bash denylist wiring, evaluate's fail-hard contract,
-decide/decide_batch's fail-closed contract, the parent design §19
-invariants this layer owns, and import isolation (spec §11)."""
+"""Tests for dirtywork.firewall.policy: PolicyContext invariants (including
+worktree root validation), the file-target rules (backend-aware `.git`/`..`
+alias classification included), the bash denylist wiring, evaluate's
+fail-hard contract, decide/decide_batch's fail-closed contract, the parent
+design §19 invariants this layer owns, and import isolation (spec §11)."""
 from __future__ import annotations
 
 import ast
@@ -747,7 +814,6 @@ from dirtywork.firewall.capabilities import ActionKind, Capability
 from dirtywork.firewall.errors import FirewallInternalError
 from dirtywork.firewall.normalize import canonicalize
 from dirtywork.firewall.policy import (
-    DETAIL_PATH_OPTION_LIKE,
     DETAIL_PATH_OUTSIDE_WORKSPACE,
     DETAIL_REPO_METADATA_TARGET,
     Outcome,
@@ -803,6 +869,29 @@ def test_policy_context_invariants():
     PolicyContext(mode="docker", worktree_roots=())
 
 
+def test_policy_context_root_validation():
+    for roots in (
+        ("",),
+        ("wt",),
+        ("/",),
+        ("/wt/",),
+        ("/wt/../x",),
+        ("/wt", ""),
+    ):
+        with pytest.raises(FirewallInternalError):
+            PolicyContext(mode="host", worktree_roots=roots)
+    PolicyContext(mode="host", worktree_roots=("/wt",))
+    PolicyContext(mode="host", worktree_roots=("/private/tmp/wt", "/tmp/wt"))
+
+
+def test_policy_context_empty_root_cannot_allow_etc_passwd():
+    # A prior version matched any absolute path's prefix against an empty
+    # root string, silently ALLOWing anything outside the worktree; an
+    # empty root must now fail construction instead (spec §3).
+    with pytest.raises(FirewallInternalError):
+        PolicyContext(mode="host", worktree_roots=("",))
+
+
 # --- group 2 (file-target rules) --------------------------------------------
 
 _PATH_KIND_ARGS = {
@@ -819,35 +908,16 @@ _PATH_KIND_ARGS = {
 
 
 @pytest.mark.parametrize("kind", sorted(_PATH_KIND_ARGS))
-def test_option_like_denied_for_every_path_kind(kind):
+def test_benign_relative_path_allowed_for_every_path_kind(kind):
+    # No option-like rule any more (decision reversed): a plain relative
+    # path -- including one that used to be flagged as option-like, such as
+    # a leading "-" -- ALLOWs for every path-bearing ActionKind, in both
+    # modes, so kind coverage is preserved (spec §4).
     for ctx in (_ctx_host("/wt"), _ctx_docker()):
-        action = _action(kind, _PATH_KIND_ARGS[kind]("-delete"))
+        action = _action(kind, _PATH_KIND_ARGS[kind]("src/thing.py"))
         v = evaluate(action, ctx)
-        assert v.policy.decision is Decision.DENY
-        assert v.policy.reason_code is ReasonCode.PATH_OPTION_LIKE
-        assert v.policy.detail == DETAIL_PATH_OPTION_LIKE
+        assert v.policy.decision is Decision.ALLOW
         assert v.action is action
-
-
-def test_option_like_read_and_write_variants():
-    expected_canonical = {"-delete": "-delete", "--pre=x": "--pre=x", "./-x": "-x"}
-    for kind, args_for in (("read_file", _PATH_KIND_ARGS["read_file"]), ("write_file", _PATH_KIND_ARGS["write_file"])):
-        for path, canonical in expected_canonical.items():
-            for ctx in (_ctx_host("/wt"), _ctx_docker()):
-                action = _action(kind, args_for(path))
-                assert action.args.path == canonical
-                v = evaluate(action, ctx)
-                assert v.policy.decision is Decision.DENY, (kind, path, ctx.mode)
-                assert v.policy.reason_code is ReasonCode.PATH_OPTION_LIKE
-
-
-def test_absolute_first_component_is_not_option_like():
-    # An absolute path's first non-empty component is after the leading
-    # slash, so it is never option-like (spec §4).
-    for ctx in (_ctx_host("/Users/x"), _ctx_docker()):
-        action = _action("read_file", {"path": "/Users/x/-y"})
-        v = evaluate(action, ctx)
-        assert v.policy.reason_code is not ReasonCode.PATH_OPTION_LIKE
 
 
 def test_git_metadata_read_allow_write_deny():
@@ -920,13 +990,69 @@ def test_parent_ref_shallow_allowed_both_modes():
         assert v.policy.decision is Decision.ALLOW, ctx.mode
 
 
-def test_parent_ref_escaping_host_allowed_docker_denied():
-    action_host = _action("read_file", {"path": "a/../../x"})
-    v = evaluate(action_host, _ctx_host("/wt"))
+def test_parent_ref_escaping_denied_both_modes():
+    # posixpath.normpath("a/../../x") == "../x": a leading ".." after lexical
+    # resolution is outside in both modes now (spec §4).
+    for ctx in (_ctx_host("/wt"), _ctx_docker()):
+        action = _action("read_file", {"path": "a/../../x"})
+        v = evaluate(action, ctx)
+        assert v.policy.decision is Decision.DENY, ctx.mode
+        assert v.policy.reason_code is ReasonCode.PATH_OUTSIDE_WORKSPACE
+
+
+def test_parent_ref_non_dotdot_lookalike_allowed_both_modes():
+    # posixpath.normpath("src/../..cache/data") == "../..cache/data" isn't
+    # quite right -- "..cache" is a real component, not a ".." reference, so
+    # it never denies (spec §4).
+    for ctx in (_ctx_host("/wt"), _ctx_docker()):
+        action = _action("read_file", {"path": "src/../..cache/data"})
+        v = evaluate(action, ctx)
+        assert v.policy.decision is Decision.ALLOW, ctx.mode
+
+
+def test_parent_ref_git_alias_write_denied_both_modes():
+    for ctx in (_ctx_host("/wt"), _ctx_docker()):
+        action = _action("write_file", {"path": "src/../.git/config", "content": "x"})
+        v = evaluate(action, ctx)
+        assert v.policy.decision is Decision.DENY, ctx.mode
+        assert v.policy.reason_code is ReasonCode.REPO_METADATA_TARGET
+        assert v.policy.detail == DETAIL_REPO_METADATA_TARGET
+
+
+def test_host_absolute_git_alias_via_root_write_denied():
+    ctx = _ctx_host("/wt")
+    action = _action("write_file", {"path": "/wt/.git/config", "content": "x"})
+    v = evaluate(action, ctx)
+    assert v.policy.decision is Decision.DENY
+    assert v.policy.reason_code is ReasonCode.REPO_METADATA_TARGET
+    assert v.policy.detail == DETAIL_REPO_METADATA_TARGET
+
+
+def test_host_absolute_git_alias_via_root_read_allowed():
+    ctx = _ctx_host("/wt")
+    action = _action("read_file", {"path": "/wt/.git/config"})
+    v = evaluate(action, ctx)
     assert v.policy.decision is Decision.ALLOW
 
-    action_docker = _action("read_file", {"path": "a/../../x"})
-    v = evaluate(action_docker, _ctx_docker())
+
+def test_host_absolute_gitignore_via_root_write_allowed():
+    ctx = _ctx_host("/wt")
+    action = _action("write_file", {"path": "/wt/.gitignore", "content": "x"})
+    v = evaluate(action, ctx)
+    assert v.policy.decision is Decision.ALLOW
+
+
+def test_host_absolute_internal_parent_ref_via_root_allowed():
+    ctx = _ctx_host("/wt")
+    action = _action("read_file", {"path": "/wt/src/a/../x.py"})
+    v = evaluate(action, ctx)
+    assert v.policy.decision is Decision.ALLOW
+
+
+def test_host_absolute_leading_parent_ref_via_root_denied():
+    ctx = _ctx_host("/wt")
+    action = _action("read_file", {"path": "/wt/../x"})
+    v = evaluate(action, ctx)
     assert v.policy.decision is Decision.DENY
     assert v.policy.reason_code is ReasonCode.PATH_OUTSIDE_WORKSPACE
 
@@ -1024,7 +1150,7 @@ def test_deny_details_bounded_and_never_contain_path_or_command():
 
 
 def test_all_fixed_details_and_legacy_reasons_bounded():
-    for detail in (DETAIL_PATH_OPTION_LIKE, DETAIL_REPO_METADATA_TARGET, DETAIL_PATH_OUTSIDE_WORKSPACE):
+    for detail in (DETAIL_REPO_METADATA_TARGET, DETAIL_PATH_OUTSIDE_WORKSPACE):
         assert len(detail) <= MAX_DETAIL_CHARS
     for rule in SHELL_RULES:
         assert len(rule.legacy_reason) <= MAX_DETAIL_CHARS
@@ -1212,11 +1338,13 @@ def test_decide_batch_one_bash_failure_does_not_affect_neighbours(monkeypatch):
     assert outcomes[2].policy.decision is Decision.ALLOW
 
 
-def test_decide_batch_canonicalize_batch_raises_every_outcome_internal_error(monkeypatch):
+def test_decide_batch_duplicate_positions_raises_every_outcome_internal_error(monkeypatch):
+    # decide_batch no longer calls canonicalize_batch; the batch-wide guard
+    # is now around duplicate_positions.
     def boom(requests):
         raise RuntimeError("batch boom")
 
-    monkeypatch.setattr("dirtywork.firewall.policy.canonicalize_batch", boom)
+    monkeypatch.setattr("dirtywork.firewall.policy.duplicate_positions", boom)
     requests = [
         _req("read_file", {"path": "x"}, call_id="c1"),
         _req("read_file", {"path": "y"}, call_id="c2"),
@@ -1228,6 +1356,42 @@ def test_decide_batch_canonicalize_batch_raises_every_outcome_internal_error(mon
         assert outcome.policy.decision is Decision.DENY
         assert outcome.policy.reason_code is ReasonCode.FIREWALL_INTERNAL_ERROR
         assert outcome.policy.detail == "firewall internal error: RuntimeError"
+
+
+def test_decide_batch_canonicalize_raises_for_one_request_only(monkeypatch):
+    real_canonicalize = canonicalize
+
+    def wrapped(request):
+        if request.call_id == "c2":
+            raise RuntimeError("boom")
+        return real_canonicalize(request)
+
+    monkeypatch.setattr("dirtywork.firewall.policy.canonicalize", wrapped)
+
+    requests = [
+        _req("read_file", {"path": "x"}, call_id="c1"),
+        _req("read_file", {"path": "y"}, call_id="c2"),
+        _req("read_file", {"path": "z"}, call_id="c3"),
+    ]
+    outcomes = decide_batch(requests, _ctx_host("/wt"))
+    assert outcomes[0].policy.decision is Decision.ALLOW
+    assert outcomes[1].policy.decision is Decision.DENY
+    assert outcomes[1].policy.reason_code is ReasonCode.FIREWALL_INTERNAL_ERROR
+    assert outcomes[2].policy.decision is Decision.ALLOW
+
+
+def test_decide_batch_duplicate_detection():
+    ctx = _ctx_host("/wt")
+    requests = [
+        _req("read_file", {"path": "x"}, call_id="a"),
+        _req("read_file", {"path": "y"}, call_id="b"),
+        _req("read_file", {"path": "z"}, call_id="a"),
+    ]
+    outcomes = decide_batch(requests, ctx)
+    assert outcomes[0].policy.decision is Decision.ALLOW
+    assert outcomes[1].policy.decision is Decision.ALLOW
+    assert outcomes[2].policy.decision is Decision.DENY
+    assert outcomes[2].policy.reason_code is ReasonCode.CALL_ID_DUPLICATE
 
 
 def test_decide_batch_empty():
@@ -1347,9 +1511,27 @@ def test_import_isolation():
     root = pathlib.Path(__file__).resolve().parents[1]
     for rel in ("dirtywork/firewall/shell.py", "dirtywork/firewall/policy.py"):
         assert _forbidden_imports(root / rel) == [], rel
+
+
+# --- group 11 (host absolute-inside remainder is resolved lexically) ---------
+
+
+def test_host_absolute_inside_git_alias_through_dotdot_is_denied():
+    verdict = evaluate(_action("write_file", {"path": "/wt/src/../.git/config", "content": "x"}), _ctx_host("/wt"))
+    assert verdict.policy.reason_code is ReasonCode.REPO_METADATA_TARGET
+
+
+def test_host_absolute_inside_escape_through_dotdot_is_denied():
+    verdict = evaluate(_action("read_file", {"path": "/wt/a/../../etc/passwd"}), _ctx_host("/wt"))
+    assert verdict.policy.reason_code is ReasonCode.PATH_OUTSIDE_WORKSPACE
+
+
+def test_host_absolute_inside_benign_dotdot_is_allowed():
+    verdict = evaluate(_action("read_file", {"path": "/wt/src/a/../x.py"}), _ctx_host("/wt"))
+    assert verdict.policy.decision is Decision.ALLOW
 === END tests/test_firewall_policy.py ===
 
-VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_policy.py and expect 58 passed. Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed (2247 passed). Finish when both pass.
+VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_policy.py tests/test_firewall_normalize.py and expect 300 passed (70 + 230). Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed (2258 passed). Finish when both pass.
 ```
 
 ---
@@ -1362,10 +1544,10 @@ VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_policy.
 - Consumes: Tasks 1 and 2.
 - Produces: the package root re-exports `PolicyContext`, `Verdict`, `Outcome`, `evaluate`, `decide`, `decide_batch`, `SHELL_RULES` and `analyze_command`; `__all__` has 48 names (spec §2).
 
-- [x] **Dry-run on the scratch clone** (2026-09-19, on top of Task 2): the four edits below applied, `tests/test_firewall_request.py` 40 passed with the grown pin, `len(dirtywork.firewall.__all__) == 48` and every name resolves, full host suite 2247 passed (no new tests), `ast.parse(..., feature_version=(3, 9))` silent, `git diff --check` clean.
+- [x] **Dry-run on the scratch clone** (2026-09-19, on top of Task 2): the four edits below applied, `tests/test_firewall_request.py` 40 passed with the grown pin, `len(dirtywork.firewall.__all__) == 48` and every name resolves, full host suite 2258 passed (no new tests), `ast.parse(..., feature_version=(3, 9))` silent, `git diff --check` clean.
 - [ ] **Confirm the base.** Task 2's PR merged (or its run branch as `--branch-from`); the four anchors below must still be at the quoted line numbers.
 - [ ] **Launch** the brief below verbatim through the invocation in the header, sampler on. Four `edit_file` calls; an `apply_edits` in place of several `edit_file`s is fine.
-- [ ] **Review** against the gates in the header: apply the brief's four pairs to the base with the round-trip script and `cmp` both files; `files_changed` is exactly the two files; host suite 2247 passed; `diff --check`; 3.9 grammar; `python3 -c "import dirtywork.firewall as f; assert len(f.__all__) == 48"` from the run's worktree.
+- [ ] **Review** against the gates in the header: apply the brief's four pairs to the base with the round-trip script and `cmp` both files; `files_changed` is exactly the two files; host suite 2258 passed; `diff --check`; 3.9 grammar; `python3 -c "import dirtywork.firewall as f; assert len(f.__all__) == 48"` from the run's worktree.
 - [ ] **Ledger** `docs/superpowers/bench/2026-09-XX-issue-137-w3-reexports-ledger.md` plus the sampler CSV, committed on the run branch.
 - [ ] **PR** titled `feat(firewall): issue #137 W3 — re-exports and the __all__ pin`, body naming the plan, the spec and the ledger; part 3 of 3; **closes #137**.
 - [ ] After merge: comment on issue #137 with the three ledgers; issue #138 (Runner integration) is next and is briefed against the merged package.
@@ -1413,5 +1595,5 @@ new:
         "SHELL_RULES", "analyze_command",
     ]
 
-VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_request.py tests/test_firewall_policy.py tests/test_firewall_shell.py and expect 107 passed. Then run python3 -c "import dirtywork.firewall as f; assert len(f.__all__) == 48; [getattr(f, n) for n in f.__all__]" and expect no output. Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed (2247 passed). Finish when all pass.
+VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_request.py tests/test_firewall_policy.py tests/test_firewall_shell.py and expect 107 passed. Then run python3 -c "import dirtywork.firewall as f; assert len(f.__all__) == 48; [getattr(f, n) for n in f.__all__]" and expect no output. Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed (2258 passed). Finish when all pass.
 ```
