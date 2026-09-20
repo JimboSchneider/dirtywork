@@ -12,11 +12,12 @@ from dirtywork.runner import Runner
 from dirtywork.transcript import Transcript
 
 from .provider_doubles import DictProvider, patch_provider, text_body, tool_call_body
+from .test_runner import GATE_CTX
 
 DOC = Path(__file__).parent.parent / "docs" / "transcript-schema.md"
 
-EVENT_NAMES = ["run_start", "assistant", "tool_result", "guardrail_block", "nudge",
-               "stray_kill", "sandbox_reset", "verify", "run_end"]
+EVENT_NAMES = ["run_start", "assistant", "tool_result", "guardrail_block", "firewall_denial",
+               "nudge", "stray_kill", "sandbox_reset", "verify", "run_end"]
 NUDGE_KINDS = ["truncated", "empty", "text_tool_call", "stall", "timeout", "malformed_entry",
                "stray_kill", "sandbox_reset", "no_change", "unchanged_finish", "name_recovered"]
 STATUSES = ["completed", "max_turns", "timeout", "context_exhausted", "model_error",
@@ -28,7 +29,8 @@ RUN_END_FIELDS = ["diff_stat", "untracked", "patch_path", "escaping_symlinks",
                   "export_status", "watchdog_violation", "watchdog_violation_kind",
                   "finalize_error", "stuck_on", "files_changed",
                   "files_changed_truncated", "last_tool_result", "last_assistant_text",
-                  "verify", "trimmed_turns", "timeouts", "truncations", "context_window_source",
+                  "verify", "trimmed_turns", "timeouts", "truncations",
+                  "firewall_denials", "firewall_internal_errors", "context_window_source",
                   "changed", "changed_reason"]
 
 
@@ -212,7 +214,7 @@ def test_a_verify_run_emits_the_documented_follow_up_fields(tmp_path):
     transcript = Transcript(tmp_path / "t.jsonl")
     registry = default_registry(transcript=transcript)
     r = Runner(_FollowUpProvider(), registry, TimeoutThenFailingVerifySandbox("npm test"), transcript,
-               model="m", verify="npm test", verify_rounds=1)
+               model="m", verify="npm test", verify_rounds=1, policy_context=GATE_CTX)
     result = r.run("s", "t")
     transcript.close()
     events = [json.loads(l) for l in (tmp_path / "t.jsonl").read_text().splitlines()]

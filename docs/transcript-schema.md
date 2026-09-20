@@ -139,6 +139,32 @@ runner — this moved from `ToolExecutor` in sub-project 3.
 | `args` | ✓ | ✓ | object | the validated argument dict actually passed to the tool (unknown keys already dropped, `timeout` already clamped) |
 | `reason` | ✓ | ✓ | string | the full `BLOCKED: …` text |
 
+### `firewall_denial`
+
+**v2 only**, issue #138. One per `DENY` outcome from the Firewall's `decide_batch`,
+written by the Runner (`dirtywork/firewall_gate.py`), not the registry, for every
+denied call at the moment it is reached — immediately before that call's own
+`tool_result`. Never written for `ALLOW`. Fields are `outcome.event.to_dict()`
+plus `tool`; when every event factory the outcome's path reaches has failed, a
+minimal `event_missing` record is written instead (see below). Prose expanded
+later.
+
+| Field | v1 | v2 | Type | Notes |
+|---|---|---|---|---|
+| `schema_version` | | ✓ | integer | the `FirewallEvent` schema version (distinct from the transcript's own `schema_version`) |
+| `stage` | | ✓ | string | `"request"` or `"action"` — where the decision was made. **Sparse**: absent on an `event_missing` record |
+| `turn` | | ✓ | integer | 1-based turn number |
+| `call_id` | | ✓ | string | the call's id, capped at 256 chars |
+| `tool` | | ✓ | string | the capped name the call's `tool_result` event uses |
+| `kind` | | ✓ | string | the canonical action kind. **Sparse**: absent on an `event_missing` record |
+| `capabilities` | | ✓ | list | the action's declared capabilities. **Sparse**: absent on an `event_missing` record |
+| `decision` | | ✓ | `"deny"` | |
+| `reason_code` | | ✓ | string | the `ReasonCode` value |
+| `reason_class` | | ✓ | string | `authority`, `malformed`, `bounds`, or `internal` |
+| `action_identity` | | ✓ | object | canonical identity of the denied action. **Sparse**: absent on an `event_missing` record |
+| `semantic_status` | | ✓ | string | **Sparse**: absent on an `event_missing` record |
+| `event_missing` | | ✓ | boolean | **Sparse**: present (`true`) only when every event factory the outcome's own path reaches raised — the record then carries only `schema_version`, `turn`, `call_id`, `tool`, `decision`, `reason_code`, `reason_class` and `event_missing`, with `reason_code: "firewall_internal_error"` and `reason_class: "internal"` |
+
 ### `sandbox_reset`
 
 **v2 only**, Docker sandbox mode. Emitted when the container is reset — since 1.0 (#61) only
@@ -249,6 +275,8 @@ run-level fields that are known even when the agent loop never started).
 | `context_window_source` | | ✓ | string | **always** — 0.9: the same value as `run_start.context_window_source`, repeated at the end so a consumer that reads only the last line still knows where the window came from |
 | `timeouts` | | ✓ | integer | **always** — 0.9: how many `bash` TOOL CALLS timed out during the run (per call, not per turn). `grep` timeouts and the `--verify` command are excluded. `0` on a run where nothing timed out, and on the two failure paths where the runner never returned |
 | `truncations` | | ✓ | integer | **always** — 1.0 (#65): how many TURNS produced a truncation message — a `truncated` nudge or a cut-off tool call's `ERROR: … cut off at the --max-tokens cap …` result (once per turn however many calls were cut). Never reset within a run; the sixth ends the run `model_error` with `aborted after 6 cut-off replies at --max-tokens N: …`. `0` when none, and on the two failure paths |
+| `firewall_denials` | | ✓ | integer | **always** — issue #138: how many `DENY` outcomes the Firewall applied, including request-stage rejections and internal errors. `0` on a run with none, and on the two failure paths where the runner never returned (unless a `runner` instance is available, in which case the CLI's failure path overwrites the zero seed from it) |
+| `firewall_internal_errors` | | ✓ | integer | **always** — issue #138: the subset of `firewall_denials` whose `reason_code` is `firewall_internal_error`; never greater than `firewall_denials`. `0` on a run with none, and on the two failure paths under the same overwrite rule as `firewall_denials` |
 | `changed` | | ✓ | boolean \| null | **always** — 1.0 (#66): whether the newest worktree fingerprint the harness took (at a completion, at a ten-turn check, or first thing when the run ended) differed from the one it took at run start — every repository under the worktree, tracked and untracked-but-not-ignored content plus the root's `HEAD`, so a commit counts and a byte-identical rewrite does not. `null` when the guard could not measure (see `changed_reason`), when the run ended before any measurement after the start one (`interrupted` on turn 1), and on the two failure paths |
 | `changed_reason` | | ✓ | string | **Sparse** — 1.0 (#66): present exactly when `changed` is `null` because a fingerprint was attempted and failed or raised — the first diagnostic line of the failed measurement, ≤ 200 chars (git's own `error: …`, `ERROR: command timed out after …`, `[output truncated at 10000 chars — bash output capped]`, `budget: <reason>`, `sandbox: <error>`, `sandbox has no bash`). The CLI echoes it once on stderr as `dirtywork: change guard off: <reason>`. Absent when `changed` is `null` only because nothing was measured after the start |
 
