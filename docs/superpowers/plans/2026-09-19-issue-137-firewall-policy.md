@@ -436,10 +436,10 @@ VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_shell.p
 - Consumes: `analyze_command` (Task 1); `canonicalize`, `Normalization`, `WRITE_KINDS` and the new `duplicate_positions` (`normalize.py`); `normalize_path`, `TargetClass` (`paths.py`); `CanonicalAction`, `ActionRequest`, `PolicyDecision`, `Decision`, `FirewallEvent` (`schema.py`); `Rejection`; `ReasonCode`; `ActionKind`; `FirewallInternalError`.
 - Produces: `PolicyContext(mode, worktree_roots)` frozen with its invariants; `Verdict(action, policy)`; `Outcome(action, policy, event, dropped_keys)`; `evaluate(action, context) -> Verdict`; `decide(request, context) -> Outcome`; `decide_batch(requests, context) -> list[Outcome]`; the two detail constants `DETAIL_REPO_METADATA_TARGET`, `DETAIL_PATH_OUTSIDE_WORKSPACE`; `normalize.duplicate_positions(requests) -> frozenset[int]` (spec §4, §6, §7). This is the surface #138 calls.
 
-- [x] **Dry-run on the scratch clone** (2026-09-19, on top of Task 1): the files and the edit below applied, `tests/test_firewall_policy.py` 78 passed (context and root-shape invariants; every file-target rule on a read kind and a write kind in both modes, the `.git` aliases and the `..` component cases, a benign path across all nine path kinds, every file-target denial carrying its `FILE_TARGET_RULES` capability in the event (`repo_control`, `host_fs`) and every ALLOW returning the action unchanged; `finish`; every shell rule through `evaluate` with the capability added; detail bounds and no leakage; `evaluate`'s raise contract; `decide` accept, rejection, internal-error and double-failure paths; `decide_batch` mixed batches with per-request isolation; the parent design §19 invariants as named tests; import isolation), full host suite 2266 passed (Task 1: 2188), `ast.parse(..., feature_version=(3, 9))` silent, `git diff --check` clean.
+- [x] **Dry-run on the scratch clone** (2026-09-19, on top of Task 1): the files and the edit below applied, `tests/test_firewall_policy.py` 87 passed (context and root-shape invariants; every file-target rule on a read kind and a write kind in both modes, the `.git` aliases and the `..` component cases, a benign path across all nine path kinds, every file-target denial carrying its `FILE_TARGET_RULES` capability in the event (`repo_control`, `host_fs`) and every ALLOW returning the action unchanged; an evaluation failure keeping the canonical action with an action-stage `firewall_internal_error` event whose identity still distinguishes targets, with the request-stage and no-event fallbacks behind it, and the internal-error detail bounded before construction so a 300-character exception class name cannot make the guard itself raise; `finish`; every shell rule through `evaluate` with the capability added; detail bounds and no leakage; `evaluate`'s raise contract; `decide` accept, rejection, internal-error and double-failure paths; `decide_batch` mixed batches with per-request isolation; the parent design §19 invariants as named tests; import isolation), full host suite 2275 passed (Task 1: 2188), `ast.parse(..., feature_version=(3, 9))` silent, `git diff --check` clean.
 - [ ] **Confirm the base.** Task 1's PR merged (or its run branch as `--branch-from`); `dirtywork/firewall/shell.py` present at the brief's content; the `normalize.py` anchor at the quoted line numbers.
-- [ ] **Launch** the brief below verbatim through the invocation in the header, sampler on, only the worker model resident. One `edit_file` and two `write_file`s (about 11 KB and 33 KB; the 48 KB brief is the largest of the series). Pass `--max-tokens 24576` for this run so hidden reasoning cannot starve the 30 KB write; if either write lands truncated anyway, rerun fresh rather than resume.
-- [ ] **Review** against the gates in the header: apply the brief's pair to the base with the round-trip script and `cmp` `normalize.py`; `cmp` both new files against their blocks; `files_changed` is exactly the three files; host suite 2266 passed; `diff --check`; 3.9 grammar; the §19 invariant tests and import isolation green in the produced test file.
+- [ ] **Launch** the brief below verbatim through the invocation in the header, sampler on, only the worker model resident. One `edit_file` and two `write_file`s (about 14 KB and 41 KB; the 57 KB brief is the largest of the series). Pass `--max-tokens 24576` for this run so hidden reasoning cannot starve the 30 KB write; if either write lands truncated anyway, rerun fresh rather than resume.
+- [ ] **Review** against the gates in the header: apply the brief's pair to the base with the round-trip script and `cmp` `normalize.py`; `cmp` both new files against their blocks; `files_changed` is exactly the three files; host suite 2275 passed; `diff --check`; 3.9 grammar; the §19 invariant tests and import isolation green in the produced test file.
 - [ ] **Ledger** `docs/superpowers/bench/2026-09-XX-issue-137-w2-policy-ledger.md` plus the sampler CSV, committed on the run branch.
 - [ ] **PR** titled `feat(firewall): issue #137 W2 — policy context, file-target rules, evaluate and fail-closed decide`, body naming the plan, the spec and the ledger; part 2 of 3 for issue #137 (does not close it).
 
@@ -534,7 +534,7 @@ def canonicalize_batch(requests: "Sequence[ActionRequest]") -> "list[Normalizati
         results.append(canonicalize(request))
     return results
 
-FILE dirtywork/firewall/policy.py (new, 281 lines) — write_file with exactly:
+FILE dirtywork/firewall/policy.py (new, 369 lines) — write_file with exactly:
 === BEGIN dirtywork/firewall/policy.py ===
 """The deterministic policy engine: `evaluate` (pure, first match wins) and
 the fail-closed entry points `decide` / `decide_batch` (spec §3, §4, §6,
@@ -545,6 +545,7 @@ import posixpath
 from dataclasses import dataclass, replace
 from typing import Optional, Sequence
 
+from .bounds import MAX_DETAIL_CHARS
 from .capabilities import ActionKind, Capability, FILE_TARGET_RULES
 from .errors import FirewallInternalError
 from .normalize import WRITE_KINDS, Normalization, canonicalize, duplicate_positions
@@ -625,8 +626,12 @@ class Verdict:
 @dataclass(frozen=True)
 class Outcome:
     """`decide` / `decide_batch`'s result for one request (spec §7).
-    `action` is None on a request-stage rejection or an internal error;
-    `event` is None only when building the event itself also failed."""
+    `action` is None on a request-stage rejection, or on an internal error
+    raised before an action existed (a `canonicalize` failure); it is
+    retained on an internal error raised after `canonicalize` already
+    produced one, so evaluating or eventing that action can still fail
+    without discarding its evidence (spec §9.2). `event` is None only when
+    building the event itself also failed."""
 
     action: Optional[CanonicalAction]
     policy: PolicyDecision
@@ -761,39 +766,111 @@ def _outcome_from(request: ActionRequest, normalization, context: PolicyContext)
     return Outcome(verdict.action, verdict.policy, event, normalization.dropped_keys)
 
 
+_NO_EVENT_SUFFIX = "; no event"
+
+
+def _internal_error_detail(exc: Exception) -> str:
+    """`"firewall internal error: <exception class name>"`, cut to fit
+    `MAX_DETAIL_CHARS` with room for `_NO_EVENT_SUFFIX`, so a class name long
+    enough to overflow the bound cannot make `PolicyDecision` or `Rejection`
+    raise outside the guard (spec §7). Never the message: it can carry
+    worker bytes."""
+    base = f"firewall internal error: {type(exc).__name__}"
+    return base[: MAX_DETAIL_CHARS - len(_NO_EVENT_SUFFIX)]
+
+
 def _internal_error_outcome(request: ActionRequest, exc: Exception) -> Outcome:
-    """The fail-closed outcome for an unexpected exception (spec §7): the
+    """The fail-closed outcome for an unexpected exception when no action
+    exists yet -- `canonicalize` itself raised, or `normalization` is a
+    rejection (spec §7): `action` is None, since none was ever produced. The
     detail names only the exception class, never its message, since a
-    message can carry worker bytes. If even building the synthetic event
-    fails, the event is None and the detail gains a suffix saying so."""
-    detail = f"firewall internal error: {type(exc).__name__}"
+    message can carry worker bytes. If even building the synthetic
+    request-stage event fails, the event is None and the detail gains a
+    suffix saying so."""
+    detail = _internal_error_detail(exc)
     try:
         rejection = Rejection(ReasonCode.FIREWALL_INTERNAL_ERROR, detail)
         event = FirewallEvent.from_rejection(request, rejection)
     except Exception:
         event = None
-        detail = detail + "; no event"
+        detail = detail + _NO_EVENT_SUFFIX
     return Outcome(None, PolicyDecision(Decision.DENY, ReasonCode.FIREWALL_INTERNAL_ERROR, detail), event, 0)
+
+
+def _action_internal_error_outcome(
+    request: ActionRequest, action: CanonicalAction, dropped_keys: int, exc: Exception
+) -> Outcome:
+    """The fail-closed outcome for an unexpected exception raised by
+    `evaluate` or by building its event, once `canonicalize` already
+    produced `action` (spec §7, §9.2). Unlike `_internal_error_outcome`,
+    the action is *retained*: discarding it would downgrade the event to a
+    request-stage identity keyed only on tool name and reason code, which
+    cannot tell two different targets of the same kind apart -- exactly the
+    identity the Supervisor's exact-equivalent denial tracking needs from
+    an action that already exists.
+
+    Three-tier fallback, most specific first:
+      1. an action-stage DENY event, built from `action` -- it carries the
+         action's own capabilities and `action_identity`;
+      2. if building that also raises, a request-stage synthetic-rejection
+         event (the same shape `_internal_error_outcome` builds; detail
+         unchanged);
+      3. if that also raises, no event, and the detail gains a "; no
+         event" suffix -- the same collapse `_internal_error_outcome` uses.
+
+    `action` is returned in all three tiers, since canonicalization already
+    succeeded. The detail names only the exception class, never its
+    message."""
+    detail = _internal_error_detail(exc)
+    policy = PolicyDecision(Decision.DENY, ReasonCode.FIREWALL_INTERNAL_ERROR, detail)
+    try:
+        event = FirewallEvent.from_action(action, policy)
+        return Outcome(action, policy, event, dropped_keys)
+    except Exception:
+        pass
+    try:
+        rejection = Rejection(ReasonCode.FIREWALL_INTERNAL_ERROR, detail)
+        event = FirewallEvent.from_rejection(request, rejection)
+    except Exception:
+        event = None
+        detail = detail + _NO_EVENT_SUFFIX
+        policy = PolicyDecision(Decision.DENY, ReasonCode.FIREWALL_INTERNAL_ERROR, detail)
+    return Outcome(action, policy, event, dropped_keys)
 
 
 def decide(request: ActionRequest, context: PolicyContext) -> Outcome:
     """The one fail-closed entry point per addressable call (spec §7):
     never raises, never returns ALLOW from the internal-error path. Catches
     `Exception`, not `BaseException`, so KeyboardInterrupt and SystemExit
-    still stop the run."""
+    still stop the run.
+
+    Two guards, not one, because a failure after canonicalization succeeds
+    must fall back differently depending on whether an action exists: a
+    canonicalize failure (or a rejection's own outcome failing to build)
+    falls back through `_internal_error_outcome` (spec §7); a failure while
+    evaluating or eventing an already-canonicalized action falls back
+    through `_action_internal_error_outcome`'s three-tier fallback instead,
+    so the action's evidence is not discarded (spec §9.2)."""
     try:
         normalization = canonicalize(request)
+    except Exception as exc:
+        return _internal_error_outcome(request, exc)
+    try:
         return _outcome_from(request, normalization, context)
     except Exception as exc:
+        if normalization.rejection is None:
+            return _action_internal_error_outcome(
+                request, normalization.action, normalization.dropped_keys, exc
+            )
         return _internal_error_outcome(request, exc)
 
 
 def decide_batch(requests: "Sequence[ActionRequest]", context: PolicyContext) -> "list[Outcome]":
     """`decide` over a batch (spec §7): duplicate ids are found once via
     `duplicate_positions`; each request is then turned into an Outcome under
-    the same per-request guard as `decide`, so one request's failure never
-    affects its neighbours. If `duplicate_positions` itself raises, every
-    request gets the internal-error outcome."""
+    the same two-guard, per-request fallback as `decide` (spec §9.2), so one
+    request's failure never affects its neighbours. If `duplicate_positions`
+    itself raises, every request gets the internal-error outcome."""
     try:
         positions = duplicate_positions(requests)
     except Exception as exc:
@@ -813,13 +890,24 @@ def decide_batch(requests: "Sequence[ActionRequest]", context: PolicyContext) ->
                 )
             else:
                 normalization = canonicalize(request)
-            outcomes.append(_outcome_from(request, normalization, context))
         except Exception as exc:
             outcomes.append(_internal_error_outcome(request, exc))
+            continue
+        try:
+            outcomes.append(_outcome_from(request, normalization, context))
+        except Exception as exc:
+            if normalization.rejection is None:
+                outcomes.append(
+                    _action_internal_error_outcome(
+                        request, normalization.action, normalization.dropped_keys, exc
+                    )
+                )
+            else:
+                outcomes.append(_internal_error_outcome(request, exc))
     return outcomes
 === END dirtywork/firewall/policy.py ===
 
-FILE tests/test_firewall_policy.py (new, 781 lines) — write_file with exactly:
+FILE tests/test_firewall_policy.py (new, 949 lines) — write_file with exactly:
 === BEGIN tests/test_firewall_policy.py ===
 """Tests for dirtywork.firewall.policy: PolicyContext invariants (including
 worktree root validation), the file-target rules (backend-aware `.git`/`..`
@@ -850,7 +938,13 @@ from dirtywork.firewall.policy import (
     evaluate,
 )
 from dirtywork.firewall.reasons import ReasonCode
-from dirtywork.firewall.schema import ActionRequest, Decision, FirewallEvent, SemanticStatus
+from dirtywork.firewall.schema import (
+    ActionRequest,
+    Decision,
+    FirewallEvent,
+    SemanticStatus,
+    action_identity,
+)
 from dirtywork.firewall.shell import SHELL_RULES
 
 
@@ -1274,12 +1368,15 @@ def test_decide_internal_error_evaluate_raises(monkeypatch):
     monkeypatch.setattr("dirtywork.firewall.policy.evaluate", boom)
     req = _req("read_file", {"path": "x"})
     outcome = decide(req, _ctx_host("/wt"))
-    assert outcome.action is None
+    # The canonical action already existed when evaluate raised, so it is
+    # retained and the event is action-stage, not discarded down to a
+    # request-stage identity (PR #180 review, spec §9.2).
+    assert outcome.action == canonicalize(req).action
     assert outcome.policy.decision is Decision.DENY
     assert outcome.policy.reason_code is ReasonCode.FIREWALL_INTERNAL_ERROR
     assert outcome.policy.detail == "firewall internal error: FirewallInternalError"
     assert outcome.event is not None
-    assert outcome.event.stage == "request"
+    assert outcome.event.stage == "action"
 
 
 def test_decide_internal_error_double_failure_no_event(monkeypatch):
@@ -1602,9 +1699,168 @@ def test_deny_path_verdict_action_differs_only_in_capabilities():
     assert verdict.policy.decision is Decision.DENY
     assert verdict.action != action
     assert replace(verdict.action, capabilities=action.capabilities) == action
+
+
+# --- group 13 (evaluate-stage internal error keeps the canonical action, PR #180 review) ---
+
+
+def test_decide_action_internal_error_keeps_action_and_builds_action_stage_event(monkeypatch):
+    def boom(action, context):
+        raise RuntimeError("secret")
+
+    monkeypatch.setattr("dirtywork.firewall.policy.evaluate", boom)
+    req = _req("read_file", {"path": "x", "bogus": 1})
+    outcome = decide(req, _ctx_host("/wt"))
+
+    expected_action = canonicalize(req).action
+    assert outcome.action == expected_action
+    assert outcome.policy.decision is Decision.DENY
+    assert outcome.policy.reason_code is ReasonCode.FIREWALL_INTERNAL_ERROR
+    assert outcome.policy.detail == "firewall internal error: RuntimeError"
+    assert "secret" not in outcome.policy.detail
+    assert outcome.event is not None
+    assert outcome.event.stage == "action"
+    assert outcome.event.kind is ActionKind.READ_FILE
+    assert set(outcome.event.capabilities) == {"workspace_read"}
+    assert outcome.event.action_identity == action_identity(outcome.action)
+    assert outcome.dropped_keys == 1
+
+
+def test_decide_action_internal_error_identity_distinguishes_different_targets(monkeypatch):
+    def boom(action, context):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("dirtywork.firewall.policy.evaluate", boom)
+    ctx = _ctx_host("/wt")
+
+    outcome_a1 = decide(_req("read_file", {"path": "a.txt"}), ctx)
+    outcome_a2 = decide(_req("read_file", {"path": "a.txt"}), ctx)
+    outcome_b = decide(_req("read_file", {"path": "b.txt"}), ctx)
+
+    assert outcome_a1.event.action_identity == outcome_a2.event.action_identity
+    assert outcome_a1.event.action_identity != outcome_b.event.action_identity
+
+
+def test_decide_action_internal_error_double_failure_falls_back_to_request_stage(monkeypatch):
+    def boom_evaluate(action, context):
+        raise RuntimeError("boom")
+
+    def boom_from_action(action, policy):
+        raise RuntimeError("event boom")
+
+    monkeypatch.setattr("dirtywork.firewall.policy.evaluate", boom_evaluate)
+    monkeypatch.setattr(FirewallEvent, "from_action", boom_from_action)
+
+    req = _req("read_file", {"path": "x"})
+    outcome = decide(req, _ctx_host("/wt"))
+
+    assert outcome.action == canonicalize(req).action
+    assert outcome.policy.decision is Decision.DENY
+    assert outcome.policy.reason_code is ReasonCode.FIREWALL_INTERNAL_ERROR
+    assert outcome.policy.detail == "firewall internal error: RuntimeError"
+    assert outcome.event is not None
+    assert outcome.event.stage == "request"
+
+
+def test_decide_action_internal_error_triple_failure_no_event(monkeypatch):
+    def boom_evaluate(action, context):
+        raise RuntimeError("boom")
+
+    def boom_from_action(action, policy):
+        raise RuntimeError("event boom")
+
+    def boom_from_rejection(request, rejection):
+        raise RuntimeError("rejection boom")
+
+    monkeypatch.setattr("dirtywork.firewall.policy.evaluate", boom_evaluate)
+    monkeypatch.setattr(FirewallEvent, "from_action", boom_from_action)
+    monkeypatch.setattr(FirewallEvent, "from_rejection", boom_from_rejection)
+
+    req = _req("read_file", {"path": "x"})
+    outcome = decide(req, _ctx_host("/wt"))
+
+    assert outcome.action == canonicalize(req).action
+    assert outcome.event is None
+    assert outcome.policy.decision is Decision.DENY
+    assert outcome.policy.reason_code is ReasonCode.FIREWALL_INTERNAL_ERROR
+    assert outcome.policy.detail.endswith("; no event")
+    assert outcome.policy.detail.startswith("firewall internal error: RuntimeError")
+
+
+def test_decide_action_internal_error_keyboard_interrupt_propagates(monkeypatch):
+    def boom(action, context):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr("dirtywork.firewall.policy.evaluate", boom)
+    req = _req("read_file", {"path": "x"})
+    with pytest.raises(KeyboardInterrupt):
+        decide(req, _ctx_host("/wt"))
+
+
+def test_decide_batch_action_internal_error_middle_request_only(monkeypatch):
+    real_evaluate = evaluate
+
+    def wrapped(action, context):
+        if action.args.path == "y":
+            raise RuntimeError("boom")
+        return real_evaluate(action, context)
+
+    monkeypatch.setattr("dirtywork.firewall.policy.evaluate", wrapped)
+
+    requests = [
+        _req("read_file", {"path": "x"}, call_id="c1"),
+        _req("read_file", {"path": "y"}, call_id="c2"),
+        _req("read_file", {"path": "z"}, call_id="c3"),
+    ]
+    outcomes = decide_batch(requests, _ctx_host("/wt"))
+
+    assert outcomes[0].policy.decision is Decision.ALLOW
+    assert outcomes[0].action is not None
+
+    middle = outcomes[1]
+    assert middle.policy.decision is Decision.DENY
+    assert middle.policy.reason_code is ReasonCode.FIREWALL_INTERNAL_ERROR
+    assert middle.action is not None
+    assert middle.action == canonicalize(requests[1]).action
+    assert middle.event is not None
+    assert middle.event.stage == "action"
+
+    assert outcomes[2].policy.decision is Decision.ALLOW
+    assert outcomes[2].action is not None
+
+
+# --- group 14 (the internal-error detail is bounded before construction) ----
+
+
+_LongName = type("E" * 300, (RuntimeError,), {})
+
+
+@pytest.mark.parametrize("stage", ["canonicalize", "evaluate"])
+def test_internal_error_detail_is_bounded_for_a_long_exception_class_name(monkeypatch, stage):
+    def boom(*args, **kwargs):
+        raise _LongName("x")
+    monkeypatch.setattr("dirtywork.firewall.policy." + stage, boom)
+    outcome = decide(_req("read_file", {"path": "x"}), _ctx_docker())
+    assert outcome.policy.decision is Decision.DENY
+    assert outcome.policy.reason_code is ReasonCode.FIREWALL_INTERNAL_ERROR
+    assert len(outcome.policy.detail) <= MAX_DETAIL_CHARS
+    assert outcome.policy.detail.startswith("firewall internal error: EEEE")
+    assert outcome.event is not None
+
+
+def test_internal_error_detail_with_no_event_suffix_stays_bounded(monkeypatch):
+    def boom(*args, **kwargs):
+        raise _LongName("x")
+    monkeypatch.setattr("dirtywork.firewall.policy.evaluate", boom)
+    monkeypatch.setattr(FirewallEvent, "from_action", boom)
+    monkeypatch.setattr(FirewallEvent, "from_rejection", boom)
+    outcome = decide(_req("read_file", {"path": "x"}), _ctx_docker())
+    assert outcome.event is None
+    assert outcome.policy.detail.endswith("; no event")
+    assert len(outcome.policy.detail) <= MAX_DETAIL_CHARS
 === END tests/test_firewall_policy.py ===
 
-VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_policy.py tests/test_firewall_normalize.py and expect 308 passed (78 + 230). Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed (2266 passed). Finish when both pass.
+VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_policy.py tests/test_firewall_normalize.py and expect 317 passed (87 + 230). Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed (2275 passed). Finish when both pass.
 ```
 
 ---
@@ -1617,10 +1873,10 @@ VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_policy.
 - Consumes: Tasks 1 and 2.
 - Produces: the package root re-exports `PolicyContext`, `Verdict`, `Outcome`, `evaluate`, `decide`, `decide_batch`, `SHELL_RULES` and `analyze_command`; `__all__` has 48 names (spec §2).
 
-- [x] **Dry-run on the scratch clone** (2026-09-19, on top of Task 2): the four edits below applied, `tests/test_firewall_request.py` 40 passed with the grown pin, `len(dirtywork.firewall.__all__) == 48` and every name resolves, full host suite 2266 passed (no new tests), `ast.parse(..., feature_version=(3, 9))` silent, `git diff --check` clean.
+- [x] **Dry-run on the scratch clone** (2026-09-19, on top of Task 2): the four edits below applied, `tests/test_firewall_request.py` 40 passed with the grown pin, `len(dirtywork.firewall.__all__) == 48` and every name resolves, full host suite 2275 passed (no new tests), `ast.parse(..., feature_version=(3, 9))` silent, `git diff --check` clean.
 - [ ] **Confirm the base.** Task 2's PR merged (or its run branch as `--branch-from`); the four anchors below must still be at the quoted line numbers.
 - [ ] **Launch** the brief below verbatim through the invocation in the header, sampler on. Four `edit_file` calls; an `apply_edits` in place of several `edit_file`s is fine.
-- [ ] **Review** against the gates in the header: apply the brief's four pairs to the base with the round-trip script and `cmp` both files; `files_changed` is exactly the two files; host suite 2266 passed; `diff --check`; 3.9 grammar; `python3 -c "import dirtywork.firewall as f; assert len(f.__all__) == 48"` from the run's worktree.
+- [ ] **Review** against the gates in the header: apply the brief's four pairs to the base with the round-trip script and `cmp` both files; `files_changed` is exactly the two files; host suite 2275 passed; `diff --check`; 3.9 grammar; `python3 -c "import dirtywork.firewall as f; assert len(f.__all__) == 48"` from the run's worktree.
 - [ ] **Ledger** `docs/superpowers/bench/2026-09-XX-issue-137-w3-reexports-ledger.md` plus the sampler CSV, committed on the run branch.
 - [ ] **PR** titled `feat(firewall): issue #137 W3 — re-exports and the __all__ pin`, body naming the plan, the spec and the ledger; part 3 of 3; **closes #137**.
 - [ ] After merge: comment on issue #137 with the three ledgers; issue #138 (Runner integration) is next and is briefed against the merged package.
@@ -1668,5 +1924,5 @@ new:
         "SHELL_RULES", "analyze_command",
     ]
 
-VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_request.py tests/test_firewall_policy.py tests/test_firewall_shell.py and expect 126 passed (40 + 78 + 8). Then run python3 -c "import dirtywork.firewall as f; assert len(f.__all__) == 48; [getattr(f, n) for n in f.__all__]" and expect no output. Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed (2266 passed). Finish when all pass.
+VERIFY: run python3 -m pytest -q -p no:cacheprovider tests/test_firewall_request.py tests/test_firewall_policy.py tests/test_firewall_shell.py and expect 135 passed (40 + 87 + 8). Then run python3 -c "import dirtywork.firewall as f; assert len(f.__all__) == 48; [getattr(f, n) for n in f.__all__]" and expect no output. Then run python3 -m pytest -q -p no:cacheprovider with timeout=300 and expect all passed, 0 failed (2275 passed). Finish when all pass.
 ```
