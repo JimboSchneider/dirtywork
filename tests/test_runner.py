@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from dirtywork.firewall import PolicyContext
 from dirtywork.llm import LLMError, LLMTimeout, MalformedResponse
 from dirtywork.providers import ChatResponse, ToolCall
 from dirtywork.providers.openai_compat import CONTEXT_WINDOWS
@@ -49,6 +50,12 @@ from .provider_doubles import FingerprintSandbox
 from .provider_doubles import assert_strict_template_legal
 from .provider_doubles import TimeoutThenFailingVerifySandbox as _TimeoutThenFailingVerifySandbox
 from .markers import TOOL_CALL_OPEN, TOOL_CALL_CLOSE, TOOL_CALLS
+
+# Spec #138 §3: docker mode's empty-roots context, passed explicitly at
+# every direct Runner(...) construction below whose sandbox double has no
+# `worktree` attribute -- their calls are relative-path file tools, grep,
+# finish and benign bash, all allowed in docker mode.
+GATE_CTX = PolicyContext("docker", ())
 
 
 def _resp(content=None, tool_calls=None, usage=None, finish_reason=None):
@@ -205,7 +212,10 @@ def test_unknown_tool_counts_as_strike_but_recovers(parts):
     # the model got an error message back as the tool result
     second = provider.requests[1]
     tool_msgs = [m for m in second if m["role"] == "tool"]
-    assert "unknown tool" in tool_msgs[0]["content"].lower()
+    # Spec #138 §5: the Firewall denies the call at request stage (tool_unknown)
+    # before the registry ever sees it; the gate's own detail text replaces the
+    # registry's, dropping its echo of the offending name.
+    assert "not a known action kind" in tool_msgs[0]["content"].lower()
 
 
 def test_trim_messages():
@@ -748,6 +758,7 @@ def test_finalize_merges_into_run_end_and_result_extra(parts):
     assert result.extra == {"stuck_on": None, "last_tool_result": None,
                             "last_assistant_text": "done", "verify": None,
                             "trimmed_turns": 0, "timeouts": 0, "truncations": 0,
+                            "firewall_denials": 0, "firewall_internal_errors": 0,
                             "context_window_source": None,
                             "changed": None,
                             "diff_stat": " 1 file changed"}
@@ -810,7 +821,7 @@ def test_budget_exceeded_from_sandbox_ends_run(parts):
             raise BudgetExceeded("worktree exceeds 2048 MB")
 
     provider = FakeProvider([_resp(tool_calls=[_call("c1", "write_file", {"path": "x", "content": "y"})])])
-    r = Runner(provider, registry, BudgetBustingSandbox(), transcript, model="m")
+    r = Runner(provider, registry, BudgetBustingSandbox(), transcript, model="m", policy_context=GATE_CTX)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "budget_exceeded"
@@ -1703,7 +1714,7 @@ def test_verify_on_a_plain_answer_completion_and_error_passthrough(parts):
     transcript2 = Transcript(tmp / "t2.jsonl")
     provider2 = FakeProvider([_resp(content="I am done")])
     r2 = Runner(provider2, default_registry(transcript=transcript2), ExplodingSandbox(),
-                transcript2, model="m", verify="true")
+                transcript2, model="m", verify="true", policy_context=GATE_CTX)
     result2 = r2.run("s", "t")
     transcript2.close()
     assert result2.status == "budget_exceeded"
@@ -1780,7 +1791,7 @@ def test_timed_out_is_flagged_on_the_event_and_absent_otherwise(parts):
         _resp(tool_calls=[_bash_call("b1")]),
         _resp(content="done"),
     ])
-    r = Runner(provider, registry, _TimeoutSandbox(), transcript, model="m")
+    r = Runner(provider, registry, _TimeoutSandbox(), transcript, model="m", policy_context=GATE_CTX)
     result = r.run("s", "t")
     transcript.close()
     events = [e for e in _events(tmp) if e["event"] == "tool_result"]
@@ -1792,7 +1803,7 @@ def test_timed_out_is_flagged_on_the_event_and_absent_otherwise(parts):
     registry2 = default_registry(transcript=transcript2)
     provider2 = FakeProvider([_resp(tool_calls=[_bash_call("b2")]), _resp(content="ok")])
     r2 = Runner(provider2, registry2, _TimeoutSandbox(timing_out=False), transcript2,
-                model="m")
+                model="m", policy_context=GATE_CTX)
     result2 = r2.run("s", "t")
     transcript2.close()
     events2 = [json.loads(l) for l in (tmp / "t2.jsonl").read_text().splitlines()]
@@ -1822,7 +1833,7 @@ def test_grep_timeout_is_not_flagged_or_counted(parts):
         _resp(tool_calls=[_call("g1", "grep", {"pattern": "x"})]),
         _resp(content="done"),
     ])
-    r = Runner(provider, registry, _GrepTimeoutSandbox(), transcript, model="m")
+    r = Runner(provider, registry, _GrepTimeoutSandbox(), transcript, model="m", policy_context=GATE_CTX)
     result = r.run("s", "t")
     transcript.close()
     events = [e for e in _events(tmp) if e["event"] == "tool_result"]
@@ -1837,7 +1848,7 @@ def test_one_timeout_nudge_per_turn_even_with_two_timeouts(parts):
         _resp(tool_calls=[_bash_call("b1", "sleep 1"), _bash_call("b2", "sleep 2")]),
         _resp(content="done"),
     ])
-    r = Runner(provider, registry, _TimeoutSandbox(), transcript, model="m")
+    r = Runner(provider, registry, _TimeoutSandbox(), transcript, model="m", policy_context=GATE_CTX)
     result = r.run("s", "t")
     transcript.close()
     nudges = [e for e in _events(tmp) if e["event"] == "nudge"]
@@ -1861,7 +1872,7 @@ def test_timeout_nudge_merges_with_the_stall_nudge(parts):
     provider = FakeProvider([_resp(tool_calls=[_bash_call("b1")]),
                              _resp(content="done")])
     r = Runner(provider, registry, _TimeoutSandbox(), transcript, model="m",
-               stall_turns=2)
+               stall_turns=2, policy_context=GATE_CTX)
     r.run("s", "t")
     transcript.close()
     kinds = [e["kind"] for e in _events(tmp) if e["event"] == "nudge"]
@@ -1885,7 +1896,7 @@ def test_no_timeout_nudge_when_the_turn_ends_the_run(parts):
         _resp(tool_calls=[_bash_call("b1"),
                           _call("f1", "finish", {"summary": "done anyway"})]),
     ])
-    r = Runner(provider, registry, _TimeoutSandbox(), transcript, model="m")
+    r = Runner(provider, registry, _TimeoutSandbox(), transcript, model="m", policy_context=GATE_CTX)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -1907,7 +1918,7 @@ def test_verify_feedback_carries_the_timeout_nudge_from_the_same_turn(parts):
     ])
     box = _TimeoutThenFailingVerifySandbox("npm test")
     r = Runner(provider, registry, box, transcript, model="m",
-               verify="npm test", verify_rounds=1)
+               verify="npm test", verify_rounds=1, policy_context=GATE_CTX)
     r.run("s", "t")
     transcript.close()
 
@@ -1935,7 +1946,7 @@ def test_a_verify_timeout_is_not_counted(parts):
     provider = FakeProvider([_resp(content="all done")])
     box = _TimeoutSandbox()
     r = Runner(provider, registry, box, transcript, model="m",
-               verify="npm test", verify_rounds=0)
+               verify="npm test", verify_rounds=0, policy_context=GATE_CTX)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "verify_failed"
@@ -2019,7 +2030,7 @@ def test_recovered_name_nudge_orders_after_timeout(parts):
         _resp(content="done"),
     ])
     box = _TimeoutSandbox()
-    r = Runner(provider, registry, box, transcript, model="m")
+    r = Runner(provider, registry, box, transcript, model="m", policy_context=GATE_CTX)
     result = r.run("s", "t")
     transcript.close()
 
@@ -2211,7 +2222,7 @@ def test_verify_that_cannot_run_leaves_an_honest_finish_result(parts):
         wt, registry, sandbox, transcript, tmp = parts
         transcript_i = Transcript(tmp / f"t-{status}.jsonl")
         provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "done"})])])
-        r = Runner(provider, registry, Raising(exc), transcript_i, model="m", verify="true")
+        r = Runner(provider, registry, Raising(exc), transcript_i, model="m", verify="true", policy_context=GATE_CTX)
         result = r.run("s", "t")
         transcript_i.close()
         assert result.status == status
@@ -2246,7 +2257,7 @@ def test_terminal_exits_before_verify_never_leave_run_finished(parts):
         wt, registry, sandbox, transcript, tmp = parts
         transcript_i = Transcript(tmp / f"t-{status}.jsonl")
         provider = FakeProvider([_resp(tool_calls=calls)])
-        r = Runner(provider, registry, box or sandbox, transcript_i, model="m")
+        r = Runner(provider, registry, box or sandbox, transcript_i, model="m", policy_context=GATE_CTX)
         result = r.run("s", "t")
         transcript_i.close()
         assert result.status == status
@@ -2267,7 +2278,7 @@ def test_interrupt_inside_verify_resolves_the_finish_result_before_the_flush(par
             raise KeyboardInterrupt
 
     provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "s"})])])
-    r = Runner(provider, registry, InterruptingVerify(), transcript, model="m", verify="npm test")
+    r = Runner(provider, registry, InterruptingVerify(), transcript, model="m", verify="npm test", policy_context=GATE_CTX)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "interrupted"
@@ -2290,7 +2301,7 @@ def test_unhandled_exception_after_finish_leaves_the_provisional_result_on_disk(
             raise RuntimeError("disk on fire")
 
     provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "s"}), _bash_call("b1")])])
-    r = Runner(provider, registry, Exploding(), transcript, model="m")
+    r = Runner(provider, registry, Exploding(), transcript, model="m", policy_context=GATE_CTX)
     with pytest.raises(RuntimeError):
         r.run("s", "t")
     transcript.close()
@@ -2496,7 +2507,7 @@ SCENARIOS = [_scenario_verify_feedback_on_finish, _scenario_finish_first_then_ti
 def _run_scenario(parts, build):
     wt, registry, sandbox, transcript, tmp = parts
     provider, box, kwargs = build()
-    r = Runner(provider, registry, box or sandbox, transcript, model="m", **kwargs)
+    r = Runner(provider, registry, box or sandbox, transcript, model="m", **kwargs, policy_context=GATE_CTX)
     result = r.run("s", "t")
     transcript.close()
     return provider, result, _events(tmp)
@@ -2531,7 +2542,7 @@ def test_two_finish_calls_around_a_timeout_put_the_follow_up_on_the_last_call_on
         _resp(content="ok"),
     ])
     r = Runner(provider, registry, _TimeoutThenFailingVerifySandbox("npm test"), transcript,
-               model="m", verify="npm test", verify_rounds=1)
+               model="m", verify="npm test", verify_rounds=1, policy_context=GATE_CTX)
     r.run("s", "t")
     transcript.close()
     f1, b1, f2 = _tool_events(_events(tmp))
@@ -2548,7 +2559,7 @@ def test_mixed_turn_timeout_finish_timeout_carrier_is_the_last_call(parts):
         _resp(content="ok"),
     ])
     r = Runner(provider, registry, _TimeoutThenFailingVerifySandbox("npm test"), transcript,
-               model="m", verify="npm test", verify_rounds=1)
+               model="m", verify="npm test", verify_rounds=1, policy_context=GATE_CTX)
     r.run("s", "t")
     transcript.close()
     tools = [m for m in provider.requests[1] if m["role"] == "tool"]
@@ -2573,7 +2584,7 @@ def test_mixed_turn_finish_first_then_timeout_with_passing_verify_ends_clean(par
     wt, registry, sandbox, transcript, tmp = parts
     provider = FakeProvider([_resp(tool_calls=[_call("f1", "finish", {"summary": "s"}), _bash_call("b1")])])
     r = Runner(provider, registry, _TimeoutThenPassingVerifySandbox("npm test"), transcript,
-               model="m", verify="npm test")
+               model="m", verify="npm test", policy_context=GATE_CTX)
     result = r.run("s", "t")
     transcript.close()
     assert result.status == "completed"
@@ -2632,7 +2643,7 @@ def test_transcript_equals_wire_for_every_tool_and_assistant_message(parts):
         _resp(content="ok"),
     ])
     r = Runner(provider, registry, Box("npm test"), transcript, model="m",
-               verify="npm test", verify_rounds=1, stall_turns=0)
+               verify="npm test", verify_rounds=1, stall_turns=0, policy_context=GATE_CTX)
     r.run("s", "t")
     transcript.close()
     events = _events(tmp)
@@ -2943,7 +2954,7 @@ def test_sandbox_without_drain_notices_works(parts):
         _resp(tool_calls=[_call("c1", "read_file", {"path": "f.txt"})]),
         _resp(content="done"),
     ])
-    r = Runner(provider, registry, NoDrainSandbox(), transcript, model="m")
+    r = Runner(provider, registry, NoDrainSandbox(), transcript, model="m", policy_context=GATE_CTX)
     result = r.run("s", "t")
     transcript.close()
 
@@ -2964,7 +2975,7 @@ def test_exploding_sandbox_still_works(parts):
     provider = FakeProvider([
         _resp(tool_calls=[_call("c1", "write_file", {"path": "x", "content": "y"})]),
     ])
-    r = Runner(provider, registry, ExplodingSandbox(), transcript, model="m")
+    r = Runner(provider, registry, ExplodingSandbox(), transcript, model="m", policy_context=GATE_CTX)
     result = r.run("s", "t")
     transcript.close()
 

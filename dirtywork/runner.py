@@ -14,6 +14,9 @@ from .changes import (UNCHANGED_PLAIN, UNCHANGED_REQUIRED,
                        NO_CHANGE_SINCE_START_PLAIN,
                        NO_CHANGE_RECENT,
                        fingerprint as _fingerprint)
+from .firewall import Decision, PolicyContext, ReasonCode
+from .firewall_gate import (FIREWALL_DENIAL_EVENT, decide_turn, denial_event_fields,
+                            denial_strike, denial_text, execution_args, policy_context_for)
 from .llm import LLMTimeout, MalformedResponse
 from .providers import assistant_message, tool_message
 from .sandbox import SandboxError
@@ -545,7 +548,8 @@ class Runner:
                  verify_rounds: int = DEFAULT_VERIFY_ROUNDS,
                  verify_timeout: int = DEFAULT_VERIFY_TIMEOUT,
                  require_changes: bool = False,
-                 no_change_turns: int = DEFAULT_NO_CHANGE_TURNS):
+                 no_change_turns: int = DEFAULT_NO_CHANGE_TURNS,
+                 policy_context: "PolicyContext | None" = None):
         self.provider = provider
         self.registry = registry
         self.sandbox = sandbox
@@ -576,6 +580,16 @@ class Runner:
         self.require_changes = require_changes
         # Spec #66 §4.4: every K turns a fingerprint; equal to the last check's -> a nudge, never an abort; 0 disables. Not a CLI flag.
         self.no_change_turns = no_change_turns
+        # Spec #138 §2/§3: the Firewall's run context. None only for direct
+        # construction against a sandbox that has a `worktree` (tests,
+        # embedders) -- never a discovery step, and never a docker fallback.
+        if policy_context is None:
+            policy_context = policy_context_for("none", getattr(sandbox, "worktree", None))
+        self.policy_context = policy_context
+        # Spec #138 §2/§7: readable at any time, including after an
+        # exception escapes run().
+        self.firewall_denials = 0
+        self.firewall_internal_errors = 0
         # An explicit 0 is honoured (it is how a test forces context_exhausted);
         # only None means "ask the provider".
         self.context_window = (context_window if context_window is not None
@@ -773,6 +787,8 @@ class Runner:
                            "trimmed_turns": trimmed_turns,
                            "timeouts": timeouts,
                            "truncations": truncations,
+                           "firewall_denials": self.firewall_denials,
+                           "firewall_internal_errors": self.firewall_internal_errors,
                            "context_window_source": self.context_window_source,
                            "changed": changed}
             if changed_reason is not None:
@@ -1074,10 +1090,16 @@ class Runner:
             if abort_reason is not None:
                 return finish("model_error", abort_reason)
 
+            # Spec #138 §4: evaluated once, up front, for the whole batch;
+            # applied per call, below, only when the loop reaches it.
+            outcomes = decide_turn(tool_calls, turn=turns, context=self.policy_context)
             pending_finish = None
             timed_out_this_turn = False   # spec §4.3: at most ONE nudge per turn
             first_recovered = None
-            for tc in tool_calls:
+            # Spec #138 §5: computed once per turn, for the tool_unknown text.
+            available_tools = ", ".join(self.registry.names())
+            for i, tc in enumerate(tool_calls):
+                outcome = outcomes[i]
                 name = tc.name
                 raw_args = tc.raw_arguments or "{}"
                 args = tc.arguments
@@ -1089,13 +1111,14 @@ class Runner:
 
                 abort_reason = None
                 terminal = False
-                if tc.error is not None:
-                    if finish_reason == "length":
-                        note_truncation(tc)
-                        result = truncated_call_result(name, tc.raw_arguments, trunc)
-                    else:
-                        abort_reason = failures.record("malformed_args")
-                        result = f"ERROR: {tc.error}"
+                if tc.error is not None and finish_reason == "length":
+                    # Spec #138 §4 step 1: truncation classification is
+                    # unchanged and never consults the outcome -- no denial
+                    # event, no counter, no strike, no reset. The call stays
+                    # in the batch for evaluation, so a later call reusing
+                    # its id is still call_id_duplicate.
+                    note_truncation(tc)
+                    result = truncated_call_result(name, tc.raw_arguments, trunc)
                     if abort_reason is None and truncations >= MAX_TRUNCATED_REPLIES:
                         abort_reason = TRUNCATION_ABORT.format(n=truncations, cap=self.max_tokens)
                 elif finish_reason == "length" and self._missing_required(name, args):
@@ -1109,17 +1132,37 @@ class Runner:
                     result = truncated_call_result(name, tc.raw_arguments, trunc)
                     if abort_reason is None and truncations >= MAX_TRUNCATED_REPLIES:
                         abort_reason = TRUNCATION_ABORT.format(n=truncations, cap=self.max_tokens)
+                elif outcome.policy.decision is Decision.DENY:
+                    # Spec #138 §4 step 2 / §5 / §7: a non-truncated call
+                    # with tc.error is DENIED here too (arguments_unparseable),
+                    # replacing the old malformed_args strike + ERROR text.
+                    result = denial_text(outcome, tc, available_tools=available_tools)
+                    verb, strike_kind = denial_strike(outcome)
+                    if verb == "strike":
+                        abort_reason = failures.record(strike_kind)
+                    elif verb == "reset":
+                        failures.reset()
+                    # verb == "hold": neither a strike nor a reset.
+                    self.transcript.write(
+                        FIREWALL_DENIAL_EVENT,
+                        **denial_event_fields(outcome, tc, turn=turns, tool=cap_name(name)))
+                    self.firewall_denials += 1
+                    if outcome.policy.reason_code is ReasonCode.FIREWALL_INTERNAL_ERROR:
+                        self.firewall_internal_errors += 1
                 else:
+                    # Spec #138 §6: the executor receives the canonical
+                    # action, not the raw call. The loop's `name`/`args`
+                    # locals are left untouched for the tail's bookkeeping.
+                    action = outcome.action
                     try:
-                        spec = self.registry.spec(name)
-                        if spec is not None and spec.terminal:
-                            summary = args.get("summary")
-                            pending_finish = summary if isinstance(summary, str) else ""
+                        if action.kind.value == FINISH_TOOL:
+                            pending_finish = action.args.summary
                             result = FINISH_PROVISIONAL
                             terminal = True
                         else:
                             tool_result = self.registry.execute(
-                                name, args, sandbox=self.sandbox, deadline=deadline)
+                                action.kind.value, execution_args(action),
+                                sandbox=self.sandbox, deadline=deadline)
                             result = tool_result.text
                             if tool_result.failure is not None:
                                 abort_reason = failures.record(tool_result.failure)

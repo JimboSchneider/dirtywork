@@ -25,6 +25,7 @@ from pathlib import Path
 from . import __version__
 from .budget import DEFAULT_MAX_WORKTREE_FILES, DEFAULT_MAX_WORKTREE_MB
 from .contract import AGENTS
+from .firewall_gate import policy_context_for
 from .llm import LLMError
 from .providers import DEFAULT_BASE_URLS, PROVIDER_NAMES, get_provider
 from .rundir import (RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json,
@@ -591,6 +592,8 @@ def _emit_result(*, status: str, worktree: Path, branch: str, transcript_path: P
         "trimmed_turns": 0,
         "timeouts": 0,
         "truncations": 0,
+        "firewall_denials": 0,
+        "firewall_internal_errors": 0,
         "changed": None,
         "context_window_source": None,
     }
@@ -612,6 +615,8 @@ def _contract_fields(extra: dict, ctx: RunContext) -> dict:
     fields = {"trimmed_turns": extra.get("trimmed_turns", 0),
               "timeouts": extra.get("timeouts", 0),
               "truncations": extra.get("truncations", 0),
+              "firewall_denials": extra.get("firewall_denials", 0),
+              "firewall_internal_errors": extra.get("firewall_internal_errors", 0),
               "changed": extra.get("changed"),
               "context_window_source": ctx.context_window_source}
     if extra.get("changed_reason") is not None:
@@ -689,12 +694,17 @@ def _fail_setup(e: Exception, ctx: RunContext, *, run_dir, transcript, transcrip
 
 
 def _fail_run(e: Exception, ctx: RunContext, *, sandbox, sandbox_started: bool, transcript,
-              run_dir: Path, transcript_path: Path) -> int:
+              run_dir: Path, transcript_path: Path, runner=None) -> int:
     """An exception the runner did not itself convert to a terminal status
     (e.g. an LLMError that escapes runner.run()'s own try/except). The
     sandbox has already started here, so — unlike _fail_setup — there may be
     real agent work sitting in the container; recover it before it is lost
-    to `finally`'s sandbox.stop()."""
+    to `finally`'s sandbox.stop().
+
+    Spec #138 §2/§7: when `runner` is not None (it was constructed before
+    the exception), the firewall counters it already recorded overwrite the
+    zero seed in the contract dict, so a denial recorded before the
+    exception survives; when no runner exists, the zero seed stands."""
     if isinstance(e, SandboxError):
         fail_status, message = "sandbox_error", str(e)
     elif isinstance(e, LLMError):
@@ -712,6 +722,9 @@ def _fail_run(e: Exception, ctx: RunContext, *, sandbox, sandbox_started: bool, 
             message += f" (docker volume kept for recovery: {sandbox.volume})"
 
     contract = _contract_fields({}, ctx)
+    if runner is not None:
+        contract["firewall_denials"] = runner.firewall_denials
+        contract["firewall_internal_errors"] = runner.firewall_internal_errors
     if transcript is not None:
         try:
             transcript.write("run_end", status=fail_status, error=message, **contract)
@@ -912,12 +925,14 @@ def _execute(ctx: RunContext, args, client) -> int:
     transcript = None
     sandbox = None
     sandbox_started = False
+    runner = None
     try:
         transcript = Transcript(transcript_path)  # constructed BEFORE the sandbox so sandbox_reset events reach it
         sandbox, sandbox_info = _build_sandbox(
             args, ctx=ctx, run_dir=run_dir, transcript=transcript
         )
         sandbox_started = True
+        policy_context = policy_context_for(ctx.sandbox_mode, ctx.worktree)
 
         registry = default_registry(transcript=transcript)
 
@@ -958,6 +973,7 @@ def _execute(ctx: RunContext, args, client) -> int:
             verify_rounds=getattr(args, "verify_rounds", DEFAULT_VERIFY_ROUNDS),
             verify_timeout=getattr(args, "verify_timeout", DEFAULT_VERIFY_TIMEOUT),
             require_changes=ctx.feedback is not None,
+            policy_context=policy_context,
         )  # spec #66 §4.3: a feedback resume must change something
         display_root = DOCKER_WORKDIR if ctx.sandbox_mode == "docker" else str(ctx.worktree)
         system_prompt = build_system_prompt(display_root,
@@ -972,7 +988,7 @@ def _execute(ctx: RunContext, args, client) -> int:
                                 transcript_path=transcript_path)
         return _fail_run(e, ctx=ctx, sandbox=sandbox, sandbox_started=sandbox_started,
                           transcript=transcript, run_dir=run_dir,
-                          transcript_path=transcript_path)
+                          transcript_path=transcript_path, runner=runner)
     finally:
         if sandbox is not None:
             try:
