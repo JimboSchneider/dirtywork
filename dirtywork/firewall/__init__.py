@@ -12,6 +12,7 @@ from .capabilities import (
 from .errors import FirewallInternalError
 from .normalize import Normalization, canonicalize, canonicalize_batch, recover_name
 from .paths import NormalizedPath, TargetClass, normalize_path
+from .policy import Outcome, PolicyContext, Verdict, decide, decide_batch, evaluate
 from .reasons import ReasonClass, ReasonCode, reason_class
 from .request import Rejection, check_request
 from .schema import (
@@ -36,6 +37,7 @@ from .schema import (
     action_identity,
     rejection_identity,
 )
+from .shell import SHELL_RULES, analyze_command
 
 __all__ = [
     "FIREWALL_SCHEMA_VERSION", "IDENTITY_VERSION",
@@ -49,4 +51,6 @@ __all__ = [
     "Rejection", "check_request",
     "Normalization", "canonicalize", "canonicalize_batch", "recover_name",
     "NormalizedPath", "TargetClass", "normalize_path",
+    "PolicyContext", "Verdict", "Outcome", "evaluate", "decide", "decide_batch",
+    "SHELL_RULES", "analyze_command",
 ]
