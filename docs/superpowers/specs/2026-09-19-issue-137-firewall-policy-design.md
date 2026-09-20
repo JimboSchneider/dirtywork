@@ -9,7 +9,7 @@ Written 2026-09-19 against `main` at `d8638e4`, where `dirtywork/firewall/` hold
 This issue adds the decision: from a `CanonicalAction` and a run context to `ALLOW` or `DENY`, deterministically, with a stable reason code and bounded detail, and a wrapper that can never raise and can never answer `ALLOW` by accident. It ships:
 
 - a `PolicyContext` carrying the sandbox mode and the worktree root forms the caller has already computed;
-- four ordered file-target rules over the #136 target classes, including one new reason code for option-like paths;
+- three ordered file-target rules over the #136 target classes, backend-aware for `.git` and `..`;
 - the deterministic shell analyzer: the eight guardrail rules copied by value with their scope, pattern, legacy reason text, capability and reason code, a drift test that pins them to the live `guardrails.py`, and the worktree-reference rewrite without filesystem access;
 - `evaluate(action, context) -> Verdict`, pure, first match wins, precedence documented and tested;
 - `decide(request, context) -> Outcome` and `decide_batch`, the fail-closed entry points #138 will call;
@@ -26,7 +26,7 @@ Two new modules, each with one test file:
 | `dirtywork/firewall/shell.py` | `ShellRule`, `SHELL_RULES`, `ROOT_BOUNDARY`, `rewrite_worktree_refs`, `ShellMatch`, `analyze_command` | `.capabilities`, `.errors`, `.reasons` |
 | `dirtywork/firewall/policy.py` | `PolicyContext`, `Verdict`, `Outcome`, `WRITE_KINDS` (re-used from `.normalize`), `evaluate`, `decide`, `decide_batch` | `.bounds`, `.capabilities`, `.errors`, `.normalize`, `.paths`, `.reasons`, `.request`, `.schema`, `.shell` |
 
-One existing file changes inside the package: `reasons.py` gains `PATH_OPTION_LIKE = "path_option_like"` in `ReasonCode` and its `MALFORMED` row in the class mapping (section 3). The package `__init__.py` re-exports `PolicyContext`, `Verdict`, `Outcome`, `evaluate`, `decide`, `decide_batch`, `analyze_command` and `SHELL_RULES`; `__all__` grows from 40 to 48. The import-isolation rule holds: a test parses both modules' imports and fails on any `dirtywork.` import outside the package.
+One existing file changes inside the package: `normalize.py` gains `duplicate_positions` (section 7), which `canonicalize_batch` and `decide_batch` share. The package `__init__.py` re-exports `PolicyContext`, `Verdict`, `Outcome`, `evaluate`, `decide`, `decide_batch`, `analyze_command` and `SHELL_RULES`; `__all__` grows from 40 to 48. The import-isolation rule holds: a test parses both modules' imports and fails on any `dirtywork.` import outside the package.
 
 ```python
 @dataclass(frozen=True)
@@ -54,30 +54,29 @@ def analyze_command(command: str, *, mode: str, worktree_roots: "tuple[str, ...]
 
 `evaluate` is pure: no I/O, no filesystem, no clock. It raises `FirewallInternalError` on any input outside its contract and on any internal inconsistency; it never catches anything. `decide` is the opposite by design: it never raises (section 7).
 
-## 3. Context, mode and the new reason code
+## 3. Context, mode and the worktree roots
 
-`PolicyContext.__post_init__` raises `FirewallInternalError` unless `mode` is exactly `"host"` or `"docker"` and `worktree_roots` is a tuple of `str`, nonempty in host mode and empty in Docker mode. An unknown mode therefore fails closed instead of falling through to the permissive branch (parent design §8: unknown internal state is a Firewall failure, not a bypass). Host-only rules run only when `mode == "host"`.
+`PolicyContext.__post_init__` raises `FirewallInternalError` unless `mode` is exactly `"host"` or `"docker"` and `worktree_roots` is a tuple of `str`, nonempty in host mode and empty in Docker mode, and every root is a nonempty absolute posix path equal to its own `posixpath.normpath` and not `/`. Review of the first reference found that an empty root would have made every absolute path "inside" and rewritten every shell command into harmlessness, so the root shape is part of the contract, not a caller courtesy. An unknown mode therefore fails closed instead of falling through to the permissive branch (parent design §8: unknown internal state is a Firewall failure, not a bypass). Host-only rules run only when `mode == "host"`.
 
 The roots exist for two reasons and are supplied, not discovered: the shell analyzer rewrites absolute references to the worktree to `.` before its patterns run, exactly as `guardrails._rewrite_worktree_refs` does, and the file-target rules treat an absolute path under a root as inside the worktree in host mode, as `resolve_in_worktree` does. The legacy rewrite calls `Path.resolve()` to get the second form; this package never touches the filesystem, so the caller (#138) computes both forms once per run and passes them longest first. A test builds a symlinked temporary worktree, passes both forms, and asserts the rewrite matches the legacy function's output on a command corpus.
 
-`ReasonCode.PATH_OPTION_LIKE = "path_option_like"`, class `MALFORMED`, is the one vocabulary change. It is appended, so it is additive under #135 §10 (no schema version bump), and the #135 pins that enumerate the codes and the class mapping grow by one entry each. It carries no capability: an option-like path is a malformed target, not an authority claim. The inventory §4 recorded the gap it closes: the Docker backend passes `list_dir(path="-delete")` to GNU `find` as an expression and `grep(path="--pre=./helper")` to ripgrep as an option.
+No reason code is added. An earlier draft of this spec denied option-like paths (a first component beginning with `-`), citing the inventory §4 gap where the Docker backend passed `list_dir(path="-delete")` to GNU `find` as an expression; #145 and #153 closed that gap before this issue by anchoring every Docker operand with `./` and terminating options with `--`, and the host backend never exposes a path as an argv option, so the rule would have restricted nothing real and would have denied any worktree whose own name begins with `-`. The vocabulary stays at 26 codes.
 
 ## 4. File-target rules
 
-For every kind with a `path` field (all but `bash` and `finish`), `evaluate` applies these rules in order and the first match wins. Every rule reads only the canonical path and its `TargetClass` from #136 and the context; none touches the filesystem.
+For every kind with a `path` field (all but `bash` and `finish`), `evaluate` applies these rules in order and the first match wins. Every rule reads only the canonical path, its `TargetClass` from #136, a lexical `posixpath.normpath` where stated, and the context; none touches the filesystem. One private helper carries the two checks that recur: given a relative path whose `..` have been resolved lexically, a first component of `..` is `path_outside_workspace`, and a first component of exactly `.git` on a write kind is `repo_metadata_target`.
 
 | Order | Condition | Reason code | Class | Mode |
 | --- | --- | --- | --- | --- |
-| 1 | the first component of the canonical path begins with `-` | `path_option_like` | `malformed` | both |
-| 2 | target is `repo_metadata` and the kind is in `WRITE_KINDS` | `repo_metadata_target` | `authority` | both |
-| 3 | target is `outside`: the path is absolute, unless host mode and the path equals a context root or begins with a root followed by `/`; or the path begins with `..` | `path_outside_workspace` | `authority` | both, with the host exception |
-| 4 | target is `parent_ref` and `posixpath.normpath(path)` begins with `..` | `path_outside_workspace` | `authority` | Docker only |
+| 1 | target is `repo_metadata` and the kind is in `WRITE_KINDS` | `repo_metadata_target` | `authority` | both |
+| 2 | target is `outside`: absolute, or a leading `..`. In host mode an absolute path that equals a context root or begins with a root followed by `/` is inside; the remainder after the root goes through the helper, so `/wt/.git/config` written is `repo_metadata_target` and `/wt/../x` is outside. Every other `outside` path is denied. | `path_outside_workspace` or `repo_metadata_target` | `authority` | both, with the host exception |
+| 3 | target is `parent_ref`: `posixpath.normpath(path)` goes through the helper, so `a/../../x` is outside and `src/../.git/config` written is `repo_metadata_target`, while `src/a/../x.py` and `src/../..cache/data` are allowed (`..cache` is a name, not a `..` component) | `path_outside_workspace` or `repo_metadata_target` | `authority` | both |
 
-Everything else is `ALLOW`. Reading under `.git` is allowed for the read kinds, as the executors allow it today. Rule 3's host exception mirrors `resolve_in_worktree`, which accepts an absolute path that lands inside the worktree, and the Docker backend's `_rel`, which refuses every absolute path. Rule 4 mirrors `_rel` exactly: it normalizes and then refuses a remaining leading `..`; in host mode a `parent_ref` path is allowed and the executor's on-disk resolution keeps deciding, because a symlink can make the lexical answer wrong (the #136 finding), and today's host behavior is exactly that resolution. `./-x` normalizes to `-x` in #136 and is denied by rule 1 like any other option-like first component; a file literally named `-x` stays reachable through `bash`, and no legitimate file tool call needs it.
+Everything else is `ALLOW`. Reading under `.git` is allowed for the read kinds, as the executors allow it today. Rule 2's host exception mirrors `resolve_in_worktree`, which accepts an absolute path that lands inside the worktree and still refuses a root `.git` write on it, and the Docker backend's `_rel`, which refuses every absolute path. Rule 3 mirrors `_rel` exactly in Docker mode (normalize, then refuse a remaining leading `..` or a root `.git` write). In host mode the same lexical classification is applied on purpose: the executor resolves on disk and would refuse the same targets in every case except one where a symlink sits before the `..`, and there the Firewall's lexical denial is the conservative side; the #136 rule that keeps `..` verbatim in the canonical path is untouched, because that rule protects the execution target, while this one only classifies. A component test, not a string-prefix test, decides `..`: review of the first reference found `startswith("..")` rejecting `..cache`.
 
-Rules 2 to 4 each key on a different target class, so at most one of them can match a given path; rule 1 keys on the first component instead, so it is the only one that can overlap, and it wins by being first. "First component" means the first non-empty component after splitting the canonical string on `/`: for `-delete` it is `-delete`, for `./-x` (which #136 normalizes to `-x`) it is `-x`, and for an absolute path such as `/Users/jim/wt/-x` it is `Users`, so an absolute path is never option-like and rule 3 decides it. That is the right split: the option-like hazard lives in the Docker backend's `find` and `rg` argv, and Docker refuses every absolute path under rule 3, while the host backend handles an absolute path safely. A test pins each rule on a read kind and a write kind, in both modes.
+Rules 1 to 3 key on different target classes, so at most one applies. A test pins each on a read kind and a write kind, in both modes.
 
-Detail strings are fixed harness sentences per rule (`"path is option-like"`, `"write under the repository's .git"`, `"path resolves outside the worktree"`), within `MAX_DETAIL_CHARS`, never containing the path.
+Detail strings are fixed harness sentences per reason (`"write under the repository's .git"`, `"path resolves outside the worktree"`), within `MAX_DETAIL_CHARS`, never containing the path.
 
 ## 5. The shell analyzer
 
@@ -111,7 +110,7 @@ The result is `Verdict(action, PolicyDecision)`. `ALLOW` decisions have `reason_
 
 `decide` never raises, never returns `ALLOW` from step 3, and never lets a worker input become `ALLOW` through exception handling (parent design §11, §19). The detail on an internal error names the exception class and nothing else: no message text, since an exception message can carry worker bytes.
 
-`decide_batch(requests, context)` runs `canonicalize_batch` for duplicate-id handling and then the same per-request logic on each result, with the same guard per request; a duplicate is a `DENY` with `call_id_duplicate` and a request-stage event. Every request gets an `Outcome`, in order, and one request's failure never affects its neighbours.
+`decide_batch(requests, context)` first computes `duplicate_positions(requests)`, a new `normalize.py` helper that returns the batch indexes whose `str` `call_id` repeats an earlier one (never raises; `canonicalize_batch` is refactored onto it so the two agree by construction), under a guard that turns any failure there into an internal-error outcome for every request. Then each request is handled under its own guard: a duplicate position becomes a `DENY` with `call_id_duplicate` and a request-stage event; every other request goes through `canonicalize` and the same steps as `decide`. Review of the first reference found the batch normalized as one guarded operation, so one request's normalization failure denied its neighbours; normalizing per request under the per-request guard is what makes the isolation promise true. Every request gets an `Outcome`, in order.
 
 ## 8. Evidence
 
@@ -127,13 +126,14 @@ Nothing new is defined. `FirewallEvent` carries the enriched capabilities, the d
 
 1. **No shell command becomes `semantic_known`.** The regex analyzer can prove a denial, not an understanding; a future analyzer may say more.
 2. **Only the first matching shell rule contributes a capability.** Mirrors the legacy first-match contract; scanning for every match would cost little but would change the Supervisor's key for multi-match commands relative to what the legacy reason implies.
-3. **`parent_ref` paths are allowed in host mode.** On-disk resolution decides, as today; the Docker rule normalizes lexically, as the Docker backend does.
+3. **`parent_ref` paths are classified lexically in both modes.** `normpath`, then the same `..` and `.git` checks as any other path. The first draft left host mode to on-disk resolution; review showed that let a `src/../.git/config` write through as `ALLOW` where the executor refuses it, so the evidence would have lied. The symlink case where lexical and on-disk disagree resolves to the conservative side.
 4. **The caller supplies the worktree root forms.** The Firewall never calls `resolve()`; #138 computes the given and resolved forms once per run.
-5. **Option-like paths are denied for every path kind, `./-x` included.** One new `malformed` reason code, no capability; a file literally named `-x` stays reachable through `bash`.
+5. **Worktree roots are validated, not trusted.** Nonempty, absolute, normalized, not `/`. The first draft accepted an empty root and it disabled every host check.
 6. **Shell denial details reuse the legacy reason text verbatim.** #140's compatibility mapping from `guardrail_block.reason` becomes a lookup on `SHELL_RULES`.
 7. **`decide` catches `Exception`, not `BaseException`.** Interrupts must still interrupt.
 8. **`Outcome.event` may be `None` on a double failure.** Denying is the invariant; the event is evidence, and a harness bug in the event code must not turn into a raise from the one function that promises never to raise.
-9. **The `NETWORK` capability stays unset.** The download-into-interpreter rule maps to `REMOTE_CODE_EXEC` per #135; no rule here recognizes network use as such.
+9. **No option-like path rule.** Its hazard was closed by #145 and #153 (section 3); a rule without a hazard is a false positive waiting for a worktree named `-wt`.
+10. **The `NETWORK` capability stays unset.** The download-into-interpreter rule maps to `REMOTE_CODE_EXEC` per #135; no rule here recognizes network use as such.
 
 ## 11. Tests
 
@@ -150,17 +150,17 @@ Two new files under `tests/`, which may import `dirtywork.guardrails`; the packa
 
 `tests/test_firewall_policy.py`:
 
-- `PolicyContext` invariants: bad mode, non-tuple roots, host with no roots, Docker with roots, each `FirewallInternalError`;
-- every file-target rule on one read kind and one write kind in both modes, including host absolute-inside allowed (root itself and a path under it), host absolute-outside denied, Docker absolute denied, leading `..` denied in both, `parent_ref` allowed in host and split by `normpath` in Docker, option-like for every path kind including `./-x`, `.git` read allowed and write denied, `.gitignore` write allowed;
+- `PolicyContext` invariants: bad mode, non-tuple roots, host with no roots, Docker with roots, and each bad root shape (empty, relative, `/`, trailing slash, non-normalized), each `FirewallInternalError`;
+- every file-target rule on one read kind and one write kind in both modes, including host absolute-inside allowed (root itself and a path under it), host absolute-outside denied, Docker absolute denied, leading `..` denied in both, `parent_ref` classified by `normpath` in both modes (`a/../../x` outside, `src/a/../x.py` and `src/../..cache/data` allowed), the `.git` aliases (`/wt/.git/config` written under root `/wt` in host mode, `src/../.git/config` written in both modes) denied as `repo_metadata_target`, `.git` read allowed and write denied, `.gitignore` write allowed, and every path kind allowing a benign relative path;
 - `finish` allowed; `bash` allowed with the action unchanged and denied with the capability added, for every legacy rule once;
 - `evaluate` raises on a `dict`, a `Normalization`, a `Rejection` and a context of the wrong type;
 - `decide`: accept path (action, ALLOW, event stage `action`), rejection path (event stage `request`, `action None`), internal error path with `canonicalize` monkeypatched to raise `RuntimeError` and with `evaluate` monkeypatched to raise `FirewallInternalError` (both `DENY`, `firewall_internal_error`, detail naming the class only, event stage `request`), and the double failure with `FirewallEvent.from_rejection` monkeypatched to raise (`event None`, detail suffix `"; no event"`); never `ALLOW` from any of these;
-- `decide_batch`: mixed batch of allow, deny, rejection and duplicate, in order, with one neighbour's internal error not affecting the rest;
+- `decide_batch`: mixed batch of allow, deny, rejection and duplicate, in order; a normalization failure injected on the middle request leaves both neighbours unaffected; duplicates still detected; a failure in `duplicate_positions` denies every request;
 - the parent design §19 invariants this layer owns, each as a named test: raw dicts cannot reach rules; malformed input cannot become `ALLOW` through exception handling; precedence is deterministic (the same batch evaluated twice gives equal outcomes); reason code, capability set and identity on every event are members of their closed vocabularies; `semantic_unknown` never denies (every `bash` `DENY` here has a reason code from `SHELL_RULES`, and an allowed `bash` action keeps `semantic_unknown`); internal failure fails closed;
 - import isolation of `shell.py` and `policy.py`.
 
-The #135 and #136 pins that grow: the reasons test's expected code list and class-mapping count (27 codes), and the `__all__` pin (48 names), edited in the last brief.
+The one #136 pin that grows is the `__all__` list (48 names), edited in the last brief. The reasons vocabulary and its pins are untouched.
 
 ## 12. Compatibility
 
-No runtime path changes: the Runner, registry, executors and `guardrails.py` do not import the package, and `check_bash_command` keeps running exactly as before. This issue adds a second copy of the eight rules inside the Firewall and pins the two together, so #140 can shadow-compare, prove parity on the known-denied fixtures, and only then retire the legacy path. Run artifacts, the transcript and `guardrail_block` events are untouched.
+No runtime path changes: the Runner, registry, executors and `guardrails.py` do not import the package, and `check_bash_command` keeps running exactly as before. This issue adds a second copy of the eight rules inside the Firewall and pins the two together, and adds `duplicate_positions` to `normalize.py` with `canonicalize_batch` refactored onto it and its tests unchanged, so #140 can shadow-compare, prove parity on the known-denied fixtures, and only then retire the legacy path. Run artifacts, the transcript and `guardrail_block` events are untouched.
