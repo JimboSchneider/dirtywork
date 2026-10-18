@@ -224,6 +224,10 @@ it is running, the view refreshes every three seconds.
 
 - **Watch active work:** follow elapsed worker time, the activity stream and
   a timeline of model actions, tools and verification events.
+- **Focus on a repository:** scope the run list, counts, Outcomes and token
+  totals to a saved repository path. Active, Needs review and search further
+  narrow the list within that scope. Each run shows its repository, worktree
+  and branch.
 - **Inspect results:** view verification evidence and PR-style file diffs
   with line numbers and highlighted additions and removals. New runs publish
   live snapshots after edits and commands; completed Docker runs use their

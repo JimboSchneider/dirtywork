@@ -199,7 +199,7 @@ function taskTypeHarness(fetchResult, detailResult) {
   assert.ok(end > start, 'task type controls must precede review controls');
   const nodes = Object.fromEntries(['task-type', 'task-type-source', 'task-type-feedback',
     'review-panel', 'review-form', 'review-summary', 'review-summary-title', 'review-summary-note',
-    'start-review', 'accept-review', 'reject-review', 'review-note', 'review-controls-state', 'review-feedback']
+    'start-review', 'accept-review', 'reject-review', 'review-note', 'review-controls-state', 'review-feedback', 'repository']
     .map(id => [id, new Element(id === 'task-type' ? 'select' : 'div')]));
   const run = {slug: 'run with spaces', verdict: 'accept', review_duration_s: 12,
     task_type: {id: 'code', label: 'Code changes', source: 'suggested'}};

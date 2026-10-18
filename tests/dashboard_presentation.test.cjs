@@ -38,6 +38,7 @@ test('empty task titles use only the provided fallback', () => {
 
 const runs = [
   {slug: 'confirmed', task: 'Fix live rendering', model: 'Qwen', repo: '/repo/one',
+    worktree: '/worktrees/live-rendering', branch: 'codex/renderer',
     status: 'running', activity_state: 'running', review_eligible: false, verdict: null,
     task_type: {label: 'Code changes'}},
   {slug: 'unconfirmed', task: 'An uncertain worker', model: 'Other', repo: '/repo/two',
@@ -72,6 +73,8 @@ test('search matches literal evidence fields case insensitively within the selec
     ['unconfirmed', ['unconfirmed']],
     ['qWeN', ['confirmed', 'pending', 'accepted']],
     ['/REPO/ONE', ['confirmed', 'pending', 'accepted']],
+    ['/WORKTREES/LIVE-RENDERING', ['confirmed']],
+    ['CODEX/RENDERER', ['confirmed']],
     ['verify_FAILED', ['reviewing']],
     ['ACCEPT', ['accepted']],
     ['DOCUMENTATION', ['pending']],

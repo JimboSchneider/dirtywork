@@ -3,7 +3,7 @@
   'use strict';
   const $ = id => document.getElementById(id);
   const root = document.documentElement;
-  const state = {snapshot: null, selected: null, detail: null, view: 'activity', limit: 8, query: '', busy: false,
+  const state = {allSnapshot: null, snapshot: null, repository: null, selected: null, detail: null, view: 'activity', limit: 8, query: '', busy: false,
     reviewBusy: false, detailRevision: 0, reviewNotes: new Map(), reviewFeedback: null,
     taskTypeBusy: null, taskTypeFeedback: null};
   const knownThemes = ['ion', 'orchid', 'terminal'];
@@ -96,6 +96,8 @@
     }
   });
   state.selected = stored('run');
+  const savedRepository = stored('repository');
+  state.repository = savedRepository?.startsWith('repo:') ? savedRepository.slice(5) : null;
   state.runScope = ['all', 'active', 'review'].includes(stored('runScope')) ? stored('runScope') : 'all';
   const number = value => value == null ? '—' : new Intl.NumberFormat(undefined, {maximumFractionDigits: 0}).format(value);
   const compactNumber = value => value == null ? '—' : new Intl.NumberFormat(undefined, {notation: 'compact', maximumFractionDigits: 1}).format(value);
@@ -125,6 +127,7 @@
   }
   function set(id, value) { $(id).textContent = value; }
   const explanations = {
+    'repository-scope': ['Repository scope', 'Choose a recorded repository to scope runs, token totals, and Outcomes together; search and run filters only narrow the run list.'],
     offloaded: ['Tokens offloaded', 'Recorded worker tokens measure offloaded work, rather than exact token savings.'],
     'accepted-tokens': ['Accepted work', 'Worker tokens used on runs that a reviewer accepted.'],
     coverage: ['Runs with usage', 'Runs with both input and output token counts, out of all saved runs.'],
@@ -298,6 +301,7 @@
   }
   $('task-type').addEventListener('change', performTaskType);
   function renderReviewControls(run) {
+    $('repository').disabled = state.reviewBusy || Boolean(state.taskTypeBusy);
     const settled = Boolean(run.verdict);
     const eligible = Boolean(!settled && run.review_eligible && !run.resumed_by);
     $('review-panel').classList.toggle('review-actionable', eligible);
@@ -368,6 +372,93 @@
   $('start-review').addEventListener('click', () => performReview('start'));
   $('accept-review').addEventListener('click', () => performReview('accept'));
   $('reject-review').addEventListener('click', () => performReview('reject'));
+  function renderRepositoryScope() {
+    const select = $('repository');
+    const value = state.repository === null ? '' : 'repo:' + state.repository;
+    const choiceBeforePoll = select.value;
+    const groups = state.allSnapshot.repositories || [];
+    const keys = new Set(['', ...groups.map(group => 'repo:' + group.repo)]);
+    for (const option of [...select.children]) if (!keys.has(option.value)) option.remove();
+    let previous = [...select.children].find(option => option.value === '');
+    if (!previous) {
+      previous = element('option', '', 'All repositories'); previous.value = '';
+      select.insertBefore(previous, select.firstChild);
+    }
+    for (const group of groups) {
+      const key = 'repo:' + group.repo;
+      let option = [...select.children].find(option => option.value === key);
+      if (!option) { option = element('option'); option.value = key; }
+      const text = `${group.repo || 'Repository not recorded'} · ${number(group.summary.total)} ${group.summary.total === 1 ? 'run' : 'runs'}`;
+      if (option.textContent !== text) option.textContent = text;
+      if (previous.nextSibling !== option) select.insertBefore(option, previous.nextSibling);
+      previous = option;
+    }
+    if (select.dataset.repository !== value || !keys.has(choiceBeforePoll)) select.value = value;
+    else if (select.value !== choiceBeforePoll) select.value = choiceBeforePoll;
+    select.dataset.repository = value;
+    select.disabled = state.reviewBusy || Boolean(state.taskTypeBusy);
+    const all = state.repository === null;
+    const scope = all ? 'All repositories' : 'This repository';
+    const context = all ? 'All repositories' : `Repository: ${state.repository || 'Not recorded'}`;
+    const total = state.snapshot.summary.total;
+    const description = `${state.repositoryNotice || ''}${context} · ${number(total)} recorded ${total === 1 ? 'run' : 'runs'}`;
+    if ($('repository-context').textContent !== description) set('repository-context', description);
+    set('token-scope', `Lifetime · ${scope.toLowerCase()} · including demos`);
+    set('outcomes-scope', `${scope} · all runs, including demos`);
+    set('funnel-scope', `${scope} · including demos`);
+    set('models-scope', `${scope} · including demos`);
+    set('fit-scope', `Real work only · ${scope.toLowerCase()}`);
+  }
+  function applyRepositoryScope() {
+    if (!state.allSnapshot) return;
+    let snapshot = presentation.scopeSnapshot(state.allSnapshot, state.repository);
+    if (!snapshot) {
+      state.repository = null;
+      state.repositoryNotice = 'Saved repository is no longer available; showing all repositories. ';
+      remember('repository', '');
+      state.detailRevision++;
+      snapshot = state.allSnapshot;
+    }
+    state.snapshot = snapshot;
+    if (!snapshot.runs.some(run => run.slug === state.selected)) {
+      state.selected = snapshot.runs.find(run => run.activity_state === 'running')?.slug || snapshot.runs[0]?.slug || null;
+      state.detail = null;
+      state.detailRevision++;
+      remember('run', state.selected || '');
+    }
+    const hasDetail = state.detail?.slug === state.selected && Boolean(state.selected) &&
+      (state.repository === null || (state.detail.repo || '') === state.repository);
+    $('run-panel').hidden = !hasDetail;
+    $('run-loading').hidden = !state.selected || hasDetail;
+    $('empty').hidden = snapshot.runs.length > 0;
+    if (!hasDetail) {
+      state.detail = null;
+      for (const id of ['start-review', 'accept-review', 'reject-review', 'review-note', 'task-type']) $(id).disabled = true;
+      renderWoprRun(null);
+      for (const [id, text] of [['worker-time', '—'], ['turns', '— / —'], ['verdict', '—'], ['worker-time-note', state.selected ? 'Loading selected run' : 'No run selected'], ['verdict-note', 'No verdict recorded']]) set(id, text);
+      set('run-task', 'Loading selected run…');
+    }
+    renderRepositoryScope();
+    renderList();
+    renderOutcomes();
+    const summary = snapshot.summary;
+    const connection = `Live · ${number(summary.active)} active · ${summary.reviewing ? number(summary.reviewing) + ' in review · ' : ''}${number(summary.total)} recorded`;
+    if ($('connection').textContent !== connection) set('connection', connection);
+  }
+  $('repository').addEventListener('change', () => {
+    if (state.reviewBusy || state.taskTypeBusy) {
+      $('repository').value = state.repository === null ? '' : 'repo:' + state.repository;
+      return;
+    }
+    const value = $('repository').value;
+    state.repository = value.startsWith('repo:') ? value.slice(5) : null;
+    state.repositoryNotice = '';
+    state.detailRevision++;
+    state.limit = 8;
+    remember('repository', value);
+    applyRepositoryScope();
+    loadDetail();
+  });
   function selectRun(slug) {
     if (state.selected === slug) return;
     state.selected = slug;
@@ -376,6 +467,10 @@
     for (const id of ['start-review', 'accept-review', 'reject-review', 'review-note', 'task-type']) $(id).disabled = true;
     remember('run', slug);
     renderList();
+    $('run-panel').hidden = true;
+    $('run-loading').hidden = false;
+    renderWoprRun(null);
+    for (const [id, text] of [['worker-time', '—'], ['turns', '— / —'], ['verdict', '—'], ['worker-time-note', 'Loading selected run'], ['verdict-note', 'No verdict recorded']]) set(id, text);
     set('run-task', 'Loading selected run…');
     loadDetail();
   }
@@ -389,7 +484,7 @@
     }
     set('run-count', `${number(runs.length)}${state.query ? ' matches' : ' runs'}`);
     const jump = $('run-jump');
-    const jumpScope = JSON.stringify([state.runScope, state.query]);
+    const jumpScope = JSON.stringify([state.repository, state.runScope, state.query]);
     const choiceBeforePoll = jump.value;
     const jumpKeys = new Set(['', ...runs.map(run => run.slug)]);
     for (const option of [...jump.children]) if (!jumpKeys.has(option.value)) option.remove();
@@ -429,7 +524,7 @@
         button = element('button', 'run-choice');
         button.type = 'button';
         button.dataset.slug = run.slug;
-        button.append(element('span', 'run-choice-title'), element('span', 'run-choice-meta'), element('span', 'run-choice-model'), element('span', 'run-choice-slug'));
+        button.append(element('span', 'run-choice-title'), element('span', 'run-choice-meta'), element('span', 'run-choice-model'), element('span', 'run-choice-slug'), element('span', 'run-choice-context'));
         button.addEventListener('click', () => selectRun(run.slug));
       }
       button.setAttribute('aria-pressed', String(run.slug === state.selected));
@@ -437,6 +532,8 @@
       button.children[1].textContent = `${label(run)} · ${duration(run.duration_s)}`;
       button.children[2].textContent = run.model || 'Unknown model';
       button.children[3].textContent = run.slug;
+      button.children[4].textContent = `${run.repo ? run.repo.split(/[\\/]/).filter(Boolean).pop() : 'Repository not recorded'} · ${run.branch || 'Branch not recorded'}`;
+      button.children[4].title = [run.repo, run.worktree, run.branch].filter(Boolean).join('\n');
       const next = previous ? previous.nextSibling : list.firstChild;
       if (next !== button) list.insertBefore(button, next);
       previous = button;
@@ -674,6 +771,8 @@
   });
 
   function renderDetail(run) {
+    $('run-panel').hidden = false;
+    $('run-loading').hidden = true;
     renderWoprRun(run);
     renderTaskType(run);
     renderReviewControls(run);
@@ -689,6 +788,9 @@
     const title = presentation.taskTitle(run.task, 'Task not recorded');
     set('run-task', title);
     set('run-model', [run.model || 'Unknown model', run.provider, run.sandbox && `${run.sandbox} sandbox`].filter(Boolean).join(' · '));
+    set('run-repository', run.repo || 'Not recorded');
+    set('run-worktree', run.worktree || 'Not recorded');
+    set('run-branch', run.branch || 'Not recorded');
     set('run-status', label(run));
     $('run-status').classList.toggle('warning', run.verdict === 'reject' || ['inactive', 'unconfirmed', 'unknown'].includes(run.activity_state) || !['running', 'completed'].includes(run.status));
     const verification = run.verify?.passed === true ? 'Passed' : run.verify?.passed === false ? 'Failed' : 'Not recorded';
@@ -713,7 +815,7 @@
       $('files-status').title = '';
     }
     if ($('files-details').open) loadChanges(run.slug);
-    set('lineage', [run.repo, run.branch, run.resumed_from && `Resumed from ${run.resumed_from}`, run.resumed_by && `Resumed by ${run.resumed_by}`, run.note && `Review note: ${run.note}`].filter(Boolean).join(' · '));
+    set('lineage', [run.resumed_from && `Resumed from ${run.resumed_from}`, run.resumed_by && `Resumed by ${run.resumed_by}`, run.note && `Review note: ${run.note}`].filter(Boolean).join(' · '));
     $('run-warnings').hidden = !run.warnings.length;
     set('run-warnings', run.warnings.join(' '));
     const signature = JSON.stringify(run.activity);
@@ -877,10 +979,11 @@
     try {
       const run = await api('/api/runs/' + encodeURIComponent(slug));
       if (state.selected !== slug || state.detailRevision !== revision || state.reviewBusy || state.taskTypeBusy) return;
+      if (typeof state.repository === 'string' && (run.repo || '') !== state.repository) return;
       state.detail = run;
       renderDetail(run);
     } catch (error) {
-      if (state.selected === slug) {
+      if (state.selected === slug && state.detailRevision === revision && !state.reviewBusy && !state.taskTypeBusy) {
         set('error', error.message + ' Keeping the last available values; retrying automatically.');
         $('error').hidden = false;
       }
@@ -891,32 +994,18 @@
     state.busy = true;
     try {
       const snapshot = await api('/api/runs');
-      state.snapshot = snapshot;
+      state.allSnapshot = snapshot;
       $('error').hidden = true;
       const indicator = $('connection-dot');
       indicator.classList.remove('offline');
       indicator.classList.add('syncing');
       clearTimeout(syncIndicatorTimer);
       syncIndicatorTimer = setTimeout(() => indicator.classList.remove('syncing'), 900);
-      const connectionLabel = `Live · ${number(snapshot.summary.active)} active · ${snapshot.summary.reviewing ? number(snapshot.summary.reviewing) + ' in review · ' : ''}${number(snapshot.summary.total)} recorded`;
-      if ($('connection').textContent !== connectionLabel) set('connection', connectionLabel);
       $('connection').title = `Refreshes every 3 seconds · Last synced ${new Date(snapshot.updated_at).toLocaleTimeString()}`;
       set('source', snapshot.runs_dir);
-      $('empty').hidden = snapshot.runs.length > 0;
-      $('run-panel').hidden = !snapshot.runs.length;
-      if (!snapshot.runs.some(run => run.slug === state.selected)) {
-        state.selected = snapshot.runs.find(run => run.activity_state === 'running')?.slug || snapshot.runs[0]?.slug || null;
-        state.detail = null;
-        state.detailRevision++;
-      }
-      if (!state.selected) {
-        renderWoprRun(null);
-        for (const [id, value] of [['worker-time', '—'], ['turns', '— / —'], ['verdict', '—'], ['worker-time-note', 'No run selected'], ['verdict-note', 'No verdict recorded']]) set(id, value);
-      }
-      renderList();
-      renderOutcomes();
+      applyRepositoryScope();
       $('data-warnings').hidden = !snapshot.warnings.length;
-      set('warning-summary', `${number(snapshot.warnings.length)} run data notices`);
+      set('warning-summary', `All repositories · ${number(snapshot.warnings.length)} run data notices`);
       $('warnings-list').replaceChildren(...snapshot.warnings.map(warning => element('li', '', warning)));
       await loadDetail();
     } catch (error) {

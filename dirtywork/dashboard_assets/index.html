@@ -29,9 +29,13 @@
         <button id="outcomes-tab" role="tab" aria-selected="false" aria-controls="outcomes-view" type="button" tabindex="-1">Outcomes</button>
       </div>
     </div>
+    <div class="repository-scope">
+      <div class="repository-control"><label for="repository">Repository</label><span data-help="repository-scope"></span><select id="repository" aria-describedby="repository-context"><option value="">All repositories</option></select></div>
+      <p id="repository-context" class="secondary" role="status" aria-live="polite">Showing all saved repositories.</p>
+    </div>
     <div id="error" class="notice error" role="alert" hidden></div>
     <section class="panel offload-summary" aria-label="Token offloading">
-      <p class="scope-label">Lifetime · all runs, including demos</p>
+      <p id="token-scope" class="scope-label">Lifetime · all repositories · including demos</p>
       <div class="offload-grid">
         <div class="offload-main"><h2 class="eyebrow" data-help="offloaded">Tokens offloaded</h2><strong id="offloaded-tokens">—</strong><span class="secondary">Gross worker usage · recorded at run end</span></div>
         <div><span class="eyebrow" data-help="accepted-tokens">Accepted work</span><strong id="accepted-tokens">—</strong><span id="accepted-tokens-note" class="secondary">No recorded usage yet</span></div>
@@ -47,6 +51,7 @@
         <article class="metric"><span class="eyebrow" data-help="turns">Turns / tool results</span><strong id="turns">— / —</strong><span class="secondary">Observed in run evidence</span></article>
         <article class="metric"><span class="eyebrow" data-help="verdict">Review verdict</span><strong id="verdict">—</strong><span id="verdict-note" class="secondary">Separate from worker completion</span></article>
       </div>
+      <p id="run-loading" class="secondary" role="status" hidden>Loading selected run…</p>
       <div class="activity-layout">
         <aside class="panel recent-panel" aria-label="Run selection">
           <div class="section-head"><h3 data-help="runs">Runs</h3><span id="run-count" class="secondary mono">0 records</span></div>
@@ -64,6 +69,11 @@
           <div id="wopr-run-status" role="status" aria-live="polite" aria-atomic="true"></div>
           <h2 id="run-task">Loading run records…</h2>
           <div id="run-model" class="secondary mono"></div>
+          <dl class="run-location" aria-label="Run location">
+            <div class="run-location-row"><dt>Repository</dt><dd id="run-repository">Not recorded</dd></div>
+            <div class="run-location-row"><dt>Worktree</dt><dd id="run-worktree">Not recorded</dd></div>
+            <div class="run-location-row"><dt>Branch</dt><dd id="run-branch">Not recorded</dd></div>
+          </dl>
           <div class="stages" id="stages" aria-label="Recorded run stages"><div><span id="stage-start"></span>Started</div><div><span id="stage-work"></span>Activity</div><div><span id="stage-verify"></span>Verify</div><div><span id="stage-review"></span>Review</div></div>
           <div class="evidence-strip"><div><span class="eyebrow" data-help="verification">Verification</span><strong id="verification">—</strong></div><div><span class="eyebrow" data-help="tokens">Tokens · in / out</span><strong id="tokens">— / —</strong></div><div><span class="eyebrow" data-help="files">Changed files</span><strong id="file-count">—</strong></div><div><span class="eyebrow" data-help="review-time">Review time</span><strong id="review-time">—</strong><span id="review-time-state" class="secondary"></span></div></div>
           <div class="task-type-control"><label for="task-type">Task type</label><span data-help="task-type"></span><select id="task-type" disabled><option value="">Suggesting a type…</option></select><span id="task-type-source" class="secondary"></span><p id="task-type-feedback" class="secondary" role="status" aria-live="polite"></p></div>
@@ -90,14 +100,14 @@
       </div>
     </section>
     <section id="outcomes-view" role="tabpanel" aria-labelledby="outcomes-tab" hidden>
-      <p class="scope-label">All runs · including demos</p>
+      <p id="outcomes-scope" class="scope-label">All repositories · including demos</p>
       <div class="metrics">
         <article class="metric"><span class="eyebrow" data-help="acceptance">Accepted / reviewed</span><strong id="accepted">—</strong><span id="accepted-note" class="secondary">Accept and reject verdicts only</span></article>
         <article class="metric"><span class="eyebrow" data-help="median-worker">Median worker time</span><strong id="median-worker">—</strong><span id="median-worker-note" class="secondary"></span></article>
         <article class="metric"><span class="eyebrow" data-help="median-review">Median review time</span><strong id="median-review">—</strong><span id="median-review-note" class="secondary"></span></article>
       </div>
       <article class="panel offload-fit" aria-labelledby="offload-fit-heading">
-        <div class="section-head"><h3 id="offload-fit-heading" data-help="offload-fit">Offloading fit</h3><span class="scope-badge">Real work only</span></div>
+        <div class="section-head"><h3 id="offload-fit-heading" data-help="offload-fit">Offloading fit</h3><span id="fit-scope" class="scope-badge">Real work only · all repositories</span></div>
         <p class="fit-intro">Look for high acceptance and short reviews. Suggested types can be corrected on each run.</p>
         <p id="offload-fit-summary" class="secondary"></p>
         <p id="offload-fit-empty" class="fit-empty">Start timed reviews on real tasks to compare review effort.</p>
@@ -107,8 +117,8 @@
         <details class="secondary fit-method"><summary>How this is calculated</summary><p>Demos and benchmarks are excluded. Acceptance rates count attempts with an accept or reject verdict. Unique task descriptions show how much work was repeated. Five unique reviewed and five unique timed task descriptions clear the limited-data label; this is a coverage guide. Review time includes checks and waiting after Start Review. These metrics do not measure net time saved.</p></details>
       </article>
       <div class="outcomes-layout">
-        <article class="panel"><div class="section-head"><h3 data-help="funnel">From recorded to accepted</h3><span class="scope-badge">All runs · including demos</span></div><div id="funnel"></div><p id="outcome-note" class="secondary"></p></article>
-        <article class="panel"><div class="section-head"><h3 data-help="models">Worker comparison</h3><span class="scope-badge">All runs · including demos</span></div><div class="table-wrap"><table><thead><tr><th scope="col">Model</th><th scope="col">Accepted / reviewed</th><th scope="col">Median worker time</th></tr></thead><tbody id="models"></tbody></table></div><p class="secondary">Different tasks and sample sizes; descriptive comparison.</p></article>
+        <article class="panel"><div class="section-head"><h3 data-help="funnel">From recorded to accepted</h3><span id="funnel-scope" class="scope-badge">All repositories · including demos</span></div><div id="funnel"></div><p id="outcome-note" class="secondary"></p></article>
+        <article class="panel"><div class="section-head"><h3 data-help="models">Worker comparison</h3><span id="models-scope" class="scope-badge">All repositories · including demos</span></div><div class="table-wrap"><table><thead><tr><th scope="col">Model</th><th scope="col">Accepted / reviewed</th><th scope="col">Median worker time</th></tr></thead><tbody id="models"></tbody></table></div><p class="secondary">Different tasks and sample sizes; descriptive comparison.</p></article>
       </div>
     </section>
     <details id="data-warnings" class="notice" hidden><summary id="warning-summary">Data notices</summary><ul id="warnings-list"></ul></details>
