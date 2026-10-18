@@ -196,6 +196,30 @@
   .legend .fr::before { content: "■ "; color: var(--frontier); }
   .legend .lo::before { content: "■ "; color: var(--local); }
 
+  /* ---------- worker observatory ---------- */
+  .observatory-lead { font-size: 1.2rem; color: var(--ink-soft); margin: 0 0 1.2rem; }
+  .observatory-lead strong { color: var(--ink); }
+  .observatory-benefits { list-style: none; padding: 0; margin: 0 0 1.6rem; color: var(--ink-soft); }
+  .observatory-benefits li { margin: 0.7rem 0; }
+  .observatory-benefits strong { color: var(--local); }
+  .observatory-figure { margin: 1.6rem 0; }
+  .observatory-figure > a { display: block; border-radius: 10px; }
+  .observatory-figure img {
+    display: block; width: 100%; height: auto;
+    border: 1px solid var(--line); border-radius: 10px;
+    background: var(--bg-raise);
+  }
+  .observatory-figure figcaption {
+    margin-top: 0.65rem; text-align: center;
+    font-size: 0.8rem; color: var(--ink-faint);
+  }
+  .observatory-command { padding: 0.85rem 1.15rem; }
+  .observatory-command pre { font-size: 0.9rem; }
+  .observatory-note { margin: 0.7rem 0 0; font-size: 0.85rem; color: var(--ink-faint); }
+  @media (min-width: 60rem) {
+    .observatory-figure { width: 54rem; margin-left: calc((100% - 54rem) / 2); }
+  }
+
   /* ---------- beta strip ---------- */
   .beta-strip {
     margin-top: 3.4rem;
@@ -267,6 +291,26 @@ free on your own machine, and <strong>nothing merges without review</strong>.</p
   </div>
   <p class="legend"><span class="fr">frontier / you — spends judgment</span>
   <span class="lo">local worker — spends electricity</span></p>
+</section>
+
+<section aria-labelledby="observatory-heading">
+  <h2 id="observatory-heading">Worker Observatory</h2>
+  <p class="observatory-lead"><strong>Watch the work. Keep the judgment.</strong>
+  Bring your runs and their evidence into one local browser view.</p>
+  <ul class="observatory-benefits">
+    <li><strong>Follow the work.</strong> Watch activity, verification evidence and file diffs as worker actions finish.</li>
+    <li><strong>Time your review.</strong> Start a timer, inspect the result, then save Accept or Reject with an optional note.</li>
+    <li><strong>Choose what to delegate.</strong> Compare acceptance and recorded review effort by task type, with sample counts in view.</li>
+  </ul>
+  <figure class="observatory-figure">
+    <a href="images/worker-observatory.jpg" aria-label="View full-size Worker Observatory screenshot">
+      <img src="images/worker-observatory.jpg" width="1280" height="720" loading="lazy" decoding="async" alt="Worker Observatory showing an example run, a file diff and timed review controls.">
+    </a>
+    <figcaption>Illustrative sample data · <a href="images/worker-observatory.jpg">View full-size image</a></figcaption>
+  </figure>
+  <div class="run observatory-command"><pre><code>dirtywork dashboard --open</code></pre></div>
+  <p class="observatory-note">Runs locally and reads your existing run records. Leave the command running while you review.
+  <a href="https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md#dashboard">Dashboard guide</a></p>
 </section>
 
 <div class="beta-strip">
