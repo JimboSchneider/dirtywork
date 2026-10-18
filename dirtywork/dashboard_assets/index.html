@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en" data-theme="ion" data-appearance="system">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>dirtywork · Worker observatory</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/wopr.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <a class="brand" href="/" aria-label="dirtywork dashboard"><span class="brand-mark" aria-hidden="true">›_</span><span>dirtywork<span class="brand-period">.</span></span></a>
+    <span class="wopr-badge" title="Please HACK THE PLANET responsibly.">HACK THE PLANET</span>
+    <span class="eyebrow wordmark-caption">Worker observatory</span>
+    <div class="preferences">
+      <label>Theme <select id="theme"><option value="ion">Ion</option><option value="orchid">Orchid</option><option value="terminal">Terminal</option></select></label>
+      <label>Appearance <select id="appearance"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+    </div>
+  </header>
+  <main>
+    <div class="page-heading">
+      <div><div class="eyebrow">Local intelligence / observable work</div><h1>Mission control.</h1><div class="connection"><span class="connection-dot" id="connection-dot" aria-hidden="true"><span></span><span></span><span></span></span><span id="connection" role="status">Connecting to run records…</span></div></div>
+      <div class="tabs" role="tablist" aria-label="Dashboard view">
+        <button id="activity-tab" role="tab" aria-selected="true" aria-controls="activity-view" type="button">Run activity</button>
+        <button id="outcomes-tab" role="tab" aria-selected="false" aria-controls="outcomes-view" type="button" tabindex="-1">Outcomes</button>
+      </div>
+    </div>
+    <div id="error" class="notice error" role="alert" hidden></div>
+    <section class="panel offload-summary" aria-label="Token offloading">
+      <div class="offload-grid">
+        <div class="offload-main"><h2 class="eyebrow" data-help="offloaded">Tokens offloaded</h2><strong id="offloaded-tokens">—</strong><span class="secondary">Gross worker usage · recorded at run end</span></div>
+        <div><span class="eyebrow" data-help="accepted-tokens">Accepted work</span><strong id="accepted-tokens">—</strong><span id="accepted-tokens-note" class="secondary">No recorded usage yet</span></div>
+        <div><span class="eyebrow" data-help="coverage">Runs with usage</span><strong id="token-coverage">— / —</strong><span id="token-breakdown" class="secondary">Input + output tokens</span></div>
+      </div>
+      <details class="offload-method"><summary>How this relates to savings</summary><p>Recorded worker input + output tokens are a proxy for work offloaded from the orchestrator. These are not measured net frontier-token savings: tokenizers and execution paths differ, repeated input context is included, and orchestration/review tokens are not subtracted. All runs with complete recorded usage contribute, including rejected runs; accepted work is shown separately. Missing usage is excluded; providers that omit usage may have recorded zeros. Totals update when usage is written at run end.</p></details>
+    </section>
+    <div id="empty" class="empty-state" hidden><span class="eyebrow">Ready when you are</span><h2>No runs yet.</h2><p>Run a dirtywork task and its activity will appear here automatically.</p><code>dirtywork run --repo /path/to/repo "Your task"</code></div>
+    <section id="activity-view" role="tabpanel" aria-labelledby="activity-tab">
+      <div class="metrics">
+        <article class="metric"><span class="eyebrow" data-help="worker-time">Worker time</span><strong id="worker-time">—</strong><span id="worker-time-note" class="secondary">Select a run</span></article>
+        <article class="metric"><span class="eyebrow" data-help="turns">Turns / tool results</span><strong id="turns">— / —</strong><span class="secondary">Observed in run evidence</span></article>
+        <article class="metric"><span class="eyebrow" data-help="verdict">Review verdict</span><strong id="verdict">—</strong><span id="verdict-note" class="secondary">Separate from worker completion</span></article>
+      </div>
+      <div class="activity-layout">
+        <article class="panel run-detail" id="run-panel" aria-label="Selected run">
+          <div class="section-head"><span class="run-identifier"><span class="eyebrow" id="run-slug">Selected run</span><span data-help="selected-run"></span></span><span id="run-status" class="badge">—</span></div>
+          <div id="wopr-run-status" role="status" aria-live="polite" aria-atomic="true"></div>
+          <h2 id="run-task">Loading run records…</h2>
+          <div id="run-model" class="secondary mono"></div>
+          <div class="stages" id="stages" aria-label="Recorded run stages"><div><span id="stage-start"></span>Started</div><div><span id="stage-work"></span>Activity</div><div><span id="stage-verify"></span>Verify</div><div><span id="stage-review"></span>Review</div></div>
+          <div class="evidence-strip"><div><span class="eyebrow" data-help="verification">Verification</span><strong id="verification">—</strong></div><div><span class="eyebrow" data-help="tokens">Tokens · in / out</span><strong id="tokens">— / —</strong></div><div><span class="eyebrow" data-help="files">Changed files</span><strong id="file-count">—</strong></div><div><span class="eyebrow" data-help="review-time">Review time</span><strong id="review-time">—</strong><span id="review-time-state" class="secondary"></span></div></div>
+          <div class="task-type-control"><label for="task-type">Task type</label><span data-help="task-type"></span><select id="task-type" disabled><option value="">Suggesting a type…</option></select><span id="task-type-source" class="secondary"></span><p id="task-type-feedback" class="secondary" role="status" aria-live="polite"></p></div>
+          <section class="review-controls" aria-labelledby="review-controls-heading">
+            <div class="section-head"><h3 id="review-controls-heading" data-help="review-actions">Review this run</h3><span id="review-controls-state" class="secondary"></span></div>
+            <label for="review-note" class="review-note-label">Review note <span class="secondary">(optional)</span></label>
+            <textarea id="review-note" rows="2" maxlength="2000" placeholder="What did you check or find?"></textarea>
+            <div class="review-buttons"><button id="start-review" type="button" disabled>Start Review</button><button id="accept-review" type="button" disabled>Accept</button><button id="reject-review" type="button" disabled>Reject</button></div>
+            <p class="secondary">Saves your review decision and timing; Accept does not merge changes, and Reject does not delete files.</p>
+            <p id="review-feedback" class="review-feedback" role="status" aria-live="polite"></p>
+          </section>
+          <details id="task-details" hidden><summary>Full task</summary><pre id="full-task"></pre></details>
+          <div class="run-observations">
+            <section class="timeline-panel" aria-labelledby="timeline-heading"><div class="section-head activity-heading"><h3 id="timeline-heading" data-help="timeline">Run timeline</h3><span id="timeline-status" class="secondary mono"></span></div><div id="timeline-chart" class="timeline-chart"></div><p id="timeline-note" class="secondary"></p><div id="timeline-selection" class="timeline-selection" role="status" aria-live="polite">Select a marker for its recorded time.</div></section>
+            <section class="stream-panel" aria-label="Activity stream"><div class="section-head activity-heading"><h3 data-help="stream">Activity stream</h3><span class="secondary mono">Latest 60 events</span></div><div id="activity-log" class="activity-log" aria-label="Recorded activity"></div></section>
+          </div>
+          <details id="verify-details" hidden><summary>Verification evidence</summary><pre id="verify-output"></pre></details>
+          <details id="files-details"><summary>File changes</summary><p class="secondary">Select a file to inspect added and removed lines. Live previews update after worker actions.</p><p id="files-status" class="secondary"></p><div id="files-output"></div></details>
+          <div id="lineage" class="secondary mono"></div>
+          <div id="run-warnings" class="notice" hidden></div>
+        </article>
+        <aside class="panel recent-panel" aria-label="Run selection"><div class="section-head"><h3 data-help="runs">Runs</h3><span id="run-count" class="secondary mono">0 records</span></div><label class="run-search-label" for="run-search">Find runs</label><input id="run-search" class="run-search" type="search" placeholder="Task, slug, model, repository…"><div id="run-list" class="run-list"></div><p id="no-matches" class="secondary" hidden>No matching runs.</p><button id="more-runs" class="secondary-button" hidden type="button">Show more runs</button></aside>
+      </div>
+    </section>
+    <section id="outcomes-view" role="tabpanel" aria-labelledby="outcomes-tab" hidden>
+      <div class="metrics">
+        <article class="metric"><span class="eyebrow" data-help="acceptance">Accepted / reviewed</span><strong id="accepted">—</strong><span id="accepted-note" class="secondary">Accept and reject verdicts only</span></article>
+        <article class="metric"><span class="eyebrow" data-help="median-worker">Median worker time</span><strong id="median-worker">—</strong><span id="median-worker-note" class="secondary"></span></article>
+        <article class="metric"><span class="eyebrow" data-help="median-review">Median review time</span><strong id="median-review">—</strong><span id="median-review-note" class="secondary"></span></article>
+      </div>
+      <article class="panel offload-fit" aria-labelledby="offload-fit-heading">
+        <div class="section-head"><h3 id="offload-fit-heading" data-help="offload-fit">Offloading fit</h3><span class="eyebrow">Task types</span></div>
+        <p class="fit-intro">Look for high acceptance and short reviews. Suggested types can be corrected on each run.</p>
+        <p id="offload-fit-summary" class="secondary"></p>
+        <p id="offload-fit-empty" class="fit-empty">Start timed reviews on real tasks to compare review effort.</p>
+        <div id="offload-fit-chart" class="fit-chart" hidden></div>
+        <p id="offload-fit-selection" class="secondary fit-selection" role="status" aria-live="polite"></p>
+        <div class="table-wrap"><table class="fit-table"><thead><tr><th scope="col">Task type</th><th scope="col">Acceptance</th><th scope="col">Median review</th><th scope="col">Evidence</th></tr></thead><tbody id="offload-fit-types"></tbody></table></div>
+        <p class="secondary fit-method">Demos and benchmarks are excluded. Rates count reviewed attempts; distinct briefs show repeated work. Five distinct reviewed and five distinct timed briefs clear the limited-data label; this is a coverage guide. These metrics do not measure net time saved.</p>
+      </article>
+      <div class="outcomes-layout">
+        <article class="panel"><div class="section-head"><h3 data-help="funnel">From recorded to accepted</h3><span class="eyebrow">All runs</span></div><div id="funnel"></div><p id="outcome-note" class="secondary"></p></article>
+        <article class="panel"><h3 data-help="models">Worker comparison</h3><div class="table-wrap"><table><thead><tr><th scope="col">Model</th><th scope="col">Accepted / reviewed</th><th scope="col">Median worker time</th></tr></thead><tbody id="models"></tbody></table></div><p class="secondary">Different tasks and sample sizes; descriptive comparison.</p></article>
+      </div>
+    </section>
+    <details id="data-warnings" class="notice" hidden><summary id="warning-summary">Data notices</summary><ul id="warnings-list"></ul></details>
+    <footer><span>Local review controls · refreshes every 3s · <span id="source"></span></span><span>Worker completion ≠ review acceptance</span><span class="wopr-greeting">GREETINGS, PROFESSOR FALKEN.</span></footer>
+  </main>
+</body>
+</html>

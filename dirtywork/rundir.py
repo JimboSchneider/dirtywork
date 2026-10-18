@@ -4,6 +4,9 @@ import json
 import os
 import re
 import stat
+import secrets
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from .osfs import open_nofollow
@@ -98,24 +101,100 @@ def run_dir_for(slug: str, runs_dir: Path) -> Path:
     return run_dir
 
 
-def write_run_json(run_dir: Path, data: dict) -> None:
-    """Atomic, 0600 write: a temp file in the same directory (same
-    filesystem as the final path, so os.replace is atomic) then os.replace
-    over run.json. A concurrent reader (e.g. `dirtywork runs list`) never
-    sees a partially-written file."""
-    tmp_path = run_dir / ".run.json.tmp"
-    fd = open_nofollow(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+class RunJsonConflict(OSError):
+    """The run changed after the caller read it."""
+
+
+def run_json_signature(data: dict) -> str:
+    """A content signature independent of JSON indentation and key order."""
+    return json.dumps(data, sort_keys=True, separators=(",", ":"))
+
+
+@contextmanager
+def _run_json_lock(run_dir: Path):
+    # Keep the inode in place: unlinking a lock lets a second writer lock a
+    # different inode. OS locks are released even if the process is killed.
+    lock = run_dir / ".run.json.lock"
+    fd = open_nofollow(lock, os.O_RDWR | os.O_CREAT, 0o600, cloexec=True)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2, sort_keys=True)
-            fh.write("\n")
-    except Exception:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise OSError(f"unsafe run metadata lock: {lock}")
+        if os.name == "nt":
+            import msvcrt
+            def acquire():
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            def release():
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            def acquire():
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            def release():
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                acquire()
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise OSError(f"run metadata is busy: {lock}")
+                time.sleep(0.01)
         try:
-            os.unlink(str(tmp_path))
-        except OSError:
-            pass
-        raise
-    os.replace(str(tmp_path), str(run_dir / "run.json"))
+            yield
+        finally:
+            release()
+    finally:
+        os.close(fd)
+
+
+def write_run_json(run_dir: Path, data: dict, *, expected_signature=None) -> None:
+    """Atomically replace metadata using an exclusive, private temporary file.
+
+    All writers serialize the compare-and-replace, so an expected signature
+    rejects stale read/modify/write operations without losing newer fields.
+    """
+    run_dir = Path(run_dir)
+    with _run_json_lock(run_dir):
+        if expected_signature is not None:
+            if run_json_signature(read_run_json(run_dir)) != expected_signature:
+                raise RunJsonConflict("run metadata changed; retry the operation")
+        for _ in range(100):
+            tmp_path = run_dir / f".run.json.{secrets.token_hex(16)}.tmp"
+            try:
+                fd = open_nofollow(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, cloexec=True)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise OSError("cannot allocate a private run metadata temporary file")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2, sort_keys=True)
+                fh.write("\n")
+            os.replace(str(tmp_path), str(run_dir / "run.json"))
+        finally:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def update_run_json(run_dir: Path, transform) -> dict:
+    """Apply a pure merge operation to fresh metadata, retrying conflicts."""
+    for _ in range(20):
+        current = read_run_json(run_dir)
+        signature = run_json_signature(current)
+        updated = transform(current)
+        try:
+            write_run_json(run_dir, updated, expected_signature=signature)
+            return updated
+        except RunJsonConflict:
+            continue
+    raise RunJsonConflict("run metadata kept changing; retry the operation")
 
 
 def read_run_json(run_dir: Path) -> dict:

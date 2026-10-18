@@ -90,6 +90,12 @@ automatically: put worker-facing conventions there, not in every brief.
 
 ### 3. Review — always, before anything merges
 
+- Start timing before reading the diff: `dirtywork runs review-start <slug>`.
+  Recording the verdict stops the timer and saves its wall-clock duration.
+  If an older installed version does not support `review-start`, record the
+  actual start and end times with your clock tool and pass their elapsed seconds
+  as `--review-seconds` on the verdict; never estimate or use worker-end-to-verdict
+  delay as review time.
 - `git -C <worktree> status` then `git -C <worktree> diff`: read the diff
   first, the transcript second. Compare `files_changed` with the brief —
   a touched file you did not name is a finding.
@@ -112,7 +118,8 @@ from a clean base.
 ### 5. Verdict and cleanup
 
 - `dirtywork runs verdict <slug> accept|reject --note "<why>"` records your
-  decision in the run's `run.json`.
+  decision and stops a started review timer in the run's `run.json`.
+  `--review-seconds <seconds>` overrides the timer with an explicit duration.
 - Accept: commit or PR the `dirtywork/<slug>` branch as you would any
   contributor's work.
 - Reject: record it, then discard the work but not the record —

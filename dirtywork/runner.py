@@ -47,6 +47,8 @@ LAST_TEXT_CHARS = 2000
 # this constant; it is kept because the system prompt, the docs and the bench
 # scoreboard all refer to the tool by name.
 FINISH_TOOL = "finish"
+_LIVE_CHANGE_TOOLS = frozenset({"write_file", "append_file", "edit_file", "apply_edits",
+                                "insert_before", "insert_after", "bash"})
 
 # Spec #60 §4. `finish` is executed by verifying, so its result is resolved
 # when the turn's verify outcome is known. Until then the history message and
@@ -549,7 +551,8 @@ class Runner:
                  verify_timeout: int = DEFAULT_VERIFY_TIMEOUT,
                  require_changes: bool = False,
                  no_change_turns: int = DEFAULT_NO_CHANGE_TURNS,
-                 policy_context: "PolicyContext | None" = None):
+                 policy_context: "PolicyContext | None" = None,
+                 *, on_live_changes: Callable[[], None] | None = None):
         self.provider = provider
         self.registry = registry
         self.sandbox = sandbox
@@ -563,6 +566,7 @@ class Runner:
         self.temperature = temperature
         self.run_info = run_info
         self.finalize = finalize
+        self.on_live_changes = on_live_changes
         self.stall_turns = stall_turns
         # Spec §3.4: recorded, never used for a decision. The runner already has
         # the NUMBER; this only says where it came from, so a run record can be
@@ -600,6 +604,16 @@ class Runner:
         # preflight refuses that combination for a real run.
         self.char_budget = int(max(0, self.context_window - self.max_tokens)
                                * BUDGET_FRACTION * CHARS_PER_TOKEN)
+
+    def _publish_live_changes(self) -> None:
+        """Refresh optional preview artifacts without failing the worker."""
+        if self.on_live_changes is not None:
+            try:
+                self.on_live_changes()
+            except Exception:
+                # The producer records preview failures; cancellation still
+                # reaches the run's ordinary KeyboardInterrupt handling.
+                pass
 
     def _missing_required(self, name: str, args) -> bool:
         """Spec §1.3 case (b): True when `args` parsed but is missing a
@@ -867,6 +881,7 @@ class Runner:
             nonlocal verify_state, verify_rounds_used
             verify_rounds_used += 1
             result = self.sandbox.bash(self.verify, self.verify_timeout)
+            self._publish_live_changes()
             exit_code = parse_exit_code(result)
             passed = exit_code == 0
             tail = result[-VERIFY_OUTPUT_CHARS:] if isinstance(result, str) else ""
@@ -1163,6 +1178,8 @@ class Runner:
                             tool_result = self.registry.execute(
                                 action.kind.value, execution_args(action),
                                 sandbox=self.sandbox, deadline=deadline)
+                            if action.kind.value in _LIVE_CHANGE_TOOLS:
+                                self._publish_live_changes()
                             result = tool_result.text
                             if tool_result.failure is not None:
                                 abort_reason = failures.record(tool_result.failure)

@@ -42,7 +42,38 @@ dirtywork contract                          # print this document (the installed
 dirtywork init [--agent claude|codex|gemini|cursor|copilot] [--repo <path>] [--no-user] [--force] [--stdout]
                                             # install the orchestrator skill — see "init" below
 dirtywork --version                         # prints `dirtywork X.Y.Z`
+dirtywork dashboard [--port 8765] [--runs-dir <path>] [--open]
+                                            # local web UI with review controls; port 0 selects a free port
 ```
+
+`dirtywork runs review-start <slug>` starts review timing for a non-running run
+without a verdict (exit 0). Repeating it preserves the original start. Invalid
+timers, running runs, existing verdicts and missing runs exit 2 without writes.
+`dirtywork runs verdict <slug> accept|reject|cleanup [--note TEXT]
+[--review-seconds N]` stops a started timer, saving elapsed wall seconds in
+`review_seconds` with `review_seconds_source: "timer"`. A finite non-negative
+`--review-seconds` overrides it (`"manual"`). Without a timer or explicit measure,
+review time remains unknown. Repeated verdicts preserve an existing duration.
+`time_to_verdict_s` remains worker-end-to-verdict delay, including time before
+review began; it is not substituted for review time.
+
+`dashboard` runs until Ctrl-C (exit 0), prints its local URL and records directory
+as human-readable startup text, and exits 2 on invalid ports or binding errors.
+It does not use the single-JSON stdout contract of `run`/`resume`. It reads existing
+`run.json` and `transcript.jsonl` files; browser review actions write only review
+metadata to `run.json`. Its same-origin
+read endpoints are `GET /api/runs` (summaries and aggregates) and
+`GET /api/runs/<slug>` (detail and the latest 60 activity events), and
+`GET /api/runs/<slug>/changes` (live or saved file changes); these UI endpoints
+are not a versioned machine contract. New runs publish bounded, best-effort
+`live_changes.json` snapshots between worker actions without changing the worker
+index. The HTTP server only reads those snapshots; it never executes commands.
+Completed Docker runs prefer their saved `diff.patch`. `POST /api/runs/<slug>/review` accepts JSON
+`{action: "start"|"accept"|"reject", note?: string}` with an exact same-origin
+Origin header and the `X-Dirtywork-CSRF` token returned by `GET /api/runs`. Notes
+are limited to 2,000 characters. Decisions require a started timer and cannot
+overwrite a different saved verdict. The API has no tool, merge, cleanup, delete
+or remote binding controls. See the operating guide's Dashboard section for metric denominators.
 
 ```
 dirtywork resume <slug | run-dir>     # same flags as run, minus --repo/--branch-from/--sandbox/<task>;

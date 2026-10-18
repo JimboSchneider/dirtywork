@@ -379,11 +379,20 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `verdict` | verdict | written by `dirtywork runs verdict`: `"accept"` \| `"reject"` \| `"cleanup"` |
 | `note` | verdict | `--note` text, or null |
 | `verdict_at` | verdict | UTC ISO-8601 |
-| `review_seconds` | verdict | `--review-seconds` as given, or null |
+| `review_seconds` | verdict | explicit `--review-seconds`, elapsed review timer seconds, or null; preserved on repeated verdicts without an override |
+| `review_started_at` | review-start | UTC ISO-8601 timestamp written by `dirtywork runs review-start <slug>`; repeated starts preserve it |
+| `review_seconds_source` | verdict | `"timer"` when measured from `review_started_at`, `"manual"` when explicitly supplied; absent on older records |
+| `task_type` | dashboard labeling | optional manual primary-task category: `prescribed`, `bugfix`, `feature`, `tests`, `docs`, `refactor`, `maintenance`, `other`, or `demo`; reset removes this field. Automatic suggestions are computed from the full task brief and are never persisted |
 | `time_to_verdict_s` | verdict | seconds from `ended` to `verdict_at`; null when the run has no `ended` yet |
 
 Rows marked *verdict* are added post hoc by `dirtywork runs verdict <slug> …`
 (a merge-update; no existing key is dropped) and are absent until then.
+
+`review_seconds` is now also measured automatically from an explicit
+`review_started_at` to the verdict when `--review-seconds` is omitted. It is
+wall-clock review elapsed time, including checks and pauses. A repeated verdict
+preserves an existing duration unless explicitly overridden. No duration is
+inferred from worker completion; older reviews without timing remain null.
 
 `dirtywork runs snapshot <slug>` writes no `run.json` field: it reads `branch`,
 `worktree`, `repo`, `status` and `host_pid` and commits the worktree's current
@@ -405,3 +414,7 @@ its `nudge`/`guardrail_block`/`sandbox_reset`/`stray_kill` events as blockquote 
 Token counts in the header come from
 `run_end.usage`, and the final message from the `finish` call's `summary`,
 because `run.json` records neither.
+
+### Live file-change previews
+
+New runs may contain a best-effort `live_changes.json` artifact with `version: 1`, `state` (`ready`, `unavailable` or `too_large`), `patch`, `captured_at` (UTC timestamp), and `message`. The harness replaces it atomically after edits and commands. It is dashboard preview evidence, not a transcript event or a replacement for the final export. A `ready` patch is bounded to 1 MiB and compares current files with the original base commit. Preview failures never change the run outcome.

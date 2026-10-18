@@ -202,9 +202,47 @@ clone explicitly when testing unreleased changes.
     dirtywork run --repo ~/repos/someproject "Add a unit test for X"
 
 - **Watch a run:** `tail -f` the transcript path printed on stderr.
+- **Open the dashboard:** `dirtywork dashboard --open` — live activity,
+  verification evidence and recorded review outcomes, with persistent themes.
+  Runs locally at `http://127.0.0.1:8765`; reads your existing run records.
 - **Review a run:** `git -C <worktree> diff`, read the transcript, run the
   repo's tests — then commit the branch or discard it.
+- **Time the review:** `dirtywork runs review-start <slug>` before inspecting
+  the result; `dirtywork runs verdict <slug> accept|reject` saves the elapsed
+  review time for the dashboard.
 - **Clean up a run:** `dirtywork runs clean <slug>`.
+
+### Worker Observatory
+
+The Worker Observatory is dirtywork’s local dashboard for watching runs and
+reviewing their results in your browser:
+
+    dirtywork dashboard --open
+
+It opens at `http://127.0.0.1:8765` and reads your existing run records. While
+it is running, the view refreshes every three seconds.
+
+- **Watch active work:** follow elapsed worker time, the activity stream and
+  a timeline of model actions, tools and verification events.
+- **Inspect results:** view verification evidence and PR-style file diffs
+  with line numbers and highlighted additions and removals. New runs publish
+  live snapshots after edits and commands; completed Docker runs use their
+  saved export. Older runs show saved patches when available.
+- **Review in the browser:** choose **Start Review**, then **Accept** or
+  **Reject** to save your decision, elapsed review time and an optional note.
+  Accept does not merge changes, and Reject does not delete files.
+- **Understand outcomes:** compare recorded outcomes, worker and review
+  times, and tokens offloaded to workers. Token usage is a proxy for offloaded
+  work, not a measurement of net token savings.
+- **Find good offloading candidates:** Outcomes groups real work by task type,
+  showing acceptance, review effort, and distinct task samples. Types are
+  suggested locally from the full brief and can be corrected on each run.
+- **Choose your appearance:** Ion, Orchid and Terminal themes support light,
+  dark and system appearance, with your preferences remembered locally.
+
+The server binds only to your computer’s loopback interface. It runs until
+stopped; automatic startup is a separate setup step. For ports, custom run
+folders and metric definitions, see the [dashboard operating guide](docs/operating.md#dashboard).
 
 ### The review→fix loop
 

@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import rundir
+from .review import start_review, record_verdict
 from .resume import (ResumeError, find_stashes, load_prior_run, pid_alive,
                       preflight_run_worktree, stash_dir_for, worktree_belongs_to_repo)
 from .sandbox import docker_args, docker_cli, export
@@ -743,17 +744,23 @@ def cmd_export(args) -> int:
         repo_label=docker_args.repo_label(repo),
     )
 
-    data["status"] = _export_status_update(data.get("status"), artifacts.export_status)
-    data["export_status"] = artifacts.export_status
-    data["diff_stat"] = artifacts.diff_stat
-    data["patch_path"] = artifacts.patch_path
-    data["worktree_bytes"] = artifacts.worktree_bytes
-    data["worktree_files"] = artifacts.worktree_files
-    data["escaping_symlinks"] = artifacts.escaping_symlinks
-    data["dropped_git_entries"] = artifacts.dropped_git_entries
-    data["files_changed"] = artifacts.files_changed
-    data["files_changed_truncated"] = artifacts.files_changed_truncated
-    rundir.write_run_json(run_dir, data)
+    def merge_export(data):
+        data["status"] = _export_status_update(data.get("status"), artifacts.export_status)
+        data["export_status"] = artifacts.export_status
+        data["diff_stat"] = artifacts.diff_stat
+        data["patch_path"] = artifacts.patch_path
+        data["worktree_bytes"] = artifacts.worktree_bytes
+        data["worktree_files"] = artifacts.worktree_files
+        data["escaping_symlinks"] = artifacts.escaping_symlinks
+        data["dropped_git_entries"] = artifacts.dropped_git_entries
+        data["files_changed"] = artifacts.files_changed
+        data["files_changed_truncated"] = artifacts.files_changed_truncated
+        return data
+    try:
+        rundir.update_run_json(run_dir, merge_export)
+    except (OSError, ValueError) as e:
+        print(f"error: cannot update run metadata: {e}", file=sys.stderr)
+        return 2
 
     if artifacts.export_status != "ok":
         print(f"error: export failed: {artifacts.export_status}\n"
@@ -766,37 +773,31 @@ def cmd_export(args) -> int:
     return 0
 
 
-def cmd_verdict(args) -> int:
-    """Spec SP3 section 4: append the operator's verdict to run.json.
-    `time_to_verdict_s` is measured from the run's `ended` timestamp (the key
-    `__main__._update_run_json` writes) and is deliberately noisy -- it includes
-    idle time. `--review-seconds` is the operator's explicit measure."""
+def cmd_review_start(args) -> int:
+    """Start review wall time explicitly, without resetting an existing timer."""
     try:
         run_dir, data = _open_run(args.slug)
-    except RunsError as e:
+        now = datetime.now(timezone.utc)
+        updated = rundir.update_run_json(
+            run_dir, lambda current: start_review(current, now, run_dir=run_dir))
+    except (RunsError, OSError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    print(f"review timer started for '{args.slug}' at {updated['review_started_at']}")
+    return 0
 
-    verdict_at = datetime.now(timezone.utc).isoformat()
-    data["verdict"] = args.verdict
-    data["note"] = args.note
-    data["verdict_at"] = verdict_at
-    data["review_seconds"] = args.review_seconds
-    data["time_to_verdict_s"] = None
-    ended = data.get("ended")
-    if ended:
-        try:
-            ended_dt = datetime.fromisoformat(str(ended).replace("Z", "+00:00"))
-            if ended_dt.tzinfo is None:
-                # A naive timestamp (no tz offset recorded): assume UTC rather
-                # than crash subtracting an aware datetime from a naive one.
-                ended_dt = ended_dt.replace(tzinfo=timezone.utc)
-            data["time_to_verdict_s"] = (
-                datetime.fromisoformat(verdict_at) - ended_dt).total_seconds()
-        except (ValueError, TypeError):
-            pass
 
-    rundir.write_run_json(run_dir, data)
+def cmd_verdict(args) -> int:
+    """Record a decision and an explicit or timed review duration."""
+    try:
+        run_dir, data = _open_run(args.slug)
+        now = datetime.now(timezone.utc)
+        updated = rundir.update_run_json(
+            run_dir, lambda current: record_verdict(
+                current, args.verdict, args.note, args.review_seconds, now))
+    except (RunsError, OSError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     print(f"recorded verdict '{args.verdict}' for '{args.slug}'")
     return 0
 
@@ -877,6 +878,7 @@ def dispatch(args) -> int:
         "export": cmd_export,
         "clean": cmd_clean,
         "verdict": cmd_verdict,
+        "review-start": cmd_review_start,
         "snapshot": cmd_snapshot,
     }
     return handlers[args.runs_cmd](args)

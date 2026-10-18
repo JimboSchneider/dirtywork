@@ -28,8 +28,8 @@ from .contract import AGENTS
 from .firewall_gate import policy_context_for
 from .llm import LLMError
 from .providers import DEFAULT_BASE_URLS, PROVIDER_NAMES, get_provider
-from .rundir import (RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json,
-                     run_dir_for, write_run_json)
+from .rundir import (RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir,
+                     run_dir_for, write_run_json, update_run_json)
 from .runner import (
     CHARS_PER_TOKEN,
     DEFAULT_MAX_TOKENS,
@@ -545,12 +545,10 @@ def _update_run_json(run_dir: Path, *, mark_ended: bool = True, **fields) -> Non
     failure here must not break the stdout JSON contract of exactly one
     object per run."""
     try:
-        existing = read_run_json(run_dir)
         updates = dict(fields)
         if mark_ended:
             updates["ended"] = datetime.now(timezone.utc).isoformat()
-        existing.update(updates)
-        write_run_json(run_dir, existing)
+        update_run_json(run_dir, lambda existing: {**existing, **updates})
     except Exception:
         pass
 
@@ -953,6 +951,15 @@ def _execute(ctx: RunContext, args, client) -> int:
                 "watchdog_violation_kind": artifacts.watchdog_violation_kind,
             }
 
+        from .live_changes import LiveChangesPublisher
+        from .sandbox.live_diff import capture_docker_patch, capture_host_patch
+        if ctx.sandbox_mode == "docker":
+            capture_live = lambda: capture_docker_patch(sandbox.container, ctx.base_commit, run=sandbox._run)
+        else:
+            capture_live = lambda: capture_host_patch(ctx.worktree, ctx.base_commit)
+        live_changes = LiveChangesPublisher(run_dir, capture=capture_live)
+        live_changes()
+
         runner = Runner(
             client, registry, sandbox, transcript, model=args.model,
             max_turns=args.max_turns, timeout=args.timeout,
@@ -966,6 +973,7 @@ def _execute(ctx: RunContext, args, client) -> int:
                 "resumed_from": ctx.resumed_from, "feedback": ctx.feedback,
             },
             finalize=finalize,
+            on_live_changes=live_changes,
             stall_turns=args.stall_turns, context_window=ctx.context_window,
             context_window_source=ctx.context_window_source,
             stuck_repeats=getattr(args, "stuck_repeats", DEFAULT_STUCK_REPEATS),
@@ -1142,11 +1150,14 @@ def _add_runs_parsers(sub) -> None:
     clean_p.add_argument("--keep-transcript", action="store_true", default=False)
     clean_p.add_argument("--force", action="store_true", default=False)
 
-    verdict_p = runs_sub.add_parser("verdict", help="record accept/reject/cleanup for a run")
+    review_p = runs_sub.add_parser("review-start", help="start timing review of a finished run")
+    review_p.add_argument("slug")
+    verdict_p = runs_sub.add_parser("verdict", help="record accept/reject/cleanup and stop a review timer")
     verdict_p.add_argument("slug")
     verdict_p.add_argument("verdict", choices=["accept", "reject", "cleanup"])
     verdict_p.add_argument("--note", default=None)
-    verdict_p.add_argument("--review-seconds", type=float, default=None)
+    verdict_p.add_argument("--review-seconds", type=float, default=None,
+                           help="explicit review duration; overrides the review-start timer")
 
     snapshot_p = runs_sub.add_parser(
         "snapshot", help="commit the run worktree's current content onto its branch")
@@ -1208,6 +1219,12 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_run_flags(resume_p, resume=True)
     _add_runs_parsers(sub)
     _add_bench_parsers(sub)
+    dashboard_p = sub.add_parser("dashboard", help="view live run activity and outcomes in a local dashboard")
+    dashboard_p.add_argument("--port", type=int, default=8765,
+                             help="loopback port (default: 8765; 0 selects an available port)")
+    dashboard_p.add_argument("--runs-dir", type=Path, default=None,
+                             help="run records directory (default: ~/.dirtywork/runs)")
+    dashboard_p.add_argument("--open", action="store_true", help="open the dashboard in your browser")
     contract_p = sub.add_parser("contract", help="print the machine contract (the operator reference) to stdout")
     init_p = sub.add_parser("init", help="install the skill that teaches an orchestrating agent to drive dirtywork (Claude Code by default; --agent for Codex, Gemini CLI, Cursor, Copilot)")
     init_p.add_argument("--agent", choices=AGENTS, default="claude",
@@ -1253,6 +1270,9 @@ def run_once(argv: list) -> dict:
 
 def main(argv: list | None = None) -> int:
     args = _parse_args(argv)
+    if args.cmd == "dashboard":
+        from . import dashboard
+        return dashboard.dispatch(args)
     if args.cmd in ("contract", "init"):
         from . import contract as contract_mod
         return contract_mod.dispatch(args)
