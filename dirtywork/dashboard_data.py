@@ -55,10 +55,10 @@ def _open_regular(path):
 def _write_review(directory, data):
     # Anchor the replacement in an opened directory and create a fresh inode:
     # O_NOFOLLOW alone cannot protect a predictable temp path from hardlinks.
-    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    directory_fd = open_nofollow(directory, os.O_RDONLY | os.O_DIRECTORY)
     name = ".dashboard-review-" + secrets.token_hex(16)
     try:
-        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                      0o600, dir_fd=directory_fd)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as source:
