@@ -16,6 +16,7 @@ from .dashboard_data import RunStore
 ASSETS = {"/VT323-Regular.ttf": ("VT323-Regular.ttf", "font/ttf"),"/": ("index.html", "text/html; charset=utf-8"),
           "/style.css": ("style.css", "text/css; charset=utf-8"),
           "/wopr.js": ("wopr.js", "text/javascript; charset=utf-8"),
+          "/presentation.js": ("presentation.js", "text/javascript; charset=utf-8"),
           "/app.js": ("app.js", "text/javascript; charset=utf-8")}
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; "
        "connect-src 'self'; img-src 'self'; font-src 'self'; "

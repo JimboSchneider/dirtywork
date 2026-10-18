@@ -70,13 +70,23 @@ test('missing offloading history has no invented chart points', () => {
 
 test('untimed reviews stay unplotted and do not become zero-second reviews', () => {
   const ui = harness(history([group({median_review_s: null, review_samples: 0,
-    distinct_timed_tasks: 0, evidence: 'no_timing'})]));
+    distinct_timed_tasks: 0, evidence: 'no_timing'}),
+    group({id: 'docs', label: 'Documentation', median_review_s: null, review_samples: 0,
+      distinct_timed_tasks: 0, evidence: 'no_timing'})], {review_samples: 0}));
   ui.render();
   assert.equal(points(ui).length, 0);
   assert.equal(ui.nodes['offload-fit-empty'].hidden, false);
+  assert.match(ui.nodes['offload-fit-empty'].textContent, /No timed real-work reviews yet/i);
   const text = ui.nodes['offload-fit-types'].textContent;
-  assert.match(text, /Not timed/i);
-  assert.match(text, /No timing/i);
+  assert.doesNotMatch(text, /Not timed|No timing/i);
+  for (const row of ui.nodes['offload-fit-types'].children) {
+    assert.equal(row.children[2].children[0].textContent, '—');
+    assert.match(row.children[2].children[0].attributes['aria-label'], /No review time recorded/i);
+    assert.equal(row.children[3].children[0].textContent, '—');
+    assert.match(row.children[3].children[0].attributes['aria-label'], /No timed reviews recorded/i);
+    assert.match(row.children[2].textContent, /0\s*\/\s*4 reviews timed/i);
+    assert.match(row.children[3].textContent, /3 unique reviewed task descriptions.*0 timed/i);
+  }
   assert.ok(!all(ui.nodes['offload-fit-types']).some(node => node.textContent === '0s'));
 });
 
@@ -103,29 +113,51 @@ test('only finite median and acceptance pairs produce chart marks', () => {
   assert.match(points(ui)[0].textContent + (points(ui)[0].attributes['aria-label'] || ''), /Real timed work/);
 });
 
-test('acceptance uses reviewed decisions while revealing repeated briefs and timing coverage', () => {
+test('acceptance uses reviewed decisions while revealing unique task descriptions and timing coverage', () => {
   const ui = harness(history([group()]));
   ui.render();
   const row = ui.nodes['offload-fit-types'].children[0];
   assert.equal(row.children.length, 4);
   assert.match(row.children[0].textContent, /20/);
-  assert.match(row.children[0].textContent, /10/);
+  assert.match(row.children[0].textContent, /10 unique task descriptions/i);
   assert.match(row.children[1].textContent, /75%/);
   assert.match(row.children[1].textContent, /3\s*(?:\/|of)\s*4/);
   assert.match(row.children[2].textContent, /3\s*\/\s*4 reviews timed/i);
-  assert.match(row.children[3].textContent, /3 distinct reviewed briefs.*2 timed/i);
+  assert.match(row.children[3].textContent, /3 unique reviewed task descriptions.*2 timed/i);
   assert.match(row.children[3].textContent, /Limited/i);
 });
 
-test('repeated reviews of one brief do not present a large timing sample as strong evidence', () => {
+test('repeated reviews of one task description do not present a large timing sample as strong evidence', () => {
   const ui = harness(history([group({total: 12, reviewed: 9, accepted: 9, acceptance_rate: 1,
     review_samples: 9, distinct_tasks: 2, distinct_reviewed_tasks: 1,
     distinct_timed_tasks: 1, evidence: 'limited'})]));
   ui.render();
   const row = ui.nodes['offload-fit-types'].children[0];
-  assert.match(row.children[3].textContent, /1 distinct reviewed brief.*1 timed/i);
+  assert.match(row.children[3].textContent, /1 unique reviewed task description.*1 timed/i);
   assert.match(row.children[3].textContent, /Limited/i);
   assert.doesNotMatch(row.children[3].textContent, /5\+|ready|strong/i);
+});
+
+test('timed evidence without acceptance data is explained without claiming timing is absent', () => {
+  const ui = harness(history([group({reviewed: 0, accepted: 0, acceptance_rate: null})]));
+  ui.render();
+  assert.equal(points(ui).length, 0);
+  assert.equal(ui.nodes['offload-fit-empty'].hidden, false);
+  assert.doesNotMatch(ui.nodes['offload-fit-empty'].textContent, /No timed.*yet/i);
+  assert.match(ui.nodes['offload-fit-empty'].textContent, /review time.*acceptance rate/i);
+  assert.ok(all(ui.nodes['offload-fit-types']).some(node => node.textContent === '12s'));
+});
+
+test('ready coverage remains five unique reviewed and timed task descriptions', () => {
+  const ui = harness(history([group({reviewed: 8, review_samples: 6,
+    distinct_reviewed_tasks: 5, distinct_timed_tasks: 5, evidence: 'ready'})]));
+  ui.render();
+  const row = ui.nodes['offload-fit-types'].children[0];
+  assert.match(row.children[3].textContent, /5\+ timed task descriptions/i);
+  assert.match(row.children[3].textContent, /5 unique reviewed task descriptions.*5 timed/i);
+  points(ui)[0].listeners.click();
+  assert.match(ui.nodes['offload-fit-selection'].textContent, /5 unique timed task descriptions/i);
+  assert.doesNotMatch(ui.nodes['offload-fit-selection'].textContent, /brief/i);
 });
 
 test('task labels remain literal text in the table, point label, and selected explanation', () => {
@@ -166,6 +198,7 @@ function taskTypeHarness(fetchResult, detailResult) {
   const end = source.indexOf('  function renderReviewControls(run)', start);
   assert.ok(end > start, 'task type controls must precede review controls');
   const nodes = Object.fromEntries(['task-type', 'task-type-source', 'task-type-feedback',
+    'review-panel', 'review-form', 'review-summary', 'review-summary-title', 'review-summary-note',
     'start-review', 'accept-review', 'reject-review', 'review-note', 'review-controls-state', 'review-feedback']
     .map(id => [id, new Element(id === 'task-type' ? 'select' : 'div')]));
   const run = {slug: 'run with spaces', verdict: 'accept', review_duration_s: 12,
@@ -193,12 +226,142 @@ function taskTypeHarness(fetchResult, detailResult) {
   const reviewEnd = source.indexOf("  $('start-review').addEventListener", reviewStart);
   assert.ok(reviewControlsEnd > end && reviewStart !== -1 && reviewEnd > reviewStart,
     'the real review controls and save handler must exist');
-  vm.runInContext(source.slice(start, end) + source.slice(end, reviewControlsEnd)
+  const durationStart = source.indexOf('  const duration = value =>');
+  const durationEnd = source.indexOf('  const words =', durationStart);
+  assert.ok(durationStart !== -1 && durationEnd > durationStart, 'the real duration formatter must exist');
+  vm.runInContext(source.slice(durationStart, durationEnd)
+    + source.slice(start, end) + source.slice(end, reviewStart)
     + source.slice(reviewStart, reviewEnd) + source.slice(detailStart, detailEnd)
     + '\nthis.controls = {renderTaskType, performTaskType, renderReviewControls, performReview, loadDetail};', context);
   context.controls.renderTaskType(run);
   return {nodes, state: context.state, calls, detailCalls, rendered, ...context.controls};
 }
+
+test('pending reviews expose the action form and require starting before a decision', () => {
+  const ui = taskTypeHarness();
+  const run = {...ui.state.detail, verdict: null, review_eligible: true, review_in_progress: false};
+  ui.renderReviewControls(run);
+  assert.equal(ui.nodes['review-form'].hidden, false);
+  assert.equal(ui.nodes['review-summary'].hidden, true);
+  assert.match(ui.nodes['review-panel'].className, /\breview-actionable\b/);
+  assert.equal(ui.nodes['start-review'].disabled, false);
+  assert.equal(ui.nodes['accept-review'].disabled, true);
+  assert.equal(ui.nodes['reject-review'].disabled, true);
+  assert.equal(ui.nodes['review-note'].disabled, false);
+  assert.match(ui.nodes['review-controls-state'].textContent, /start review/i);
+});
+
+test('a review in progress keeps its elapsed timer beside the available decisions', () => {
+  const ui = taskTypeHarness();
+  const run = {...ui.state.detail, verdict: null, review_eligible: true,
+    review_in_progress: true, review_elapsed_s: 65};
+  ui.renderReviewControls(run);
+  assert.match(ui.nodes['review-controls-state'].textContent, /1m 5s/);
+  assert.match(ui.nodes['review-controls-state'].textContent, /running|in progress/i);
+  assert.equal(ui.nodes['review-form'].hidden, false);
+  assert.equal(ui.nodes['review-summary'].hidden, true);
+  assert.equal(ui.nodes['start-review'].disabled, true);
+  assert.equal(ui.nodes['accept-review'].disabled, false);
+  assert.equal(ui.nodes['reject-review'].disabled, false);
+  ui.state.reviewBusy = true;
+  ui.renderReviewControls(run);
+  assert.equal(ui.nodes['accept-review'].disabled, true);
+  assert.equal(ui.nodes['reject-review'].disabled, true);
+  assert.equal(ui.nodes['review-note'].disabled, true);
+});
+
+test('saved verdicts replace the action form with a compact result and literal user note', () => {
+  const ui = taskTypeHarness();
+  const note = '<img src=x onerror=alert(1)> & <script>review</script>';
+  for (const [verdict, title] of [['accept', 'Accepted'], ['reject', 'Rejected'], ['cleanup', 'Cleanup']]) {
+    const run = {...ui.state.detail, verdict, review_eligible: true, review_seconds: 72, note};
+    ui.renderReviewControls(run);
+    assert.equal(ui.nodes['review-form'].hidden, true);
+    assert.equal(ui.nodes['review-summary'].hidden, false);
+    assert.doesNotMatch(ui.nodes['review-panel'].className, /\breview-actionable\b/);
+    assert.equal(ui.nodes['review-summary-title'].textContent, title);
+    assert.match(ui.nodes['review-summary-note'].textContent, /1m 12s/);
+    assert.ok(ui.nodes['review-summary-note'].textContent.includes(note));
+    assert.equal(ui.nodes['review-note'].value, note);
+    assert.equal(ui.nodes['review-note'].dataset.slug, run.slug);
+  }
+});
+
+test('saved review summaries distinguish unrecorded time from a recorded zero', () => {
+  const ui = taskTypeHarness();
+  ui.renderReviewControls({...ui.state.detail, review_seconds: null});
+  assert.match(ui.nodes['review-summary-note'].textContent, /time not recorded|not timed/i);
+  assert.doesNotMatch(ui.nodes['review-summary-note'].textContent, /0s/);
+  ui.renderReviewControls({...ui.state.detail, review_seconds: 0});
+  assert.match(ui.nodes['review-summary-note'].textContent, /0s/);
+});
+
+test('active and unknown workers show a waiting explanation without review inputs', () => {
+  const ui = taskTypeHarness();
+  for (const activity_state of ['running', 'unconfirmed', null]) {
+    const run = {...ui.state.detail, verdict: null, review_eligible: false, status: 'running', activity_state};
+    ui.renderReviewControls(run);
+    assert.equal(ui.nodes['review-form'].hidden, true);
+    assert.equal(ui.nodes['review-summary'].hidden, false);
+    assert.doesNotMatch(ui.nodes['review-panel'].className, /\breview-actionable\b/);
+    assert.match(ui.nodes['review-summary-title'].textContent, /waiting|running/i);
+    assert.match(ui.nodes['review-summary-note'].textContent, /worker|finish|end/i);
+    assert.equal(ui.nodes['start-review'].disabled, true);
+    assert.equal(ui.nodes['accept-review'].disabled, true);
+    assert.equal(ui.nodes['reject-review'].disabled, true);
+  }
+});
+
+test('a superseded run cannot become actionable from stale eligibility', () => {
+  const ui = taskTypeHarness();
+  const resumed_by = '<script>next run</script>';
+  ui.renderReviewControls({...ui.state.detail, verdict: null, review_eligible: true,
+    review_in_progress: true, resumed_by});
+  assert.equal(ui.nodes['review-form'].hidden, true);
+  assert.equal(ui.nodes['review-summary'].hidden, false);
+  assert.doesNotMatch(ui.nodes['review-panel'].className, /\breview-actionable\b/);
+  assert.match(ui.nodes['review-summary-title'].textContent, /superseded/i);
+  assert.ok(ui.nodes['review-summary-note'].textContent.includes(resumed_by));
+  assert.equal(ui.nodes['start-review'].disabled, true);
+  assert.equal(ui.nodes['accept-review'].disabled, true);
+  assert.equal(ui.nodes['reject-review'].disabled, true);
+});
+
+test('polling and run switches preserve review drafts while saved notes replace drafts', () => {
+  const ui = taskTypeHarness();
+  const first = {...ui.state.detail, verdict: null, review_eligible: true};
+  const second = {...first, slug: 'another-run'};
+  ui.renderReviewControls(first);
+  ui.nodes['review-note'].value = 'First run draft';
+  ui.nodes['review-note'].listeners.input();
+  ui.renderReviewControls({...first});
+  assert.equal(ui.nodes['review-note'].value, 'First run draft');
+  ui.state.selected = second.slug;
+  ui.renderReviewControls(second);
+  assert.equal(ui.nodes['review-note'].value, '');
+  ui.nodes['review-note'].value = 'Second run draft';
+  ui.nodes['review-note'].listeners.input();
+  ui.state.selected = first.slug;
+  ui.renderReviewControls(first);
+  assert.equal(ui.nodes['review-note'].value, 'First run draft');
+  ui.renderReviewControls({...first, verdict: 'accept', review_seconds: 12, note: 'Saved note'});
+  assert.equal(ui.nodes['review-note'].value, 'Saved note');
+  assert.match(ui.nodes['review-summary-note'].textContent, /Saved note/);
+  assert.equal(ui.state.reviewNotes.get(second.slug), 'Second run draft');
+});
+
+test('review errors remain literal text and stay scoped to the run that failed', () => {
+  const ui = taskTypeHarness();
+  const run = {...ui.state.detail, verdict: null, review_eligible: true};
+  const message = '<script>Save failed</script>';
+  ui.state.reviewFeedback = {slug: run.slug, message, error: true};
+  ui.renderReviewControls(run);
+  assert.equal(ui.nodes['review-feedback'].textContent, message);
+  assert.match(ui.nodes['review-feedback'].className, /\breview-error\b/);
+  ui.renderReviewControls({...run, slug: 'another-run'});
+  assert.equal(ui.nodes['review-feedback'].textContent, '');
+  assert.doesNotMatch(ui.nodes['review-feedback'].className, /\breview-error\b/);
+});
 
 test('saving an edited task type sends its ID with CSRF and preserves the review verdict', async () => {
   const saved = {slug: 'run with spaces', verdict: 'accept', review_duration_s: 12,

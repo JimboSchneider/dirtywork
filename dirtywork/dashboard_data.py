@@ -285,7 +285,7 @@ def _timeline(transcript, metadata, started, ended, now, activity_state):
             untimed += 1
             continue
         points.append({**{k: v for k, v in event.items() if k != "ts"},
-                       "at_s": (ts - origin).total_seconds()})
+                       "ts": ts.isoformat(), "at_s": (ts - origin).total_seconds()})
     points.sort(key=lambda point: point["at_s"])
     end = now if activity_state == "running" else ended
     extent = max([point["at_s"] for point in points if point["lane"] != "review"] +
@@ -578,7 +578,7 @@ class RunStore:
                     warnings.append(directory.name + ": " + "; ".join(run["warnings"]))
                 runs.append({**{k: v for k, v in run.items() if k in (
                     "slug", "status", "activity_state", "model", "repo", "started", "ended",
-                    "duration_s", "verdict", "review_seconds", "review_in_progress", "resumed_by", "usage",
+                    "duration_s", "verdict", "review_seconds", "review_in_progress", "review_eligible", "resumed_by", "usage",
                     "task_type")}, "task": run["task"]})
             runs.sort(key=lambda r: (r["started"] or "", r["slug"]), reverse=True)
             present = {r["slug"] for r in runs}

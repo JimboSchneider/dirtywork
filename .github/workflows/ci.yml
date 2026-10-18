@@ -133,7 +133,7 @@ jobs:
           from importlib.resources import files
 
           assets = files("dirtywork.dashboard_assets")
-          for name in ("index.html", "style.css", "app.js", "wopr.js", "VT323-Regular.ttf", "VT323-OFL.txt"):
+          for name in ("index.html", "style.css", "app.js", "wopr.js", "presentation.js", "VT323-Regular.ttf", "VT323-OFL.txt"):
               assert assets.joinpath(name).read_bytes(), f"Missing or empty dashboard asset: {name}"
           PY
       # Each output goes to a file and is asserted with grep -q: a pipe's exit
