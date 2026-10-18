@@ -212,6 +212,34 @@ clone explicitly when testing unreleased changes.
   review time for the dashboard.
 - **Clean up a run:** `dirtywork runs clean <slug>`.
 
+### Worker Observatory
+
+The Worker Observatory is dirtywork’s local dashboard for watching runs and
+reviewing their results in your browser:
+
+    dirtywork dashboard --open
+
+It opens at `http://127.0.0.1:8765` and reads your existing run records. While
+it is running, the view refreshes every three seconds.
+
+- **Watch active work:** follow elapsed worker time, the activity stream and
+  a timeline of model actions, tools and verification events.
+- **Inspect results:** view verification evidence and PR-style file diffs
+  with line numbers and highlighted additions and removals. Docker runs
+  provide saved patches after export; host-mode runs do not export patches.
+- **Review in the browser:** choose **Start Review**, then **Accept** or
+  **Reject** to save your decision, elapsed review time and an optional note.
+  Accept does not merge changes, and Reject does not delete files.
+- **Understand outcomes:** compare recorded outcomes, worker and review
+  times, and tokens offloaded to workers. Token usage is a proxy for offloaded
+  work, not a measurement of net token savings.
+- **Choose your appearance:** Ion, Orchid and Terminal themes support light,
+  dark and system appearance, with your preferences remembered locally.
+
+The server binds only to your computer’s loopback interface. It runs until
+stopped; automatic startup is a separate setup step. For ports, custom run
+folders and metric definitions, see the [dashboard operating guide](docs/operating.md#dashboard).
+
 ### The review→fix loop
 
 - `dirtywork resume <slug> --feedback "…"` — send the same worktree back to
