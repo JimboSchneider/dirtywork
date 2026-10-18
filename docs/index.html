@@ -260,14 +260,14 @@
 
 <div class="wrap">
 <header>
-  <p class="eyebrow">dirtywork.run · <span class="beta">v0.13.2 beta</span> · MIT</p>
+  <p class="eyebrow">dirtywork.run · <span class="beta">v0.14.0 beta</span> · MIT</p>
   <h1>dirtywork<span class="dot">.</span></h1>
   <p class="tagline">
     <span class="think">Frontier models do the thinking.</span>
     <span class="dirty">Local models do the dirty work.</span>
   </p>
   <p class="install"><span class="p">$</span> pipx install dirtywork<span class="caret"></span></p>
-  <p class="sub-install">Installs the released CLI. <a href="#observatory-heading">Worker Observatory</a> currently requires the main-branch install below.</p>
+  <p class="sub-install">Installs the released CLI, including <a href="#observatory-heading">Worker Observatory</a>.</p>
   <p class="sub-install">Python 3.9+, stdlib only · macOS/Linux (developed on Apple Silicon; Windows unsupported) · needs LM&nbsp;Studio (or any OpenAI-compatible server) · then <a href="orchestrator-setup.html">set up Claude Code as the orchestrator</a> with a tool-calling model — or the Anthropic API via <code>--provider anthropic</code> · Docker Desktop / dockerd for the default sandbox (<code>--sandbox none</code> to run on the host)</p>
 </header>
 
@@ -336,16 +336,17 @@ free on your own machine, and <strong>nothing merges without review</strong>.</p
     </picture>
     <figcaption>Illustrative sample data · <a href="assets/worker-observatory-light.png">View full-size image</a></figcaption>
   </figure>
-  <p class="observatory-note observatory-requirement"><strong>Unreleased: requires the main branch.</strong>
-  The PyPI release, v0.13.2, does not include Worker Observatory. Install from GitHub, then launch:</p>
-  <div class="run observatory-command"><pre><code>pipx install --force 'git+https://github.com/JimboSchneider/dirtywork.git@main'
+  <p class="observatory-note observatory-requirement"><strong>Included in dirtywork 0.14.0 and later.</strong>
+  Install from PyPI, then launch:</p>
+  <div class="run observatory-command"><pre><code>pipx install dirtywork
 dirtywork dashboard --open</code></pre></div>
+  <p class="observatory-note">Already installed? Run <code>pipx upgrade dirtywork</code> first.</p>
   <p class="observatory-note">Runs locally and reads your existing run records. Leave the command running while you review.
   <a href="https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md#dashboard">Dashboard guide</a></p>
 </section>
 
 <div class="beta-strip">
-  <strong>0.13.2 is a beta.</strong> It works on my setup — LM&nbsp;Studio serving
+  <strong>0.14.0 is a beta.</strong> It works on my setup — LM&nbsp;Studio serving
   qwen3-coder or Devstral Small, driven by Claude Code as the orchestrator — and it is
   young everywhere else. Flags and output may shift. If it breaks on yours,
   <a href="https://github.com/JimboSchneider/dirtywork/issues">tell me what happened</a>.

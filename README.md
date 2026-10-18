@@ -215,7 +215,9 @@ clone explicitly when testing unreleased changes.
 ### Worker Observatory
 
 The Worker Observatory is dirtywork’s local dashboard for watching runs and
-reviewing their results in your browser:
+reviewing their results in your browser. It is included in dirtywork 0.14.0
+and later through the normal `pipx install dirtywork`. Existing users can
+run `pipx upgrade dirtywork`, then launch:
 
     dirtywork dashboard --open
 
@@ -233,8 +235,9 @@ it is running, the view refreshes every three seconds.
   live snapshots after edits and commands; completed Docker runs use their
   saved export. Older runs show saved patches when available.
 - **Review in the browser:** choose **Start Review**, then **Accept** or
-  **Reject** to save your decision, elapsed review time and an optional note.
-  Accept does not merge changes, and Reject does not delete files.
+  **Reject** to stop the timer and record the review outcome, elapsed review
+  time and an optional note. Merging changes, retrying the task and cleaning
+  up the worker’s workspace are separate steps for you or your AI agent.
 - **Understand outcomes:** compare recorded outcomes, worker and review
   times, and tokens offloaded to workers. Token usage is a proxy for offloaded
   work, not a measurement of net token savings.

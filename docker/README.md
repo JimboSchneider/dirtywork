@@ -67,6 +67,11 @@ digest under a shipped pin. To publish a Dockerfile fix inside a minor, run
 the workflow by hand (`workflow_dispatch`, input: the release tag) and then
 re-pin `PINNED_DIGEST` in a follow-up.
 
+**0.14.0 keeps the verified `:0.13` default image and its existing digest
+pin.** The Dockerfile is unchanged, so upgrading the CLI does not require
+changing the worker image. The release workflow also publishes `:0.14` and
+`:0.14.0`; those tags do not change the CLI’s pinned default.
+
 **Do not dispatch the current Dockerfile onto a `0.10.x` tag.** It is now
 intentionally *ahead* of the old `:0.10` image (two SDKs plus
 `DOTNET_EnableWriteXorExecute=0`) — it shipped as `:0.11` with 0.11.0, not as a
