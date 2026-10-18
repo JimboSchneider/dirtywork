@@ -157,7 +157,8 @@ def test_http_assets_and_api_show_new_runs_without_restart(dashboard_http):
     assert b"<title>dirtywork" in body
     assert headers["Cache-Control"] == "no-store"
     assert "script-src 'self'" in headers["Content-Security-Policy"]
-    for path, mime in (("/app.js", "javascript"), ("/wopr.js", "javascript"), ("/style.css", "text/css")):
+    for path, mime in (("/app.js", "javascript"), ("/wopr.js", "javascript"),
+                       ("/presentation.js", "javascript"), ("/style.css", "text/css")):
         status, headers, body = request(server, path)
         assert status == 200 and mime in headers["Content-Type"] and body
     assert json.loads(request(server, "/api/runs")[2])["runs"] == []

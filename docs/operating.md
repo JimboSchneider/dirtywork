@@ -43,7 +43,19 @@ records directory:
 
     dirtywork dashboard --port 0 --runs-dir /path/to/runs --open
 
-**Run activity** lets you find and select runs by task, slug, model or repository.
+The **Repository** selector scopes the run list and its counts, Outcomes,
+offloading fit and lifetime token totals. **All repositories** includes every
+saved run; choose a repository to focus those views. Repositories are grouped
+by the exact repository path saved in each run, without discovering Git
+repositories or external worktrees. Paths recorded differently remain separate
+choices. Runs without a recorded repository have their own selectable group.
+The selected run shows its recorded repository, worktree and branch explicitly;
+missing values show **Not recorded**.
+
+**Run activity** lets you find and select runs by task, slug, model, repository,
+worktree or branch.
+The Active, Needs review and All filters and search narrow only the run list
+within the repository scope; they do not change Outcomes or token totals.
 It shows worker duration, observed turns and tool results, the latest 60 transcript
 events, recorded verification, final token totals, changed files and the review
 verdict. New records and appended events appear on the next three-second refresh
@@ -58,12 +70,13 @@ Other tool results use **View output** and retain their recorded text.
 
 The **Run timeline** beside the activity stream plots recorded timestamps in
 separate lanes for run lifecycle, model replies, tool results, harness
-interventions, verification and review. Select a marker by mouse or keyboard to
+interventions and verification. Select a marker by mouse or keyboard to
 see its elapsed time. It uses the selected theme, refreshes with the stream and
 stacks above it on small screens. A running process advances the time axis even
 while waiting for the next flushed turn. Markers show when events were recorded;
 gaps are unclassified time, not measured inference or tool durations. Review
-markers require a recorded `verdict_at`. Events without usable timestamps are
+history appears separately below the worker timeline, with recorded review
+times available on selection. Events without usable timestamps are
 counted in the note, and the timeline retains the latest 2,000 transcript events
 independently of the activity stream's 60-event window.
 
@@ -132,8 +145,9 @@ copies with `dirtywork init` after installing this version. Older tools can stil
 use measured elapsed seconds with the existing `--review-seconds` flag.
 
 **Tokens offloaded** is the sum of recorded worker input and output tokens across
-runs with both usage values available, including rejected runs. The accepted-work
-subtotal uses only `accept` verdicts, and coverage shows how many records contribute.
+runs in the repository scope with both usage values available, including rejected
+runs. The accepted-work subtotal uses only `accept` verdicts, and coverage shows
+how many records contribute.
 Missing or partial usage is excluded; recorded zero remains zero. Totals refresh
 when `run_end.usage` is written, not during inference. Usage is the harness's saved
 provider counts (providers that omit usage may have recorded zeros). Input tokens
@@ -686,4 +700,4 @@ Live patches are limited to 1 MiB, with bounded capture time and explicit unavai
 
 Once a Docker run ends, its saved `diff.patch` is authoritative. If no saved patch exists, the viewer can show the last successful live snapshot, clearly labeled as such. Host-mode runs (`--sandbox none`) publish live snapshots too, but do not export a final saved patch. Missing artifacts show an explicit unavailable message.
 
-Review markers are pinned to the end of the worker timeline so delayed reviews do not compress worker events; selecting a marker shows its actual time. Superseded runs no longer count as open or awaiting review.
+Review history appears separately from the worker timeline so delayed reviews do not compress worker events; selecting a review shows its recorded time. Superseded runs no longer count as open or awaiting review.
