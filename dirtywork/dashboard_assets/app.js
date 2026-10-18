@@ -19,6 +19,40 @@
       remember(key, $(key).value);
     });
   }
+  // A session-only theme: changing the normal theme selector exits it.
+  const secretKeys = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight'];
+  let secretBuffer = [], secretLastKey = 0;
+  document.addEventListener('keydown', event => {
+    if (event.repeat || event.ctrlKey || event.metaKey || event.altKey ||
+        event.target.closest('input, textarea, select, [contenteditable]')) {
+      secretBuffer = []; return;
+    }
+    const now = Date.now();
+    if (now - secretLastKey > 3000) secretBuffer = [];
+    secretLastKey = now;
+    secretBuffer.push(event.key);
+    secretBuffer = secretBuffer.slice(-secretKeys.length);
+    if (!secretKeys.every((key, index) => secretBuffer[index] === key)) return;
+    secretBuffer = [];
+    if (!$('theme').querySelector('option[value="wopr"]')) {
+      const option = document.createElement('option');
+      option.value = 'wopr'; option.textContent = 'WOPR · unlocked';
+      $('theme').append(option);
+    }
+    root.dataset.theme = 'wopr'; $('theme').value = 'wopr';
+    let message = $('secret-theme-status');
+    if (!message) {
+      message = document.createElement('div'); message.id = 'secret-theme-status';
+      message.setAttribute('role', 'status'); document.body.append(message);
+    }
+    message.textContent = 'ACCESS GRANTED // WOPR ONLINE // SHALL WE PLAY A GAME?';
+  });
+  $('theme').addEventListener('change', () => {
+    if ($('theme').value !== 'wopr') {
+      $('theme').querySelector('option[value="wopr"]')?.remove();
+      $('secret-theme-status')?.remove();
+    }
+  });
   state.selected = stored('run');
   const number = value => value == null ? '—' : new Intl.NumberFormat(undefined, {maximumFractionDigits: 0}).format(value);
   const compactNumber = value => value == null ? '—' : new Intl.NumberFormat(undefined, {notation: 'compact', maximumFractionDigits: 1}).format(value);
