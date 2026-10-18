@@ -285,7 +285,7 @@ def _timeline(transcript, metadata, started, ended, now, activity_state):
             untimed += 1
             continue
         points.append({**{k: v for k, v in event.items() if k != "ts"},
-                       "at_s": (ts - origin).total_seconds()})
+                       "ts": ts.isoformat(), "at_s": (ts - origin).total_seconds()})
     points.sort(key=lambda point: point["at_s"])
     end = now if activity_state == "running" else ended
     extent = max([point["at_s"] for point in points if point["lane"] != "review"] +
@@ -525,7 +525,7 @@ class RunStore:
         review_started = timestamp(metadata.get("review_started_at"))
         reviewing = bool(review_started and review_started <= now and verdict is None and not metadata.get("resumed_by"))
         run = {k: text(metadata.get(k)) for k in
-               ("task", "model", "provider", "repo", "branch", "sandbox", "resumed_from", "resumed_by", "note")}
+               ("task", "model", "provider", "repo", "worktree", "branch", "sandbox", "resumed_from", "resumed_by", "note")}
         # Metadata and transcript reads already bound the complete brief to 1 MiB.
         # Preview limits must not discard classification or distinct-task evidence.
         task = metadata.get("task") if isinstance(metadata.get("task"), str) else ""
@@ -577,21 +577,35 @@ class RunStore:
                 if run["warnings"]:
                     warnings.append(directory.name + ": " + "; ".join(run["warnings"]))
                 runs.append({**{k: v for k, v in run.items() if k in (
-                    "slug", "status", "activity_state", "model", "repo", "started", "ended",
-                    "duration_s", "verdict", "review_seconds", "review_in_progress", "resumed_by", "usage",
+                    "slug", "status", "activity_state", "model", "repo", "worktree", "branch", "started", "ended",
+                    "duration_s", "verdict", "review_seconds", "review_in_progress", "review_eligible", "resumed_by", "usage",
                     "task_type")}, "task": run["task"]})
             runs.sort(key=lambda r: (r["started"] or "", r["slug"]), reverse=True)
             present = {r["slug"] for r in runs}
             self._transcripts = {k: v for k, v in self._transcripts.items() if k in present}
-            models = []
-            for model in sorted({r["model"] or "Unknown model" for r in runs}):
-                group = [r for r in runs if (r["model"] or "Unknown model") == model]
-                models.append({"model": model, **aggregate(group)})
+            models = _model_summaries(runs)
             offloading = offloading_summary(runs)
+            repo_groups = {}
+            for run in runs:
+                repo_groups.setdefault(run["repo"], []).append(run)
+            repositories = [
+                {"repo": repo, "summary": aggregate(group), "models": _model_summaries(group),
+                 "offloading": offloading_summary(group)}
+                for repo, group in sorted(repo_groups.items())
+            ]
             summaries = [{**run, "task": run["task"][:240]} for run in runs]
             return {"runs": summaries, "summary": aggregate(runs), "models": models,
                     "task_type_options": TASK_TYPE_OPTIONS, "offloading": offloading,
+                    "repositories": repositories,
                     "warnings": warnings, "runs_dir": str(self.root), "updated_at": now.isoformat()}
+
+
+def _model_summaries(runs):
+    models = []
+    for model in sorted({run["model"] or "Unknown model" for run in runs}):
+        group = [run for run in runs if (run["model"] or "Unknown model") == model]
+        models.append({"model": model, **aggregate(group)})
+    return models
 
 
 def _usage_totals(runs):

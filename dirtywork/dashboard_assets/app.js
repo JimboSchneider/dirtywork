@@ -3,12 +3,13 @@
   'use strict';
   const $ = id => document.getElementById(id);
   const root = document.documentElement;
-  const state = {snapshot: null, selected: null, detail: null, view: 'activity', limit: 8, query: '', busy: false,
+  const state = {allSnapshot: null, snapshot: null, repository: null, selected: null, detail: null, view: 'activity', limit: 8, query: '', busy: false,
     reviewBusy: false, detailRevision: 0, reviewNotes: new Map(), reviewFeedback: null,
     taskTypeBusy: null, taskTypeFeedback: null};
   const knownThemes = ['ion', 'orchid', 'terminal'];
   const appearances = ['system', 'light', 'dark'];
   const wopr = window.DirtyworkWopr;
+  const presentation = window.DirtyworkPresentation;
   let lastWoprRun = null, woprPulseTimer, disconnectTimer, syncIndicatorTimer;
   function renderWoprRun(run) {
     const active = root.dataset.theme === 'wopr';
@@ -95,6 +96,9 @@
     }
   });
   state.selected = stored('run');
+  const savedRepository = stored('repository');
+  state.repository = savedRepository?.startsWith('repo:') ? savedRepository.slice(5) : null;
+  state.runScope = ['all', 'active', 'review'].includes(stored('runScope')) ? stored('runScope') : 'all';
   const number = value => value == null ? '—' : new Intl.NumberFormat(undefined, {maximumFractionDigits: 0}).format(value);
   const compactNumber = value => value == null ? '—' : new Intl.NumberFormat(undefined, {notation: 'compact', maximumFractionDigits: 1}).format(value);
   const duration = value => {
@@ -123,6 +127,7 @@
   }
   function set(id, value) { $(id).textContent = value; }
   const explanations = {
+    'repository-scope': ['Repository scope', 'Choose a recorded repository to scope runs, token totals, and Outcomes together; search and run filters only narrow the run list.'],
     offloaded: ['Tokens offloaded', 'Recorded worker tokens measure offloaded work, rather than exact token savings.'],
     'accepted-tokens': ['Accepted work', 'Worker tokens used on runs that a reviewer accepted.'],
     coverage: ['Runs with usage', 'Runs with both input and output token counts, out of all saved runs.'],
@@ -135,7 +140,7 @@
     verification: ['Verification', 'Whether the run’s configured check passed, if a result was recorded.'],
     tokens: ['Input and output tokens', 'Tokens are pieces of text: input goes to the worker and output comes back.'],
     files: ['Changed files', 'How many files the selected run changed, when that information is available.'],
-    timeline: ['Run timeline', 'When model replies, tools, checks, and reviews were recorded during this run.'],
+    timeline: ['Run timeline', 'Worker events share a time scale; review history is shown separately with its recorded times.'],
     stream: ['Activity stream', 'The latest recorded actions and results from the selected run, updated as they arrive.'],
     runs: ['Runs', 'Search your saved runs and select one to inspect its task and results.'],
     acceptance: ['Accepted and reviewed runs', 'Runs accepted by review, out of runs with an accept or reject decision.'],
@@ -296,8 +301,25 @@
   }
   $('task-type').addEventListener('change', performTaskType);
   function renderReviewControls(run) {
+    $('repository').disabled = state.reviewBusy || Boolean(state.taskTypeBusy);
     const settled = Boolean(run.verdict);
-    const eligible = !settled && run.review_eligible;
+    const eligible = Boolean(!settled && run.review_eligible && !run.resumed_by);
+    $('review-panel').classList.toggle('review-actionable', eligible);
+    $('review-form').hidden = !eligible;
+    $('review-summary').hidden = eligible;
+    if (settled) {
+      set('review-summary-title', {accept: 'Accepted', reject: 'Rejected', cleanup: 'Cleanup'}[run.verdict] || 'Review saved');
+      const timing = run.review_seconds != null ? `${duration(run.review_seconds)} recorded review time` : 'Review time not recorded';
+      set('review-summary-note', timing + (run.note ? ` · ${run.note}` : ''));
+    } else if (run.resumed_by) {
+      set('review-summary-title', 'Superseded');
+      set('review-summary-note', `Continued in ${run.resumed_by}. Review the latest run.`);
+    } else if (!eligible) {
+      set('review-summary-title', 'Waiting for review');
+      set('review-summary-note', run.activity_state === 'running'
+        ? 'The worker is still running. Review will be available when it finishes.'
+        : 'Wait for the worker to finish before starting review.');
+    }
     $('start-review').disabled = state.reviewBusy || Boolean(state.taskTypeBusy) || !eligible || run.review_in_progress;
     $('start-review').textContent = run.review_in_progress ? 'Review started' : 'Start Review';
     $('accept-review').disabled = state.reviewBusy || Boolean(state.taskTypeBusy) || !eligible || !run.review_in_progress;
@@ -310,7 +332,7 @@
       $('review-note').value = state.reviewNotes.get(run.slug) || '';
       $('review-note').dataset.slug = run.slug;
     }
-    set('review-controls-state', settled ? 'Review saved' : run.resumed_by ? `Superseded by ${run.resumed_by}` : !eligible ? 'Wait for the worker to finish' : run.review_in_progress ? 'Timer running' : 'Start review to begin timing');
+    set('review-controls-state', settled ? 'Review saved' : run.resumed_by ? `Superseded by ${run.resumed_by}` : !eligible ? 'Wait for the worker to finish' : run.review_in_progress ? `${duration(run.review_elapsed_s)} · Timer running` : 'Start review to begin timing');
     const feedback = state.reviewFeedback?.slug === run.slug ? state.reviewFeedback : null;
     const message = feedback?.message || '';
     if ($('review-feedback').textContent !== message) set('review-feedback', message);
@@ -350,6 +372,93 @@
   $('start-review').addEventListener('click', () => performReview('start'));
   $('accept-review').addEventListener('click', () => performReview('accept'));
   $('reject-review').addEventListener('click', () => performReview('reject'));
+  function renderRepositoryScope() {
+    const select = $('repository');
+    const value = state.repository === null ? '' : 'repo:' + state.repository;
+    const choiceBeforePoll = select.value;
+    const groups = state.allSnapshot.repositories || [];
+    const keys = new Set(['', ...groups.map(group => 'repo:' + group.repo)]);
+    for (const option of [...select.children]) if (!keys.has(option.value)) option.remove();
+    let previous = [...select.children].find(option => option.value === '');
+    if (!previous) {
+      previous = element('option', '', 'All repositories'); previous.value = '';
+      select.insertBefore(previous, select.firstChild);
+    }
+    for (const group of groups) {
+      const key = 'repo:' + group.repo;
+      let option = [...select.children].find(option => option.value === key);
+      if (!option) { option = element('option'); option.value = key; }
+      const text = `${group.repo || 'Repository not recorded'} · ${number(group.summary.total)} ${group.summary.total === 1 ? 'run' : 'runs'}`;
+      if (option.textContent !== text) option.textContent = text;
+      if (previous.nextSibling !== option) select.insertBefore(option, previous.nextSibling);
+      previous = option;
+    }
+    if (select.dataset.repository !== value || !keys.has(choiceBeforePoll)) select.value = value;
+    else if (select.value !== choiceBeforePoll) select.value = choiceBeforePoll;
+    select.dataset.repository = value;
+    select.disabled = state.reviewBusy || Boolean(state.taskTypeBusy);
+    const all = state.repository === null;
+    const scope = all ? 'All repositories' : 'This repository';
+    const context = all ? 'All repositories' : `Repository: ${state.repository || 'Not recorded'}`;
+    const total = state.snapshot.summary.total;
+    const description = `${state.repositoryNotice || ''}${context} · ${number(total)} recorded ${total === 1 ? 'run' : 'runs'}`;
+    if ($('repository-context').textContent !== description) set('repository-context', description);
+    set('token-scope', `Lifetime · ${scope.toLowerCase()} · including demos`);
+    set('outcomes-scope', `${scope} · all runs, including demos`);
+    set('funnel-scope', `${scope} · including demos`);
+    set('models-scope', `${scope} · including demos`);
+    set('fit-scope', `Real work only · ${scope.toLowerCase()}`);
+  }
+  function applyRepositoryScope() {
+    if (!state.allSnapshot) return;
+    let snapshot = presentation.scopeSnapshot(state.allSnapshot, state.repository);
+    if (!snapshot) {
+      state.repository = null;
+      state.repositoryNotice = 'Saved repository is no longer available; showing all repositories. ';
+      remember('repository', '');
+      state.detailRevision++;
+      snapshot = state.allSnapshot;
+    }
+    state.snapshot = snapshot;
+    if (!snapshot.runs.some(run => run.slug === state.selected)) {
+      state.selected = snapshot.runs.find(run => run.activity_state === 'running')?.slug || snapshot.runs[0]?.slug || null;
+      state.detail = null;
+      state.detailRevision++;
+      remember('run', state.selected || '');
+    }
+    const hasDetail = state.detail?.slug === state.selected && Boolean(state.selected) &&
+      (state.repository === null || (state.detail.repo || '') === state.repository);
+    $('run-panel').hidden = !hasDetail;
+    $('run-loading').hidden = !state.selected || hasDetail;
+    $('empty').hidden = snapshot.runs.length > 0;
+    if (!hasDetail) {
+      state.detail = null;
+      for (const id of ['start-review', 'accept-review', 'reject-review', 'review-note', 'task-type']) $(id).disabled = true;
+      renderWoprRun(null);
+      for (const [id, text] of [['worker-time', '—'], ['turns', '— / —'], ['verdict', '—'], ['worker-time-note', state.selected ? 'Loading selected run' : 'No run selected'], ['verdict-note', 'No verdict recorded']]) set(id, text);
+      set('run-task', 'Loading selected run…');
+    }
+    renderRepositoryScope();
+    renderList();
+    renderOutcomes();
+    const summary = snapshot.summary;
+    const connection = `Live · ${number(summary.active)} active · ${summary.reviewing ? number(summary.reviewing) + ' in review · ' : ''}${number(summary.total)} recorded`;
+    if ($('connection').textContent !== connection) set('connection', connection);
+  }
+  $('repository').addEventListener('change', () => {
+    if (state.reviewBusy || state.taskTypeBusy) {
+      $('repository').value = state.repository === null ? '' : 'repo:' + state.repository;
+      return;
+    }
+    const value = $('repository').value;
+    state.repository = value.startsWith('repo:') ? value.slice(5) : null;
+    state.repositoryNotice = '';
+    state.detailRevision++;
+    state.limit = 8;
+    remember('repository', value);
+    applyRepositoryScope();
+    loadDetail();
+  });
   function selectRun(slug) {
     if (state.selected === slug) return;
     state.selected = slug;
@@ -358,13 +467,48 @@
     for (const id of ['start-review', 'accept-review', 'reject-review', 'review-note', 'task-type']) $(id).disabled = true;
     remember('run', slug);
     renderList();
+    $('run-panel').hidden = true;
+    $('run-loading').hidden = false;
+    renderWoprRun(null);
+    for (const [id, text] of [['worker-time', '—'], ['turns', '— / —'], ['verdict', '—'], ['worker-time-note', 'Loading selected run'], ['verdict-note', 'No verdict recorded']]) set(id, text);
     set('run-task', 'Loading selected run…');
     loadDetail();
   }
   function renderList() {
     const allRuns = state.snapshot.runs;
-    const runs = allRuns.filter(run => [run.task, run.slug, run.model, run.repo, run.status, run.verdict, run.task_type?.label].join(' ').toLowerCase().includes(state.query));
-    set('run-count', `${number(runs.length)}${state.query ? ' matches' : ' records'}`);
+    const runs = presentation.filterRuns(allRuns, {scope: state.runScope, query: state.query});
+    const counts = presentation.runCounts(allRuns);
+    for (const scope of ['all', 'active', 'review']) {
+      set('filter-count-' + scope, number(counts[scope]));
+      $('filter-' + scope).setAttribute('aria-pressed', String(scope === state.runScope));
+    }
+    set('run-count', `${number(runs.length)}${state.query ? ' matches' : ' runs'}`);
+    const jump = $('run-jump');
+    const jumpScope = JSON.stringify([state.repository, state.runScope, state.query]);
+    const choiceBeforePoll = jump.value;
+    const jumpKeys = new Set(['', ...runs.map(run => run.slug)]);
+    for (const option of [...jump.children]) if (!jumpKeys.has(option.value)) option.remove();
+    let previousOption = [...jump.children].find(option => option.value === '');
+    if (!previousOption) {
+      previousOption = element('option', '', 'Select a run…'); previousOption.value = '';
+      jump.insertBefore(previousOption, jump.firstChild);
+    }
+    for (const run of runs) {
+      let option = [...jump.children].find(option => option.value === run.slug);
+      if (!option) { option = element('option'); option.value = run.slug; }
+      const title = `${presentation.taskTitle(run.task, run.slug)} · ${label(run)} · ${run.slug}`;
+      if (option.textContent !== title) option.textContent = title;
+      const next = previousOption.nextSibling;
+      if (next !== option) jump.insertBefore(option, next);
+      previousOption = option;
+    }
+    const selectedInScope = runs.some(run => run.slug === state.selected);
+    if (jump.dataset.scope !== jumpScope || jump.dataset.selected !== state.selected || !jumpKeys.has(choiceBeforePoll)) {
+      jump.value = selectedInScope ? state.selected : '';
+    } else if (jump.value !== choiceBeforePoll) jump.value = choiceBeforePoll;
+    jump.dataset.scope = jumpScope;
+    jump.dataset.selected = state.selected;
+    jump.disabled = !runs.length;
     const list = $('run-list');
     const desired = runs.slice(0, state.limit);
     if (state.selected && !desired.some(run => run.slug === state.selected)) {
@@ -380,50 +524,93 @@
         button = element('button', 'run-choice');
         button.type = 'button';
         button.dataset.slug = run.slug;
-        button.append(element('span', 'run-choice-title'), element('span', 'run-choice-meta'), element('span', 'run-choice-model'), element('span', 'run-choice-slug'));
+        button.append(element('span', 'run-choice-title'), element('span', 'run-choice-meta'), element('span', 'run-choice-model'), element('span', 'run-choice-slug'), element('span', 'run-choice-context'));
         button.addEventListener('click', () => selectRun(run.slug));
       }
       button.setAttribute('aria-pressed', String(run.slug === state.selected));
-      button.children[0].textContent = (run.task || run.slug).slice(0, 110);
+      button.children[0].textContent = presentation.taskTitle(run.task, run.slug);
       button.children[1].textContent = `${label(run)} · ${duration(run.duration_s)}`;
       button.children[2].textContent = run.model || 'Unknown model';
       button.children[3].textContent = run.slug;
+      button.children[4].textContent = `${run.repo ? run.repo.split(/[\\/]/).filter(Boolean).pop() : 'Repository not recorded'} · ${run.branch || 'Branch not recorded'}`;
+      button.children[4].title = [run.repo, run.worktree, run.branch].filter(Boolean).join('\n');
       const next = previous ? previous.nextSibling : list.firstChild;
       if (next !== button) list.insertBefore(button, next);
       previous = button;
     }
     $('more-runs').hidden = runs.length <= state.limit;
-    $('no-matches').hidden = runs.length > 0;
+    $('no-matches').hidden = runs.length > 0 && selectedInScope;
+    set('no-matches', runs.length ? 'Choose a run from this filter. Your current selection is unchanged.'
+      : state.query ? 'No runs match this search in the selected filter.' : state.runScope === 'active'
+      ? 'No active workers right now.' : state.runScope === 'review' ? 'No runs are waiting for review.' : 'No saved runs yet.');
   }
+  for (const scope of ['all', 'active', 'review']) $('filter-' + scope).addEventListener('click', () => {
+    state.runScope = scope; state.limit = 8;
+    remember('runScope', scope);
+    if (state.snapshot) renderList();
+  });
+  $('run-jump').addEventListener('change', () => { if ($('run-jump').value) selectRun($('run-jump').value); });
   $('run-search').addEventListener('input', () => {
     state.query = $('run-search').value.trim().toLowerCase();
     state.limit = 8;
     if (state.snapshot) renderList();
   });
   $('more-runs').addEventListener('click', () => { state.limit += 20; renderList(); });
-  const timelineLanes = [['lifecycle', 'Run'], ['model', 'Model'], ['tools', 'Tools'], ['harness', 'Harness'], ['verify', 'Verify'], ['review', 'Review']];
+  const timelineLanes = [['lifecycle', 'Run'], ['model', 'Model'], ['tools', 'Tools'], ['harness', 'Harness'], ['verify', 'Verify']];
   const timelineNodes = new Map();
   let timelineSlug = null;
   let timelineSelection = null;
+  function timelineRecordedTime(point, run) {
+    let stamp = typeof point.ts === 'string' ? Date.parse(point.ts) : NaN;
+    if (!Number.isFinite(stamp) && run.timeline?.origin === 'run start' &&
+        typeof run.started === 'string' && Number.isFinite(point.at_s)) {
+      stamp = Date.parse(run.started) + point.at_s * 1000;
+    }
+    const date = new Date(stamp);
+    if (Number.isFinite(date.getTime())) {
+      return {stamp, label: date.toLocaleString(undefined, {year: 'numeric', month: 'short', day: 'numeric',
+        hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short'})};
+    }
+    if (!Number.isFinite(point.at_s) || point.at_s < 0) return null;
+    const seconds = point.at_s.toLocaleString(undefined, {maximumFractionDigits: 6});
+    return {stamp: null, label: `${seconds}s after ${run.timeline?.origin || 'the recorded origin'}`};
+  }
+  function selectTimelineEvent(key) {
+    timelineSelection = key;
+    for (const [id, node] of timelineNodes) node.setAttribute('aria-pressed', String(id === key));
+    set('timeline-selection', timelineNodes.get(key).getAttribute('aria-label'));
+  }
   function renderTimeline(run) {
     const chart = $('timeline-chart');
+    const history = $('review-events');
     if (timelineSlug !== run.slug) {
       timelineSlug = run.slug;
       timelineSelection = null;
       timelineNodes.clear();
       chart.replaceChildren();
-      set('timeline-selection', 'Select a marker for its recorded time.');
+      history.replaceChildren();
+      set('timeline-selection', 'Select an event for its recorded time.');
     }
     const timeline = run.timeline;
-    if (!timeline || !timeline.points.length) {
-      chart.replaceChildren(element('p', 'timeline-empty', 'No timestamped events recorded yet.'));
-      timelineNodes.clear();
-      timelineSelection = null;
-      if ($('timeline-selection').textContent !== 'No timestamped events to select.') set('timeline-selection', 'No timestamped events to select.');
+    const points = timeline?.points || [];
+    const workerPoints = points.filter(point => timelineLanes.some(([lane]) => lane === point.lane) &&
+      Number.isFinite(point.at_s) && point.at_s >= 0);
+    const reviewPoints = points.filter(point => point.lane === 'review')
+      .map(point => ({point, time: timelineRecordedTime(point, run)})).filter(event => event.time)
+      .sort((a, b) => a.time.stamp != null && b.time.stamp != null
+        ? a.time.stamp - b.time.stamp : (a.point.at_s || 0) - (b.point.at_s || 0));
+    const wanted = new Set([...workerPoints, ...reviewPoints.map(event => event.point)]
+      .map(point => String(point.sequence)));
+    for (const [key, button] of timelineNodes) {
+      if (!wanted.has(key)) { button.remove(); timelineNodes.delete(key); }
+    }
+    if (!workerPoints.length) {
+      if (!chart.querySelector('.timeline-empty')) {
+        chart.replaceChildren(element('p', 'timeline-empty', 'No timestamped worker events recorded yet.'));
+      }
     } else {
       if (!chart.querySelector('.timeline-axis')) {
         chart.replaceChildren(element('div', 'timeline-axis'));
-        set('timeline-selection', 'Select a marker for its recorded time.');
         for (const [lane, label] of timelineLanes) {
           const row = element('div', 'timeline-lane');
           const track = element('div', 'timeline-track');
@@ -432,23 +619,22 @@
           chart.append(row);
         }
       }
-      const extent = Math.max(timeline.elapsed_s || 0, 1);
+      const extent = Math.max(Number.isFinite(timeline.elapsed_s) ? timeline.elapsed_s : 0,
+        ...workerPoints.map(point => point.at_s), 1);
       const axis = chart.querySelector('.timeline-axis');
-      axis.replaceChildren(...[0, 0.5, 1].map(fraction => element('span', '', duration(extent * fraction))));
-      const wanted = new Set(timeline.points.map(point => String(point.sequence)));
-      for (const [key, button] of timelineNodes) if (!wanted.has(key)) { button.remove(); timelineNodes.delete(key); }
-      for (const point of timeline.points) {
+      if (!axis.children.length) axis.append(...[0, 0.5, 1].map(() => element('span')));
+      [0, 0.5, 1].forEach((fraction, index) => {
+        const value = duration(extent * fraction);
+        if (axis.children[index].textContent !== value) axis.children[index].textContent = value;
+      });
+      for (const point of workerPoints) {
         const key = String(point.sequence);
         let marker = timelineNodes.get(key);
         if (!marker) {
           marker = element('button', 'timeline-marker');
           marker.type = 'button';
           marker.dataset.lane = point.lane;
-          marker.addEventListener('click', () => {
-            timelineSelection = key;
-            for (const [id, node] of timelineNodes) node.setAttribute('aria-pressed', String(id === key));
-            set('timeline-selection', marker.getAttribute('aria-label'));
-          });
+          marker.addEventListener('click', () => selectTimelineEvent(key));
           chart.querySelector(`[data-lane="${point.lane}"]`).append(marker);
           timelineNodes.set(key, marker);
         }
@@ -458,17 +644,41 @@
         marker.setAttribute('aria-label', `${point.label} · ${seconds}s after ${timeline.origin}${point.outcome === 'failed' ? ' · failed or blocked' : ''}`);
         marker.setAttribute('aria-pressed', String(key === timelineSelection));
       }
-      if (timelineSelection && !wanted.has(timelineSelection)) {
-        timelineSelection = null;
-        set('timeline-selection', 'Selected event is outside the retained timeline.');
-      } else if (timelineSelection) {
-        const selectedLabel = timelineNodes.get(timelineSelection).getAttribute('aria-label');
-        if ($('timeline-selection').textContent !== selectedLabel) set('timeline-selection', selectedLabel);
+    }
+    $('review-history').hidden = !reviewPoints.length;
+    let previous = null;
+    for (const {point, time} of reviewPoints) {
+      const key = String(point.sequence);
+      let button = timelineNodes.get(key);
+      if (!button) {
+        button = element('button', 'review-event');
+        button.type = 'button';
+        button.append(element('span', 'review-event-label'), element('span', 'review-event-time'));
+        button.addEventListener('click', () => selectTimelineEvent(key));
+        timelineNodes.set(key, button);
       }
+      button.dataset.outcome = point.outcome;
+      if (button.children[0].textContent !== point.label) button.children[0].textContent = point.label;
+      if (button.children[1].textContent !== time.label) button.children[1].textContent = time.label;
+      button.setAttribute('aria-label', `${point.label} · ${time.label}${point.outcome === 'failed' ? ' · failed or blocked' : ''}`);
+      button.setAttribute('aria-pressed', String(key === timelineSelection));
+      const next = previous ? previous.nextSibling : history.firstChild;
+      if (next !== button) history.insertBefore(button, next);
+      previous = button;
+    }
+    if (timelineSelection && !wanted.has(timelineSelection)) {
+      timelineSelection = null;
+      set('timeline-selection', 'Selected event is outside the retained timeline.');
+    } else if (timelineSelection) {
+      const selectedLabel = timelineNodes.get(timelineSelection).getAttribute('aria-label');
+      if ($('timeline-selection').textContent !== selectedLabel) set('timeline-selection', selectedLabel);
+    } else if (!wanted.size && $('timeline-selection').textContent !== 'No timestamped events to select.') {
+      set('timeline-selection', 'No timestamped events to select.');
+    } else if (wanted.size && $('timeline-selection').textContent === 'No timestamped events to select.') {
+      set('timeline-selection', 'Select an event for its recorded time.');
     }
     set('timeline-status', run.review_in_progress ? 'Live review · 3s refresh' : run.activity_state === 'running' ? 'Live · 3s refresh' : 'Recorded events');
-    const notices = ['Event timestamps · gaps are unclassified time.'];
-    if (timeline?.points.some(point => point.lane === 'review')) notices.push('Review markers sit at the end of the worker axis; select one for its actual time.');
+    const notices = ['Worker event timestamps · gaps are unclassified time.'];
     if (timeline?.untimed_events) notices.push(`${number(timeline.untimed_events)} events without usable timestamps.`);
     if (timeline?.omitted_events) notices.push(`Latest 2,000 events shown; ${number(timeline.omitted_events)} older events omitted.`);
     set('timeline-note', notices.join(' '));
@@ -561,6 +771,8 @@
   });
 
   function renderDetail(run) {
+    $('run-panel').hidden = false;
+    $('run-loading').hidden = true;
     renderWoprRun(run);
     renderTaskType(run);
     renderReviewControls(run);
@@ -573,8 +785,12 @@
     set('review-time', duration(run.review_in_progress ? run.review_elapsed_s : run.review_seconds));
     set('review-time-state', run.review_in_progress ? 'Timer running' : run.review_seconds != null ? 'Recorded duration' : 'Not tracked');
     set('run-slug', run.slug);
-    set('run-task', (run.task || 'Task not recorded').slice(0, 240) + (run.task.length > 240 ? '…' : ''));
+    const title = presentation.taskTitle(run.task, 'Task not recorded');
+    set('run-task', title);
     set('run-model', [run.model || 'Unknown model', run.provider, run.sandbox && `${run.sandbox} sandbox`].filter(Boolean).join(' · '));
+    set('run-repository', run.repo || 'Not recorded');
+    set('run-worktree', run.worktree || 'Not recorded');
+    set('run-branch', run.branch || 'Not recorded');
     set('run-status', label(run));
     $('run-status').classList.toggle('warning', run.verdict === 'reject' || ['inactive', 'unconfirmed', 'unknown'].includes(run.activity_state) || !['running', 'completed'].includes(run.status));
     const verification = run.verify?.passed === true ? 'Passed' : run.verify?.passed === false ? 'Failed' : 'Not recorded';
@@ -585,7 +801,7 @@
       $('stage-' + id).classList.toggle('recorded', recorded);
     }
     $('stage-verify').classList.toggle('failed', run.verify?.passed === false);
-    $('task-details').hidden = run.task.length <= 100;
+    $('task-details').hidden = !run.task || run.task.trim() === title;
     set('full-task', run.task);
     $('verify-details').hidden = !run.verify;
     set('verify-output', run.verify ? [run.verify.command, `Result: ${verification} · exit ${run.verify.exit_code ?? 'unknown'}`, run.verify.output_tail].filter(Boolean).join('\n') : '');
@@ -593,11 +809,13 @@
       $('files-output').replaceChildren();
       $('files-output').dataset.slug = run.slug;
       $('files-output').dataset.signature = '';
+      $('files-details').open = Boolean(run.review_eligible || run.activity_state === 'running' || run.files_changed?.length);
+      $('verify-details').open = Boolean(run.verify && run.review_eligible);
       set('files-status', 'Expand to load file changes.');
       $('files-status').title = '';
     }
     if ($('files-details').open) loadChanges(run.slug);
-    set('lineage', [run.repo, run.branch, run.resumed_from && `Resumed from ${run.resumed_from}`, run.resumed_by && `Resumed by ${run.resumed_by}`, run.note && `Review note: ${run.note}`].filter(Boolean).join(' · '));
+    set('lineage', [run.resumed_from && `Resumed from ${run.resumed_from}`, run.resumed_by && `Resumed by ${run.resumed_by}`, run.note && `Review note: ${run.note}`].filter(Boolean).join(' · '));
     $('run-warnings').hidden = !run.warnings.length;
     set('run-warnings', run.warnings.join(' '));
     const signature = JSON.stringify(run.activity);
@@ -632,16 +850,18 @@
     output.dataset.signature = signature;
     set('offload-fit-summary', `${number(data.reviewed)} reviewed real-work attempts · ${number(data.review_samples)} timed reviews · ${number(data.excluded_demos)} demo or benchmark runs excluded`);
     const groups = data.groups;
+    const hasTiming = groups.some(group => Number.isFinite(group.median_review_s) && group.median_review_s >= 0);
     const timed = groups.filter(group => Number.isFinite(group.median_review_s) && group.median_review_s >= 0 &&
       Number.isFinite(group.acceptance_rate) && group.acceptance_rate >= 0 && group.acceptance_rate <= 1);
     const chart = $('offload-fit-chart');
     chart.hidden = !timed.length;
     $('offload-fit-empty').hidden = Boolean(timed.length);
     set('offload-fit-empty', groups.length
-      ? 'No timed real-work reviews yet. Use Start Review before inspecting a result, then Accept or Reject to record the effort.'
+      ? hasTiming ? 'No task type has both a recorded review time and an acceptance rate yet.'
+        : 'No timed real-work reviews yet. Dashes mark missing timing. Start a review before inspecting a result, then accept or reject it to record the effort.'
       : 'Review a real task to begin comparing task types. Demos and benchmarks stay outside this comparison.');
     set('offload-fit-selection', '');
-    const describe = group => `${group.label}: ${number(group.accepted)} / ${number(group.reviewed)} accepted (${Math.round(group.acceptance_rate * 100)}%). Median review ${duration(group.median_review_s)} across ${number(group.review_samples)} timed reviews and ${number(group.distinct_timed_tasks)} distinct timed briefs. ${group.evidence === 'ready' ? 'Five or more distinct timed briefs.' : 'Limited data; treat this as an early signal.'}`;
+    const describe = group => `${group.label}: ${number(group.accepted)} / ${number(group.reviewed)} accepted (${Math.round(group.acceptance_rate * 100)}%). Median review ${duration(group.median_review_s)} across ${number(group.review_samples)} timed reviews and ${number(group.distinct_timed_tasks)} unique timed task descriptions. ${group.evidence === 'ready' ? 'At least five unique reviewed and timed task descriptions.' : 'Limited data; treat this as an early signal.'}`;
     const selectGroup = group => set('offload-fit-selection', describe(group));
     chart.replaceChildren();
     if (timed.length) {
@@ -678,7 +898,7 @@
         name.addEventListener('click', () => selectGroup(group));
         type.append(element('span', 'fit-key', index + 1), name);
       } else type.append(element('span', '', group.label));
-      type.append(element('small', '', `${number(group.total)} ${group.total === 1 ? 'run' : 'runs'} · ${number(group.distinct_tasks)} distinct ${group.distinct_tasks === 1 ? 'brief' : 'briefs'}`));
+      type.append(element('small', '', `${number(group.total)} ${group.total === 1 ? 'run' : 'runs'} · ${number(group.distinct_tasks)} unique task ${group.distinct_tasks === 1 ? 'description' : 'descriptions'}`));
       const rate = element('td');
       const knownRate = Number.isFinite(group.acceptance_rate) && group.acceptance_rate >= 0 && group.acceptance_rate <= 1;
       rate.append(element('span', 'fit-value', knownRate ? `${Math.round(group.acceptance_rate * 100)}%` : 'No verdicts'),
@@ -689,11 +909,22 @@
         track.setAttribute('aria-hidden', 'true'); track.append(fill); rate.append(track);
       }
       const review = element('td');
-      review.append(element('span', 'fit-value', Number.isFinite(group.median_review_s) && group.median_review_s >= 0 ? duration(group.median_review_s) : 'Not timed'),
+      const knownTime = Number.isFinite(group.median_review_s) && group.median_review_s >= 0;
+      const time = element('span', 'fit-value', knownTime ? duration(group.median_review_s) : '—');
+      if (!knownTime) {
+        time.setAttribute('aria-label', 'No review time recorded');
+        time.title = 'No review time recorded';
+      }
+      review.append(time,
         element('small', '', `${number(group.review_samples)} / ${number(group.reviewed)} reviews timed`));
       const evidence = element('td');
-      evidence.append(element('span', 'fit-evidence', {no_timing: 'No timing yet', limited: 'Limited data', ready: '5+ timed briefs'}[group.evidence] || 'Limited data'),
-        element('small', '', `${number(group.distinct_reviewed_tasks)} distinct reviewed ${group.distinct_reviewed_tasks === 1 ? 'brief' : 'briefs'} · ${number(group.distinct_timed_tasks)} timed`));
+      const coverage = element('span', 'fit-evidence', {no_timing: '—', limited: 'Limited data', ready: '5+ timed task descriptions'}[group.evidence] || 'Limited data');
+      if (group.evidence === 'no_timing') {
+        coverage.setAttribute('aria-label', 'No timed reviews recorded');
+        coverage.title = 'No timed reviews recorded';
+      }
+      evidence.append(coverage,
+        element('small', '', `${number(group.distinct_reviewed_tasks)} unique reviewed task ${group.distinct_reviewed_tasks === 1 ? 'description' : 'descriptions'} · ${number(group.distinct_timed_tasks)} timed`));
       row.append(type, rate, review, evidence); return row;
     }));
     if (!groups.length) {
@@ -748,10 +979,11 @@
     try {
       const run = await api('/api/runs/' + encodeURIComponent(slug));
       if (state.selected !== slug || state.detailRevision !== revision || state.reviewBusy || state.taskTypeBusy) return;
+      if (typeof state.repository === 'string' && (run.repo || '') !== state.repository) return;
       state.detail = run;
       renderDetail(run);
     } catch (error) {
-      if (state.selected === slug) {
+      if (state.selected === slug && state.detailRevision === revision && !state.reviewBusy && !state.taskTypeBusy) {
         set('error', error.message + ' Keeping the last available values; retrying automatically.');
         $('error').hidden = false;
       }
@@ -762,32 +994,18 @@
     state.busy = true;
     try {
       const snapshot = await api('/api/runs');
-      state.snapshot = snapshot;
+      state.allSnapshot = snapshot;
       $('error').hidden = true;
       const indicator = $('connection-dot');
       indicator.classList.remove('offline');
       indicator.classList.add('syncing');
       clearTimeout(syncIndicatorTimer);
       syncIndicatorTimer = setTimeout(() => indicator.classList.remove('syncing'), 900);
-      const connectionLabel = `Live · ${number(snapshot.summary.active)} active · ${snapshot.summary.reviewing ? number(snapshot.summary.reviewing) + ' in review · ' : ''}${number(snapshot.summary.total)} recorded`;
-      if ($('connection').textContent !== connectionLabel) set('connection', connectionLabel);
       $('connection').title = `Refreshes every 3 seconds · Last synced ${new Date(snapshot.updated_at).toLocaleTimeString()}`;
       set('source', snapshot.runs_dir);
-      $('empty').hidden = snapshot.runs.length > 0;
-      $('run-panel').hidden = !snapshot.runs.length;
-      if (!snapshot.runs.some(run => run.slug === state.selected)) {
-        state.selected = snapshot.runs.find(run => run.activity_state === 'running')?.slug || snapshot.runs[0]?.slug || null;
-        state.detail = null;
-        state.detailRevision++;
-      }
-      if (!state.selected) {
-        renderWoprRun(null);
-        for (const [id, value] of [['worker-time', '—'], ['turns', '— / —'], ['verdict', '—'], ['worker-time-note', 'No run selected'], ['verdict-note', 'No verdict recorded']]) set(id, value);
-      }
-      renderList();
-      renderOutcomes();
+      applyRepositoryScope();
       $('data-warnings').hidden = !snapshot.warnings.length;
-      set('warning-summary', `${number(snapshot.warnings.length)} run data notices`);
+      set('warning-summary', `All repositories · ${number(snapshot.warnings.length)} run data notices`);
       $('warnings-list').replaceChildren(...snapshot.warnings.map(warning => element('li', '', warning)));
       await loadDetail();
     } catch (error) {
