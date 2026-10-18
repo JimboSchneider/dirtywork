@@ -51,6 +51,11 @@ while the page is visible. Events are flushed at turn boundaries, so this is not
 a token-by-token stream. Result previews are the evidence saved by dirtywork,
 not a new execution of the commands.
 
+Use **View edit** on a file-edit result to see line numbers, added and removed
+lines, and a short change summary. It shows that individual edit; **File changes**
+shows the cumulative run diff. Limited edit previews are labeled **Partial preview**.
+Other tool results use **View output** and retain their recorded text.
+
 The **Run timeline** beside the activity stream plots recorded timestamps in
 separate lanes for run lifecycle, model replies, tool results, harness
 interventions, verification and review. Select a marker by mouse or keyboard to

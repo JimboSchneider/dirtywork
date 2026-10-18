@@ -19,7 +19,20 @@ from .review import start_review, record_verdict, effective_run_status, review_e
 MAX_LINE = 1024 * 1024
 MAX_LIVE_RECORD = 4 * 1024 * 1024
 ACTIVITY_LIMIT = 60
+ACTIVITY_DETAIL_LIMIT = 2000
 TIMELINE_LIMIT = 2000
+_CHANGE_TOOLS = frozenset({"write_file", "append_file", "edit_file", "apply_edits",
+                           "insert_before", "insert_after"})
+# Keep the success format in sync with tools.describe_change. Parse only the
+# bounded preview here; importing tools also initializes its execution helpers.
+_CHANGE_HEAD = re.compile(
+    r"(?:Wrote|Edited|Appended to|Inserted into|Applied [0-9]+ edits? to) "
+    r"(.+): \+([0-9]{1,16}) -([0-9]{1,16})"
+    r"(?: \(removed [0-9]+ non-blank lines?\))?")
+_CHANGE_HUNK = re.compile(
+    r"@@ -([0-9]{1,16})(?:,([0-9]{1,16}))? "
+    r"\+([0-9]{1,16})(?:,([0-9]{1,16}))? @@(.*)")
+_CHANGE_TRUNCATED = re.compile(r"\[diff truncated: [0-9]+ more lines\]|\[output truncated[^\n]*\]")
 TIMELINE_LANES = {"run_start": "lifecycle", "run_end": "lifecycle",
                   "assistant": "model", "tool_result": "tools", "verify": "verify",
                   "nudge": "harness", "guardrail_block": "harness",
@@ -143,8 +156,83 @@ def _verify(value):
             "output_tail": text(value.get("output_tail"))}
 
 
+def _activity_change_preview(result):
+    """Project only recognized edit evidence, bounded before splitting or parsing."""
+    if not isinstance(result, str):
+        return None
+    preview = result[:ACTIVITY_DETAIL_LIMIT]
+    # ToolExecutor's transcript preview silently caps at the same 2,000 chars.
+    # At either cap, an unfinished final line is not evidence of a whole edit.
+    truncated = len(result) >= ACTIVITY_DETAIL_LIMIT
+    if (truncated and not preview.endswith("\n")
+            and (len(result) == ACTIVITY_DETAIL_LIMIT or result[ACTIVITY_DETAIL_LIMIT] != "\n")):
+        preview = preview.rpartition("\n")[0]
+    lines = preview.split("\n")  # Preserve CR, form feeds, and Unicode separators as content.
+    if lines[-1] == "":
+        lines.pop()
+    head = _CHANGE_HEAD.fullmatch(lines[0]) if lines else None
+    if not head or len(lines) < 4:
+        return None
+    path, added, deleted = head.groups()
+    added, deleted = int(added), int(deleted)
+    if (number(added) is None or number(deleted) is None or added + deleted == 0
+            or lines[1:3] != ["--- a/" + path, "+++ b/" + path]):
+        return None
+    for index, line in enumerate(lines[3:], 3):
+        if _CHANGE_TRUNCATED.fullmatch(line):
+            if index != len(lines) - 1:
+                return None
+            truncated = True
+            # Unlike describe_change's line cap, an output cap can stop in the
+            # middle of its preceding row. Omit that uncertain row as well.
+            end = index - 1 if line.startswith("[output truncated") else index
+            lines = lines[:end]
+            break
+
+    old_left = new_left = None
+    seen_added = seen_deleted = content_rows = 0
+    previous_content = False
+    for line in lines[3:]:
+        hunk = _CHANGE_HUNK.fullmatch(line)
+        if hunk:
+            if old_left not in (None, 0) or new_left not in (None, 0):
+                return None
+            old, old_left, new, new_left = (int(value) if value is not None else 1
+                                             for value in hunk.groups()[:4])
+            if (any(number(value) is None for value in (old, old_left, new, new_left))
+                    or (old_left and old == 0) or (new_left and new == 0)
+                    or old_left + new_left == 0
+                    or number(old + max(0, old_left - 1)) is None
+                    or number(new + max(0, new_left - 1)) is None):
+                return None
+            previous_content = False
+        elif line[:1] in ("+", "-", " ") and old_left is not None:
+            consumes_old = line[0] != "+"
+            consumes_new = line[0] != "-"
+            if old_left < consumes_old or new_left < consumes_new:
+                return None
+            old_left -= consumes_old
+            new_left -= consumes_new
+            seen_added += line[0] == "+"
+            seen_deleted += line[0] == "-"
+            content_rows += 1
+            previous_content = True
+        elif line == "\\ No newline at end of file" and previous_content:
+            previous_content = False
+        else:
+            return None
+    if (not content_rows or seen_added > added or seen_deleted > deleted
+            or (not truncated and (old_left or new_left
+                                   or (seen_added, seen_deleted) != (added, deleted)))):
+        return None
+    summary = (f"{added} {'line' if added == 1 else 'lines'} added · "
+               f"{deleted} {'line' if deleted == 1 else 'lines'} removed")
+    return {"summary": summary, "additions": added, "deletions": deleted,
+            "rows": _diff_rows("\n".join(lines[3:])), "truncated": truncated}
+
+
 def _event(event, sequence):
-    """Bound browser-visible evidence, excluding assistant prose and file bodies."""
+    """Bound transcript evidence for browser display, excluding assistant prose."""
     kind = text(event.get("event"), 80)
     tool = text(event.get("tool"), 201)
     args = event.get("args")
@@ -157,7 +245,7 @@ def _event(event, sequence):
         target = text(args.get("path")) or text(args.get("command"))
     else:
         target = text(args, 500)
-    detail = text(event.get("result"), 2000)
+    detail = text(event.get("result"), ACTIVITY_DETAIL_LIMIT)
     if kind == "assistant":
         calls = event.get("tool_calls")
         detail = ", ".join(text(c.get("name"), 201) for c in calls[:12]
@@ -169,8 +257,13 @@ def _event(event, sequence):
         detail = text(event.get("status"))
     elif kind == "nudge":
         detail = text(event.get("kind"))
-    return {"event": kind, "sequence": sequence, "ts": text(event.get("ts"), 80),
-            "tool": tool, "target": target, "detail": detail}
+    projected = {"event": kind, "sequence": sequence, "ts": text(event.get("ts"), 80),
+                 "tool": tool, "target": target, "detail": detail}
+    if kind == "tool_result" and tool in _CHANGE_TOOLS:
+        preview = _activity_change_preview(event.get("result"))
+        if preview is not None:
+            projected["change_preview"] = preview
+    return projected
 
 
 def _timeline(transcript, metadata, started, ended, now, activity_state):

@@ -559,7 +559,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync(process.argv[1], 'utf8');
-const start = source.includes('  let changesRequest') ? source.indexOf('  let changesRequest') : source.indexOf('  async function loadChanges');
+const start = source.indexOf('  function diffCode(');
 const loader = source.slice(start, source.indexOf("  $('files-details').addEventListener", start));
 class Element {
   constructor(tag, className, text) { this.tag = tag; this.className = className; this.textContent = text || ''; this.dataset = {}; this.children = []; this.open = false; }

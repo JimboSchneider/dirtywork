@@ -417,6 +417,48 @@
     if (timeline?.omitted_events) notices.push(`Latest 2,000 events shown; ${number(timeline.omitted_events)} older events omitted.`);
     set('timeline-note', notices.join(' '));
   }
+  function diffCode(file) {
+    const code = element('div', 'diff-code');
+    code.setAttribute('role', 'table');
+    code.setAttribute('aria-label', `Changes to ${file.path}`);
+    for (const line of file.rows) {
+      const kind = {add: 'diff-add', remove: 'diff-remove', hunk: 'diff-hunk', notice: 'diff-notice', context: 'diff-context'}[line.kind];
+      const entry = element('div', 'diff-line ' + kind);
+      entry.setAttribute('role', 'row');
+      const old = element('span', 'diff-number', line.old ?? '');
+      const next = element('span', 'diff-number', line.new ?? '');
+      old.setAttribute('role', 'cell'); next.setAttribute('role', 'cell');
+      old.setAttribute('aria-label', line.old == null ? 'No previous line' : `Before: line ${line.old}`);
+      next.setAttribute('aria-label', line.new == null ? 'No new line' : `After: line ${line.new}`);
+      const sign = element('span', 'diff-sign', {add: '+', remove: '−', hunk: '⋯'}[line.kind] || '');
+      sign.setAttribute('role', 'cell');
+      const content = element('code', 'diff-text', line.kind === 'hunk' ? (line.text || 'Changed lines') : line.text);
+      content.setAttribute('role', 'cell');
+      entry.append(old, next, sign, content); code.append(entry);
+    }
+    if (!file.rows.length) code.append(element('p', 'diff-empty', 'File metadata or binary contents changed; no text lines to display.'));
+    return code;
+  }
+  function renderResultPreview(event) {
+    const details = element('details', 'result-preview');
+    const preview = event.change_preview;
+    if (preview) {
+      const heading = element('summary', 'edit-preview-heading');
+      heading.append(element('span', '', 'View edit'),
+        element('span', 'diff-count-add', `+${preview.additions}`),
+        element('span', 'diff-count-remove', `−${preview.deletions}`));
+      const body = element('div', 'activity-edit');
+      body.append(element('p', 'edit-description', preview.summary),
+        diffCode({path: event.target || 'this file', rows: preview.rows}),
+        element('p', 'edit-preview-note', preview.truncated
+          ? 'Partial preview. See File changes below for more context.'
+          : 'This edit only. See File changes below for the overall run.'));
+      details.append(heading, body);
+    } else {
+      details.append(element('summary', '', 'View output'), element('pre', '', event.detail));
+    }
+    return details;
+  }
   let changesRequest = null, changesQueued = null;
   function loadChanges(slug) {
     const revision = state.detailRevision;
@@ -451,24 +493,7 @@
         const heading = element('summary');
         heading.append(element('span', 'diff-filename', file.path), element('span', 'diff-type', file.change_type),
           element('span', 'diff-count-add', `+${file.additions}`), element('span', 'diff-count-remove', `−${file.deletions}`));
-        const code = element('div', 'diff-code');
-        code.setAttribute('role', 'table');
-        code.setAttribute('aria-label', `Changes to ${file.path}`);
-        for (const line of file.rows) {
-          const kind = {add: 'diff-add', remove: 'diff-remove', hunk: 'diff-hunk', notice: 'diff-notice', context: 'diff-context'}[line.kind];
-          const entry = element('div', 'diff-line ' + kind);
-          entry.setAttribute('role', 'row');
-          const old = element('span', 'diff-number', line.old ?? '');
-          const next = element('span', 'diff-number', line.new ?? '');
-          old.setAttribute('role', 'cell'); next.setAttribute('role', 'cell');
-          const sign = element('span', 'diff-sign', {add: '+', remove: '−', hunk: '⋯'}[line.kind] || '');
-          sign.setAttribute('role', 'cell');
-          const content = element('code', 'diff-text', line.kind === 'hunk' ? (line.text || 'Changed lines') : line.text);
-          content.setAttribute('role', 'cell');
-          entry.append(old, next, sign, content); code.append(entry);
-        }
-        if (!file.rows.length) code.append(element('p', 'diff-empty', 'File metadata or binary contents changed; no text lines to display.'));
-        row.append(heading, code); return row;
+        row.append(heading, diffCode(file)); return row;
       }));
       output.dataset.signature = signature;
     } catch (_) {
@@ -530,10 +555,9 @@
         head.append(element('span', 'log-time', elapsed != null && Number.isFinite(elapsed) ? duration(Math.max(0, elapsed)) : '—'), element('span', 'log-event', event.tool || words(event.event)), element('span', 'log-target', event.target || (event.event === 'tool_result' ? '' : event.detail)));
         row.append(head);
         if (event.detail && event.event === 'tool_result') {
-          const details = element('details');
+          const details = renderResultPreview(event);
           details.dataset.key = `${run.slug}:${event.sequence}`;
           details.open = expanded.has(details.dataset.key);
-          details.append(element('summary', '', 'Result preview'), element('pre', '', event.detail));
           row.append(details);
         }
         return row;
