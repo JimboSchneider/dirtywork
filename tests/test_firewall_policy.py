@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import json
 import pathlib
+import posixpath
 from dataclasses import replace
 
 import pytest
@@ -83,6 +84,7 @@ def test_policy_context_root_validation():
         ("",),
         ("wt",),
         ("/",),
+        ("//",),
         ("/wt/",),
         ("/wt/../x",),
         ("/wt", ""),
@@ -99,6 +101,17 @@ def test_policy_context_empty_root_cannot_allow_etc_passwd():
     # empty root must now fail construction instead (spec §3).
     with pytest.raises(FirewallInternalError):
         PolicyContext(mode="host", worktree_roots=("",))
+
+
+def test_policy_context_all_slash_root_is_rejected():
+    # `posixpath.normpath("//")` is "//" (POSIX keeps exactly two leading
+    # slashes), so "//" used to pass the normpath and "/" checks and then
+    # match nothing: fail closed, but a useless root. It must fail
+    # construction like "/" does (issue #184).
+    assert posixpath.normpath("//") == "//"
+    for roots in (("//",), ("/wt", "//")):
+        with pytest.raises(FirewallInternalError):
+            PolicyContext(mode="host", worktree_roots=roots)
 
 
 # --- group 2 (file-target rules) --------------------------------------------
@@ -450,6 +463,26 @@ def test_decide_internal_error_canonicalize_raises(monkeypatch):
     assert outcome.event.stage == "request"
 
 
+def test_decide_internal_error_canonicalize_returns_non_normalization(monkeypatch):
+    # `canonicalize` always returns a `Normalization`. If it ever did not, the
+    # second guard would read `.rejection` inside its own `except` and raise;
+    # the type check lands the failure in the first guard instead (issue #184).
+    # Two shapes, so that an `is None` check could not stand in for the type check.
+    for bogus in (None, "not a normalization"):
+        monkeypatch.setattr(
+            "dirtywork.firewall.policy.canonicalize", lambda request, bogus=bogus: bogus
+        )
+        req = _req("read_file", {"path": "x"})
+        outcome = decide(req, _ctx_host("/wt"))
+        assert outcome.action is None
+        assert outcome.policy.decision is Decision.DENY
+        assert outcome.policy.reason_code is ReasonCode.FIREWALL_INTERNAL_ERROR
+        assert outcome.policy.detail == "firewall internal error: FirewallInternalError"
+        assert outcome.event is not None
+        assert outcome.event.stage == "request"
+        assert outcome.dropped_keys == 0
+
+
 def test_decide_internal_error_evaluate_raises(monkeypatch):
     def boom(action, context):
         raise FirewallInternalError("nope")
@@ -589,6 +622,32 @@ def test_decide_batch_canonicalize_raises_for_one_request_only(monkeypatch):
     assert outcomes[0].policy.decision is Decision.ALLOW
     assert outcomes[1].policy.decision is Decision.DENY
     assert outcomes[1].policy.reason_code is ReasonCode.FIREWALL_INTERNAL_ERROR
+    assert outcomes[2].policy.decision is Decision.ALLOW
+
+
+def test_decide_batch_canonicalize_returns_non_normalization_for_one_request_only(monkeypatch):
+    real_canonicalize = canonicalize
+
+    def wrapped(request):
+        if request.call_id == "c2":
+            return None
+        return real_canonicalize(request)
+
+    monkeypatch.setattr("dirtywork.firewall.policy.canonicalize", wrapped)
+
+    requests = [
+        _req("read_file", {"path": "x"}, call_id="c1"),
+        _req("read_file", {"path": "y"}, call_id="c2"),
+        _req("read_file", {"path": "z"}, call_id="c3"),
+    ]
+    outcomes = decide_batch(requests, _ctx_host("/wt"))
+    assert outcomes[0].policy.decision is Decision.ALLOW
+    assert outcomes[1].action is None
+    assert outcomes[1].policy.decision is Decision.DENY
+    assert outcomes[1].policy.reason_code is ReasonCode.FIREWALL_INTERNAL_ERROR
+    assert outcomes[1].policy.detail == "firewall internal error: FirewallInternalError"
+    assert outcomes[1].event is not None
+    assert outcomes[1].event.stage == "request"
     assert outcomes[2].policy.decision is Decision.ALLOW
 
 

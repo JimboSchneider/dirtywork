@@ -45,9 +45,10 @@ class PolicyContext:
 
     `worktree_roots` is supplied, never discovered: host mode requires it
     nonempty (absolute posix paths, longest first, each already normalized
-    and never "/"); Docker mode requires it empty, since a container-scoped
-    command has no worktree path to rewrite against and every absolute path
-    is already outside it (spec §4 rule 3).
+    and never a bare run of slashes such as "/" or "//"); Docker mode
+    requires it empty, since a container-scoped command has no worktree
+    path to rewrite against and every absolute path is already outside it
+    (spec §4 rule 3).
     """
 
     mode: str
@@ -61,11 +62,15 @@ class PolicyContext:
         ):
             raise FirewallInternalError("worktree_roots must be a tuple of str")
         for root in self.worktree_roots:
+            # `posixpath.normpath("//")` is "//" (POSIX keeps exactly two
+            # leading slashes; three or more collapse to "/"), so "//" is the
+            # one all-slash root that survives the normpath check, and it then
+            # matches nothing. Reject every root that is only slashes, like
+            # "/". An empty root fails `isabs`.
             if (
-                not root
-                or not posixpath.isabs(root)
+                not posixpath.isabs(root)
                 or root != posixpath.normpath(root)
-                or root == "/"
+                or root.strip("/") == ""
             ):
                 raise FirewallInternalError(f"invalid worktree root: {root!r}")
         is_host = self.mode == "host"
@@ -300,6 +305,22 @@ def _action_internal_error_outcome(
     return Outcome(action, policy, event, dropped_keys)
 
 
+def _canonicalize_checked(request: ActionRequest) -> Normalization:
+    """`canonicalize` with its return type enforced. `canonicalize` is a
+    same-package function that always returns a `Normalization`, so any other
+    return is unreachable today; if it ever happened, the second guard in
+    `decide` would read `normalization.rejection` inside its own `except` and
+    raise, breaking the never-raises contract (spec §7). Raising here lands
+    the failure in the first guard instead, which already takes the
+    request-stage internal-error path."""
+    normalization = canonicalize(request)
+    if not isinstance(normalization, Normalization):
+        raise FirewallInternalError(
+            f"canonicalize returned {type(normalization).__name__}, not Normalization"
+        )
+    return normalization
+
+
 def decide(request: ActionRequest, context: PolicyContext) -> Outcome:
     """The one fail-closed entry point per addressable call (spec §7):
     never raises, never returns ALLOW from the internal-error path. Catches
@@ -314,7 +335,7 @@ def decide(request: ActionRequest, context: PolicyContext) -> Outcome:
     through `_action_internal_error_outcome`'s three-tier fallback instead,
     so the action's evidence is not discarded (spec §9.2)."""
     try:
-        normalization = canonicalize(request)
+        normalization = _canonicalize_checked(request)
     except Exception as exc:
         return _internal_error_outcome(request, exc)
     try:
@@ -351,7 +372,7 @@ def decide_batch(requests: "Sequence[ActionRequest]", context: PolicyContext) ->
                     0,
                 )
             else:
-                normalization = canonicalize(request)
+                normalization = _canonicalize_checked(request)
         except Exception as exc:
             outcomes.append(_internal_error_outcome(request, exc))
             continue
