@@ -7,6 +7,36 @@
     reviewBusy: false, detailRevision: 0, reviewNotes: new Map(), reviewFeedback: null};
   const knownThemes = ['ion', 'orchid', 'terminal'];
   const appearances = ['system', 'light', 'dark'];
+  const wopr = window.DirtyworkWopr;
+  let lastWoprRun = null, woprPulseTimer, disconnectTimer;
+  function renderWoprRun(run) {
+    const active = root.dataset.theme === 'wopr';
+    const stamp = $('wopr-run-status');
+    const text = active ? wopr.statusStamp(run) : '';
+    if (stamp.textContent !== text) stamp.textContent = text;
+    if (active && wopr.hasNewActivity(lastWoprRun, run) &&
+        !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      const panel = $('run-panel');
+      clearTimeout(woprPulseTimer);
+      panel.classList.remove('wopr-activity-pulse');
+      // Restart the single pulse even if new events arrive during its fade.
+      void panel.offsetWidth;
+      panel.classList.add('wopr-activity-pulse');
+      woprPulseTimer = setTimeout(() => panel.classList.remove('wopr-activity-pulse'), 800);
+    }
+    lastWoprRun = run;
+  }
+  function disconnectWopr() {
+    clearTimeout(disconnectTimer);
+    $('wopr-disconnect')?.remove();
+    const message = element('div', '', '[ CONNECTION TERMINATED ]');
+    message.id = 'wopr-disconnect'; message.setAttribute('role', 'status');
+    document.body.append(message);
+    disconnectTimer = setTimeout(() => message.remove(), 1500);
+    clearTimeout(woprPulseTimer);
+    $('run-panel').classList.remove('wopr-activity-pulse');
+    renderWoprRun(state.detail);
+  }
   function stored(key) { try { return localStorage.getItem('dirtywork.' + key); } catch { return null; } }
   function remember(key, value) { try { localStorage.setItem('dirtywork.' + key, value); } catch { /* Private browsing can disable storage. */ } }
   for (const [key, options, fallback] of [['theme', knownThemes, 'ion'], ['appearance', appearances, 'system']]) {
@@ -40,6 +70,8 @@
       $('theme').append(option);
     }
     root.dataset.theme = 'wopr'; $('theme').value = 'wopr';
+    clearTimeout(disconnectTimer); $('wopr-disconnect')?.remove();
+    renderWoprRun(state.detail);
     clearTimeout(secretAlertTimer);
     $('secret-theme-status')?.remove();
     const message = document.createElement('div'); message.id = 'secret-theme-status';
@@ -54,7 +86,9 @@
   });
   $('theme').addEventListener('change', () => {
     if ($('theme').value !== 'wopr') {
-      $('theme').querySelector('option[value="wopr"]')?.remove();
+      const unlocked = $('theme').querySelector('option[value="wopr"]');
+      if (unlocked) disconnectWopr();
+      unlocked?.remove();
       clearTimeout(secretAlertTimer);
       $('secret-theme-status')?.remove();
     }
@@ -430,6 +464,7 @@
   });
 
   function renderDetail(run) {
+    renderWoprRun(run);
     renderReviewControls(run);
     renderTimeline(run);
     set('worker-time', duration(run.duration_s));
@@ -563,6 +598,7 @@
         state.detail = null;
       }
       if (!state.selected) {
+        renderWoprRun(null);
         for (const [id, value] of [['worker-time', '—'], ['turns', '— / —'], ['verdict', '—'], ['worker-time-note', 'No run selected'], ['verdict-note', 'No verdict recorded']]) set(id, value);
       }
       renderList();

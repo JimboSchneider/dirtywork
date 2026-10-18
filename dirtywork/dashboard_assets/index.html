@@ -7,6 +7,7 @@
   <title>dirtywork · Worker observatory</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/style.css">
+  <script src="/wopr.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -46,6 +47,7 @@
       <div class="activity-layout">
         <article class="panel run-detail" id="run-panel" aria-label="Selected run">
           <div class="section-head"><span class="run-identifier"><span class="eyebrow" id="run-slug">Selected run</span><span data-help="selected-run"></span></span><span id="run-status" class="badge">—</span></div>
+          <div id="wopr-run-status" role="status" aria-live="polite" aria-atomic="true"></div>
           <h2 id="run-task">Loading run records…</h2>
           <div id="run-model" class="secondary mono"></div>
           <div class="stages" id="stages" aria-label="Recorded run stages"><div><span id="stage-start"></span>Started</div><div><span id="stage-work"></span>Activity</div><div><span id="stage-verify"></span>Verify</div><div><span id="stage-review"></span>Review</div></div>
@@ -83,7 +85,7 @@
       </div>
     </section>
     <details id="data-warnings" class="notice" hidden><summary id="warning-summary">Data notices</summary><ul id="warnings-list"></ul></details>
-    <footer><span>Local review controls · refreshes every 3s · <span id="source"></span></span><span>Worker completion ≠ review acceptance</span></footer>
+    <footer><span>Local review controls · refreshes every 3s · <span id="source"></span></span><span>Worker completion ≠ review acceptance</span><span class="wopr-greeting">GREETINGS, PROFESSOR FALKEN.</span></footer>
   </main>
 </body>
 </html>

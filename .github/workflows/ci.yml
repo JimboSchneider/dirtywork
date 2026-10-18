@@ -122,6 +122,8 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install build
       - run: python -m build
+      - name: WOPR behavior checks
+        run: node --test tests/dashboard_wopr.test.cjs
       - run: python -m venv smoke && smoke/bin/pip install dist/*.whl
       - name: Verify installed dashboard assets outside the checkout
         run: |
@@ -131,7 +133,7 @@ jobs:
           from importlib.resources import files
 
           assets = files("dirtywork.dashboard_assets")
-          for name in ("index.html", "style.css", "app.js", "VT323-Regular.ttf", "VT323-OFL.txt"):
+          for name in ("index.html", "style.css", "app.js", "wopr.js", "VT323-Regular.ttf", "VT323-OFL.txt"):
               assert assets.joinpath(name).read_bytes(), f"Missing or empty dashboard asset: {name}"
           PY
       # Each output goes to a file and is asserted with grep -q: a pipe's exit
