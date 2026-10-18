@@ -92,7 +92,7 @@ def test_inactive_and_unconfirmed_are_not_counted_as_live(tmp_path):
     record(tmp_path, "dead", {"status": "running", "host_pid": -1})
     record(tmp_path, "unknown", {"status": "running"})
     store = RunStore(tmp_path)
-    assert store.detail("dead", now=NOW)["activity_state"] == "inactive"
+    assert store.detail("dead", now=NOW)["activity_state"] == "unconfirmed"
     assert store.detail("unknown", now=NOW)["activity_state"] == "unconfirmed"
     assert store.snapshot(now=NOW)["summary"]["active"] == 0
 
@@ -227,8 +227,10 @@ def test_summary_omits_large_detail_evidence_and_prunes_deleted_cache(tmp_path):
     run = store.snapshot(now=NOW)["runs"][0]
     assert len(run["task"]) <= 240
     assert "files_changed" not in run
+    assert set(store._transcripts) == {"one"}
     shutil.rmtree(path)
     assert store.snapshot(now=NOW)["runs"] == []
+    assert store._transcripts == {}
 
 
 def test_out_of_range_numbers_and_deep_json_do_not_disconnect_dashboard(tmp_path):
@@ -247,9 +249,9 @@ def test_out_of_range_numbers_and_deep_json_do_not_disconnect_dashboard(tmp_path
     json.dumps(snapshot, allow_nan=False)
 
 
-def test_out_of_range_pid_is_inactive_not_an_exception(tmp_path):
+def test_out_of_range_pid_is_unconfirmed_not_an_exception(tmp_path):
     record(tmp_path, "numeric-pid", {"status": "running", "host_pid": 10 ** 100})
-    assert RunStore(tmp_path).detail("numeric-pid", now=NOW)["activity_state"] == "inactive"
+    assert RunStore(tmp_path).detail("numeric-pid", now=NOW)["activity_state"] == "unconfirmed"
 
 
 def test_rolling_activity_preserves_retained_event_identity(tmp_path):
@@ -288,7 +290,7 @@ def test_timeline_spans_full_run_and_refreshes_with_recorded_review(tmp_path):
     updated = store.detail("timeline", now=NOW)["timeline"]
     assert updated["points"][-1]["lane"] == "review"
     assert updated["points"][-1]["at_s"] == 60
-    assert updated["elapsed_s"] == 60
+    assert updated["elapsed_s"] == 40
 
 
 def test_timeline_does_not_invent_missing_times_or_review_timestamp(tmp_path):
@@ -469,10 +471,100 @@ def test_diff_rows_hide_metadata_and_track_both_line_numbers(tmp_path):
     ]
 
 
-def test_review_does_not_follow_planted_temporary_hardlink(tmp_path):
+@pytest.mark.parametrize('via_cli', [False, True])
+def test_review_does_not_follow_planted_temporary_hardlink(tmp_path, monkeypatch, via_cli):
+    from dirtywork import rundir
     directory = record(tmp_path, 'demo', {'status': 'completed'})
     outside = tmp_path / 'unrelated.txt'
     outside.write_text('keep this')
-    os.link(outside, directory / '.run.json.tmp')
-    RunStore(tmp_path).review_action('demo', 'start')
+    os.link(outside, directory / '.run.json.collision.tmp')
+    tokens = iter(['collision', 'fresh'])
+    monkeypatch.setattr(rundir.secrets, 'token_hex', lambda *a: next(tokens))
+    if via_cli:
+        from dirtywork.__main__ import main
+        monkeypatch.setattr(rundir, 'RUNS_DIR', tmp_path)
+        assert main(['runs', 'review-start', 'demo']) == 0
+    else:
+        RunStore(tmp_path).review_action('demo', 'start')
     assert outside.read_text() == 'keep this'
+
+
+def test_superseded_review_is_closed_and_not_awaiting(tmp_path):
+    record(tmp_path, 'old', {'status': 'completed', 'resumed_by': 'new',
+           'review_started_at': '2026-10-18T10:00:00Z'})
+    store = RunStore(tmp_path)
+    run = store.detail('old', now=NOW)
+    assert not run['review_in_progress']
+    assert run['review_elapsed_s'] is None
+    assert store.snapshot(now=NOW)['summary']['awaiting_review'] == 0
+
+
+def test_late_review_keeps_worker_axis(tmp_path):
+    record(tmp_path, 'late', {'status': 'completed', 'started': '2026-10-18T10:00:00Z',
+           'ended': '2026-10-18T10:02:00Z', 'review_started_at': '2026-10-18T11:59:00Z'},
+           [{'event': 'assistant', 'ts': '2026-10-18T10:01:00Z'}])
+    timeline = RunStore(tmp_path).detail('late', now=NOW)['timeline']
+    assert timeline['elapsed_s'] == 120
+    assert timeline['points'][0]['at_s'] == 60
+    assert timeline['points'][-1]['at_s'] == 7140
+
+
+def test_unsearchable_record_does_not_hide_readable_runs(tmp_path, monkeypatch):
+    from pathlib import Path
+    record(tmp_path, 'good', {'status': 'completed'})
+    bad = record(tmp_path, 'bad', {'status': 'completed'})
+    original = Path.is_dir
+    def denied(path):
+        if path == bad:
+            raise PermissionError('denied')
+        return original(path)
+    monkeypatch.setattr(Path, 'is_dir', denied)
+    result = RunStore(tmp_path).snapshot(now=NOW)
+    assert [r['slug'] for r in result['runs']] == ['good']
+    assert any('bad' in warning for warning in result['warnings'])
+
+
+@pytest.mark.parametrize('path', ['/api/runs', '/api/runs/demo', '/api/runs/demo/changes'])
+def test_http_filesystem_errors_are_json(dashboard_http, monkeypatch, path):
+    server, _ = dashboard_http
+    store = server.RequestHandlerClass.keywords['store']
+    def denied(*args, **kwargs):
+        raise PermissionError('denied')
+    for name in ('snapshot', 'detail', 'changes'):
+        monkeypatch.setattr(store, name, denied)
+    status, _, body = request(server, path)
+    assert status == 503
+    assert 'error' in json.loads(body)
+
+
+def test_host_changes_explain_no_export(tmp_path):
+    record(tmp_path, 'host', {'status': 'running', 'sandbox': 'none', 'host_pid': os.getpid()})
+    result = RunStore(tmp_path).changes('host')
+    assert 'Host-mode' in result['message']
+    assert 'do not export' in result['message']
+
+
+@pytest.mark.parametrize('metadata,events', [
+    ({'status': 'running', 'host_pid': os.getpid()}, [{'event': 'run_end', 'status': 'completed'}]),
+    ({'status': 'running', 'host_pid': 2147483647}, []),
+])
+def test_projected_review_eligibility_matches_browser_action(tmp_path, monkeypatch, metadata, events):
+    import dirtywork.review as review
+    monkeypatch.setattr(review, 'pid_alive', lambda pid: pid == os.getpid())
+    record(tmp_path, 'eligible', metadata, events)
+    store = RunStore(tmp_path)
+    assert store.detail('eligible')['review_eligible']
+    assert store.review_action('eligible', 'start')['review_in_progress']
+
+
+def test_browser_save_detects_concurrent_metadata_change(tmp_path, monkeypatch):
+    from dirtywork import rundir
+    directory = record(tmp_path, 'demo', {'status': 'completed'})
+    original = rundir.write_run_json
+    def concurrent(path, data, **kwargs):
+        original(path, {'status': 'completed', 'note': 'other writer'})
+        return original(path, data, **kwargs)
+    monkeypatch.setattr(rundir, 'write_run_json', concurrent)
+    with pytest.raises(RuntimeError, match='Run changed'):
+        RunStore(tmp_path).review_action('demo', 'start')
+    assert json.loads((directory / 'run.json').read_text())['note'] == 'other writer'

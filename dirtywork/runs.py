@@ -744,17 +744,23 @@ def cmd_export(args) -> int:
         repo_label=docker_args.repo_label(repo),
     )
 
-    data["status"] = _export_status_update(data.get("status"), artifacts.export_status)
-    data["export_status"] = artifacts.export_status
-    data["diff_stat"] = artifacts.diff_stat
-    data["patch_path"] = artifacts.patch_path
-    data["worktree_bytes"] = artifacts.worktree_bytes
-    data["worktree_files"] = artifacts.worktree_files
-    data["escaping_symlinks"] = artifacts.escaping_symlinks
-    data["dropped_git_entries"] = artifacts.dropped_git_entries
-    data["files_changed"] = artifacts.files_changed
-    data["files_changed_truncated"] = artifacts.files_changed_truncated
-    rundir.write_run_json(run_dir, data)
+    def merge_export(data):
+        data["status"] = _export_status_update(data.get("status"), artifacts.export_status)
+        data["export_status"] = artifacts.export_status
+        data["diff_stat"] = artifacts.diff_stat
+        data["patch_path"] = artifacts.patch_path
+        data["worktree_bytes"] = artifacts.worktree_bytes
+        data["worktree_files"] = artifacts.worktree_files
+        data["escaping_symlinks"] = artifacts.escaping_symlinks
+        data["dropped_git_entries"] = artifacts.dropped_git_entries
+        data["files_changed"] = artifacts.files_changed
+        data["files_changed_truncated"] = artifacts.files_changed_truncated
+        return data
+    try:
+        rundir.update_run_json(run_dir, merge_export)
+    except (OSError, ValueError) as e:
+        print(f"error: cannot update run metadata: {e}", file=sys.stderr)
+        return 2
 
     if artifacts.export_status != "ok":
         print(f"error: export failed: {artifacts.export_status}\n"
@@ -771,9 +777,9 @@ def cmd_review_start(args) -> int:
     """Start review wall time explicitly, without resetting an existing timer."""
     try:
         run_dir, data = _open_run(args.slug)
-        updated = start_review(data, datetime.now(timezone.utc))
-        if updated != data:
-            rundir.write_run_json(run_dir, updated)
+        now = datetime.now(timezone.utc)
+        updated = rundir.update_run_json(
+            run_dir, lambda current: start_review(current, now, run_dir=run_dir))
     except (RunsError, OSError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -785,9 +791,10 @@ def cmd_verdict(args) -> int:
     """Record a decision and an explicit or timed review duration."""
     try:
         run_dir, data = _open_run(args.slug)
-        updated = record_verdict(data, args.verdict, args.note, args.review_seconds,
-                                 datetime.now(timezone.utc))
-        rundir.write_run_json(run_dir, updated)
+        now = datetime.now(timezone.utc)
+        updated = rundir.update_run_json(
+            run_dir, lambda current: record_verdict(
+                current, args.verdict, args.note, args.review_seconds, now))
     except (RunsError, OSError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

@@ -28,8 +28,8 @@ from .contract import AGENTS
 from .firewall_gate import policy_context_for
 from .llm import LLMError
 from .providers import DEFAULT_BASE_URLS, PROVIDER_NAMES, get_provider
-from .rundir import (RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir, read_run_json,
-                     run_dir_for, write_run_json)
+from .rundir import (RUNS_DIR, RunDirError, create_run_dir, ensure_runs_dir,
+                     run_dir_for, write_run_json, update_run_json)
 from .runner import (
     CHARS_PER_TOKEN,
     DEFAULT_MAX_TOKENS,
@@ -545,12 +545,10 @@ def _update_run_json(run_dir: Path, *, mark_ended: bool = True, **fields) -> Non
     failure here must not break the stdout JSON contract of exactly one
     object per run."""
     try:
-        existing = read_run_json(run_dir)
         updates = dict(fields)
         if mark_ended:
             updates["ended"] = datetime.now(timezone.utc).isoformat()
-        existing.update(updates)
-        write_run_json(run_dir, existing)
+        update_run_json(run_dir, lambda existing: {**existing, **updates})
     except Exception:
         pass
 

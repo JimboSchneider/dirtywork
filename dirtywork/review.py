@@ -2,7 +2,68 @@
 from __future__ import annotations
 
 import math
+import os
+import stat
+import json
+from pathlib import Path
+
+from .osfs import open_nofollow
+from .resume import pid_alive
 from datetime import datetime, timezone
+
+
+def _terminal_event(run_dir):
+    """Read complete transcript records; a partial final write is not evidence."""
+    end = None
+    try:
+        fd = open_nofollow(Path(run_dir) / "transcript.jsonl",
+                           os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+        with os.fdopen(fd, "rb") as source:
+            while True:
+                line = source.readline(1_048_577)
+                if not line:
+                    break
+                if len(line) > 1_048_576:
+                    while line and not line.endswith(b"\n"):
+                        line = source.readline(1_048_577)
+                    continue
+                if not line.endswith(b"\n"):
+                    break
+                try:
+                    event = json.loads(line)
+                except (ValueError, UnicodeError, RecursionError):
+                    continue
+                if isinstance(event, dict) and event.get("event") == "run_end":
+                    end = event
+    except OSError:
+        pass
+    return end
+
+
+def effective_run_status(data, end=None, *, run_dir=None):
+    """Return display status and activity without modifying stored metadata."""
+    if end is None and run_dir is not None:
+        end = _terminal_event(run_dir)
+    status = data.get("status")
+    status = status if isinstance(status, str) and status else "unknown"
+    if end and (status in ("running", "unknown")):
+        terminal_status = end.get("status")
+        status = (terminal_status if isinstance(terminal_status, str)
+                  and terminal_status and terminal_status != "running" else "ended")
+    if status == "running":
+        pid = data.get("host_pid")
+        valid_pid = type(pid) is int and 0 < pid <= 2 ** 31 - 1
+        activity = "unconfirmed" if not valid_pid else "running" if pid_alive(pid) else "inactive"
+    else:
+        activity = "unknown" if status == "unknown" else "ended"
+    return status, activity
+
+
+def review_eligible(status, activity_state):
+    return activity_state in ("ended", "inactive") and status != "unknown"
 
 
 def review_timestamp(value):
@@ -12,10 +73,13 @@ def review_timestamp(value):
     return result if result.tzinfo else result.replace(tzinfo=timezone.utc)
 
 
-def start_review(data, now):
+def start_review(data, now, *, run_dir=None, end=None):
+    if data.get("resumed_by"):
+        raise ValueError("Run is superseded by a resumed run.")
     if data.get("verdict"):
         raise ValueError("Run already has a verdict.")
-    if data.get("status") == "running":
+    status, activity = effective_run_status(data, end, run_dir=run_dir)
+    if not review_eligible(status, activity):
         raise ValueError("Wait for the worker to finish before starting review.")
     if data.get("review_started_at") is not None:
         if review_timestamp(data["review_started_at"]) > now:

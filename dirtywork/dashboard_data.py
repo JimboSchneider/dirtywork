@@ -5,7 +5,6 @@ import json
 import math
 import os
 import re
-import secrets
 import stat
 import threading
 from collections import deque
@@ -15,8 +14,7 @@ from statistics import median
 
 from . import rundir
 from .osfs import open_nofollow
-from .resume import pid_alive
-from .review import start_review, record_verdict
+from .review import start_review, record_verdict, effective_run_status, review_eligible
 
 MAX_LINE = 1024 * 1024
 ACTIVITY_LIMIT = 60
@@ -50,28 +48,6 @@ def _open_regular(path):
         os.close(fd)
         raise ValueError("not a regular file")
     return os.fdopen(fd, "rb")
-
-
-def _write_review(directory, data):
-    # Anchor the replacement in an opened directory and create a fresh inode:
-    # O_NOFOLLOW alone cannot protect a predictable temp path from hardlinks.
-    directory_fd = open_nofollow(directory, os.O_RDONLY | os.O_DIRECTORY)
-    name = ".dashboard-review-" + secrets.token_hex(16)
-    try:
-        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                     0o600, dir_fd=directory_fd)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as source:
-                json.dump(data, source, indent=2, sort_keys=True, allow_nan=False)
-                source.write("\n")
-            os.replace(name, "run.json", src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
-        finally:
-            try:
-                os.unlink(name, dir_fd=directory_fd)
-            except FileNotFoundError:
-                pass
-    finally:
-        os.close(directory_fd)
 
 
 def _diff_rows(patch):
@@ -162,9 +138,7 @@ def _timeline(transcript, metadata, started, ended, now, activity_state):
                        "at_s": (ts - origin).total_seconds()})
     points.sort(key=lambda point: point["at_s"])
     end = now if activity_state == "running" else ended
-    if metadata.get("review_started_at") and not metadata.get("verdict"):
-        end = now
-    extent = max([point["at_s"] for point in points] +
+    extent = max([point["at_s"] for point in points if point["lane"] != "review"] +
                  ([(end - origin).total_seconds()] if end and origin and end >= origin else []), default=None)
     return {"points": points, "elapsed_s": extent, "untimed_events": untimed,
             "omitted_events": max(0, transcript["timeline_total"] - TIMELINE_LIMIT),
@@ -198,12 +172,14 @@ class RunStore:
                     raise ValueError("Run metadata is not an object.")
             except (OSError, ValueError, RecursionError) as e:
                 raise RuntimeError("Run metadata cannot be safely updated.") from e
-            if data.get("status") in (None, "", "running", "unknown"):
-                raise RuntimeError("Wait for the worker to finish before reviewing this run.")
+            end = self._transcript(directory)["end"]
+            status, activity = effective_run_status(data, end)
+            if not review_eligible(status, activity) or data.get("resumed_by"):
+                raise RuntimeError("This run is still running, unknown, or superseded; refresh to see its state.")
             now = datetime.now(timezone.utc)
             if action == "start":
                 try:
-                    updated = start_review(data, now)
+                    updated = start_review(data, now, end=end)
                 except ValueError as e:
                     raise RuntimeError(str(e)) from e
             else:
@@ -218,7 +194,10 @@ class RunStore:
                 except ValueError as e:
                     raise RuntimeError(str(e)) from e
             if updated != data:
-                _write_review(directory, updated)
+                try:
+                    rundir.write_run_json(directory, updated, expected_signature=rundir.run_json_signature(data))
+                except rundir.RunJsonConflict as e:
+                    raise RuntimeError("Run changed; refresh before saving your review.") from e
             return self._detail(slug, now)
 
     def _transcript(self, directory):
@@ -288,7 +267,9 @@ class RunStore:
         with self._lock:
             run = self._detail(slug, datetime.now(timezone.utc))
             directory = rundir.run_dir_for(slug, self.root)
-            message = ("Changes will appear when the worker exports its files."
+            message = ("Host-mode runs do not export a patch; inspect git diff in the worktree."
+                       if run["sandbox"] == "none" else
+                       "Changes will appear when the worker exports its files."
                        if run["status"] == "running" else
                        "No saved patch is available for this run.")
             try:
@@ -343,19 +324,7 @@ class RunStore:
         start = transcript["start"]
         metadata = {**start, **metadata}
         end = transcript["end"]
-        status = text(metadata.get("status"), 100) or text(end.get("status"), 100) or "unknown"
-        # A CLI killed between its transcript flush and metadata update can
-        # leave a running label beside terminal evidence.
-        if status == "running" and end:
-            status = text(end.get("status"), 100) or "ended"
-        activity_state = "ended"
-        if status == "running":
-            pid = metadata.get("host_pid")
-            valid_pid = type(pid) is int and 0 < pid <= 2 ** 31 - 1
-            activity_state = ("unconfirmed" if pid is None else
-                              "running" if valid_pid and pid_alive(pid) else "inactive")
-        elif status == "unknown":
-            activity_state = "unknown"
+        status, activity_state = effective_run_status(metadata, end)
         started = timestamp(metadata.get("started")) or timestamp(start.get("ts"))
         ended = timestamp(metadata.get("ended")) or timestamp(end.get("ts"))
         duration = number(end.get("duration_s"))
@@ -374,7 +343,7 @@ class RunStore:
         files = metadata.get("files_changed", end.get("files_changed"))
         verdict = metadata.get("verdict")
         review_started = timestamp(metadata.get("review_started_at"))
-        reviewing = bool(review_started and review_started <= now and verdict is None)
+        reviewing = bool(review_started and review_started <= now and verdict is None and not metadata.get("resumed_by"))
         run = {k: text(metadata.get(k)) for k in
                ("task", "model", "provider", "repo", "branch", "sandbox", "resumed_from", "resumed_by", "note")}
         run["task"] = text(metadata.get("task"), 64000)
@@ -389,6 +358,7 @@ class RunStore:
                     "review_seconds": number(metadata.get("review_seconds")),
                     "review_started_at": review_started.isoformat() if review_started else None,
                     "review_in_progress": reviewing,
+                    "review_eligible": review_eligible(status, activity_state) and not metadata.get("resumed_by"),
                     "review_elapsed_s": (now - review_started).total_seconds() if reviewing else None,
                     "verify": _verify(metadata.get("verify")) or transcript["verify"] or _verify(end.get("verify")),
                     "files_changed": [text(p) for p in files[:1000] if isinstance(p, str)] if isinstance(files, list) else None,
@@ -408,9 +378,13 @@ class RunStore:
                 directories = []
                 warnings.append("Cannot list runs: " + str(e))
             for directory in directories:
-                if directory.is_symlink() or not directory.is_dir() or not (directory / "run.json").exists():
-                    continue
                 try:
+                    if directory.is_symlink() or not directory.is_dir():
+                        continue
+                    try:
+                        (directory / "run.json").stat()
+                    except FileNotFoundError:
+                        continue
                     run = self._detail(directory.name, now)
                 except (OSError, ValueError) as e:
                     warnings.append(f"{directory.name}: {e}")
@@ -419,7 +393,7 @@ class RunStore:
                     warnings.append(directory.name + ": " + "; ".join(run["warnings"]))
                 runs.append({**{k: v for k, v in run.items() if k in (
                     "slug", "status", "activity_state", "model", "repo", "started", "ended",
-                    "duration_s", "verdict", "review_seconds", "review_in_progress", "usage")}, "task": run["task"][:240]})
+                    "duration_s", "verdict", "review_seconds", "review_in_progress", "resumed_by", "usage")}, "task": run["task"][:240]})
             runs.sort(key=lambda r: (r["started"] or "", r["slug"]), reverse=True)
             present = {r["slug"] for r in runs}
             self._transcripts = {k: v for k, v in self._transcripts.items() if k in present}
@@ -461,7 +435,7 @@ def aggregate(runs):
             "reviewed": len(reviewed), "accepted": accepted,
             "rejected": len(reviewed) - accepted,
             "cleanup": sum(r["verdict"] == "cleanup" for r in runs),
-            "awaiting_review": sum(r["activity_state"] == "ended" and r["verdict"] is None for r in runs),
+            "awaiting_review": sum(review_eligible(r["status"], r["activity_state"]) and r["verdict"] is None and not r.get("resumed_by") for r in runs),
             "acceptance_rate": accepted / len(reviewed) if reviewed else None,
             "median_duration_s": median(durations) if durations else None,
             "duration_samples": len(durations),

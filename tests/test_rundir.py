@@ -163,3 +163,81 @@ def test_run_dir_for_refuses_a_slug_that_could_name_a_path(tmp_path: Path, slug)
     with pytest.raises(RunDirError) as excinfo:
         run_dir_for(slug, runs)
     assert f"invalid run slug '{slug}'" in str(excinfo.value)
+
+
+def test_writer_skips_an_existing_hardlinked_temp_candidate(tmp_path, monkeypatch):
+    from dirtywork import rundir
+    victim = tmp_path / 'victim'
+    victim.write_text('do not truncate')
+    candidate = tmp_path / '.run.json.collision.tmp'
+    os.link(victim, candidate)
+    tokens = iter(['collision', 'fresh'])
+    monkeypatch.setattr(rundir.secrets, 'token_hex', lambda *a: next(tokens))
+    rundir.write_run_json(tmp_path, {'status': 'done'})
+    assert victim.read_text() == 'do not truncate'
+    assert rundir.read_run_json(tmp_path) == {'status': 'done'}
+
+
+def test_writer_rejects_stale_expected_signature(tmp_path):
+    from dirtywork import rundir
+    original = {'status': 'completed'}
+    rundir.write_run_json(tmp_path, original)
+    signature = rundir.run_json_signature(original)
+    rundir.write_run_json(tmp_path, {**original, 'verdict': 'accepted'})
+    with pytest.raises(rundir.RunJsonConflict):
+        rundir.write_run_json(tmp_path, original, expected_signature=signature)
+    assert rundir.read_run_json(tmp_path)['verdict'] == 'accepted'
+
+
+def test_concurrent_merge_updates_preserve_both_fields(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from dirtywork import rundir
+    rundir.write_run_json(tmp_path, {'status': 'completed'})
+    barrier = Barrier(2)
+    def update(key, value):
+        first_attempt = True
+        def transform(current):
+            nonlocal first_attempt
+            if first_attempt:
+                first_attempt = False
+                barrier.wait(timeout=5)
+            return {**current, key: value}
+        return rundir.update_run_json(tmp_path, transform)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        verdict = pool.submit(update, 'verdict', 'accepted')
+        exported = pool.submit(update, 'export_status', 'ok')
+        verdict.result(timeout=10)
+        exported.result(timeout=10)
+    assert rundir.read_run_json(tmp_path) == {
+        'status': 'completed', 'verdict': 'accepted', 'export_status': 'ok'}
+
+
+def test_metadata_lock_is_released_when_writer_process_dies(tmp_path):
+    import subprocess
+    import sys
+    from dirtywork import rundir
+    child = subprocess.Popen([
+        sys.executable, '-c',
+        'from pathlib import Path; import sys,time; '
+        'from dirtywork.rundir import _run_json_lock; '
+        'lock=_run_json_lock(Path(sys.argv[1])); lock.__enter__(); '
+        'print("locked",flush=True); time.sleep(30)', str(tmp_path)],
+        stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == 'locked'
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+    rundir.write_run_json(tmp_path, {'status': 'completed'})
+    assert rundir.read_run_json(tmp_path)['status'] == 'completed'
+
+
+def test_metadata_lock_refuses_hardlink_without_touching_target(tmp_path):
+    from dirtywork import rundir
+    victim = tmp_path / 'victim'
+    victim.write_text('untouched')
+    os.link(victim, tmp_path / '.run.json.lock')
+    with pytest.raises(OSError, match='unsafe run metadata lock'):
+        rundir.write_run_json(tmp_path, {'status': 'done'})
+    assert victim.read_text() == 'untouched'

@@ -113,7 +113,7 @@ jobs:
   wheel-smoke:
     # The only check that catches a missing package-data entry: the unit suite
     # runs from the source tree and would pass without it.
-    name: wheel smoke (build, install, contract, init, --version)
+    name: wheel smoke (build, install, assets, contract, init, --version)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -123,6 +123,17 @@ jobs:
       - run: python -m pip install build
       - run: python -m build
       - run: python -m venv smoke && smoke/bin/pip install dist/*.whl
+      - name: Verify installed dashboard assets outside the checkout
+        run: |
+          smoke_python="$PWD/smoke/bin/python"
+          cd "$RUNNER_TEMP"
+          "$smoke_python" -I - <<'PY'
+          from importlib.resources import files
+
+          assets = files("dirtywork.dashboard_assets")
+          for name in ("index.html", "style.css", "app.js"):
+              assert assets.joinpath(name).read_bytes(), f"Missing or empty dashboard asset: {name}"
+          PY
       # Each output goes to a file and is asserted with grep -q: a pipe's exit
       # status is its last command's, so a crash upstream would be masked.
       - run: |

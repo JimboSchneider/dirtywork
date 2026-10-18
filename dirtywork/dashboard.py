@@ -67,7 +67,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(200, body, mime)
             return
         if path == "/api/runs":
-            self._json(200, {**self.store.snapshot(), "csrf_token": self.csrf_token})
+            try:
+                self._json(200, {**self.store.snapshot(), "csrf_token": self.csrf_token})
+            except OSError:
+                self._json(503, {"error": "Run records are temporarily unavailable; retry shortly."})
             return
         if path.startswith("/api/runs/"):
             is_changes = path.endswith("/changes")
@@ -78,6 +81,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "Invalid run slug."})
             except FileNotFoundError:
                 self._json(404, {"error": "Run no longer exists."})
+            except OSError:
+                self._json(503, {"error": "Run records are temporarily unavailable; retry shortly."})
             return
         self._json(404, {"error": "Not found."})
 

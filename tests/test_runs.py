@@ -1562,3 +1562,21 @@ def test_timeline_line_sandbox_reset_with_strays():
     line = runs._timeline_line(event)
     assert "sandbox_reset" in line
     assert "strays:" in line
+
+
+def test_export_preserves_review_recorded_while_exporting(tmp_path, repo, monkeypatch):
+    monkeypatch.setattr(rundir, 'RUNS_DIR', tmp_path / 'runs')
+    wt = _empty_worktree(repo, 'slug1')
+    run_dir = _docker_run_json(tmp_path / 'runs', 'slug1', repo, wt)
+    _export_ok(monkeypatch, RunArtifacts(export_status='ok'))
+    def concurrent_export(*a, **kw):
+        current = rundir.read_run_json(run_dir)
+        current.update(verdict='accept', review_seconds=12, review_started_at='earlier')
+        rundir.write_run_json(run_dir, current)
+        return RunArtifacts(export_status='ok')
+    monkeypatch.setattr(runs.export, 'export_run', concurrent_export)
+    assert runs.cmd_export(_export_args('slug1')) == 0
+    updated = rundir.read_run_json(run_dir)
+    assert updated['verdict'] == 'accept'
+    assert updated['review_seconds'] == 12
+    assert updated['review_started_at'] == 'earlier'

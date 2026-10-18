@@ -651,3 +651,5 @@ are not part of the installed package.
 ### Inspecting file changes in the dashboard
 
 Expand **File changes** on a selected run, then select a file to see its unified diff. Added and removed lines use the selected theme. New files appear in full. The viewer reads the run’s saved `diff.patch` (up to 1 MiB) and refreshes every three seconds while expanded. Docker runs export this patch at completion; while a run is active, the viewer explains that it is waiting for export. Runs without a saved patch, including older or cleaned-up records, show an explicit unavailable message. The viewer never executes repository code or writes files.
+
+Host-mode runs (`--sandbox none`) do not export saved patches; inspect `git diff` in their worktree. Review markers are pinned to the end of the worker timeline so delayed reviews do not compress worker events; selecting a marker shows its actual time. Superseded runs no longer count as open or awaiting review.

@@ -34,6 +34,7 @@
     if (run.verdict === 'accept') return 'Accepted';
     if (run.verdict === 'reject') return 'Rejected';
     if (run.verdict === 'cleanup') return 'Cleanup';
+    if (run.resumed_by) return `Superseded by ${run.resumed_by}`;
     if (run.review_in_progress) return 'In review';
     if (run.activity_state === 'inactive') return 'Inactive · process stopped';
     if (run.activity_state === 'unconfirmed') return 'Running · unconfirmed';
@@ -167,7 +168,7 @@
   }
   function renderReviewControls(run) {
     const settled = Boolean(run.verdict);
-    const eligible = !settled && !['running', 'unknown'].includes(run.status);
+    const eligible = !settled && run.review_eligible;
     $('start-review').disabled = state.reviewBusy || !eligible || run.review_in_progress;
     $('start-review').textContent = run.review_in_progress ? 'Review started' : 'Start Review';
     $('accept-review').disabled = state.reviewBusy || !eligible || !run.review_in_progress;
@@ -180,7 +181,7 @@
       $('review-note').value = state.reviewNotes.get(run.slug) || '';
       $('review-note').dataset.slug = run.slug;
     }
-    set('review-controls-state', settled ? 'Review saved' : !eligible ? 'Wait for the worker to finish' : run.review_in_progress ? 'Timer running' : 'Start review to begin timing');
+    set('review-controls-state', settled ? 'Review saved' : run.resumed_by ? `Superseded by ${run.resumed_by}` : !eligible ? 'Wait for the worker to finish' : run.review_in_progress ? 'Timer running' : 'Start review to begin timing');
     const feedback = state.reviewFeedback?.slug === run.slug ? state.reviewFeedback : null;
     const message = feedback?.message || '';
     if ($('review-feedback').textContent !== message) set('review-feedback', message);
@@ -337,6 +338,7 @@
     }
     set('timeline-status', run.review_in_progress ? 'Live review · 3s refresh' : run.activity_state === 'running' ? 'Live · 3s refresh' : 'Recorded events');
     const notices = ['Event timestamps · gaps are unclassified time.'];
+    if (timeline?.points.some(point => point.lane === 'review')) notices.push('Review markers sit at the end of the worker axis; select one for its actual time.');
     if (timeline?.untimed_events) notices.push(`${number(timeline.untimed_events)} events without usable timestamps.`);
     if (timeline?.omitted_events) notices.push(`Latest 2,000 events shown; ${number(timeline.omitted_events)} older events omitted.`);
     set('timeline-note', notices.join(' '));
@@ -393,7 +395,7 @@
     set('worker-time', duration(run.duration_s));
     set('worker-time-note', run.activity_state === 'running' ? 'Elapsed · live process detected' : run.duration_s == null ? 'Duration unavailable' : 'Recorded worker duration');
     set('turns', `${number(run.turns)} / ${number(run.tool_calls)}`);
-    set('verdict', {accept: 'Accepted', reject: 'Rejected', cleanup: 'Cleanup'}[run.verdict] || (run.review_in_progress ? 'Reviewing' : 'Pending'));
+    set('verdict', {accept: 'Accepted', reject: 'Rejected', cleanup: 'Cleanup'}[run.verdict] || (run.resumed_by ? 'Superseded' : run.review_in_progress ? 'Reviewing' : 'Pending'));
     set('verdict-note', run.review_in_progress ? `${duration(run.review_elapsed_s)} review in progress` : run.review_seconds != null ? `${duration(run.review_seconds)} recorded review time` : run.verdict ? 'Review time not recorded' : run.activity_state === 'running' ? 'Worker is still running' : 'No verdict recorded');
     set('review-time', duration(run.review_in_progress ? run.review_elapsed_s : run.review_seconds));
     set('review-time-state', run.review_in_progress ? 'Timer running' : run.review_seconds != null ? 'Recorded duration' : 'Not tracked');
