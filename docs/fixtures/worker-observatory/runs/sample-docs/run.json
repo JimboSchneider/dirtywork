@@ -1,0 +1,28 @@
+{
+  "task": "Update the invoice setup guide.",
+  "task_type": "docs",
+  "status": "completed",
+  "model": "qwen3.6-35b-a3b-splash",
+  "provider": "openai",
+  "sandbox": {
+    "backend": "docker"
+  },
+  "repo": "/projects/atlas",
+  "worktree": "/projects/atlas/.worktrees/docs",
+  "branch": "dirtywork/docs",
+  "started": "2026-10-18T14:00:00Z",
+  "ended": "2026-10-18T14:00:46Z",
+  "turns": 6,
+  "files_changed": [
+    "docs/invoicing.md"
+  ],
+  "verify": {
+    "command": "python -m pytest tests/test_invoices.py -q",
+    "passed": true,
+    "exit_code": 0,
+    "output_tail": "12 passed in 0.08s"
+  },
+  "verdict": "accept",
+  "review_seconds": 15,
+  "verdict_at": "2026-10-18T14:01:01Z"
+}

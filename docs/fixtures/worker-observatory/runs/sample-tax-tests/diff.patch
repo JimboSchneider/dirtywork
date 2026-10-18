@@ -1,0 +1,7 @@
+diff --git a/tests/test_invoices.py b/tests/test_invoices.py
+--- a/tests/test_invoices.py
++++ b/tests/test_invoices.py
+@@ -1 +1,3 @@
+ def test_tax_exempt_total():
++    invoice = Invoice(tax_exempt=True, subtotal=100)
++    assert invoice.total == 100

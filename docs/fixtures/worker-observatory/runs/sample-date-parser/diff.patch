@@ -1,0 +1,7 @@
+diff --git a/src/dates.py b/src/dates.py
+--- a/src/dates.py
++++ b/src/dates.py
+@@ -1,2 +1,2 @@
+ def parse_invoice_date(value):
+-    return datetime.fromisoformat(value)
++    return datetime.strptime(value, "%Y-%m-%d")

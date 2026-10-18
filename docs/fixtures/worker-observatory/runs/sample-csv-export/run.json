@@ -1,0 +1,25 @@
+{
+  "task": "Add CSV export for invoice summaries.",
+  "task_type": "feature",
+  "status": "completed",
+  "model": "qwen3.6-35b-a3b-splash",
+  "provider": "openai",
+  "sandbox": {
+    "backend": "docker"
+  },
+  "repo": "/projects/atlas",
+  "worktree": "/projects/atlas/.worktrees/csv-export",
+  "branch": "dirtywork/csv-export",
+  "started": "2026-10-18T13:15:00Z",
+  "ended": "2026-10-18T13:17:06Z",
+  "turns": 6,
+  "files_changed": [
+    "src/export.py"
+  ],
+  "verify": {
+    "command": "python -m pytest tests/test_invoices.py -q",
+    "passed": true,
+    "exit_code": 0,
+    "output_tail": "12 passed in 0.08s"
+  }
+}
