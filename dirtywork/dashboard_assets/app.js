@@ -8,7 +8,7 @@
   const knownThemes = ['ion', 'orchid', 'terminal'];
   const appearances = ['system', 'light', 'dark'];
   const wopr = window.DirtyworkWopr;
-  let lastWoprRun = null, woprPulseTimer, disconnectTimer;
+  let lastWoprRun = null, woprPulseTimer, disconnectTimer, syncIndicatorTimer;
   function renderWoprRun(run) {
     const active = root.dataset.theme === 'wopr';
     const stamp = $('wopr-run-status');
@@ -588,8 +588,14 @@
       const snapshot = await api('/api/runs');
       state.snapshot = snapshot;
       $('error').hidden = true;
-      $('connection-dot').classList.remove('offline');
-      set('connection', `${number(snapshot.summary.active)} active · ${snapshot.summary.reviewing ? number(snapshot.summary.reviewing) + ' in review · ' : ''}${number(snapshot.summary.total)} recorded · updated ${new Date(snapshot.updated_at).toLocaleTimeString()}`);
+      const indicator = $('connection-dot');
+      indicator.classList.remove('offline');
+      indicator.classList.add('syncing');
+      clearTimeout(syncIndicatorTimer);
+      syncIndicatorTimer = setTimeout(() => indicator.classList.remove('syncing'), 900);
+      const connectionLabel = `Live · ${number(snapshot.summary.active)} active · ${snapshot.summary.reviewing ? number(snapshot.summary.reviewing) + ' in review · ' : ''}${number(snapshot.summary.total)} recorded`;
+      if ($('connection').textContent !== connectionLabel) set('connection', connectionLabel);
+      $('connection').title = `Refreshes every 3 seconds · Last synced ${new Date(snapshot.updated_at).toLocaleTimeString()}`;
       set('source', snapshot.runs_dir);
       $('empty').hidden = snapshot.runs.length > 0;
       $('run-panel').hidden = !snapshot.runs.length;
@@ -608,8 +614,11 @@
       $('warnings-list').replaceChildren(...snapshot.warnings.map(warning => element('li', '', warning)));
       await loadDetail();
     } catch (error) {
+      clearTimeout(syncIndicatorTimer);
+      $('connection-dot').classList.remove('syncing');
       $('connection-dot').classList.add('offline');
       set('connection', 'Disconnected · last available data shown');
+      $('connection').title = 'Connection unavailable · retrying automatically every 3 seconds';
       set('error', error.message + ' Check that dirtywork dashboard is still running. Retrying automatically.');
       $('error').hidden = false;
     } finally { state.busy = false; }
