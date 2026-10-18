@@ -568,3 +568,10 @@ def test_browser_save_detects_concurrent_metadata_change(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match='Run changed'):
         RunStore(tmp_path).review_action('demo', 'start')
     assert json.loads((directory / 'run.json').read_text())['note'] == 'other writer'
+
+
+def test_bundled_wopr_font_is_served(dashboard_http):
+    status, headers, body = request(dashboard_http[0], '/VT323-Regular.ttf')
+    assert status == 200
+    assert headers['Content-Type'] == 'font/ttf'
+    assert body[:4] == b'\x00\x01\x00\x00'

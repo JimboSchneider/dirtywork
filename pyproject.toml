@@ -35,7 +35,7 @@ packages = ["dirtywork", "dirtywork.providers", "dirtywork.sandbox", "dirtywork.
 
 [tool.setuptools.package-data]
 "dirtywork.contract" = ["*.md"]
-"dirtywork.dashboard_assets" = ["*.html", "*.css", "*.js"]
+"dirtywork.dashboard_assets" = ["*.html", "*.css", "*.js", "*.ttf", "*-OFL.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

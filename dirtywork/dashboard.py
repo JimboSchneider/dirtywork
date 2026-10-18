@@ -13,7 +13,7 @@ from urllib.parse import unquote, urlsplit
 from . import rundir
 from .dashboard_data import RunStore
 
-ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
+ASSETS = {"/VT323-Regular.ttf": ("VT323-Regular.ttf", "font/ttf"),"/": ("index.html", "text/html; charset=utf-8"),
           "/style.css": ("style.css", "text/css; charset=utf-8"),
           "/app.js": ("app.js", "text/javascript; charset=utf-8")}
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; "
