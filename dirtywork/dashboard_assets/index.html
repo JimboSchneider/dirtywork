@@ -52,6 +52,7 @@
           <div id="run-model" class="secondary mono"></div>
           <div class="stages" id="stages" aria-label="Recorded run stages"><div><span id="stage-start"></span>Started</div><div><span id="stage-work"></span>Activity</div><div><span id="stage-verify"></span>Verify</div><div><span id="stage-review"></span>Review</div></div>
           <div class="evidence-strip"><div><span class="eyebrow" data-help="verification">Verification</span><strong id="verification">—</strong></div><div><span class="eyebrow" data-help="tokens">Tokens · in / out</span><strong id="tokens">— / —</strong></div><div><span class="eyebrow" data-help="files">Changed files</span><strong id="file-count">—</strong></div><div><span class="eyebrow" data-help="review-time">Review time</span><strong id="review-time">—</strong><span id="review-time-state" class="secondary"></span></div></div>
+          <div class="task-type-control"><label for="task-type">Task type</label><span data-help="task-type"></span><select id="task-type" disabled><option value="">Suggesting a type…</option></select><span id="task-type-source" class="secondary"></span><p id="task-type-feedback" class="secondary" role="status" aria-live="polite"></p></div>
           <section class="review-controls" aria-labelledby="review-controls-heading">
             <div class="section-head"><h3 id="review-controls-heading" data-help="review-actions">Review this run</h3><span id="review-controls-state" class="secondary"></span></div>
             <label for="review-note" class="review-note-label">Review note <span class="secondary">(optional)</span></label>
@@ -79,6 +80,16 @@
         <article class="metric"><span class="eyebrow" data-help="median-worker">Median worker time</span><strong id="median-worker">—</strong><span id="median-worker-note" class="secondary"></span></article>
         <article class="metric"><span class="eyebrow" data-help="median-review">Median review time</span><strong id="median-review">—</strong><span id="median-review-note" class="secondary"></span></article>
       </div>
+      <article class="panel offload-fit" aria-labelledby="offload-fit-heading">
+        <div class="section-head"><h3 id="offload-fit-heading" data-help="offload-fit">Offloading fit</h3><span class="eyebrow">Task types</span></div>
+        <p class="fit-intro">Look for high acceptance and short reviews. Suggested types can be corrected on each run.</p>
+        <p id="offload-fit-summary" class="secondary"></p>
+        <p id="offload-fit-empty" class="fit-empty">Start timed reviews on real tasks to compare review effort.</p>
+        <div id="offload-fit-chart" class="fit-chart" hidden></div>
+        <p id="offload-fit-selection" class="secondary fit-selection" role="status" aria-live="polite"></p>
+        <div class="table-wrap"><table class="fit-table"><thead><tr><th scope="col">Task type</th><th scope="col">Acceptance</th><th scope="col">Median review</th><th scope="col">Evidence</th></tr></thead><tbody id="offload-fit-types"></tbody></table></div>
+        <p class="secondary fit-method">Demos and benchmarks are excluded. Rates count reviewed attempts; distinct briefs show repeated work. Five distinct reviewed and five distinct timed briefs clear the limited-data label; this is a coverage guide. These metrics do not measure net time saved.</p>
+      </article>
       <div class="outcomes-layout">
         <article class="panel"><div class="section-head"><h3 data-help="funnel">From recorded to accepted</h3><span class="eyebrow">All runs</span></div><div id="funnel"></div><p id="outcome-note" class="secondary"></p></article>
         <article class="panel"><h3 data-help="models">Worker comparison</h3><div class="table-wrap"><table><thead><tr><th scope="col">Model</th><th scope="col">Accepted / reviewed</th><th scope="col">Median worker time</th></tr></thead><tbody id="models"></tbody></table></div><p class="secondary">Different tasks and sample sizes; descriptive comparison.</p></article>

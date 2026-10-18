@@ -15,6 +15,7 @@ from statistics import median
 from . import rundir
 from .osfs import open_nofollow
 from .review import start_review, record_verdict, effective_run_status, review_eligible
+from .task_types import TASK_TYPE_OPTIONS, classify_task, offloading_summary
 
 MAX_LINE = 1024 * 1024
 MAX_LIVE_RECORD = 4 * 1024 * 1024
@@ -300,6 +301,42 @@ class RunStore:
         self._transcripts = {}
         self._lock = threading.RLock()
 
+    def set_task_type(self, slug, task_type):
+        """Change only the explicit task label against fresh, confined metadata."""
+        if task_type is not None and (not isinstance(task_type, str) or
+                                      task_type not in {option["id"] for option in TASK_TYPE_OPTIONS}):
+            raise ValueError("Choose a valid task type or reset the suggestion.")
+        with self._lock:
+            try:
+                directory = rundir.run_dir_for(slug, self.root)
+            except rundir.RunDirError as e:
+                raise ValueError("Invalid run slug.") from e
+            if directory.is_symlink():
+                raise ValueError("Symlinked run directories cannot be labeled.")
+            if not directory.is_dir():
+                raise FileNotFoundError("Run no longer exists.")
+            try:
+                with _open_regular(directory / "run.json") as source:
+                    raw = source.read(MAX_LINE + 1)
+                if len(raw) > MAX_LINE:
+                    raise ValueError("Run metadata is too large.")
+                data = json.loads(raw)
+                if not isinstance(data, dict):
+                    raise ValueError("Run metadata is not an object.")
+            except (OSError, ValueError, UnicodeError, RecursionError) as e:
+                raise RuntimeError("Run metadata cannot be safely updated.") from e
+            updated = dict(data)
+            if task_type is None:
+                updated.pop("task_type", None)
+            else:
+                updated["task_type"] = task_type
+            if updated != data:
+                try:
+                    rundir.write_run_json(directory, updated, expected_signature=rundir.run_json_signature(data))
+                except rundir.RunJsonConflict as e:
+                    raise RuntimeError("Run changed; refresh before saving its task type.") from e
+            return self._detail(slug, datetime.now(timezone.utc))
+
     def review_action(self, slug, action, note=""):
         """Serialize browser updates against fresh metadata, using CLI transitions."""
         with self._lock:
@@ -441,7 +478,7 @@ class RunStore:
         with self._lock:
             return self._detail(slug, now or datetime.now(timezone.utc))
 
-    def _detail(self, slug, now):
+    def _detail(self, slug, now, *, full_task=False):
         try:
             directory = rundir.run_dir_for(slug, self.root)
         except rundir.RunDirError as e:
@@ -464,6 +501,7 @@ class RunStore:
             warnings.append("Run metadata unavailable: " + str(e))
         transcript = self._transcript(directory)
         start = transcript["start"]
+        stored_type = metadata.get("task_type")
         metadata = {**start, **metadata}
         end = transcript["end"]
         status, activity_state = effective_run_status(metadata, end)
@@ -488,7 +526,12 @@ class RunStore:
         reviewing = bool(review_started and review_started <= now and verdict is None and not metadata.get("resumed_by"))
         run = {k: text(metadata.get(k)) for k in
                ("task", "model", "provider", "repo", "branch", "sandbox", "resumed_from", "resumed_by", "note")}
-        run["task"] = text(metadata.get("task"), 64000)
+        # Metadata and transcript reads already bound the complete brief to 1 MiB.
+        # Preview limits must not discard classification or distinct-task evidence.
+        task = metadata.get("task") if isinstance(metadata.get("task"), str) else ""
+        run["task"] = task if full_task else task[:64000]
+        run["task_type"] = classify_task(task, stored_type=stored_type,
+                                         repo=run["repo"], slug=slug)
         if isinstance(metadata.get("sandbox"), dict):
             run["sandbox"] = text(metadata["sandbox"].get("backend"))
         run.update({"slug": slug, "status": status, "activity_state": activity_state,
@@ -527,7 +570,7 @@ class RunStore:
                         (directory / "run.json").stat()
                     except FileNotFoundError:
                         continue
-                    run = self._detail(directory.name, now)
+                    run = self._detail(directory.name, now, full_task=True)
                 except (OSError, ValueError) as e:
                     warnings.append(f"{directory.name}: {e}")
                     continue
@@ -535,7 +578,8 @@ class RunStore:
                     warnings.append(directory.name + ": " + "; ".join(run["warnings"]))
                 runs.append({**{k: v for k, v in run.items() if k in (
                     "slug", "status", "activity_state", "model", "repo", "started", "ended",
-                    "duration_s", "verdict", "review_seconds", "review_in_progress", "resumed_by", "usage")}, "task": run["task"][:240]})
+                    "duration_s", "verdict", "review_seconds", "review_in_progress", "resumed_by", "usage",
+                    "task_type")}, "task": run["task"]})
             runs.sort(key=lambda r: (r["started"] or "", r["slug"]), reverse=True)
             present = {r["slug"] for r in runs}
             self._transcripts = {k: v for k, v in self._transcripts.items() if k in present}
@@ -543,7 +587,10 @@ class RunStore:
             for model in sorted({r["model"] or "Unknown model" for r in runs}):
                 group = [r for r in runs if (r["model"] or "Unknown model") == model]
                 models.append({"model": model, **aggregate(group)})
-            return {"runs": runs, "summary": aggregate(runs), "models": models,
+            offloading = offloading_summary(runs)
+            summaries = [{**run, "task": run["task"][:240]} for run in runs]
+            return {"runs": summaries, "summary": aggregate(runs), "models": models,
+                    "task_type_options": TASK_TYPE_OPTIONS, "offloading": offloading,
                     "warnings": warnings, "runs_dir": str(self.root), "updated_at": now.isoformat()}
 
 

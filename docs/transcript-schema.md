@@ -382,6 +382,7 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `review_seconds` | verdict | explicit `--review-seconds`, elapsed review timer seconds, or null; preserved on repeated verdicts without an override |
 | `review_started_at` | review-start | UTC ISO-8601 timestamp written by `dirtywork runs review-start <slug>`; repeated starts preserve it |
 | `review_seconds_source` | verdict | `"timer"` when measured from `review_started_at`, `"manual"` when explicitly supplied; absent on older records |
+| `task_type` | dashboard labeling | optional manual primary-task category: `prescribed`, `bugfix`, `feature`, `tests`, `docs`, `refactor`, `maintenance`, `other`, or `demo`; reset removes this field. Automatic suggestions are computed from the full task brief and are never persisted |
 | `time_to_verdict_s` | verdict | seconds from `ended` to `verdict_at`; null when the run has no `ended` yet |
 
 Rows marked *verdict* are added post hoc by `dirtywork runs verdict <slug> …`

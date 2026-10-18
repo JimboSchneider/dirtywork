@@ -4,7 +4,8 @@
   const $ = id => document.getElementById(id);
   const root = document.documentElement;
   const state = {snapshot: null, selected: null, detail: null, view: 'activity', limit: 8, query: '', busy: false,
-    reviewBusy: false, detailRevision: 0, reviewNotes: new Map(), reviewFeedback: null};
+    reviewBusy: false, detailRevision: 0, reviewNotes: new Map(), reviewFeedback: null,
+    taskTypeBusy: null, taskTypeFeedback: null};
   const knownThemes = ['ion', 'orchid', 'terminal'];
   const appearances = ['system', 'light', 'dark'];
   const wopr = window.DirtyworkWopr;
@@ -142,6 +143,8 @@
     'median-review': ['Median review time', 'The middle recorded review duration for accepted or rejected runs that include review time.'],
     funnel: ['From recorded to accepted', 'Counts of saved runs, completed work, review decisions, and accepted results.'],
     models: ['Worker comparison', 'Recorded outcomes and worker times grouped by model, across different tasks.'],
+    'task-type': ['Task type', 'A suggested category based on the full task description; choose another type to correct it, or return to Auto.'],
+    'offload-fit': ['Offloading fit', 'Acceptance and measured review effort by task type, with sample counts so repeated or sparsely timed work stays visible.'],
   };
   const help = element('div', 'section-help');
   help.id = 'section-help';
@@ -240,13 +243,65 @@
     if (!response.ok) throw new Error(`Run records request failed (${response.status}).`);
     return response.json();
   }
+  function renderTaskType(run) {
+    const select = $('task-type');
+    const options = state.snapshot?.task_type_options || [];
+    const signature = JSON.stringify(options);
+    if (select.dataset.signature !== signature) {
+      const automatic = element('option', '', 'Use automatic suggestion');
+      automatic.value = '';
+      select.replaceChildren(automatic, ...options.map(type => {
+        const option = element('option', '', type.label); option.value = type.id; return option;
+      }));
+      select.dataset.signature = signature;
+    }
+    const manual = run.task_type?.source === 'manual';
+    select.children[0].textContent = manual ? 'Use automatic suggestion' : `Auto · ${run.task_type?.label || 'Other / unclear'}`;
+    if (state.taskTypeBusy !== run.slug) select.value = manual ? run.task_type.id : '';
+    select.disabled = Boolean(state.taskTypeBusy) || state.reviewBusy || !options.length;
+    set('task-type-source', manual ? 'Set by you.' : 'Suggested from the task description.');
+    const feedback = state.taskTypeFeedback?.slug === run.slug ? state.taskTypeFeedback : null;
+    set('task-type-feedback', feedback?.message || '');
+    $('task-type-feedback').classList.toggle('review-error', Boolean(feedback?.error));
+  }
+  async function performTaskType() {
+    if (state.taskTypeBusy || state.reviewBusy || !state.detail || state.detail.slug !== state.selected) return;
+    const slug = state.selected, token = state.snapshot?.csrf_token;
+    if (!token) return;
+    const taskType = $('task-type').value || null;
+    const revision = ++state.detailRevision;
+    state.taskTypeBusy = slug;
+    state.taskTypeFeedback = {slug, message: 'Saving task type…', error: false};
+    renderTaskType(state.detail);
+    renderReviewControls(state.detail);
+    try {
+      const response = await fetch('/api/runs/' + encodeURIComponent(slug) + '/task-type', {
+        method: 'POST', headers: {'Content-Type': 'application/json', 'X-Dirtywork-CSRF': token},
+        body: JSON.stringify({task_type: taskType}), signal: AbortSignal.timeout(15000),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'Could not save the task type.');
+      state.taskTypeFeedback = {slug, message: taskType ? 'Task type saved.' : 'Automatic suggestion restored.', error: false};
+      if (state.selected === slug && state.detailRevision === revision) {
+        state.detail = payload.run; renderDetail(payload.run);
+      }
+    } catch (error) {
+      state.taskTypeFeedback = {slug, message: error.message + ' Refresh to check the saved type before retrying.', error: true};
+    } finally {
+      state.detailRevision++;
+      state.taskTypeBusy = null;
+      if (state.detail?.slug === state.selected) { renderTaskType(state.detail); renderReviewControls(state.detail); }
+      refresh();
+    }
+  }
+  $('task-type').addEventListener('change', performTaskType);
   function renderReviewControls(run) {
     const settled = Boolean(run.verdict);
     const eligible = !settled && run.review_eligible;
-    $('start-review').disabled = state.reviewBusy || !eligible || run.review_in_progress;
+    $('start-review').disabled = state.reviewBusy || Boolean(state.taskTypeBusy) || !eligible || run.review_in_progress;
     $('start-review').textContent = run.review_in_progress ? 'Review started' : 'Start Review';
-    $('accept-review').disabled = state.reviewBusy || !eligible || !run.review_in_progress;
-    $('reject-review').disabled = state.reviewBusy || !eligible || !run.review_in_progress;
+    $('accept-review').disabled = state.reviewBusy || Boolean(state.taskTypeBusy) || !eligible || !run.review_in_progress;
+    $('reject-review').disabled = state.reviewBusy || Boolean(state.taskTypeBusy) || !eligible || !run.review_in_progress;
     $('review-note').disabled = state.reviewBusy || !eligible;
     if (settled) {
       $('review-note').value = run.note || '';
@@ -265,14 +320,15 @@
     if (state.selected) state.reviewNotes.set(state.selected, $('review-note').value);
   });
   async function performReview(action) {
-    if (state.reviewBusy || !state.detail || state.detail.slug !== state.selected) return;
+    if (state.reviewBusy || state.taskTypeBusy || !state.detail || state.detail.slug !== state.selected) return;
     const slug = state.selected;
     const token = state.snapshot?.csrf_token;
     if (!token) return;
     state.reviewBusy = true;
-    state.detailRevision++;
+    const revision = ++state.detailRevision;
     state.reviewFeedback = {slug, message: 'Saving…', error: false};
     renderReviewControls(state.detail);
+    renderTaskType(state.detail);
     try {
       const response = await fetch('/api/runs/' + encodeURIComponent(slug) + '/review', {
         method: 'POST', headers: {'Content-Type': 'application/json', 'X-Dirtywork-CSRF': token},
@@ -282,12 +338,12 @@
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || 'Could not save the review.');
       state.reviewFeedback = {slug, message: action === 'start' ? 'Review started. The timer is running.' : `${action === 'accept' ? 'Accepted' : 'Rejected'}. Decision and review time saved.`, error: false};
-      if (state.selected === slug) { state.detail = payload.run; renderDetail(payload.run); }
+      if (state.selected === slug && state.detailRevision === revision) { state.detail = payload.run; renderDetail(payload.run); }
     } catch (error) {
       state.reviewFeedback = {slug, message: error.message + ' Refresh to check the saved state before retrying.', error: true};
     } finally {
       state.reviewBusy = false;
-      if (state.detail?.slug === state.selected) renderReviewControls(state.detail);
+      if (state.detail?.slug === state.selected) { renderReviewControls(state.detail); renderTaskType(state.detail); }
       refresh();
     }
   }
@@ -299,7 +355,7 @@
     state.selected = slug;
     state.detail = null;
     state.detailRevision++;
-    for (const id of ['start-review', 'accept-review', 'reject-review', 'review-note']) $(id).disabled = true;
+    for (const id of ['start-review', 'accept-review', 'reject-review', 'review-note', 'task-type']) $(id).disabled = true;
     remember('run', slug);
     renderList();
     set('run-task', 'Loading selected run…');
@@ -307,7 +363,7 @@
   }
   function renderList() {
     const allRuns = state.snapshot.runs;
-    const runs = allRuns.filter(run => [run.task, run.slug, run.model, run.repo, run.status, run.verdict].join(' ').toLowerCase().includes(state.query));
+    const runs = allRuns.filter(run => [run.task, run.slug, run.model, run.repo, run.status, run.verdict, run.task_type?.label].join(' ').toLowerCase().includes(state.query));
     set('run-count', `${number(runs.length)}${state.query ? ' matches' : ' records'}`);
     const list = $('run-list');
     const desired = runs.slice(0, state.limit);
@@ -506,6 +562,7 @@
 
   function renderDetail(run) {
     renderWoprRun(run);
+    renderTaskType(run);
     renderReviewControls(run);
     renderTimeline(run);
     set('worker-time', duration(run.duration_s));
@@ -567,7 +624,85 @@
       if (focusedKey) [...$('activity-log').querySelectorAll('details')].find(node => node.dataset.key === focusedKey)?.querySelector('summary').focus({preventScroll: true});
     }
   }
+  function renderOffloading() {
+    const data = state.snapshot.offloading || {groups: [], reviewed: 0, review_samples: 0, excluded_demos: 0, unclassified: 0};
+    const output = $('offload-fit-types');
+    const signature = JSON.stringify(data);
+    if (output.dataset.signature === signature) return;
+    output.dataset.signature = signature;
+    set('offload-fit-summary', `${number(data.reviewed)} reviewed real-work attempts · ${number(data.review_samples)} timed reviews · ${number(data.excluded_demos)} demo or benchmark runs excluded`);
+    const groups = data.groups;
+    const timed = groups.filter(group => Number.isFinite(group.median_review_s) && group.median_review_s >= 0 &&
+      Number.isFinite(group.acceptance_rate) && group.acceptance_rate >= 0 && group.acceptance_rate <= 1);
+    const chart = $('offload-fit-chart');
+    chart.hidden = !timed.length;
+    $('offload-fit-empty').hidden = Boolean(timed.length);
+    set('offload-fit-empty', groups.length
+      ? 'No timed real-work reviews yet. Use Start Review before inspecting a result, then Accept or Reject to record the effort.'
+      : 'Review a real task to begin comparing task types. Demos and benchmarks stay outside this comparison.');
+    set('offload-fit-selection', '');
+    const describe = group => `${group.label}: ${number(group.accepted)} / ${number(group.reviewed)} accepted (${Math.round(group.acceptance_rate * 100)}%). Median review ${duration(group.median_review_s)} across ${number(group.review_samples)} timed reviews and ${number(group.distinct_timed_tasks)} distinct timed briefs. ${group.evidence === 'ready' ? 'Five or more distinct timed briefs.' : 'Limited data; treat this as an early signal.'}`;
+    const selectGroup = group => set('offload-fit-selection', describe(group));
+    chart.replaceChildren();
+    if (timed.length) {
+      chart.setAttribute('role', 'figure');
+      chart.setAttribute('aria-label', 'Task types by acceptance rate and median review time. Higher and farther left is favorable.');
+      const maximum = Math.ceil(Math.max(60, ...timed.map(group => group.median_review_s)) / 60) * 60;
+      const yLabel = element('p', 'fit-y-label', 'Acceptance rate');
+      const yAxis = element('div', 'fit-axis-y');
+      yAxis.append(...['100%', '50%', '0%'].map(value => element('span', '', value)));
+      const plot = element('div', 'fit-plot');
+      for (const group of timed) {
+        const index = groups.indexOf(group) + 1;
+        const point = element('button', 'fit-point' + (group.evidence === 'ready' ? '' : ' fit-point-limited'), index);
+        point.type = 'button';
+        point.style.left = `${group.median_review_s / maximum * 100}%`;
+        point.style.top = `${(1 - group.acceptance_rate) * 100}%`;
+        point.setAttribute('aria-label', describe(group));
+        point.title = describe(group);
+        point.addEventListener('click', () => selectGroup(group));
+        point.addEventListener('focus', () => selectGroup(group));
+        plot.append(point);
+      }
+      const xAxis = element('div', 'fit-axis-x');
+      xAxis.append(...[0, maximum / 2, maximum].map(value => element('span', '', duration(value))));
+      chart.append(yLabel, yAxis, plot, xAxis,
+        element('p', 'fit-x-label', 'Median review time · shorter is farther left'),
+        element('p', 'secondary fit-chart-note', 'Numbers match the table. Hollow points have limited data. Select a point or task type for details.'));
+    }
+    output.replaceChildren(...groups.map((group, index) => {
+      const row = element('tr'); row.dataset.type = group.id;
+      const type = element('td');
+      if (timed.includes(group)) {
+        const name = element('button', 'fit-type-button', group.label); name.type = 'button';
+        name.addEventListener('click', () => selectGroup(group));
+        type.append(element('span', 'fit-key', index + 1), name);
+      } else type.append(element('span', '', group.label));
+      type.append(element('small', '', `${number(group.total)} ${group.total === 1 ? 'run' : 'runs'} · ${number(group.distinct_tasks)} distinct ${group.distinct_tasks === 1 ? 'brief' : 'briefs'}`));
+      const rate = element('td');
+      const knownRate = Number.isFinite(group.acceptance_rate) && group.acceptance_rate >= 0 && group.acceptance_rate <= 1;
+      rate.append(element('span', 'fit-value', knownRate ? `${Math.round(group.acceptance_rate * 100)}%` : 'No verdicts'),
+        element('small', '', `${number(group.accepted)} / ${number(group.reviewed)} reviewed`));
+      if (knownRate) {
+        const track = element('div', 'fit-rate-track');
+        const fill = element('span', 'fit-rate-fill'); fill.style.width = `${group.acceptance_rate * 100}%`;
+        track.setAttribute('aria-hidden', 'true'); track.append(fill); rate.append(track);
+      }
+      const review = element('td');
+      review.append(element('span', 'fit-value', Number.isFinite(group.median_review_s) && group.median_review_s >= 0 ? duration(group.median_review_s) : 'Not timed'),
+        element('small', '', `${number(group.review_samples)} / ${number(group.reviewed)} reviews timed`));
+      const evidence = element('td');
+      evidence.append(element('span', 'fit-evidence', {no_timing: 'No timing yet', limited: 'Limited data', ready: '5+ timed briefs'}[group.evidence] || 'Limited data'),
+        element('small', '', `${number(group.distinct_reviewed_tasks)} distinct reviewed ${group.distinct_reviewed_tasks === 1 ? 'brief' : 'briefs'} · ${number(group.distinct_timed_tasks)} timed`));
+      row.append(type, rate, review, evidence); return row;
+    }));
+    if (!groups.length) {
+      const row = element('tr'), cell = element('td', '', 'No task types to compare yet.');
+      cell.setAttribute('colspan', '4'); row.append(cell); output.append(row);
+    }
+  }
   function renderOutcomes() {
+    renderOffloading();
     const summary = state.snapshot.summary;
     set('offloaded-tokens', compactNumber(summary.offloaded_tokens));
     $('offloaded-tokens').setAttribute('aria-label', `${number(summary.offloaded_tokens)} recorded worker tokens`);
@@ -606,13 +741,13 @@
     }));
   }
   async function loadDetail() {
-    if (state.reviewBusy) return;
+    if (state.reviewBusy || state.taskTypeBusy) return;
     const slug = state.selected;
     const revision = state.detailRevision;
     if (!slug) return;
     try {
       const run = await api('/api/runs/' + encodeURIComponent(slug));
-      if (state.selected !== slug || state.detailRevision !== revision || state.reviewBusy) return;
+      if (state.selected !== slug || state.detailRevision !== revision || state.reviewBusy || state.taskTypeBusy) return;
       state.detail = run;
       renderDetail(run);
     } catch (error) {

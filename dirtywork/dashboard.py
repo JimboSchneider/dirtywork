@@ -89,29 +89,37 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
-        if not path.startswith("/api/runs/") or not path.endswith("/review"):
+        is_task_type = path.endswith("/task-type")
+        if not path.startswith("/api/runs/") or not (path.endswith("/review") or is_task_type):
             self._json(405, {"error": "Only review actions are supported."})
             return
         if (not self._local_request() or not self.headers.get("Origin") or
                 not secrets.compare_digest(self.headers.get("X-Dirtywork-CSRF", "").encode("utf-8"), self.csrf_token.encode("utf-8"))):
-            self._json(403, {"error": "Reload the dashboard before saving review actions."})
+            self._json(403, {"error": "Reload the dashboard before saving task types." if is_task_type else
+                                    "Reload the dashboard before saving review actions."})
             return
         if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
-            self._json(415, {"error": "Review actions require JSON."})
+            self._json(415, {"error": "Task types require JSON." if is_task_type else "Review actions require JSON."})
             return
-        slug = unquote(path[len("/api/runs/"):-len("/review")])
+        suffix = "/task-type" if is_task_type else "/review"
+        slug = unquote(path[len("/api/runs/"):-len(suffix)])
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if self.headers.get("Transfer-Encoding") or not 0 < length <= 16384:
-                raise ValueError("Invalid review request size.")
+                raise ValueError("Invalid task type request size." if is_task_type else "Invalid review request size.")
             self.connection.settimeout(5)
             payload = json.loads(self.rfile.read(length))
-            if not isinstance(payload, dict) or payload.get("action") not in ("start", "accept", "reject"):
-                raise ValueError("Choose Start Review, Accept, or Reject.")
-            note = payload.get("note", "")
-            if not isinstance(note, str) or len(note) > 2000:
-                raise ValueError("Review notes must be at most 2,000 characters.")
-            result = self.store.review_action(slug, payload["action"], note)
+            if is_task_type:
+                if not isinstance(payload, dict) or "task_type" not in payload:
+                    raise ValueError("Choose a task type or reset the suggestion.")
+                result = self.store.set_task_type(slug, payload["task_type"])
+            else:
+                if not isinstance(payload, dict) or payload.get("action") not in ("start", "accept", "reject"):
+                    raise ValueError("Choose Start Review, Accept, or Reject.")
+                note = payload.get("note", "")
+                if not isinstance(note, str) or len(note) > 2000:
+                    raise ValueError("Review notes must be at most 2,000 characters.")
+                result = self.store.review_action(slug, payload["action"], note)
             self._json(200, {"run": result})
         except FileNotFoundError:
             self._json(404, {"error": "Run no longer exists."})
@@ -120,7 +128,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except RuntimeError as e:
             self._json(409, {"error": str(e)})
         except OSError:
-            self._json(503, {"error": "Could not save the review; refresh and try again."})
+            self._json(503, {"error": "Could not save the task type; refresh and try again." if is_task_type else
+                                    "Could not save the review; refresh and try again."})
 
     def _unsupported_write(self):
         self._json(405, {"error": "Only review POST actions are supported."})

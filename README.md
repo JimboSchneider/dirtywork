@@ -234,6 +234,9 @@ it is running, the view refreshes every three seconds.
 - **Understand outcomes:** compare recorded outcomes, worker and review
   times, and tokens offloaded to workers. Token usage is a proxy for offloaded
   work, not a measurement of net token savings.
+- **Find good offloading candidates:** Outcomes groups real work by task type,
+  showing acceptance, review effort, and distinct task samples. Types are
+  suggested locally from the full brief and can be corrected on each run.
 - **Choose your appearance:** Ion, Orchid and Terminal themes support light,
   dark and system appearance, with your preferences remembered locally.
 

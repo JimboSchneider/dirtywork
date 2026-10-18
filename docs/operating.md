@@ -75,6 +75,29 @@ Every median shows its sample count; missing evidence displays as a dash. Model
 comparisons describe different tasks, not a controlled benchmark. Record reviews
 with `dirtywork runs verdict <slug> accept --review-seconds 42` (or `reject`).
 
+**Offloading fit** groups task types by acceptance and median review time. High
+acceptance with short reviews is a useful signal when choosing work to delegate.
+The comparison suggests a primary type from the full brief using local rules,
+without another model call. Prescribed edits, bug fixes, features, tests,
+documentation, refactoring and maintenance are separate types; ambiguous briefs
+remain **Other / unclear**. Suggestions can be wrong: use **Task type** on any run
+to save a correction, or choose **Use automatic suggestion** to reset it. Labels
+can be changed independently of review decisions, including on active runs.
+
+Demos and benchmark fixtures are excluded from this comparison. Acceptance is
+accepted attempts divided by accepted and rejected attempts; cleanup and pending
+runs do not enter that rate or review medians. Repeated attempts remain visible
+as run counts alongside distinct full briefs (whitespace differences are ignored).
+Missing timing is **Not timed**, never zero. Counts show how many reviews and
+distinct briefs have timing. A type needs five distinct reviewed briefs and five
+distinct timed briefs before leaving **Limited data**; this is a coverage rule,
+not a statistical guarantee. The chart plots only measured pairs, with hollow
+points for limited samples. Compare higher acceptance and shorter review effort;
+these observations do not measure net time saved or control for model/task difficulty.
+
+Saved overrides are written to `run.json`; automatic suggestions are computed at
+read time and leave old records untouched. Both views refresh every three seconds.
+
 To track future review durations automatically, start the timer before inspecting
 the result, then record the verdict when you finish:
 
