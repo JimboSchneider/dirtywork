@@ -1142,11 +1142,14 @@ def _add_runs_parsers(sub) -> None:
     clean_p.add_argument("--keep-transcript", action="store_true", default=False)
     clean_p.add_argument("--force", action="store_true", default=False)
 
-    verdict_p = runs_sub.add_parser("verdict", help="record accept/reject/cleanup for a run")
+    review_p = runs_sub.add_parser("review-start", help="start timing review of a finished run")
+    review_p.add_argument("slug")
+    verdict_p = runs_sub.add_parser("verdict", help="record accept/reject/cleanup and stop a review timer")
     verdict_p.add_argument("slug")
     verdict_p.add_argument("verdict", choices=["accept", "reject", "cleanup"])
     verdict_p.add_argument("--note", default=None)
-    verdict_p.add_argument("--review-seconds", type=float, default=None)
+    verdict_p.add_argument("--review-seconds", type=float, default=None,
+                           help="explicit review duration; overrides the review-start timer")
 
     snapshot_p = runs_sub.add_parser(
         "snapshot", help="commit the run worktree's current content onto its branch")
@@ -1208,6 +1211,12 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_run_flags(resume_p, resume=True)
     _add_runs_parsers(sub)
     _add_bench_parsers(sub)
+    dashboard_p = sub.add_parser("dashboard", help="view live run activity and outcomes in a local dashboard")
+    dashboard_p.add_argument("--port", type=int, default=8765,
+                             help="loopback port (default: 8765; 0 selects an available port)")
+    dashboard_p.add_argument("--runs-dir", type=Path, default=None,
+                             help="run records directory (default: ~/.dirtywork/runs)")
+    dashboard_p.add_argument("--open", action="store_true", help="open the dashboard in your browser")
     contract_p = sub.add_parser("contract", help="print the machine contract (the operator reference) to stdout")
     init_p = sub.add_parser("init", help="install the skill that teaches an orchestrating agent to drive dirtywork (Claude Code by default; --agent for Codex, Gemini CLI, Cursor, Copilot)")
     init_p.add_argument("--agent", choices=AGENTS, default="claude",
@@ -1253,6 +1262,9 @@ def run_once(argv: list) -> dict:
 
 def main(argv: list | None = None) -> int:
     args = _parse_args(argv)
+    if args.cmd == "dashboard":
+        from . import dashboard
+        return dashboard.dispatch(args)
     if args.cmd in ("contract", "init"):
         from . import contract as contract_mod
         return contract_mod.dispatch(args)

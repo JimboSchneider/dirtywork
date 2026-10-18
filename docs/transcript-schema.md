@@ -379,11 +379,19 @@ JSON object (not JSONL), written at run start and merge-updated at run end.
 | `verdict` | verdict | written by `dirtywork runs verdict`: `"accept"` \| `"reject"` \| `"cleanup"` |
 | `note` | verdict | `--note` text, or null |
 | `verdict_at` | verdict | UTC ISO-8601 |
-| `review_seconds` | verdict | `--review-seconds` as given, or null |
+| `review_seconds` | verdict | explicit `--review-seconds`, elapsed review timer seconds, or null; preserved on repeated verdicts without an override |
+| `review_started_at` | review-start | UTC ISO-8601 timestamp written by `dirtywork runs review-start <slug>`; repeated starts preserve it |
+| `review_seconds_source` | verdict | `"timer"` when measured from `review_started_at`, `"manual"` when explicitly supplied; absent on older records |
 | `time_to_verdict_s` | verdict | seconds from `ended` to `verdict_at`; null when the run has no `ended` yet |
 
 Rows marked *verdict* are added post hoc by `dirtywork runs verdict <slug> …`
 (a merge-update; no existing key is dropped) and are absent until then.
+
+`review_seconds` is now also measured automatically from an explicit
+`review_started_at` to the verdict when `--review-seconds` is omitted. It is
+wall-clock review elapsed time, including checks and pauses. A repeated verdict
+preserves an existing duration unless explicitly overridden. No duration is
+inferred from worker completion; older reviews without timing remain null.
 
 `dirtywork runs snapshot <slug>` writes no `run.json` field: it reads `branch`,
 `worktree`, `repo`, `status` and `host_pid` and commits the worktree's current

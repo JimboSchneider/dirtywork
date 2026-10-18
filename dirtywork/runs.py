@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import rundir
+from .review import start_review, record_verdict
 from .resume import (ResumeError, find_stashes, load_prior_run, pid_alive,
                       preflight_run_worktree, stash_dir_for, worktree_belongs_to_repo)
 from .sandbox import docker_args, docker_cli, export
@@ -766,37 +767,30 @@ def cmd_export(args) -> int:
     return 0
 
 
-def cmd_verdict(args) -> int:
-    """Spec SP3 section 4: append the operator's verdict to run.json.
-    `time_to_verdict_s` is measured from the run's `ended` timestamp (the key
-    `__main__._update_run_json` writes) and is deliberately noisy -- it includes
-    idle time. `--review-seconds` is the operator's explicit measure."""
+def cmd_review_start(args) -> int:
+    """Start review wall time explicitly, without resetting an existing timer."""
     try:
         run_dir, data = _open_run(args.slug)
-    except RunsError as e:
+        updated = start_review(data, datetime.now(timezone.utc))
+        if updated != data:
+            rundir.write_run_json(run_dir, updated)
+    except (RunsError, OSError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    print(f"review timer started for '{args.slug}' at {updated['review_started_at']}")
+    return 0
 
-    verdict_at = datetime.now(timezone.utc).isoformat()
-    data["verdict"] = args.verdict
-    data["note"] = args.note
-    data["verdict_at"] = verdict_at
-    data["review_seconds"] = args.review_seconds
-    data["time_to_verdict_s"] = None
-    ended = data.get("ended")
-    if ended:
-        try:
-            ended_dt = datetime.fromisoformat(str(ended).replace("Z", "+00:00"))
-            if ended_dt.tzinfo is None:
-                # A naive timestamp (no tz offset recorded): assume UTC rather
-                # than crash subtracting an aware datetime from a naive one.
-                ended_dt = ended_dt.replace(tzinfo=timezone.utc)
-            data["time_to_verdict_s"] = (
-                datetime.fromisoformat(verdict_at) - ended_dt).total_seconds()
-        except (ValueError, TypeError):
-            pass
 
-    rundir.write_run_json(run_dir, data)
+def cmd_verdict(args) -> int:
+    """Record a decision and an explicit or timed review duration."""
+    try:
+        run_dir, data = _open_run(args.slug)
+        updated = record_verdict(data, args.verdict, args.note, args.review_seconds,
+                                 datetime.now(timezone.utc))
+        rundir.write_run_json(run_dir, updated)
+    except (RunsError, OSError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     print(f"recorded verdict '{args.verdict}' for '{args.slug}'")
     return 0
 
@@ -877,6 +871,7 @@ def dispatch(args) -> int:
         "export": cmd_export,
         "clean": cmd_clean,
         "verdict": cmd_verdict,
+        "review-start": cmd_review_start,
         "snapshot": cmd_snapshot,
     }
     return handlers[args.runs_cmd](args)

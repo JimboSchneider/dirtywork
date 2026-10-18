@@ -202,8 +202,14 @@ clone explicitly when testing unreleased changes.
     dirtywork run --repo ~/repos/someproject "Add a unit test for X"
 
 - **Watch a run:** `tail -f` the transcript path printed on stderr.
+- **Open the dashboard:** `dirtywork dashboard --open` — live activity,
+  verification evidence and recorded review outcomes, with persistent themes.
+  Runs locally at `http://127.0.0.1:8765`; reads your existing run records.
 - **Review a run:** `git -C <worktree> diff`, read the transcript, run the
   repo's tests — then commit the branch or discard it.
+- **Time the review:** `dirtywork runs review-start <slug>` before inspecting
+  the result; `dirtywork runs verdict <slug> accept|reject` saves the elapsed
+  review time for the dashboard.
 - **Clean up a run:** `dirtywork runs clean <slug>`.
 
 ### The review→fix loop

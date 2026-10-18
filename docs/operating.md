@@ -33,6 +33,103 @@ Day-to-day usage once dirtywork is installed: running a task, reviewing and resu
 - **All flags, stdout JSON, exit codes, transcript events:** see
   [Machine contract](https://github.com/JimboSchneider/dirtywork/blob/main/dirtywork/contract/machine-contract.md#machine-contract).
 
+## Dashboard
+
+    dirtywork dashboard --open
+
+Opens a local dashboard at `http://127.0.0.1:8765`. Leave the command running
+while viewing it; Ctrl-C stops the server. To use an available port or another
+records directory:
+
+    dirtywork dashboard --port 0 --runs-dir /path/to/runs --open
+
+**Run activity** lets you find and select runs by task, slug, model or repository.
+It shows worker duration, observed turns and tool results, the latest 60 transcript
+events, recorded verification, final token totals, changed files and the review
+verdict. New records and appended events appear on the next three-second refresh
+while the page is visible. Events are flushed at turn boundaries, so this is not
+a token-by-token stream. Result previews are the evidence saved by dirtywork,
+not a new execution of the commands.
+
+The **Run timeline** beside the activity stream plots recorded timestamps in
+separate lanes for run lifecycle, model replies, tool results, harness
+interventions, verification and review. Select a marker by mouse or keyboard to
+see its elapsed time. It uses the selected theme, refreshes with the stream and
+stacks above it on small screens. A running process advances the time axis even
+while waiting for the next flushed turn. Markers show when events were recorded;
+gaps are unclassified time, not measured inference or tool durations. Review
+markers require a recorded `verdict_at`. Events without usable timestamps are
+counted in the note, and the timeline retains the latest 2,000 transcript events
+independently of the activity stream's 60-event window.
+
+**Outcomes** separates worker completion from review acceptance. Acceptance uses
+only `accept` and `reject` verdicts; `cleanup` is reported separately. Worker-time
+medians include ended runs with recorded or derivable duration, including failed
+runs. Review-time medians use only accept/reject runs with `review_seconds`.
+Every median shows its sample count; missing evidence displays as a dash. Model
+comparisons describe different tasks, not a controlled benchmark. Record reviews
+with `dirtywork runs verdict <slug> accept --review-seconds 42` (or `reject`).
+
+To track future review durations automatically, start the timer before inspecting
+the result, then record the verdict when you finish:
+
+    dirtywork runs review-start <slug>
+    # Read the diff, inspect the transcript, and run your checks.
+    dirtywork runs verdict <slug> accept --note "Reviewed and verified"
+
+`review-start` does not reset a timer that is already running, and refuses runs
+still marked `running` or already carrying a verdict. The verdict saves elapsed
+wall-clock seconds since that explicit start, including time spent on checks and
+any pauses. `--review-seconds` can override the timer with a finite, non-negative
+duration. Re-recording a verdict without an override preserves its existing review
+duration. A malformed or future timer must be corrected with an explicit duration.
+
+The selected run's **Review time** field counts upward while review is in progress;
+the review timeline includes its start marker and the header counts reviewing runs.
+Once an accept/reject verdict is saved, its duration contributes to the review-time
+median. Old untimed reviews remain unknown: worker completion to verdict includes
+queueing time and is a separate measurement.
+
+You can also review entirely in the dashboard. Select a finished, unreviewed run,
+click **Start Review**, inspect its evidence, optionally write a review note, then
+choose **Accept** or **Reject**. The timer stops and the verdict, note and duration
+are saved to that run's `run.json`. Decision buttons stay disabled until review
+starts; running and already-reviewed runs cannot be changed through these controls.
+Repeated requests for the same decision preserve the saved result. A different
+decision cannot overwrite it through the dashboard. Neither button merges changes,
+executes tests, cleans up worktrees or deletes files. Draft notes survive polling
+and run switches during the current page visit; they are saved only with a decision.
+The shipped orchestrator skill includes the timer workflow; refresh installed
+copies with `dirtywork init` after installing this version. Older tools can still
+use measured elapsed seconds with the existing `--review-seconds` flag.
+
+**Tokens offloaded** is the sum of recorded worker input and output tokens across
+runs with both usage values available, including rejected runs. The accepted-work
+subtotal uses only `accept` verdicts, and coverage shows how many records contribute.
+Missing or partial usage is excluded; recorded zero remains zero. Totals refresh
+when `run_end.usage` is written, not during inference. Usage is the harness's saved
+provider counts (providers that omit usage may have recorded zeros). Input tokens
+include repeated context across turns. This is gross worker usage, a proxy for
+offloaded work, not measured net frontier-token savings: it does not establish what
+a frontier model would have used, translate between tokenizers, or deduct the
+orchestrator's briefing and review usage.
+
+The Ion, Orchid and Terminal themes and System/Light/Dark appearance are saved in
+your browser. Small info buttons beside section titles explain what each section
+shows: hover, focus with Tab, or tap to read; Escape or clicking outside dismisses
+the explanation. All assets are bundled; no frontend build or external service is
+needed. The dashboard reads `~/.dirtywork/runs` by default and writes only review
+metadata when you use its review controls. It never starts workers or executes
+tools. It listens only on IPv4 loopback, rejects foreign browser origins, and
+requires a per-server request token for review actions. Keep it local; it is not an authenticated remote
+service.
+
+A record still marked `running` whose host process has stopped is shown as
+inactive. Without PID evidence it is unconfirmed. A live PID is a best-effort
+signal (operating systems can reuse process IDs). Missing or corrupt evidence is
+reported under data notices; other runs remain available. Terminal transcript
+evidence takes precedence over a stale `running` label in metadata.
+
 #### Editing files
 
 The worker changes files only through tools — `write_file`, `append_file`,
@@ -550,3 +647,7 @@ are not part of the installed package.
   dw-<slug>-work:/work <image> ...`), or discard it with `docker volume rm
   dw-<slug>-work` once you're done.
 
+
+### Inspecting file changes in the dashboard
+
+Expand **File changes** on a selected run, then select a file to see its unified diff. Added and removed lines use the selected theme. New files appear in full. The viewer reads the run’s saved `diff.patch` (up to 1 MiB) and refreshes every three seconds while expanded. Docker runs export this patch at completion; while a run is active, the viewer explains that it is waiting for export. Runs without a saved patch, including older or cleaned-up records, show an explicit unavailable message. The viewer never executes repository code or writes files.
