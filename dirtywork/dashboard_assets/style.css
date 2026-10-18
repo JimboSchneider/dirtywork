@@ -66,3 +66,9 @@
 :root[data-theme=wopr] .access-subtitle{font-family:VT323,var(--mono);font-size:20px;letter-spacing:1px}
 :root[data-theme=wopr] .access-panel::before,:root[data-theme=wopr] .access-panel::after{border-color:var(--neon-magenta)}
 :root[data-theme=wopr] .access-countdown{background:linear-gradient(90deg,var(--neon-magenta),var(--neon-cyan));box-shadow:0 0 14px #33efff80}
+
+.wopr-badge{display:none}
+:root[data-theme=wopr] .wopr-badge{display:inline-flex;align-items:center;padding:3px 9px;border:1px solid var(--neon-magenta);background:#ff53d80a;color:var(--neon-magenta);font:18px/1.2 VT323,var(--mono);letter-spacing:1.5px;white-space:nowrap;box-shadow:0 0 15px #ff53d81a;text-shadow:0 0 10px #ff53d845}
+:root[data-theme=wopr] #run-panel{position:relative;isolation:isolate}
+:root[data-theme=wopr] #run-panel::before{content:'';position:absolute;inset:-2px;pointer-events:none;z-index:2;background:linear-gradient(var(--neon-cyan),var(--neon-cyan)) left top/24px 2px no-repeat,linear-gradient(var(--neon-cyan),var(--neon-cyan)) left top/2px 24px no-repeat,linear-gradient(var(--neon-cyan),var(--neon-cyan)) right top/24px 2px no-repeat,linear-gradient(var(--neon-cyan),var(--neon-cyan)) right top/2px 24px no-repeat,linear-gradient(var(--neon-magenta),var(--neon-magenta)) left bottom/24px 2px no-repeat,linear-gradient(var(--neon-magenta),var(--neon-magenta)) left bottom/2px 24px no-repeat,linear-gradient(var(--neon-magenta),var(--neon-magenta)) right bottom/24px 2px no-repeat,linear-gradient(var(--neon-magenta),var(--neon-magenta)) right bottom/2px 24px no-repeat;filter:drop-shadow(0 0 5px #33efff65)}
+@media(max-width:500px){:root[data-theme=wopr] .wopr-badge{font-size:16px;letter-spacing:1px}:root[data-theme=wopr] .app-header{column-gap:14px}}
