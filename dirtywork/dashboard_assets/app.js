@@ -21,7 +21,7 @@
   }
   // A session-only theme: changing the normal theme selector exits it.
   const secretKeys = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight'];
-  let secretBuffer = [], secretLastKey = 0;
+  let secretBuffer = [], secretLastKey = 0, secretAlertTimer;
   document.addEventListener('keydown', event => {
     if (event.repeat || event.ctrlKey || event.metaKey || event.altKey ||
         event.target.closest('input, textarea, select, [contenteditable]')) {
@@ -40,16 +40,22 @@
       $('theme').append(option);
     }
     root.dataset.theme = 'wopr'; $('theme').value = 'wopr';
-    let message = $('secret-theme-status');
-    if (!message) {
-      message = document.createElement('div'); message.id = 'secret-theme-status';
-      message.setAttribute('role', 'status'); document.body.append(message);
-    }
-    message.textContent = 'ACCESS GRANTED // WOPR ONLINE // SHALL WE PLAY A GAME?';
+    clearTimeout(secretAlertTimer);
+    $('secret-theme-status')?.remove();
+    const message = document.createElement('div'); message.id = 'secret-theme-status';
+    message.setAttribute('role', 'status');
+    const panel = document.createElement('div'); panel.className = 'access-panel';
+    panel.append(element('span', 'access-code', '[ AUTHENTICATION COMPLETE ]'),
+      element('strong', 'access-title', 'ACCESS GRANTED'),
+      element('span', 'access-subtitle', 'WOPR ONLINE // SHALL WE PLAY A GAME?'),
+      element('span', 'access-countdown'));
+    message.append(panel); document.body.append(message);
+    secretAlertTimer = setTimeout(() => message.remove(), 3000);
   });
   $('theme').addEventListener('change', () => {
     if ($('theme').value !== 'wopr') {
       $('theme').querySelector('option[value="wopr"]')?.remove();
+      clearTimeout(secretAlertTimer);
       $('secret-theme-status')?.remove();
     }
   });
