@@ -135,7 +135,7 @@
     turns: ['Turns and tool results', 'The number of model replies and tool results recorded for this run.'],
     verdict: ['Review verdict', 'The recorded review decision, which is separate from the worker finishing.'],
     'review-time': ['Review time', 'Time from starting review to recording a decision, including any checks and waiting.'],
-    'review-actions': ['Review actions', 'Start the timer, then save your decision and an optional note after checking the result.'],
+    'review-actions': ['Review actions', 'Accept and Reject save the review outcome, elapsed review time and optional note. Merging, retrying and cleanup are separate steps for you or your AI agent.'],
     'selected-run': ['Selected run', 'The task, model, and results for the run you selected.'],
     verification: ['Verification', 'Whether the run’s configured check passed, if a result was recorded.'],
     tokens: ['Input and output tokens', 'Tokens are pieces of text: input goes to the worker and output comes back.'],
