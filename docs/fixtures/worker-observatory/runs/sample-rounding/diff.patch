@@ -1,0 +1,9 @@
+diff --git a/src/invoices.py b/src/invoices.py
+--- a/src/invoices.py
++++ b/src/invoices.py
+@@ -1,3 +1,4 @@
+ def invoice_total(items):
+     total = sum(item.amount for item in items)
+-    return round(total, 2)
++    # Round once, after adding every line item.
++    return total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)

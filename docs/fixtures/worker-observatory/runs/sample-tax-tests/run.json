@@ -1,0 +1,28 @@
+{
+  "task": "Add tests for tax-exempt invoices.",
+  "task_type": "tests",
+  "status": "completed",
+  "model": "qwen3.6-35b-a3b-splash",
+  "provider": "openai",
+  "sandbox": {
+    "backend": "docker"
+  },
+  "repo": "/projects/atlas",
+  "worktree": "/projects/atlas/.worktrees/tax-tests",
+  "branch": "dirtywork/tax-tests",
+  "started": "2026-10-18T14:15:00Z",
+  "ended": "2026-10-18T14:16:32Z",
+  "turns": 6,
+  "files_changed": [
+    "tests/test_invoices.py"
+  ],
+  "verify": {
+    "command": "python -m pytest tests/test_invoices.py -q",
+    "passed": true,
+    "exit_code": 0,
+    "output_tail": "12 passed in 0.08s"
+  },
+  "verdict": "accept",
+  "review_seconds": 38,
+  "verdict_at": "2026-10-18T14:17:10Z"
+}

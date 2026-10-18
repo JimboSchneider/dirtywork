@@ -201,9 +201,8 @@
   .observatory-lead strong { color: var(--ink); }
   .observatory-benefits { list-style: none; padding: 0; margin: 0 0 1.6rem; color: var(--ink-soft); }
   .observatory-benefits li { margin: 0.7rem 0; }
-  .observatory-benefits strong { color: var(--local); }
+  .observatory-benefits strong { color: var(--ink); }
   .observatory-figure { margin: 1.6rem 0; }
-  .observatory-figure > a { display: block; border-radius: 10px; }
   .observatory-figure img {
     display: block; width: 100%; height: auto;
     border: 1px solid var(--line); border-radius: 10px;
@@ -213,9 +212,11 @@
     margin-top: 0.65rem; text-align: center;
     font-size: 0.8rem; color: var(--ink-faint);
   }
-  .observatory-command { padding: 0.85rem 1.15rem; }
-  .observatory-command pre { font-size: 0.9rem; }
+  .run.observatory-command { padding: 0.85rem 1.15rem; }
+  .run.observatory-command pre { font-size: 0.9rem; white-space: pre-wrap; overflow-wrap: anywhere; }
   .observatory-note { margin: 0.7rem 0 0; font-size: 0.85rem; color: var(--ink-faint); }
+  .observatory-note strong { color: var(--ink); }
+  .observatory-requirement { margin-bottom: 0.7rem; }
   @media (min-width: 60rem) {
     .observatory-figure { width: 54rem; margin-left: calc((100% - 54rem) / 2); }
   }
@@ -259,13 +260,14 @@
 
 <div class="wrap">
 <header>
-  <p class="eyebrow">dirtywork.run · <span class="beta">v0.13 beta</span> · MIT</p>
+  <p class="eyebrow">dirtywork.run · <span class="beta">v0.13.2 beta</span> · MIT</p>
   <h1>dirtywork<span class="dot">.</span></h1>
   <p class="tagline">
     <span class="think">Frontier models do the thinking.</span>
     <span class="dirty">Local models do the dirty work.</span>
   </p>
   <p class="install"><span class="p">$</span> pipx install dirtywork<span class="caret"></span></p>
+  <p class="sub-install">Installs the released CLI. <a href="#observatory-heading">Worker Observatory</a> currently requires the main-branch install below.</p>
   <p class="sub-install">Python 3.9+, stdlib only · macOS/Linux (developed on Apple Silicon; Windows unsupported) · needs LM&nbsp;Studio (or any OpenAI-compatible server) · then <a href="orchestrator-setup.html">set up Claude Code as the orchestrator</a> with a tool-calling model — or the Anthropic API via <code>--provider anthropic</code> · Docker Desktop / dockerd for the default sandbox (<code>--sandbox none</code> to run on the host)</p>
 </header>
 
@@ -274,8 +276,8 @@ models with local ones. dirtywork keeps the frontier model — but only where ju
 lives, as planner and auditor. The grunt work goes to the models already running for
 free on your own machine, and <strong>nothing merges without review</strong>.</p>
 
-<section aria-label="How a run works">
-  <h2>How a run works</h2>
+<section aria-labelledby="run-heading">
+  <h2 id="run-heading">How a run works</h2>
   <div class="run">
 <pre><span class="who fr">1 · you/ai</span> <span class="dim">$</span> dirtywork run --repo ~/code/app <span class="dim">"Add unit tests for parser.ts"</span>
 <span class="who lo">2 · local</span> explores the repo, edits, runs the tests — inside a
@@ -295,26 +297,55 @@ free on your own machine, and <strong>nothing merges without review</strong>.</p
 
 <section aria-labelledby="observatory-heading">
   <h2 id="observatory-heading">Worker Observatory</h2>
-  <p class="observatory-lead"><strong>Watch the work. Keep the judgment.</strong>
+  <p class="observatory-lead"><strong>See the evidence. Keep the judgment.</strong>
   Bring your runs and their evidence into one local browser view.</p>
   <ul class="observatory-benefits">
-    <li><strong>Follow the work.</strong> Watch activity, verification evidence and file diffs as worker actions finish.</li>
-    <li><strong>Time your review.</strong> Start a timer, inspect the result, then save Accept or Reject with an optional note.</li>
+    <li><strong>See progress live.</strong> Inspect activity, verification evidence and file diffs as worker actions finish.</li>
+    <li><strong>Time your review.</strong> Start a timer, inspect the result, then record Accept or Reject with an optional note. Accept does not merge changes; Reject does not delete files.</li>
     <li><strong>Choose what to delegate.</strong> Compare acceptance and recorded review effort by task type, with sample counts in view.</li>
   </ul>
+  <!--
+    Screenshot provenance: merged main 3dc3ff3a7ceb6415c57b1a6a1d07e173ba6aafb4
+    (PR #194), captured 2026-10-18. Both PNGs are 2560 x 3512 at 2x.
+    Six fictional records are committed in docs/fixtures/worker-observatory/runs;
+    they are illustrative data, not measured product performance. No live workers
+    or real repositories are used. Capture controls use Ion, repository Atlas,
+    sample-rounding, Run activity, and light/dark appearance. The frame starts at
+    the dashboard header and ends 24 CSS px after complete verification evidence.
+
+    Regenerate from the repository root with Python 3.9+ and Node 22+:
+      git fetch origin main
+      capture_runs=$(mktemp -d /tmp/dirtywork-observatory.XXXXXX)
+      cp -R docs/fixtures/worker-observatory/runs "$capture_runs/runs"
+      python3 -m dirtywork dashboard --port 8768 --runs-dir "$capture_runs/runs"
+    In a second terminal, install optional capture tooling outside the checkout:
+      capture_tools=$(mktemp -d /tmp/dirtywork-observatory-tools.XXXXXX)
+      npm install --prefix "$capture_tools" playwright@1.62.1
+      "$capture_tools/node_modules/.bin/playwright" install chromium
+      NODE_PATH="$capture_tools/node_modules" node docs/fixtures/worker-observatory/capture.cjs
+    CHROMIUM_EXECUTABLE_PATH may select an existing Chromium/Chrome executable.
+    The script checks the six fixture slugs and served assets against origin/main,
+    uses a 1280 CSS px viewport at device scale 2, and saves lossless PNGs under
+    docs/assets. Stop the preview server when finished. Recheck the composition,
+    dimensions, and revision above whenever dashboard UI changes.
+  -->
   <figure class="observatory-figure">
-    <a href="images/worker-observatory.jpg" aria-label="View full-size Worker Observatory screenshot">
-      <img src="images/worker-observatory.jpg" width="1280" height="720" loading="lazy" decoding="async" alt="Worker Observatory showing an example run, a file diff and timed review controls.">
-    </a>
-    <figcaption>Illustrative sample data · <a href="images/worker-observatory.jpg">View full-size image</a></figcaption>
+    <picture>
+      <source srcset="assets/worker-observatory-dark.png" media="(prefers-color-scheme: dark)">
+      <img src="assets/worker-observatory-light.png" width="2560" height="3512" loading="lazy" decoding="async" alt="Worker Observatory showing its repository selector, an example run, file changes and timed review controls.">
+    </picture>
+    <figcaption>Illustrative sample data · <a href="assets/worker-observatory-light.png">View full-size image</a></figcaption>
   </figure>
-  <div class="run observatory-command"><pre><code>dirtywork dashboard --open</code></pre></div>
+  <p class="observatory-note observatory-requirement"><strong>Unreleased: requires the main branch.</strong>
+  The PyPI release, v0.13.2, does not include Worker Observatory. Install from GitHub, then launch:</p>
+  <div class="run observatory-command"><pre><code>pipx install --force 'git+https://github.com/JimboSchneider/dirtywork.git@main'
+dirtywork dashboard --open</code></pre></div>
   <p class="observatory-note">Runs locally and reads your existing run records. Leave the command running while you review.
   <a href="https://github.com/JimboSchneider/dirtywork/blob/main/docs/operating.md#dashboard">Dashboard guide</a></p>
 </section>
 
 <div class="beta-strip">
-  <strong>0.13 is a beta.</strong> It works on my setup — LM&nbsp;Studio serving
+  <strong>0.13.2 is a beta.</strong> It works on my setup — LM&nbsp;Studio serving
   qwen3-coder or Devstral Small, driven by Claude Code as the orchestrator — and it is
   young everywhere else. Flags and output may shift. If it breaks on yours,
   <a href="https://github.com/JimboSchneider/dirtywork/issues">tell me what happened</a>.

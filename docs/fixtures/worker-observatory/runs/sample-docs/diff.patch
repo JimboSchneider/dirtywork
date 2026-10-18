@@ -1,0 +1,7 @@
+diff --git a/docs/invoicing.md b/docs/invoicing.md
+--- a/docs/invoicing.md
++++ b/docs/invoicing.md
+@@ -1 +1,3 @@
+ # Invoice setup
++
++Set the default tax rate before creating your first invoice.

@@ -1,0 +1,9 @@
+diff --git a/src/export.py b/src/export.py
+--- a/src/export.py
++++ b/src/export.py
+@@ -1,2 +1,4 @@
+ def export_invoices(invoices, output):
+-    pass
++    writer = csv.writer(output)
++    writer.writerow(["Invoice", "Total"])
++    writer.writerows((item.number, item.total) for item in invoices)
