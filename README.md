@@ -225,8 +225,9 @@ it is running, the view refreshes every three seconds.
 - **Watch active work:** follow elapsed worker time, the activity stream and
   a timeline of model actions, tools and verification events.
 - **Inspect results:** view verification evidence and PR-style file diffs
-  with line numbers and highlighted additions and removals. Docker runs
-  provide saved patches after export; host-mode runs do not export patches.
+  with line numbers and highlighted additions and removals. New runs publish
+  live snapshots after edits and commands; completed Docker runs use their
+  saved export. Older runs show saved patches when available.
 - **Review in the browser:** choose **Start Review**, then **Accept** or
   **Reject** to save your decision, elapsed review time and an optional note.
   Accept does not merge changes, and Reject does not delete files.

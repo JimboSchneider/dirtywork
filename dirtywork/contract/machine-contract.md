@@ -63,8 +63,12 @@ It does not use the single-JSON stdout contract of `run`/`resume`. It reads exis
 `run.json` and `transcript.jsonl` files; browser review actions write only review
 metadata to `run.json`. Its same-origin
 read endpoints are `GET /api/runs` (summaries and aggregates) and
-`GET /api/runs/<slug>` (detail and the latest 60 activity events); these UI endpoints
-are not a versioned machine contract. `POST /api/runs/<slug>/review` accepts JSON
+`GET /api/runs/<slug>` (detail and the latest 60 activity events), and
+`GET /api/runs/<slug>/changes` (live or saved file changes); these UI endpoints
+are not a versioned machine contract. New runs publish bounded, best-effort
+`live_changes.json` snapshots between worker actions without changing the worker
+index. The HTTP server only reads those snapshots; it never executes commands.
+Completed Docker runs prefer their saved `diff.patch`. `POST /api/runs/<slug>/review` accepts JSON
 `{action: "start"|"accept"|"reject", note?: string}` with an exact same-origin
 Origin header and the `X-Dirtywork-CSRF` token returned by `GET /api/runs`. Notes
 are limited to 2,000 characters. Decisions require a started timer and cannot

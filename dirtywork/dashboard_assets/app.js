@@ -417,13 +417,29 @@
     if (timeline?.omitted_events) notices.push(`Latest 2,000 events shown; ${number(timeline.omitted_events)} older events omitted.`);
     set('timeline-note', notices.join(' '));
   }
-  async function loadChanges(slug) {
+  let changesRequest = null, changesQueued = null;
+  function loadChanges(slug) {
+    const revision = state.detailRevision;
+    if (changesRequest) {
+      if (changesRequest.slug !== slug || changesRequest.revision !== revision) changesQueued = {slug, revision};
+      return changesRequest.promise;
+    }
+    const request = {slug, revision};
+    changesRequest = request;
+    request.promise = fetchChanges(slug, revision).finally(() => {
+      changesRequest = null;
+      const next = changesQueued;
+      changesQueued = null;
+      if (next && state.selected === next.slug && state.detailRevision === next.revision && $('files-details').open) loadChanges(next.slug);
+    });
+    return request.promise;
+  }
+  async function fetchChanges(slug, revision) {
     try {
-      const response = await fetch(`/api/runs/${encodeURIComponent(slug)}/changes`);
-      if (!response.ok) throw new Error('Changes unavailable');
-      const data = await response.json();
-      if (state.selected !== slug) return;
-      set('files-status', data.message);
+      const data = await api(`/api/runs/${encodeURIComponent(slug)}/changes`);
+      if (state.selected !== slug || state.detailRevision !== revision) return;
+      if ($('files-status').textContent !== data.message) set('files-status', data.message);
+      $('files-status').title = data.captured_at ? `Captured ${new Date(data.captured_at).toLocaleString()}` : '';
       const output = $('files-output');
       const signature = JSON.stringify([slug, data.files]);
       if (output.dataset.signature === signature) return;
@@ -456,7 +472,7 @@
       }));
       output.dataset.signature = signature;
     } catch (_) {
-      if (state.selected === slug) set('files-status', 'Could not load changes. Retrying on the next refresh.');
+      if (state.selected === slug && state.detailRevision === revision) set('files-status', 'Could not load changes. Retrying on the next refresh.');
     }
   }
   $('files-details').addEventListener('toggle', () => {
@@ -495,7 +511,8 @@
       $('files-output').replaceChildren();
       $('files-output').dataset.slug = run.slug;
       $('files-output').dataset.signature = '';
-      set('files-status', 'Expand to load saved changes.');
+      set('files-status', 'Expand to load file changes.');
+      $('files-status').title = '';
     }
     if ($('files-details').open) loadChanges(run.slug);
     set('lineage', [run.repo, run.branch, run.resumed_from && `Resumed from ${run.resumed_from}`, run.resumed_by && `Resumed by ${run.resumed_by}`, run.note && `Review note: ${run.note}`].filter(Boolean).join(' · '));
@@ -602,6 +619,7 @@
       if (!snapshot.runs.some(run => run.slug === state.selected)) {
         state.selected = snapshot.runs.find(run => run.activity_state === 'running')?.slug || snapshot.runs[0]?.slug || null;
         state.detail = null;
+        state.detailRevision++;
       }
       if (!state.selected) {
         renderWoprRun(null);

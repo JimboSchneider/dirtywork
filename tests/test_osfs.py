@@ -303,18 +303,34 @@ def test_posix_composition_is_identical(monkeypatch, site):
     assert seen["flags"] == before, site
 
 
+def _raw_nofollow_lines(source):
+    import ast
+    return [node.lineno for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "open" and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "os"
+            and any(isinstance(part, ast.Attribute) and part.attr == "O_NOFOLLOW"
+                    for part in ast.walk(node))]
+
+
 def test_no_raw_nofollow_opens_outside_osfs():
-    """The eleven sites are converted; nothing else composes O_NOFOLLOW by hand."""
-    import re, pathlib
+    """Host Python uses the shared helper, including multiline os.open calls.
+
+    Embedded remote POSIX programs are string data, not host open calls.
+    """
+    import pathlib
     root = pathlib.Path(__file__).resolve().parent.parent / "dirtywork"
     offenders = []
     for py in root.rglob("*.py"):
-        if py.name == "osfs.py":
-            continue
-        for n, line in enumerate(py.read_text(encoding="utf-8").splitlines(), 1):
-            if "os.open(" in line and "O_NOFOLLOW" in line:
-                offenders.append(f"{py.relative_to(root)}:{n}")
+        if py.name != "osfs.py":
+            offenders.extend(f"{py.relative_to(root)}:{n}" for n in
+                             _raw_nofollow_lines(py.read_text(encoding="utf-8")))
     assert offenders == []
+
+
+def test_nofollow_guard_distinguishes_code_from_remote_program_strings():
+    assert _raw_nofollow_lines('remote = "os.open(path, os.O_NOFOLLOW)"') == []
+    assert _raw_nofollow_lines("os.open(\n    path,\n    os.O_RDONLY | os.O_NOFOLLOW,\n)") == [1]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX values")

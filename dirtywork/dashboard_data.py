@@ -17,6 +17,7 @@ from .osfs import open_nofollow
 from .review import start_review, record_verdict, effective_run_status, review_eligible
 
 MAX_LINE = 1024 * 1024
+MAX_LIVE_RECORD = 4 * 1024 * 1024
 ACTIVITY_LIMIT = 60
 TIMELINE_LIMIT = 2000
 TIMELINE_LANES = {"run_start": "lifecycle", "run_end": "lifecycle",
@@ -67,6 +68,61 @@ def _diff_rows(patch):
         elif line.startswith("\\ No newline"):
             rows.append({"kind": "notice", "text": line[2:], "old": None, "new": None})
     return rows
+
+
+def _patch_files(patch):
+    files = []
+    for line in patch.splitlines():
+        if line.startswith("diff --git "):
+            path = line.partition(" b/")[2] or line[11:]
+            files.append({"path": path[:4000], "diff": line + "\n"})
+        elif files:
+            files[-1]["diff"] += line + "\n"
+    for file in files:
+        file["rows"] = _diff_rows(file["diff"])
+        file["additions"] = sum(row["kind"] == "add" for row in file["rows"])
+        file["deletions"] = sum(row["kind"] == "remove" for row in file["rows"])
+        file["change_type"] = ("New file" if "\nnew file mode " in file["diff"] else
+                               "Deleted file" if "\ndeleted file mode " in file["diff"] else "Modified")
+    return files[:1000]
+
+
+def _live_changes(directory, active):
+    """Return a confined snapshot projection, or None when no capture exists."""
+    unavailable = {"files": [], "message": "Live preview unavailable: capture could not be read safely.",
+                   "source": None, "live": False, "captured_at": None}
+    try:
+        with _open_regular(directory / "live_changes.json") as source:
+            raw = source.read(MAX_LIVE_RECORD + 1)
+        if len(raw) > MAX_LIVE_RECORD:
+            raise ValueError("live record exceeds preview limit")
+        capture = json.loads(raw)
+        if (not isinstance(capture, dict) or type(capture.get("version")) is not int
+                or capture["version"] != 1 or capture.get("state") not in ("ready", "too_large", "unavailable")
+                or not isinstance(capture.get("patch"), str) or not isinstance(capture.get("message"), str)
+                or not isinstance(capture.get("captured_at"), str)):
+            raise ValueError("invalid live capture")
+        captured = datetime.fromisoformat(capture["captured_at"].replace("Z", "+00:00"))
+        if captured.tzinfo is None or captured.utcoffset().total_seconds() != 0:
+            raise ValueError("capture timestamp is not UTC")
+        if len(capture["patch"].encode("utf-8")) > MAX_LINE:
+            raise ValueError("live patch exceeds preview limit")
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, UnicodeError, RecursionError, OverflowError):
+        return unavailable
+    result = {"files": [], "message": "", "source": "live", "live": False,
+              "captured_at": capture["captured_at"][:80]}
+    if capture["state"] != "ready":
+        result["message"] = ("Live preview unavailable. " + text(capture["message"]) if capture["state"] == "unavailable"
+                             else text(capture["message"]) or "Changes exceed the 1 MiB preview limit.")
+        return result
+    result["files"] = _patch_files(capture["patch"])
+    result["live"] = active
+    result["message"] = (("Live file changes · updates after worker actions." if result["files"] else
+                          "Live file changes · no changes captured yet.") if active else
+                         "Last live snapshot; no saved patch is available for this run.")
+    return result
 
 
 def _signature(path):
@@ -263,37 +319,30 @@ class RunStore:
         return result
 
     def changes(self, slug):
-        """Read only the run's bounded, regular exported patch; never execute git."""
+        """Read bounded regular captures and exports; never execute git."""
         with self._lock:
             run = self._detail(slug, datetime.now(timezone.utc))
             directory = rundir.run_dir_for(slug, self.root)
-            message = ("Host-mode runs do not export a patch; inspect git diff in the worktree."
-                       if run["sandbox"] == "none" else
-                       "Changes will appear when the worker exports its files."
-                       if run["status"] == "running" else
-                       "No saved patch is available for this run.")
+            if run["activity_state"] == "running":
+                return _live_changes(directory, True) or {
+                    "files": [], "message": "Waiting for the next capture of live file changes.",
+                    "source": None, "live": False, "captured_at": None}
             try:
                 with _open_regular(directory / "diff.patch") as source:
                     raw = source.read(MAX_LINE + 1)
                 if len(raw) > MAX_LINE:
-                    return {"files": [], "message": "Patch exceeds the 1 MiB preview limit."}
+                    return {"files": [], "message": "Patch exceeds the 1 MiB preview limit.",
+                            "source": "saved", "live": False, "captured_at": None}
                 patch = raw.decode("utf-8", errors="replace")
             except (OSError, ValueError):
-                return {"files": [], "message": message}
-            files = []
-            for line in patch.splitlines():
-                if line.startswith("diff --git "):
-                    path = line.partition(" b/")[2] or line[11:]
-                    files.append({"path": path[:4000], "diff": line + "\n"})
-                elif files:
-                    files[-1]["diff"] += line + "\n"
-            for file in files:
-                file["rows"] = _diff_rows(file["diff"])
-                file["additions"] = sum(row["kind"] == "add" for row in file["rows"])
-                file["deletions"] = sum(row["kind"] == "remove" for row in file["rows"])
-                file["change_type"] = ("New file" if "\nnew file mode " in file["diff"] else
-                                       "Deleted file" if "\ndeleted file mode " in file["diff"] else "Modified")
-            return {"files": files[:1000], "message": "Saved changes from this run." if files else "No file changes in the saved patch."}
+                return _live_changes(directory, False) or {
+                    "files": [], "message": ("Host-mode run has no saved patch; inspect git diff in the worktree."
+                                              if run["sandbox"] == "none" else
+                                              "No saved patch is available for this run."),
+                    "source": None, "live": False, "captured_at": None}
+            files = _patch_files(patch)
+            return {"files": files, "message": "Saved changes from this run." if files else "No file changes in the saved patch.",
+                    "source": "saved", "live": False, "captured_at": None}
 
     def detail(self, slug, *, now=None):
         with self._lock:

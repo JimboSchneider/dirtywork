@@ -413,3 +413,7 @@ its `nudge`/`guardrail_block`/`sandbox_reset`/`stray_kill` events as blockquote 
 Token counts in the header come from
 `run_end.usage`, and the final message from the `finish` call's `summary`,
 because `run.json` records neither.
+
+### Live file-change previews
+
+New runs may contain a best-effort `live_changes.json` artifact with `version: 1`, `state` (`ready`, `unavailable` or `too_large`), `patch`, `captured_at` (UTC timestamp), and `message`. The harness replaces it atomically after edits and commands. It is dashboard preview evidence, not a transcript event or a replacement for the final export. A `ready` patch is bounded to 1 MiB and compares current files with the original base commit. Preview failures never change the run outcome.

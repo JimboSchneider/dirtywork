@@ -430,6 +430,206 @@ def test_changes_reads_saved_patch_and_refreshes(tmp_path):
     assert '+updated' in store.changes('demo')['files'][0]['diff']
 
 
+def live_capture(directory, patch, **overrides):
+    capture = {'version': 1, 'state': 'ready', 'patch': patch,
+               'captured_at': '2026-10-18T12:00:00+00:00', 'message': ''}
+    capture.update(overrides)
+    (directory / 'live_changes.json').write_text(json.dumps(capture))
+
+
+def test_active_changes_refresh_live_patch_and_include_new_files(tmp_path):
+    directory = record(tmp_path, 'active', {'status': 'running', 'host_pid': os.getpid()})
+    patch = 'diff --git a/existing.txt b/existing.txt\n--- a/existing.txt\n+++ b/existing.txt\n@@ -1 +1 @@\n-old\n+first\n'
+    live_capture(directory, patch)
+    store = RunStore(tmp_path)
+    first = store.changes('active')
+    assert first['source'] == 'live'
+    assert first['live'] is True
+    assert first['captured_at'] == '2026-10-18T12:00:00+00:00'
+    assert first['files'][0]['rows'][-1]['text'] == 'first'
+    assert first['files'][0]['additions'] == 1
+    patch = patch.replace('+first', '+updated') + 'diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+new file\n'
+    live_capture(directory, patch, captured_at='2026-10-18T12:00:03+00:00')
+    updated = store.changes('active')
+    assert updated['files'][0]['rows'][-1]['text'] == 'updated'
+    assert updated['files'][1]['path'] == 'new.txt'
+    assert updated['files'][1]['change_type'] == 'New file'
+    assert updated['captured_at'] == '2026-10-18T12:00:03+00:00'
+
+
+def test_active_resume_prefers_live_capture_to_previous_saved_export(tmp_path):
+    directory = record(tmp_path, 'active', {'status': 'running', 'host_pid': os.getpid()})
+    (directory / 'diff.patch').write_text('diff --git a/old b/old\n--- /dev/null\n+++ b/old\n@@ -0,0 +1 @@\n+stale export\n')
+    store = RunStore(tmp_path)
+    assert store.changes('active')['files'] == []
+    live_capture(directory, 'diff --git a/current b/current\n--- /dev/null\n+++ b/current\n@@ -0,0 +1 @@\n+current work\n')
+    result = store.changes('active')
+    assert [file['path'] for file in result['files']] == ['current']
+    assert result['live'] is True
+
+
+def test_completed_changes_prefer_saved_export_and_fallback_to_last_live_capture(tmp_path):
+    directory = record(tmp_path, 'done', {'status': 'completed'})
+    live_capture(directory, 'diff --git a/live b/live\n--- /dev/null\n+++ b/live\n@@ -0,0 +1 @@\n+captured\n')
+    store = RunStore(tmp_path)
+    fallback = store.changes('done')
+    assert fallback['files'][0]['path'] == 'live'
+    assert fallback['source'] == 'live'
+    assert fallback['live'] is False
+    assert 'Last live snapshot' in fallback['message']
+    (directory / 'diff.patch').write_text('diff --git a/saved b/saved\n--- /dev/null\n+++ b/saved\n@@ -0,0 +1 @@\n+final export\n')
+    result = store.changes('done')
+    assert result['files'][0]['path'] == 'saved'
+    assert result['source'] == 'saved'
+    assert result['live'] is False
+    assert result.get('captured_at') is None
+
+
+@pytest.mark.parametrize('metadata', [
+    {'status': 'running'},
+    {'status': 'running', 'host_pid': -1},
+    {'status': 'running', 'host_pid': os.getpid()},
+])
+def test_only_genuinely_active_run_labels_capture_live(tmp_path, metadata):
+    directory = record(tmp_path, 'demo', metadata)
+    live_capture(directory, '')
+    result = RunStore(tmp_path).changes('demo')
+    assert result['live'] is (metadata.get('host_pid') == os.getpid())
+    if not result['live']:
+        assert 'Last live snapshot' in result['message']
+
+
+@pytest.mark.parametrize('content', [
+    b'not json', b'[]', b'\xff',
+    json.dumps({'version': True, 'state': 'ready', 'patch': '', 'captured_at': '2026-10-18T12:00:00Z', 'message': ''}).encode(),
+    json.dumps({'version': 1, 'state': 'unknown', 'patch': '', 'captured_at': '2026-10-18T12:00:00Z', 'message': ''}).encode(),
+    json.dumps({'version': 1, 'state': 'ready', 'patch': [], 'captured_at': '2026-10-18T12:00:00Z', 'message': ''}).encode(),
+    json.dumps({'version': 1, 'state': 'ready', 'patch': '', 'captured_at': 'not a timestamp', 'message': ''}).encode(),
+    json.dumps({'version': 1, 'state': 'ready', 'patch': '', 'captured_at': '2026-10-18T12:00:00', 'message': ''}).encode(),
+    json.dumps({'version': 1, 'state': 'ready', 'patch': '\ud800', 'captured_at': '2026-10-18T12:00:00Z', 'message': ''}).encode(),
+])
+def test_invalid_live_capture_is_explicitly_unavailable(tmp_path, content):
+    directory = record(tmp_path, 'active', {'status': 'running', 'host_pid': os.getpid()})
+    (directory / 'live_changes.json').write_bytes(content)
+    result = RunStore(tmp_path).changes('active')
+    assert result['files'] == []
+    assert 'unavailable' in result['message'].lower()
+
+
+@pytest.mark.parametrize('kind', ['symlink', 'fifo', 'large_record', 'large_patch'])
+def test_live_capture_refuses_unsafe_files_and_bounds_record_and_patch(tmp_path, kind):
+    directory = record(tmp_path, 'active', {'status': 'running', 'host_pid': os.getpid()})
+    target = directory / 'live_changes.json'
+    if kind == 'symlink':
+        outside = record(tmp_path, 'outside', {'status': 'completed'})
+        live_capture(outside, 'secret')
+        target.symlink_to(outside / 'live_changes.json')
+    elif kind == 'fifo':
+        os.mkfifo(target)
+    elif kind == 'large_record':
+        target.write_bytes(b' ' * (4 * 1024 * 1024 + 1))
+    else:
+        live_capture(directory, '\u00e9' * (512 * 1024 + 1))
+    result = RunStore(tmp_path).changes('active')
+    assert result['files'] == []
+    assert 'unavailable' in result['message'].lower() or 'limit' in result['message'].lower()
+    assert RunStore(tmp_path).snapshot()['runs']
+
+
+@pytest.mark.parametrize('state,message', [('too_large', 'Changes exceed preview limit.'),
+                                          ('unavailable', 'Capture could not inspect the worktree.')])
+def test_live_capture_state_explains_why_preview_is_missing(tmp_path, state, message):
+    directory = record(tmp_path, 'active', {'status': 'running', 'host_pid': os.getpid()})
+    live_capture(directory, '', state=state, message=message)
+    result = RunStore(tmp_path).changes('active')
+    assert result['files'] == []
+    assert message in result['message']
+
+
+def test_browser_changes_coalesce_refreshes_and_preserve_reading_context():
+    """Exercise the real loader with deferred HTTP responses and a small DOM."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+    node = shutil.which('node')
+    if node is None:
+        pytest.skip('Node is required for the dashboard browser regression')
+    script = r'''
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const start = source.includes('  let changesRequest') ? source.indexOf('  let changesRequest') : source.indexOf('  async function loadChanges');
+const loader = source.slice(start, source.indexOf("  $('files-details').addEventListener", start));
+class Element {
+  constructor(tag, className, text) { this.tag = tag; this.className = className; this.textContent = text || ''; this.dataset = {}; this.children = []; this.open = false; }
+  append(...nodes) { this.children.push(...nodes); }
+  replaceChildren(...nodes) { this.children = nodes; }
+  setAttribute() {}
+  querySelectorAll() { return this.children.filter(node => node.tag === 'details' && node.open); }
+}
+function browser() {
+  const state = {selected: 'alpha', detailRevision: 0};
+  const nodes = {'files-output': new Element('div'), 'files-status': new Element('p'), 'files-details': new Element('details')};
+  nodes['files-details'].open = true;
+  const requests = [];
+  const fetch = path => new Promise(resolve => requests.push({path, finish: data => resolve({ok: true, json: async () => data})}));
+  const context = {state, fetch, api: async path => (await fetch(path)).json(),
+    $: id => nodes[id], set: (id, value) => { nodes[id].textContent = value; },
+    element: (tag, className, text) => new Element(tag, className, text)};
+  vm.createContext(context);
+  vm.runInContext(loader + '\nthis.loadChanges = loadChanges;', context);
+  return {...context, nodes, requests};
+}
+function data(text = 'first', captured_at = '2026-10-18T12:00:00Z') {
+  return {message: 'Live file changes · updates after worker actions.', live: true, source: 'live', captured_at,
+    files: ['one.txt', 'two.txt'].map(path => ({path, diff: '+' + text, change_type: 'Modified', additions: 1, deletions: 0,
+      rows: [{kind: 'add', text, old: null, new: 1}]}))};
+}
+const settle = () => new Promise(resolve => setImmediate(resolve));
+(async () => {
+  const view = browser();
+  const first = view.loadChanges('alpha');
+  const repeated = view.loadChanges('alpha');
+  assert.equal(view.requests.length, 1, 'refreshes must share the pending changes request');
+  view.requests[0].finish(data());
+  await first; await repeated;
+  const row = view.nodes['files-output'].children[0];
+  row.open = true;
+  const selectedTextNode = row.children[1].children[0].children[3];
+  const unchanged = view.loadChanges('alpha');
+  view.requests[1].finish(data('first', '2026-10-18T12:00:03Z'));
+  await unchanged;
+  assert.equal(view.nodes['files-output'].children[0], row, 'capture timestamps must not replace the file DOM');
+  assert.equal(view.nodes['files-output'].children[0].children[1].children[0].children[3], selectedTextNode, 'selected text stays attached to the same DOM node');
+  const updated = view.loadChanges('alpha');
+  view.requests[2].finish(data('updated'));
+  await updated;
+  assert.equal(view.nodes['files-output'].children[0].open, true, 'updated diffs retain expanded files');
+  assert.equal(view.nodes['files-output'].children[0].children[1].children[0].children[3].textContent, 'updated');
+
+  const switched = browser();
+  const stale = switched.loadChanges('alpha');
+  switched.state.selected = 'beta'; switched.state.detailRevision++;
+  switched.loadChanges('beta');
+  switched.state.selected = 'alpha'; switched.state.detailRevision++;
+  switched.loadChanges('alpha');
+  assert.equal(switched.requests.length, 1, 'selection refreshes coalesce while a request is pending');
+  switched.requests[0].finish(data('stale selection'));
+  await stale; await settle();
+  assert.equal(switched.nodes['files-output'].children.length, 0, 'an old response cannot overwrite a reselected run');
+  assert.equal(switched.requests.length, 2, 'the current selection is fetched after the pending request settles');
+  assert.match(switched.requests[1].path, /\/alpha\/changes$/);
+  switched.requests[1].finish(data('fresh selection'));
+  await settle();
+  assert.equal(switched.nodes['files-output'].children[0].children[1].children[0].children[3].textContent, 'fresh selection');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+    app = Path(__file__).parents[1] / 'dirtywork' / 'dashboard_assets' / 'app.js'
+    result = subprocess.run([node, '-e', script, str(app)], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_changes_refuses_symlinks_and_bounds_patch(tmp_path):
     directory = record(tmp_path, 'demo', {'status': 'running'})
     assert RunStore(tmp_path).changes('demo')['files'] == []
@@ -537,11 +737,18 @@ def test_http_filesystem_errors_are_json(dashboard_http, monkeypatch, path):
     assert 'error' in json.loads(body)
 
 
-def test_host_changes_explain_no_export(tmp_path):
+def test_active_host_changes_wait_for_next_capture(tmp_path):
     record(tmp_path, 'host', {'status': 'running', 'sandbox': 'none', 'host_pid': os.getpid()})
     result = RunStore(tmp_path).changes('host')
+    assert 'next capture' in result['message']
+    assert 'do not export' not in result['message']
+
+
+def test_ended_host_without_artifacts_explains_missing_export(tmp_path):
+    record(tmp_path, 'host', {'status': 'completed', 'sandbox': 'none'})
+    result = RunStore(tmp_path).changes('host')
     assert 'Host-mode' in result['message']
-    assert 'do not export' in result['message']
+    assert 'worktree' in result['message']
 
 
 @pytest.mark.parametrize('metadata,events', [

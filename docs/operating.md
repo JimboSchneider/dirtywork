@@ -650,6 +650,12 @@ are not part of the installed package.
 
 ### Inspecting file changes in the dashboard
 
-Expand **File changes** on a selected run, then select a file to see its unified diff. Added and removed lines use the selected theme. New files appear in full. The viewer reads the run’s saved `diff.patch` (up to 1 MiB) and refreshes every three seconds while expanded. Docker runs export this patch at completion; while a run is active, the viewer explains that it is waiting for export. Runs without a saved patch, including older or cleaned-up records, show an explicit unavailable message. The viewer never executes repository code or writes files.
+Expand **File changes** on a selected run, then select a file to see its unified diff. Added and removed lines use the selected theme. New files appear in full.
 
-Host-mode runs (`--sandbox none`) do not export saved patches; inspect `git diff` in their worktree. Review markers are pinned to the end of the worker timeline so delayed reviews do not compress worker events; selecting a marker shows its actual time. Superseded runs no longer count as open or awaiting review.
+New runs publish `live_changes.json` after file-edit tools and shell commands finish, and after verification. The snapshot compares the current files with the run’s original base commit, including staged, unstaged and new files. Snapshots run serially between tools with a private Git index and configuration; they do not stage changes in the worker’s index. Changes made partway through a long shell command appear after that command returns. The dashboard reads these artifacts and refreshes the expanded viewer every three seconds; it never executes container commands or repository code.
+
+Live patches are limited to 1 MiB, with bounded capture time and explicit unavailable/oversized messages. Live previews exclude submodule and nested-repository internals; the final export remains authoritative for those paths. Preview failures do not fail the worker task. Older active runs launched without this feature show a waiting message until a live snapshot or saved export becomes available.
+
+Once a Docker run ends, its saved `diff.patch` is authoritative. If no saved patch exists, the viewer can show the last successful live snapshot, clearly labeled as such. Host-mode runs (`--sandbox none`) publish live snapshots too, but do not export a final saved patch. Missing artifacts show an explicit unavailable message.
+
+Review markers are pinned to the end of the worker timeline so delayed reviews do not compress worker events; selecting a marker shows its actual time. Superseded runs no longer count as open or awaiting review.

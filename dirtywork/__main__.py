@@ -951,6 +951,15 @@ def _execute(ctx: RunContext, args, client) -> int:
                 "watchdog_violation_kind": artifacts.watchdog_violation_kind,
             }
 
+        from .live_changes import LiveChangesPublisher
+        from .sandbox.live_diff import capture_docker_patch, capture_host_patch
+        if ctx.sandbox_mode == "docker":
+            capture_live = lambda: capture_docker_patch(sandbox.container, ctx.base_commit, run=sandbox._run)
+        else:
+            capture_live = lambda: capture_host_patch(ctx.worktree, ctx.base_commit)
+        live_changes = LiveChangesPublisher(run_dir, capture=capture_live)
+        live_changes()
+
         runner = Runner(
             client, registry, sandbox, transcript, model=args.model,
             max_turns=args.max_turns, timeout=args.timeout,
@@ -964,6 +973,7 @@ def _execute(ctx: RunContext, args, client) -> int:
                 "resumed_from": ctx.resumed_from, "feedback": ctx.feedback,
             },
             finalize=finalize,
+            on_live_changes=live_changes,
             stall_turns=args.stall_turns, context_window=ctx.context_window,
             context_window_source=ctx.context_window_source,
             stuck_repeats=getattr(args, "stuck_repeats", DEFAULT_STUCK_REPEATS),
