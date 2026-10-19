@@ -202,13 +202,15 @@ class OpenAICompatClient:
         return None
 
     def chat(self, model, history, tools, *, temperature=None, max_tokens=4096,
-             timeout=None) -> ChatResponse:
+             timeout=None, reasoning_effort=None) -> ChatResponse:
         payload = {"model": model, "messages": _to_openai_messages(history),
                    "max_tokens": max_tokens}
         if tools:
             payload["tools"] = tools
         if temperature is not None:
             payload["temperature"] = temperature
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
         effective_timeout = timeout if timeout is not None else self.timeout
         body = self._http_json(f"{self.base_url}/chat/completions", payload,
                                self._headers(), effective_timeout)

@@ -161,7 +161,7 @@ class AnthropicClient:
         return None
 
     def chat(self, model, history, tools, *, temperature=None, max_tokens=4096,
-             timeout=None) -> ChatResponse:
+             timeout=None, reasoning_effort=None) -> ChatResponse:
         self._require_key()
         system, messages = _to_anthropic_messages(history)
         payload = {"model": model, "max_tokens": max_tokens, "messages": messages}

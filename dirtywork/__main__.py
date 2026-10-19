@@ -965,12 +965,14 @@ def _execute(ctx: RunContext, args, client) -> int:
             max_turns=args.max_turns, timeout=args.timeout,
             max_tokens=getattr(args, "max_tokens", DEFAULT_MAX_TOKENS),
             temperature=args.temperature,
+            reasoning_effort=args.reasoning_effort,
             run_info={
                 "repo": str(ctx.repo), "worktree": str(ctx.worktree), "branch": ctx.branch,
                 "branch_from": ctx.branch_from, "base_commit": ctx.base_commit,
                 "base_url": args.base_url, "dirtywork_version": __version__,
                 "temperature": args.temperature, "sandbox": sandbox_info, "provider": ctx.provider,
                 "resumed_from": ctx.resumed_from, "feedback": ctx.feedback,
+                "reasoning_effort": args.reasoning_effort,
             },
             finalize=finalize,
             on_live_changes=live_changes,
@@ -1055,6 +1057,8 @@ def _add_run_flags(p, *, resume: bool) -> None:
     p.add_argument("--max-turns", type=int, default=40)
     p.add_argument("--timeout", type=int, default=1800)
     p.add_argument("--temperature", type=float, default=None)
+    p.add_argument("--reasoning-effort", default=None, metavar="VALUE",
+                   help="sent as reasoning_effort to OpenAI-compatible hosts (e.g. none, low, medium, high); omitted when unset")
     p.add_argument("--provider", choices=list(PROVIDER_NAMES),
                    default=None if resume else "openai",
                    help="model provider (default: openai — any OpenAI-compatible endpoint)")

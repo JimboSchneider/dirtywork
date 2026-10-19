@@ -19,6 +19,7 @@ dirtywork run --repo <path> "<task>"
                                       # built-in table, else 32768 (+ stderr warning)
     [--timeout 1800]                  # whole-run wall clock, seconds
     [--temperature <f>]               # omitted by default → server preset
+    [--reasoning-effort <s>]          # omitted by default; sent as reasoning_effort to OpenAI-compatible hosts
     [--max-tokens 8192]               # per-reply output cap; must be < the context window
     [--provider openai|anthropic|ollama]  # default: openai (sends OPENAI_API_KEY as a Bearer
                                       # token when set); anthropic needs ANTHROPIC_API_KEY
@@ -518,6 +519,7 @@ Full field-by-field schema, including every v1→v2 addition and the
 **Transcript events** (JSONL, one per line): `run_start` (task, repo, model,
 config, `schema_version: 2`, plus provenance: `worktree`, `base_commit`,
 `branch`, `branch_from`, `base_url`, `dirtywork_version`, `temperature`,
+`reasoning_effort`,
 `sandbox` — the docker settings dict, or `"none"` — and `provider`,
 `context_window`, `context_window_source`, `resumed_from`),
 `assistant` (text + tool calls — text capped at 64 000 chars in the

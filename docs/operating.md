@@ -13,6 +13,12 @@ Day-to-day usage once dirtywork is installed: running a task, reviewing and resu
 - **Review a run:** `git -C <worktree> diff`, read the transcript, run the
   repo's tests — then commit the branch or discard it. (The worktree is
   only populated after the run ends, once the export step completes.)
+- **Cap hidden reasoning:** models that reason by default can spend the whole
+  `--max-tokens` budget before a tool call. `--reasoning-effort <value>` sends
+  `reasoning_effort` on every request (`none`, `low`, `medium`, `high` are
+  typical; the value is passed through unvalidated and omitted when unset).
+  The openai and ollama providers send it, anthropic ignores it. It is recorded
+  on `run_start`, and `resume` does not inherit it, like `--temperature`.
 
   > **The worker cannot install dependencies in docker mode** (`--network none`,
   > no host directories mounted); it can only run what the image ships — git,

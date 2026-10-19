@@ -111,7 +111,8 @@ class FakeProvider:
     def context_window(self, model):
         return self._context_window
 
-    def chat(self, model, history, tools, *, temperature=None, max_tokens=4096, timeout=None):
+    def chat(self, model, history, tools, *, temperature=None, max_tokens=4096, timeout=None,
+             reasoning_effort=None):
         # Spec #60 §7: every request the runner makes is legal for strict templates.
         assert_strict_template_legal(history)
         # Deep-copy the history the way the old FakeProvider did, so later
@@ -2409,10 +2410,11 @@ def test_max_tokens_defaults_to_8192_and_reaches_the_provider(parts):
 
     class _RecordingProvider(FakeProvider):
         def chat(self, model, history, tools, *, temperature=None, max_tokens=4096,
-                 timeout=None):
+                 timeout=None, reasoning_effort=None):
             seen["max_tokens"] = max_tokens
             return super().chat(model, history, tools, temperature=temperature,
-                                max_tokens=max_tokens, timeout=timeout)
+                                max_tokens=max_tokens, timeout=timeout,
+                                reasoning_effort=reasoning_effort)
 
     r = Runner(_RecordingProvider([_resp(content="done")]), registry, sandbox, transcript,
                model="m")

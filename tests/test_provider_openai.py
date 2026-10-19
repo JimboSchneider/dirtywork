@@ -64,6 +64,17 @@ def test_chat_temperature_omitted_when_none_included_when_set():
     assert transport.calls[1]["payload"]["temperature"] == 0.2
 
 
+def test_chat_reasoning_effort_omitted_when_none_included_when_set():
+    transport = RecordingTransport([_fixture("simple_ok.json"), _fixture("simple_ok.json")])
+    client = _client(transport)
+    client.chat("model-x", [{"role": "user", "content": "hi"}], [],
+                reasoning_effort=None, max_tokens=100, timeout=30)
+    assert "reasoning_effort" not in transport.calls[0]["payload"]
+    client.chat("model-x", [{"role": "user", "content": "hi"}], [],
+                reasoning_effort="none", max_tokens=100, timeout=30)
+    assert transport.calls[1]["payload"]["reasoning_effort"] == "none"
+
+
 def test_list_models_returns_ids():
     transport = RecordingTransport([{"data": [{"id": "m1"}, {"id": "m2"}]}])
     client = _client(transport)
