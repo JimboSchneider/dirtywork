@@ -73,7 +73,8 @@ class Provider(Protocol):
     def context_window(self, model: str):
         ...
 
-    def chat(self, model, history, tools, *, temperature, max_tokens, timeout) -> ChatResponse:
+    def chat(self, model, history, tools, *, temperature, max_tokens, timeout,
+             reasoning_effort=None) -> ChatResponse:
         ...
 
 

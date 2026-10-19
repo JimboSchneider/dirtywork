@@ -1241,10 +1241,38 @@ def test_run_start_has_all_provenance_fields(tmp_path, monkeypatch):
     events = [json.loads(l) for l in transcript_files[0].read_text().splitlines()]
     run_start = next(e for e in events if e["event"] == "run_start")
     for key in ("base_commit", "branch", "branch_from", "base_url",
-                "dirtywork_version", "temperature", "sandbox", "provider"):
+                "dirtywork_version", "temperature", "sandbox", "provider", "reasoning_effort"):
         assert key in run_start, key
     assert run_start["sandbox"] == "none"
     assert run_start["provider"] == "openai"
+
+
+def test_run_start_records_reasoning_effort(tmp_path, monkeypatch):
+    import subprocess
+    import json
+    import dirtywork.__main__ as m
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
+                    "-c", "user.name=t", "commit", "--allow-empty", "-m", "i"],
+                   capture_output=True)
+    monkeypatch.setattr(m, "RUNS_DIR", tmp_path / "runs")
+
+    class ImmediateDoneClient(DictProvider):
+
+        def reply(self, model, messages, tools):
+            return {"choices": [{"message": {"role": "assistant", "content": "done"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    patch_provider(monkeypatch, m, ImmediateDoneClient)
+
+    rc = m.main(["run", "--repo", str(repo), "--sandbox", "none", "--reasoning-effort", "none", "some task"])
+    assert rc == 0
+    transcript_files = list((tmp_path / "runs").rglob("transcript.jsonl"))
+    events = [json.loads(l) for l in transcript_files[0].read_text().splitlines()]
+    run_start = next(e for e in events if e["event"] == "run_start")
+    assert run_start["reasoning_effort"] == "none"
 
 
 def test_run_end_has_diff_stat_after_writing_tracked_file(tmp_path, monkeypatch):

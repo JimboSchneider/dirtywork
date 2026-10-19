@@ -540,6 +540,7 @@ class Runner:
                  max_turns: int = 40, timeout: int = 1800,
                  max_tokens: int = DEFAULT_MAX_TOKENS,
                  temperature: float | None = None,
+                 reasoning_effort: str | None = None,
                  run_info: dict | None = None,
                  finalize: Callable[[], dict] | None = None,
                  stall_turns: int = DEFAULT_STALL_TURNS,
@@ -564,6 +565,7 @@ class Runner:
         # their own 4096 defaults for direct callers.
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.reasoning_effort = reasoning_effort
         self.run_info = run_info
         self.finalize = finalize
         self.on_live_changes = on_live_changes
@@ -1010,7 +1012,8 @@ class Runner:
                 resp = self.provider.chat(self.model, messages, self.registry.schemas(),
                                           temperature=self.temperature,
                                           max_tokens=self.max_tokens,
-                                          timeout=max(1.0, remaining))
+                                          timeout=max(1.0, remaining),
+                                          reasoning_effort=self.reasoning_effort)
             except LLMTimeout:
                 if time.monotonic() >= deadline - 0.5:
                     return finish("timeout", "")
