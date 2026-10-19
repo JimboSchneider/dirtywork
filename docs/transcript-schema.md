@@ -57,6 +57,7 @@ One per run, always the first line.
 | `base_url` | | ✓ | string | the provider endpoint actually used (after the per-provider default is applied) |
 | `dirtywork_version` | | ✓ | string | `dirtywork.__version__` |
 | `temperature` | | ✓ | number \| null | omitted from the request when null |
+| `reasoning_effort` | | ✓ | string \| null | `--reasoning-effort`, sent as `reasoning_effort` by the openai and ollama providers; omitted from the request when null; not validated |
 | `provider` | | ✓ | `"openai"` \| `"anthropic"` \| `"ollama"` | |
 | `resumed_from` | | ✓ | string \| null | slug of the run this one continues |
 | `feedback` | | ✓ | string \| null | 0.8: `resume --feedback`/`--feedback-file` text, verbatim (max 64 000 chars); null on a fresh run or a resume without feedback. Since 0.10 an EMPTY or whitespace-only `--feedback`/`--feedback-file` is normalized to null at parse, so it is treated as absent everywhere — including by the gate that refuses to resume a `completed` run without feedback |
